@@ -405,7 +405,7 @@ async def test_named_talent_recipient_routes_via_whatsapp_group():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert f"✓ {talent_name} → {group_display}" in r.reply
+        assert f"1. {talent_name}" in r.reply
         assert "1 WhatsApp Group" in r.reply
 
         r2 = await handle_inbound_message(
@@ -438,7 +438,7 @@ async def test_named_talent_recipient_routes_via_phone_when_no_group():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert f"✓ {talent_name} → 917000000013" in r.reply
+        assert f"1. {talent_name}" in r.reply
         assert "1 Phone Number" in r.reply
 
         await handle_inbound_message(
@@ -651,7 +651,7 @@ async def test_talent_recipient_surname_only_query_still_matches():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert f"✓ {talent_name}" in r.reply, r.reply
+        assert f"1. {talent_name}" in r.reply, r.reply
 
         await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
@@ -996,7 +996,7 @@ async def test_disambiguation_talent_ambiguity_resolved_via_exact_name():
         )
         assert r2.handled
         assert "RECIPIENTS" in r2.reply
-        assert f"✓ {name_sharma}" in r2.reply
+        assert f"1. {name_sharma}" in r2.reply
 
         await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
@@ -1354,7 +1354,7 @@ async def test_pipeline_stage_success_follow_up_pipeline_of_project():
         assert "Recipient Type\nPipeline" in r.reply
         assert f"Project\n{label}" in r.reply
         assert "Stage\nFollow Up" in r.reply
-        assert "Recipients\n2 talents" in r.reply
+        assert "Recipients (2)" in r.reply
         assert "Destination\n2 Phone Numbers" in r.reply
         assert "1 Approve" in r.reply
 
@@ -1414,7 +1414,7 @@ async def _run_pipeline_stage_success_variant(stage_phrase: str, expected_stage_
         assert "Recipient Type\nPipeline" in r.reply
         assert f"Project\n{label}" in r.reply
         assert nlu.stage_label(expected_stage_key) in r.reply
-        assert "Recipients\n1 talent" in r.reply
+        assert "Recipients (1)" in r.reply
 
         await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
@@ -1727,7 +1727,7 @@ async def test_editing_exclude_single():
     ctx = await _setup_editing_campaign(3)
     try:
         assert ctx["reply"].handled
-        assert "Recipients\n3 talents" in ctx["reply"].reply
+        assert "Recipients (3)" in ctx["reply"].reply
 
         _, name0 = ctx["talents"][0]
         r = await handle_inbound_message(
@@ -1735,7 +1735,7 @@ async def test_editing_exclude_single():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Recipients\n2 talents" in r.reply
+        assert "Recipients (2)" in r.reply
         assert f"Excluded\n{name0}" in r.reply
 
         await handle_inbound_message(
@@ -1755,7 +1755,7 @@ async def test_editing_exclude_multiple():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Recipients\n1 talent" in r.reply
+        assert "Recipients (1)" in r.reply
         assert n0 in r.reply and n1 in r.reply
 
         await handle_inbound_message(
@@ -1858,7 +1858,7 @@ async def test_editing_include_restores_excluded():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Recipients\n3 talents" in r.reply
+        assert "Recipients (3)" in r.reply
         assert f"Included\n{name0}" in r.reply
 
         await handle_inbound_message(
@@ -1882,7 +1882,7 @@ async def test_editing_include_via_add_back_and_restore_phrasing():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Recipients\n2 talents" in r.reply
+        assert "Recipients (2)" in r.reply
 
         await handle_inbound_message(
             group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
@@ -1892,7 +1892,7 @@ async def test_editing_include_via_add_back_and_restore_phrasing():
             group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Restore {name0}",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Recipients\n2 talents" in r2.reply
+        assert "Recipients (2)" in r2.reply
 
         await handle_inbound_message(
             group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
@@ -2192,7 +2192,7 @@ async def test_editing_restart_discards_previous_draft():
         assert r.handled
         assert f"Template\n{ctx['template_name_2']}" in r.reply
         assert "Excluded" not in r.reply
-        assert "Recipients\n2 talents" in r.reply
+        assert "Recipients (2)" in r.reply
 
         await handle_inbound_message(
             group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
@@ -2200,3 +2200,618 @@ async def test_editing_restart_discards_previous_draft():
         )
     finally:
         await _teardown_editing_campaign(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1 — Multi Manual Recipients (2026-08-09). Every name still
+# resolves through nlu.resolve_against_candidates (the same single-name
+# tier casting-agent's Move/Add use) — these tests exercise the NEW
+# splitting/independent-resolution/resume layer, not a second matcher.
+# ---------------------------------------------------------------------------
+async def test_multi_recipient_comma_separated():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    names = [f"Ahana{uuid.uuid4().hex[:6]}", f"Kripa{uuid.uuid4().hex[:6]}", f"Raj{uuid.uuid4().hex[:6]}"]
+    tids = [await _seed_talent(n, phone=f"91700010{i:04d}") for i, n in enumerate(names)]
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to {names[0]}, {names[1]}, {names[2]}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "3 Phone Numbers" in r.reply
+        for n in names:
+            assert n in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=tids, template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_multi_recipient_newline_separated():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    names = [f"Ahana{uuid.uuid4().hex[:6]}", f"Kripa{uuid.uuid4().hex[:6]}", f"Raj{uuid.uuid4().hex[:6]}", f"Sneha{uuid.uuid4().hex[:6]}"]
+    tids = [await _seed_talent(n, phone=f"91700011{i:04d}") for i, n in enumerate(names)]
+    try:
+        text = "Send {} template to\n{}\n{}\n{}\n{}".format(template_name, *names)
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "4 Phone Numbers" in r.reply
+        for n in names:
+            assert n in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=tids, template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_multi_recipient_ampersand_separated():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    names = [f"Ahana{uuid.uuid4().hex[:6]}", f"Kripa{uuid.uuid4().hex[:6]}"]
+    tids = [await _seed_talent(n, phone=f"91700012{i:04d}") for i, n in enumerate(names)]
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to {names[0]} & {names[1]}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "2 Phone Numbers" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=tids, template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_multi_recipient_mixed_comma_and_and():
+    """"Ahana, Kripa, Raj, Sneha and Jessica" — unlimited recipients, a
+    trailing "and" mixed with commas."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    names = [f"N{i}{uuid.uuid4().hex[:6]}" for i in range(5)]
+    tids = [await _seed_talent(n, phone=f"91700013{i:04d}") for i, n in enumerate(names)]
+    try:
+        text = f"Send {template_name} template to {names[0]}, {names[1]}, {names[2]}, {names[3]} and {names[4]}"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "5 Phone Numbers" in r.reply
+        for n in names:
+            assert n in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=tids, template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_multi_recipient_duplicate_names_deduped():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    names = [f"Ahana{uuid.uuid4().hex[:6]}", f"Kripa{uuid.uuid4().hex[:6]}"]
+    tids = [await _seed_talent(n, phone=f"91700014{i:04d}") for i, n in enumerate(names)]
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to {names[0]}, {names[1]}, {names[0]}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "2 Phone Numbers" in r.reply  # deduped, not 3
+        assert "RECIPIENTS (2)" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=tids, template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_multi_recipient_unknown_name_reports_clearly():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    n1 = f"Ahana{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(n1, phone="917000150000")
+    unknown = f"Jessica Nonexistent {uuid.uuid4().hex[:8]}"
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to {n1}, {unknown}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Couldn't find" in r.reply
+        assert unknown in r.reply
+        # never silently proceeds with just the known one
+        assert "3 Approve" not in r.reply and "1 Approve" not in r.reply
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_multi_recipient_ambiguous_name_disambiguates_and_resumes():
+    """A name ambiguous mid-list pauses on the shared disambiguation
+    engine WITHOUT losing the other, already-resolved recipients — after
+    picking, all of them appear in the confirmation."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    a1 = f"Ahana{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    rahul = f"Rahul{uuid.uuid4().hex[:6]}"
+    t_ahana = await _seed_talent(a1, phone="917000160000")
+    t_raj = await _seed_talent(raj, phone="917000160001")
+    t_rahul_sharma = await _seed_talent(f"{rahul} Sharma", phone="917000160002")
+    t_rahul_verma = await _seed_talent(f"{rahul} Verma", phone="917000160003")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to {a1}, {rahul}, {raj}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple talents." in r.reply
+        assert f"{rahul} Sharma" in r.reply and f"{rahul} Verma" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert a1 in r2.reply
+        assert f"{rahul} Sharma" in r2.reply
+        assert raj in r2.reply
+        assert "3 Phone Numbers" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(
+            phone, talent_ids=[t_ahana, t_raj, t_rahul_sharma, t_rahul_verma],
+            template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_multi_recipient_shows_numbered_list():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    names = [f"N{i}{uuid.uuid4().hex[:6]}" for i in range(5)]
+    tids = [await _seed_talent(n, phone=f"91700017{i:04d}") for i, n in enumerate(names)]
+    try:
+        text = f"Send {template_name} template to {names[0]}, {names[1]}, {names[2]}, {names[3]}, {names[4]}"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "RECIPIENTS (5)" in r.reply
+        for n in names:
+            assert any(line.split(". ", 1)[-1] == n for line in r.reply.splitlines() if ". " in line)
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=tids, template_ids=[template_id])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 2 — Show Recipient List: numbered list, pagination, numbered
+# Exclude/Include. Existing name-based Exclude/Include (tested above) is
+# untouched — these are the NEW ordinal-based commands layered on top.
+# ---------------------------------------------------------------------------
+async def _setup_big_editing_campaign(n_talents: int):
+    """Same shape as _setup_editing_campaign but for pagination-scale
+    counts — a distinct helper so the existing one (and everything that
+    depends on its exact n_talents<=3 assumptions) stays untouched."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"ZBig{tag}"
+    project_id = await _seed_project(label)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    talents = []
+    for i in range(n_talents):
+        name = f"Talent{i:03d} {tag}"
+        tid = await _seed_talent(name, phone=f"9170002{i:04d}")
+        await _seed_pipeline_row(project_id, tid, "follow_up")
+        talents.append((tid, name))
+    r = await handle_inbound_message(
+        group_name=group, sender_phone=phone,
+        text=f"Send {template_name} to Follow Up pipeline of {label}",
+        sender_name="Raj", sender_is_group_member=True,
+    )
+    return {
+        "group": group, "phone": phone, "original": original,
+        "project_id": project_id, "template_id": template_id,
+        "template_name": template_name, "talents": talents, "label": label, "reply": r,
+    }
+
+
+async def _teardown_big_editing_campaign(ctx: dict):
+    await _cleanup(
+        ctx["phone"], project_ids=[ctx["project_id"]],
+        talent_ids=[t[0] for t in ctx["talents"]], template_ids=[ctx["template_id"]],
+    )
+    await _restore_config(ctx["original"])
+
+
+def _numbered_lines(reply: str):
+    out = {}
+    for line in reply.splitlines():
+        if ". " in line:
+            head, _, rest = line.partition(". ")
+            if head.isdigit():
+                out[int(head)] = rest
+    return out
+
+
+async def test_recipient_list_shows_all_when_le_20():
+    ctx = await _setup_big_editing_campaign(5)
+    try:
+        assert ctx["reply"].handled
+        assert "Recipients (5)" in ctx["reply"].reply
+        assert "Showing" not in ctx["reply"].reply
+        nums = _numbered_lines(ctx["reply"].reply)
+        assert set(nums.keys()) == {1, 2, 3, 4, 5}
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_recipient_list_paginates_when_gt_20():
+    ctx = await _setup_big_editing_campaign(25)
+    try:
+        assert ctx["reply"].handled
+        assert "Recipients (25)" in ctx["reply"].reply
+        assert "Showing 20 of 25 recipients." in ctx["reply"].reply
+        nums = _numbered_lines(ctx["reply"].reply)
+        assert len(nums) == 20
+        assert set(nums.keys()) == set(range(1, 21))
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_numbered_exclude_single_and_stable_numbering():
+    ctx = await _setup_big_editing_campaign(6)
+    try:
+        before = _numbered_lines(ctx["reply"].reply)
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients (5)" in r.reply
+        after = _numbered_lines(r.reply)
+        assert 3 not in after
+        # Everyone else keeps their ORIGINAL number — never renumbered down.
+        for n, name in before.items():
+            if n != 3:
+                assert after.get(n) == name, f"#{n} shifted after excluding #3"
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_numbered_exclude_comma_list():
+    ctx = await _setup_big_editing_campaign(6)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 2,4,6",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients (3)" in r.reply
+        after = _numbered_lines(r.reply)
+        assert set(after.keys()) == {1, 3, 5}
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_numbered_exclude_range():
+    ctx = await _setup_big_editing_campaign(8)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 2-4",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients (5)" in r.reply
+        after = _numbered_lines(r.reply)
+        assert set(after.keys()) == {1, 5, 6, 7, 8}
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_numbered_exclude_space_separated():
+    ctx = await _setup_big_editing_campaign(6)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 2 4",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients (4)" in r.reply
+        after = _numbered_lines(r.reply)
+        assert set(after.keys()) == {1, 3, 5, 6}
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_numbered_include_after_exclude():
+    ctx = await _setup_big_editing_campaign(5)
+    try:
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Include 2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients (5)" in r.reply
+        assert 2 in _numbered_lines(r.reply)
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_numbered_exclude_out_of_range():
+    ctx = await _setup_big_editing_campaign(3)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 99",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "out of range" in r.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_delete_and_add_back_number_trigger_synonyms():
+    ctx = await _setup_big_editing_campaign(5)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Delete 2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients (4)" in r.reply
+        assert 2 not in _numbered_lines(r.reply)
+
+        r2 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Add back 2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "Recipients (5)" in r2.reply
+        assert 2 in _numbered_lines(r2.reply)
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_pagination_next_and_previous():
+    ctx = await _setup_big_editing_campaign(25)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Next",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        after_next = _numbered_lines(r.reply)
+        assert set(after_next.keys()) == set(range(21, 26))
+        assert "Showing 5 of 25 recipients." in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Previous",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert set(_numbered_lines(r2.reply).keys()) == set(range(1, 21))
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_pagination_page_n():
+    ctx = await _setup_big_editing_campaign(25)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Page 2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert set(_numbered_lines(r.reply).keys()) == set(range(21, 26))
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_pagination_show_all():
+    ctx = await _setup_big_editing_campaign(25)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Show All",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Showing" not in r.reply
+        assert set(_numbered_lines(r.reply).keys()) == set(range(1, 26))
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_pagination_show_remaining():
+    ctx = await _setup_big_editing_campaign(25)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Show Remaining",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert set(_numbered_lines(r.reply).keys()) == set(range(1, 26))
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_pagination_never_loses_exclusions():
+    ctx = await _setup_big_editing_campaign(25)
+    try:
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Next",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Previous",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients (24)" in r.reply
+        assert 1 not in _numbered_lines(r.reply)
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_numbered_and_name_based_editing_both_work_on_same_campaign():
+    """Existing name-based editing (already covered above) must continue
+    working unchanged, side by side with the new numbered commands, in
+    the SAME editing session."""
+    ctx = await _setup_big_editing_campaign(5)
+    try:
+        _, name0 = ctx["talents"][0]
+        r1 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r1.handled
+        assert "Recipients (4)" in r1.reply
+
+        r2 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "Recipients (3)" in r2.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)

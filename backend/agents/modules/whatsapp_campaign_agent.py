@@ -66,10 +66,11 @@ disambiguation.start.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
@@ -133,10 +134,20 @@ class AmbiguousEntity:
     a dead-end text error. `entity_type` is one of the engine's known
     opaque labels ("project"/"template"/"talent"/"crm_source"/
     "saved_list"); `field_key` is which `collected` field to overwrite
-    with the resolved label once the user picks."""
+    with the resolved label once the user picks.
+
+    `extra_collected` (Multi Manual Recipients sprint, 2026-08-09) — extra
+    private keys to fold into the `collected` snapshot disambiguation.start
+    stores, alongside (never instead of) `field_key`'s normal overwrite.
+    Used only by the multi-recipient resolver to carry "which of several
+    names is pending, and what were the others" state across the
+    disambiguation round trip — see _resolve_multi_recipient_names /
+    _resume_pending_multi_recipient. None for every other ambiguity kind,
+    completely unaffected."""
     entity_type: str
     field_key: str
     candidates: List["disambiguation.Candidate"]
+    extra_collected: Optional[Dict[str, str]] = None
 
 
 _TEMPLATE_FUZZY_CUTOFF = 0.6
@@ -296,8 +307,26 @@ def _split_stage_and_project(recipient_text: str) -> Optional["tuple[str, str]"]
 _ALL_PROJECTS_SENTINEL = "__ANY_ONGOING_PROJECT__"
 
 
+def _strip_leading_trigger_preserve_newlines(text: str, triggers: List[str]) -> str:
+    """nlu._strip_leading_trigger collapses ALL whitespace in the whole
+    text (`" ".join(text.strip().split())`) — harmless for casting-agent's
+    Move (a talent selector never needs multi-line structure), but fatal
+    for Multi Manual Recipients' newline-separated name lists ("Send X to
+    \\nAhana\\nKripa\\nRaj" would arrive at the recipient parser as one
+    space-joined blob). Reuses the SAME shared function purely to
+    identify WHICH trigger word matched (so trigger recognition itself is
+    still the one existing implementation, not reimplemented), then
+    strips only that verb off the front of the ORIGINAL text, leaving
+    every internal newline untouched."""
+    trig, _mangled = nlu._strip_leading_trigger(text or "", triggers)
+    stripped = (text or "").strip()
+    if trig is None:
+        return stripped
+    return stripped[len(trig):].lstrip(" :\n\t")
+
+
 def extract_send_requirement_fields(text: str) -> Dict[str, str]:
-    _, remainder = nlu._strip_leading_trigger(text or "", SEND_TRIGGERS)
+    remainder = _strip_leading_trigger_preserve_newlines(text or "", SEND_TRIGGERS)
     out: Dict[str, str] = {}
 
     # Tier 1: legacy explicit-template grammar.
@@ -550,6 +579,157 @@ async def _resolve_pipeline_stage(stage_query: str) -> "tuple[Optional[str], Opt
     )
 
 
+# ---------------------------------------------------------------------------
+# Multi Manual Recipients (2026-08-09) — "Send Reminder to Ahana, Kripa,
+# Raj", newline-separated lists, "and", "&". Every name is still resolved
+# through nlu.resolve_against_candidates (the SAME single-name tier
+# casting-agent's Move/Add already use) — this section only decides WHICH
+# TEXT SPAN is one recipient's name and loops over them independently, so
+# per-name ambiguity is never lost (see the module-level gap this closes:
+# resolve_against_candidates's OWN multi-name branch flattens ambiguity
+# into an unusable combined error string — deliberately NOT used here for
+# that reason; nlu.parse_talent_selector/resolve_against_candidates
+# themselves are untouched, still exactly what casting-agent depends on).
+# ---------------------------------------------------------------------------
+_RECIPIENT_LIST_SPLIT_RE = re.compile(r",|\n|\band\b", re.IGNORECASE)
+
+
+def _split_recipient_names(text: str) -> List[str]:
+    """Pure text splitter — no matching/fuzzy logic of any kind. "&" is
+    never a plausible fragment of a real person's name in this system
+    (same assumption already made for "and"/"talent" as noise words in
+    casting_pipeline_nlu.py), so it's normalized to a comma first, then
+    comma/newline/"and" are one splitting grammar. Empty fragments
+    (blank lines, trailing separators) are dropped."""
+    normalized = (text or "").replace("&", ",")
+    parts = _RECIPIENT_LIST_SPLIT_RE.split(normalized)
+    return [p.strip(" .!?") for p in parts if p.strip(" .!?")]
+
+
+@dataclass
+class _MultiRecipientResolution:
+    resolved: List[Tuple[str, str]] = None  # (talent_id, talent_label), deduped, fragment order
+    not_found: List[str] = None             # raw fragments that matched no talent at all
+    unsafe: List[Tuple[str, str]] = None    # (fragment, would-be label) that failed the safety gate
+    # (fragment, candidates, index-into-the-original-fragment-list) — set
+    # only when exactly the FIRST ambiguous fragment is found; the caller
+    # pauses there (one disambiguation at a time, same as every other
+    # ambiguity on this platform) rather than trying to resolve several
+    # at once.
+    ambiguous: Optional[Tuple[str, List["nlu.Candidate"], int]] = None
+
+    def __post_init__(self):
+        if self.resolved is None:
+            self.resolved = []
+        if self.not_found is None:
+            self.not_found = []
+        if self.unsafe is None:
+            self.unsafe = []
+
+
+async def _resolve_multi_recipient_names(fragments: List[str]) -> _MultiRecipientResolution:
+    """Resolves each fragment INDEPENDENTLY (sprint requirement) against
+    the same global talent pool ADD_INTENT/the single-name recipient tier
+    already search. Scans the WHOLE list before returning — so a not-found
+    name elsewhere in the list is never masked by pausing on an earlier
+    ambiguity, matching "never silently skip" for the harder-to-recover
+    case (a genuinely unresolvable name) over the softer, resumable case
+    (a name with a real answer waiting to be picked)."""
+    candidates = await _fetch_all_talent_candidates()
+    out = _MultiRecipientResolution()
+    seen_ids: set = set()
+    for idx, frag in enumerate(fragments):
+        one = nlu.resolve_against_candidates(nlu.SelectorResult(ok=True, name_query=frag), candidates)
+        if one.ambiguous_candidates:
+            if out.ambiguous is None:
+                out.ambiguous = (frag, one.ambiguous_candidates, idx)
+            continue
+        if not one.ok or not one.talent_ids:
+            out.not_found.append(frag)
+            continue
+        label = one.talent_labels[0]
+        if not _fuzzy_match_is_safe(frag, label):
+            out.unsafe.append((frag, label))
+            continue
+        tid = one.talent_ids[0]
+        if tid not in seen_ids:
+            seen_ids.add(tid)
+            out.resolved.append((tid, label))
+    return out
+
+
+async def _build_manual_contacts(resolved: List[Tuple[str, str]]) -> "tuple[List[ManualContact], List[str]]":
+    """Talent id/label pairs -> ManualContact list, same phone/group
+    extraction the existing single-name Tier 3 already does (not
+    duplicated logic — this is plain data shaping, no matching). Returns
+    (contacts, labels_with_no_phone_or_group)."""
+    ids = [tid for tid, _label in resolved]
+    if not ids:
+        return [], []
+    docs = await db.talents.find(
+        {"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "phone": 1, "whatsapp_group_name": 1},
+    ).to_list(len(ids))
+    tmap = {d["id"]: d for d in docs}
+    contacts: List[ManualContact] = []
+    no_contact_info: List[str] = []
+    for tid, label in resolved:
+        d = tmap.get(tid)
+        if not d:
+            continue
+        group_name = (d.get("whatsapp_group_name") or "").strip()
+        phone = (d.get("phone") or "").strip()
+        if not group_name and not phone:
+            no_contact_info.append(label)
+            continue
+        contacts.append(ManualContact(name=d.get("name") or "", phone=phone, whatsapp_group_name=group_name))
+    return contacts, no_contact_info
+
+
+# Private, never-user-facing collected keys carrying multi-recipient
+# disambiguation state across a round trip through the shared engine —
+# same pattern as _pending_exclude_name/_pending_include_name (E below),
+# just list-shaped instead of a single string.
+_PENDING_MULTI_RECIPIENT_PICK_KEY = "_pending_multi_recipient_pick"
+_PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY = "_pending_multi_recipient_fragments"
+_PENDING_MULTI_RECIPIENT_INDEX_KEY = "_pending_multi_recipient_index"
+
+
+async def _resume_pending_multi_recipient(collected: dict, ctx: ExecContext) -> dict:
+    """Mirror of _resume_pending_recipient_edit, for a multi-recipient send
+    where one name was ambiguous. The shared disambiguation engine has
+    already written the picked candidate's exact label into
+    _pending_multi_recipient_pick (dispatcher.py's _advance_disambiguation
+    — see agents/disambiguation.py). Substitutes that label back into the
+    ORIGINAL fragment list at the ambiguous position and rewrites
+    `recipient_query` to the reconstructed, now-fully-resolvable text —
+    letting the normal _resolve_recipient path re-derive everything fresh,
+    exactly like every other turn (no separate resolution logic needed
+    here). A no-op when no multi-recipient disambiguation is pending."""
+    picked_label = collected.get(_PENDING_MULTI_RECIPIENT_PICK_KEY)
+    fragments_json = collected.get(_PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY)
+    index_raw = collected.get(_PENDING_MULTI_RECIPIENT_INDEX_KEY)
+    if not picked_label or fragments_json is None or index_raw is None:
+        return collected
+    try:
+        fragments = json.loads(fragments_json)
+        index = int(index_raw)
+    except (TypeError, ValueError):
+        fragments = None
+        index = -1
+    new_collected = dict(collected)
+    for key in (
+        _PENDING_MULTI_RECIPIENT_PICK_KEY,
+        _PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY,
+        _PENDING_MULTI_RECIPIENT_INDEX_KEY,
+    ):
+        new_collected.pop(key, None)
+    if isinstance(fragments, list) and 0 <= index < len(fragments):
+        fragments[index] = picked_label
+        new_collected["recipient_query"] = ", ".join(fragments)
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    return new_collected
+
+
 async def _resolve_recipient(recipient_query: str, stage_query: str) -> _RecipientTarget:
     normalized_stage, stage_error = await _resolve_pipeline_stage(stage_query)
     if stage_error:
@@ -645,6 +825,49 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
     # be in any particular project's pipeline).
     selector = nlu.parse_talent_selector(q)
     if selector.ok and not selector.everyone and not selector.ordinals:
+        # Multi Manual Recipients (2026-08-09) — 2+ comma/newline/"and"/"&"
+        # separated names is unambiguously a manual recipient LIST (never a
+        # project/CRM/saved-list name, which never legitimately contains a
+        # separator like this), so it's handled entirely here rather than
+        # falling through to nlu.parse_talent_selector's own (ambiguity-
+        # losing, see the section above) multi-name grammar. A single name
+        # — the overwhelmingly common case — falls through to the existing,
+        # byte-for-byte-unchanged single-name resolution below.
+        fragments = _split_recipient_names(q)
+        if len(fragments) >= 2:
+            multi = await _resolve_multi_recipient_names(fragments)
+            if multi.not_found or multi.unsafe:
+                problems = list(multi.not_found) + [frag for frag, _label in multi.unsafe]
+                joined = "\n".join(problems)
+                return _RecipientTarget(ok=False, error=f"Couldn't find:\n\n{joined}")
+            if multi.ambiguous:
+                frag, amb_candidates, idx = multi.ambiguous
+                return _RecipientTarget(
+                    ok=False,
+                    ambiguous=AmbiguousEntity(
+                        entity_type="talent", field_key=_PENDING_MULTI_RECIPIENT_PICK_KEY,
+                        candidates=[disambiguation.Candidate(id=c.id, label=c.label) for c in amb_candidates],
+                        extra_collected={
+                            _PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY: json.dumps(fragments),
+                            _PENDING_MULTI_RECIPIENT_INDEX_KEY: str(idx),
+                        },
+                    ),
+                )
+            if not multi.resolved:
+                return _RecipientTarget(ok=False, error="Who should this go to?")
+            contacts, no_contact_info = await _build_manual_contacts(multi.resolved)
+            if not contacts:
+                return _RecipientTarget(
+                    ok=False,
+                    error=f'{" and ".join(no_contact_info)} — no phone number or WhatsApp group on file.',
+                )
+            labels = [label for _tid, label in multi.resolved]
+            return _RecipientTarget(
+                ok=True, source_type="MANUAL",
+                source_params=SourceParams(contacts=contacts),
+                display_label=", ".join(labels),
+            )
+
         candidates = await _fetch_all_talent_candidates()
         resolved = nlu.resolve_against_candidates(selector, candidates)
         if resolved.ok and resolved.talent_ids:
@@ -834,21 +1057,7 @@ def _truncate(s: str, limit: int = 300) -> str:
     return s if len(s) <= limit else s[:limit].rstrip() + "…"
 
 
-def _format_recipients_and_delivery(jobs: List[dict], skipped: List[dict]) -> "tuple[str, str]":
-    """Builds the RECIPIENTS list ("✓ Name → destination") and DELIVERY
-    summary line from create_batch's own dry-run job list — no separate
-    recipient-formatting logic, this just renders what the real engine
-    already resolved."""
-    lines = []
-    shown = jobs[:10]
-    for j in shown:
-        lines.append(f"✓ {j['talent_name']} → {j['destination']}")
-    if len(jobs) > len(shown):
-        lines.append(f"…and {len(jobs) - len(shown)} more")
-    if skipped:
-        lines.append(f"⚠ {len(skipped)} skipped (no phone/group on file)")
-    recipients_block = "\n".join(lines) if lines else "(no recipients resolved)"
-
+def _delivery_summary(jobs: List[dict]) -> str:
     groups = sum(1 for j in jobs if j.get("destination_type") == "group")
     numbers = sum(1 for j in jobs if j.get("destination_type") == "number")
     delivery_parts = []
@@ -856,8 +1065,110 @@ def _format_recipients_and_delivery(jobs: List[dict], skipped: List[dict]) -> "t
         delivery_parts.append(f"{groups} WhatsApp Group{'s' if groups != 1 else ''}")
     if numbers:
         delivery_parts.append(f"{numbers} Phone Number{'s' if numbers != 1 else ''}")
-    delivery = ", ".join(delivery_parts) if delivery_parts else "(none)"
-    return recipients_block, delivery
+    return ", ".join(delivery_parts) if delivery_parts else "(none)"
+
+
+# ---------------------------------------------------------------------------
+# Show Recipient List (2026-08-09) — the confirmation card's bare
+# "Recipients: N" count, replaced with the actual numbered list, paginated
+# past 20. Numbers are assigned from the FULL resolved set
+# (_current_recipient_candidates(..., apply_exclusions=False) — existing,
+# unmodified helper), not from whatever create_batch currently returns
+# WITH exclusions applied — a recipient's number must never shift just
+# because an earlier one got excluded (sprint requirement: "Indexes shown
+# to the user must remain stable after exclusions"). The DISPLAYED list
+# still only shows currently-sendable (non-excluded) recipients; excluded
+# ones simply leave a gap in the numbering rather than causing everyone
+# after them to renumber down.
+# ---------------------------------------------------------------------------
+_RECIPIENT_PAGE_SIZE = 20
+
+
+def _stable_sorted_jobs(jobs: List[dict]) -> List[dict]:
+    """resolve_recipients_engine's PROJECT branch (routers/whatsapp.py,
+    unmodified — out of scope to touch) dedupes talent ids through a
+    Python set() with no explicit Mongo sort, so its OWN return order
+    isn't guaranteed stable across a server restart. Sorting here, in OUR
+    code, the same way casting-agent's own pipeline listing already does
+    (alphabetical, case-insensitive, by display name — see
+    casting_pipeline.py's _handle_pipeline_query) makes recipient
+    NUMBERING deterministic and stable regardless of upstream iteration
+    order, without touching the shared engine at all. The ONE place both
+    the confirmation card's numbered list and numbered Exclude/Include
+    commands derive ordinals from — both must use this exact same
+    ordering or "Exclude 5" could target a different person than the "5."
+    the user is looking at."""
+    return sorted(jobs, key=lambda j: ((j.get("talent_name") or "").strip().lower(), j["recipient_id"]))
+
+
+async def _render_numbered_recipient_lines(collected: dict) -> "tuple[List[str], int]":
+    """Returns (lines, total_active) — `lines` has no title of its own
+    (each confirmation-card layout prepends its own "Recipients (N)" /
+    "RECIPIENTS" header, see _build_send_requirement_confirmation)."""
+    _target, stable_jobs = await _current_recipient_candidates(collected, apply_exclusions=False)
+    stable_jobs = _stable_sorted_jobs(stable_jobs)
+    excluded_ids = set(collected.get("excluded_ids") or [])
+    active = [(i + 1, job) for i, job in enumerate(stable_jobs) if job["recipient_id"] not in excluded_ids]
+    total = len(active)
+    if total == 0:
+        return ["(no recipients resolved)"], 0
+
+    show_all = str(collected.get("recipient_show_all") or "") == "1"
+    show_remaining = str(collected.get("recipient_show_remaining") or "") == "1"
+    try:
+        page = int(collected.get("recipient_page") or "1")
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, page)
+
+    if show_all or total <= _RECIPIENT_PAGE_SIZE:
+        shown = active
+    elif show_remaining:
+        # "Show Remaining" — continue from wherever the user was (current
+        # page's start), unlimited from there, as opposed to "Show All"
+        # (which always restarts from #1).
+        start = (page - 1) * _RECIPIENT_PAGE_SIZE
+        shown = active[start:] or active
+    else:
+        start = (page - 1) * _RECIPIENT_PAGE_SIZE
+        shown = active[start:start + _RECIPIENT_PAGE_SIZE]
+        if not shown:
+            # Page beyond the end (e.g. exclusions shrank the active set
+            # since this page number was set) — fall back to page 1 rather
+            # than showing an empty page.
+            shown = active[:_RECIPIENT_PAGE_SIZE]
+
+    # A raw phone-number recipient (Tier 1 of _resolve_recipient — no
+    # talent record at all) has no talent_name — fall back to the
+    # destination itself so the line is never blank.
+    lines = [f"{ordinal}. {job.get('talent_name') or job.get('destination') or 'Unknown'}" for ordinal, job in shown]
+    if len(shown) < total:
+        lines.append("")
+        lines.append(f"Showing {len(shown)} of {total} recipients.")
+    return lines, total
+
+
+async def _set_recipient_page(
+    collected: dict, ctx: ExecContext, *, page: int, show_all: bool = False, show_remaining: bool = False,
+) -> str:
+    """The one place Next/Previous/Page N/Show All/Show Remaining all
+    funnel through — only ever touches recipient_page/recipient_show_all/
+    recipient_show_remaining, never excluded_ids/included_ids, so paging
+    can never lose an exclusion (sprint requirement)."""
+    new_collected = dict(collected)
+    new_collected["recipient_page"] = str(max(1, page))
+    new_collected["recipient_show_all"] = "1" if show_all else ""
+    new_collected["recipient_show_remaining"] = "1" if show_remaining else ""
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    return await _build_send_requirement_confirmation(new_collected, ctx)
+
+
+async def _change_recipient_page(collected: dict, ctx: ExecContext, *, delta: int) -> str:
+    try:
+        current = int(collected.get("recipient_page") or "1")
+    except (TypeError, ValueError):
+        current = 1
+    return await _set_recipient_page(collected, ctx, page=current + delta)
 
 
 async def _build_batch_in(target: "_SendTarget", collected: dict, *, is_dry_run: bool) -> BatchIn:
@@ -924,16 +1235,20 @@ async def _resume_pending_recipient_edit(collected: dict, ctx: ExecContext) -> d
 
 async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext) -> str:
     collected = await _resume_pending_recipient_edit(collected, ctx)
+    collected = await _resume_pending_multi_recipient(collected, ctx)
     target = await _resolve_send_target(collected)
     if not target.ok:
         if target.ambiguous:
+            start_collected = collected
+            if target.ambiguous.extra_collected:
+                start_collected = {**collected, **target.ambiguous.extra_collected}
             await disambiguation.start(
                 agent_id=ctx.agent_id, phone=ctx.sender_phone,
                 entity_type=target.ambiguous.entity_type,
                 candidates=target.ambiguous.candidates,
                 intent_id=SEND_REQUIREMENT_INTENT.intent_id,
                 field_key=target.ambiguous.field_key,
-                collected=collected,
+                collected=start_collected,
             )
             # Overrides the "confirming" step dispatcher.py just set right
             # before calling this hook — same override-after-the-fact
@@ -969,26 +1284,23 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
     if included_names:
         edit_lines += ["", "Included", ", ".join(included_names)]
 
+    recipient_lines, total_active = await _render_numbered_recipient_lines(collected)
+
     if target.pipeline_stage_label:
         # An EXPLICIT single pipeline stage was resolved (not the "whole
-        # project, every stage" default) — the richer, count-based summary
-        # from the sprint spec, instead of the generic per-recipient list.
-        groups = sum(1 for j in jobs if j.get("destination_type") == "group")
-        numbers = sum(1 for j in jobs if j.get("destination_type") == "number")
-        dest_parts = []
-        if groups:
-            dest_parts.append(f"{groups} WhatsApp Group{'s' if groups != 1 else ''}")
-        if numbers:
-            dest_parts.append(f"{numbers} Phone Number{'s' if numbers != 1 else ''}")
-        destination = ", ".join(dest_parts) if dest_parts else "(none)"
+        # project, every stage" default) — the richer Project/Stage
+        # summary from the sprint spec, now WITH the numbered recipient
+        # list too (previously just a bare count here).
+        destination = _delivery_summary(jobs)
         lines = [
             "Template", template_label, "",
             "Recipient Type", "Pipeline", "",
             "Project", target.project_label or "", "",
             "Stage", target.pipeline_stage_label, "",
-            "Recipients", f"{len(jobs)} talent{'s' if len(jobs) != 1 else ''}", "",
-            "Destination", destination,
+            f"Recipients ({total_active})", "",
         ]
+        lines += recipient_lines
+        lines += ["", "Destination", destination]
         lines += edit_lines
         if skipped:
             lines += ["", f"⚠ {len(skipped)} skipped (no phone/group on file)"]
@@ -997,7 +1309,7 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
         lines += ["", "Reply", "1 Approve", "2 Edit", "3 Cancel"]
         return "\n".join(lines)
 
-    recipients_block, delivery = _format_recipients_and_delivery(jobs, skipped)
+    delivery = _delivery_summary(jobs)
 
     lines = [
         "ACTION",
@@ -1006,13 +1318,14 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
         "MESSAGE SOURCE",
         template_label,
         "",
-        "RECIPIENTS",
-        recipients_block,
+        f"RECIPIENTS ({total_active})",
         "",
-        "DELIVERY",
-        delivery,
     ]
+    lines += recipient_lines
+    lines += ["", "DELIVERY", delivery]
     lines += edit_lines
+    if skipped:
+        lines += ["", f"⚠ {len(skipped)} skipped (no phone/group on file)"]
     if jobs:
         lines += ["", "Sample message", "", _truncate(jobs[0]["message_body"])]
     lines += ["", "Reply", "1 Approve", "2 Edit", "3 Cancel"]
@@ -1139,10 +1452,87 @@ async def _resolve_named_recipient(name_query: str, jobs: List[dict]) -> _NamedR
     return _NamedRecipientResult(job=job)
 
 
+# Numbered Exclude/Include (Sprint 2: Show Recipient List, 2026-08-09) —
+# "Exclude 5", "Exclude 3,5,8", "Exclude 2-8". "Exclude 2 4 8" (space-
+# separated, no commas) needs commas inserted between the numbers before
+# nlu.parse_talent_selector's own ordinal/range grammar — built for
+# casting-agent's "Move 2,4,5,8"/"1-25" shapes — will recognize it; this
+# reshapes ONLY the separators, the actual ordinal/range PARSING is 100%
+# that existing function, not reimplemented.
+_NUMERIC_LIST_RE = re.compile(r"^[\d,\-\s]+$")
+
+
+def _normalize_numeric_list_text(text: str) -> str:
+    return re.sub(r"(\d)\s+(?=\d)", r"\1,", (text or "").strip())
+
+
+async def _apply_recipient_edit_by_ordinal(
+    ordinals: List[int], stable_jobs: List[dict], collected: dict, ctx: ExecContext, *, exclude: bool,
+) -> str:
+    """Numbers refer to the SAME stable ordering _render_numbered_recipient_
+    lines assigns (see _stable_sorted_jobs) — an out-of-range number
+    aborts the whole batch with no partial effect (same "never guess,
+    never partially apply an invalid selection" rule casting-agent's own
+    ordinal move selection already follows). A number that's already in
+    the requested state is applied to whatever ELSE in the batch is a
+    genuine new change (never a silent no-op, but also never a hard block
+    on the rest of a valid batch just because one number was redundant —
+    matches casting-agent's own "already in destination stage" bulk-move
+    handling)."""
+    max_ord = len(stable_jobs)
+    out_of_range = [n for n in ordinals if n < 1 or n > max_ord]
+    if out_of_range:
+        return f"Only {max_ord} recipient(s) are listed — #{out_of_range[0]} is out of range."
+
+    excluded_ids = list(collected.get("excluded_ids") or [])
+    included_ids = list(collected.get("included_ids") or [])
+    already: List[str] = []
+    changed: List[str] = []
+
+    for n in ordinals:
+        job = stable_jobs[n - 1]
+        rid = job["recipient_id"]
+        name = job.get("talent_name") or job.get("destination") or "Unknown"
+        if exclude:
+            if rid in excluded_ids:
+                already.append(name)
+                continue
+            excluded_ids.append(rid)
+            if rid in included_ids:
+                included_ids.remove(rid)
+        else:
+            if rid not in excluded_ids:
+                already.append(name)
+                continue
+            excluded_ids.remove(rid)
+            if rid not in included_ids:
+                included_ids.append(rid)
+        changed.append(name)
+
+    if not changed:
+        verb = "excluded" if exclude else "included"
+        return f"{', '.join(already)} {'is' if len(already) == 1 else 'are'} already {verb}."
+
+    new_collected = dict(collected)
+    new_collected["excluded_ids"] = excluded_ids
+    new_collected["included_ids"] = included_ids
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    return await _build_send_requirement_confirmation(new_collected, ctx)
+
+
 async def _apply_recipient_edit(name_query: str, collected: dict, ctx: ExecContext, *, exclude: bool) -> str:
     target, jobs = await _current_recipient_candidates(collected, apply_exclusions=False)
     if target is None:
         return "I couldn't re-check the current campaign — please try again, or Cancel and start over."
+
+    stripped_query = (name_query or "").strip()
+    if _NUMERIC_LIST_RE.match(stripped_query):
+        selector = nlu.parse_talent_selector(_normalize_numeric_list_text(stripped_query))
+        if selector.ok and selector.ordinals:
+            return await _apply_recipient_edit_by_ordinal(
+                selector.ordinals, _stable_sorted_jobs(jobs), collected, ctx, exclude=exclude,
+            )
+        return selector.error or f'I couldn\'t understand "{name_query}" as a recipient number.'
 
     names = nlu.split_multi_names(name_query)
     excluded_ids = list(collected.get("excluded_ids") or [])
@@ -1246,8 +1636,15 @@ async def _render_summary(collected: dict) -> str:
 
 
 _LEADING_CONNECTOR_RE = re.compile(r"^\s*(?:also|and|then)\s+", re.IGNORECASE)
-_EXCLUDE_TRIGGERS = ["exclude", "remove", "skip", "leave out", "don't send to", "do not send to"]
-_INCLUDE_TRIGGERS = ["include", "restore", "undo"]
+# "delete" added (Sprint 2, 2026-08-09) — a synonym the spec explicitly
+# lists ("Delete 5"); purely additive, every existing exclude synonym
+# still works exactly as before.
+_EXCLUDE_TRIGGERS = ["exclude", "remove", "skip", "leave out", "don't send to", "do not send to", "delete"]
+# "add back" added (Sprint 2) — covers "Add back 5"/"Add back Kripa" (the
+# trigger word sits at the FRONT, unlike "Add <Name> back" below, where it
+# sits in the middle) via the same longest-match-first prefix-strip every
+# other trigger here already uses.
+_INCLUDE_TRIGGERS = ["include", "restore", "undo", "add back"]
 # "Add <Name> back" — the name sits BETWEEN the trigger words, not after
 # them, so it can't use the simple prefix-strip _strip_leading_phrase every
 # other trigger list uses.
@@ -1257,6 +1654,17 @@ _CHANGE_TEMPLATE_RE = re.compile(
 )
 _PREVIEW_TRIGGERS = {"preview", "show preview", "preview message", "what will they receive"}
 _SUMMARY_TRIGGERS = {"summary", "show recipients", "who will receive this"}
+
+# Pagination (Sprint 2: Show Recipient List, 2026-08-09) — only meaningful
+# once a campaign has more than _RECIPIENT_PAGE_SIZE recipients; harmless
+# no-ops (a re-render identical to the current one) otherwise. State lives
+# in collected["recipient_page"]/["recipient_show_all"] — never touches
+# excluded_ids/included_ids, so paging can never lose an exclusion.
+_NEXT_PAGE_TRIGGERS = {"next", "next page"}
+_PREV_PAGE_TRIGGERS = {"previous", "previous page", "prev", "prev page"}
+_SHOW_ALL_TRIGGERS = {"show all", "show all recipients"}
+_SHOW_REMAINING_TRIGGERS = {"show remaining", "show remaining recipients"}
+_PAGE_N_RE = re.compile(r"^\s*page\s+(\d+)\s*$", re.IGNORECASE)
 
 
 def _strip_leading_phrase(text: str, triggers: List[str]) -> Optional[str]:
@@ -1289,6 +1697,18 @@ async def _handle_campaign_confirming_edit(text: str, collected: dict, ctx: Exec
         return await _render_preview(collected)
     if low in _SUMMARY_TRIGGERS:
         return await _render_summary(collected)
+
+    if low in _NEXT_PAGE_TRIGGERS:
+        return await _change_recipient_page(collected, ctx, delta=1)
+    if low in _PREV_PAGE_TRIGGERS:
+        return await _change_recipient_page(collected, ctx, delta=-1)
+    page_m = _PAGE_N_RE.match(low)
+    if page_m:
+        return await _set_recipient_page(collected, ctx, page=int(page_m.group(1)))
+    if low in _SHOW_ALL_TRIGGERS:
+        return await _set_recipient_page(collected, ctx, page=1, show_all=True)
+    if low in _SHOW_REMAINING_TRIGGERS:
+        return await _set_recipient_page(collected, ctx, page=int(collected.get("recipient_page") or "1"), show_remaining=True)
 
     excl_phrase = _strip_leading_phrase(norm, _EXCLUDE_TRIGGERS)
     if excl_phrase:

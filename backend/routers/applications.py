@@ -1006,7 +1006,18 @@ async def app_video_signature(
         public_id = "intro_video"
 
     from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
-    if ENABLE_R2_MEDIA_PIPELINE:
+    # Direct-to-R2 browser PUT requires the R2 bucket's CORS allowlist to
+    # exactly match the calling origin — an out-of-repo config that has
+    # repeatedly drifted from apply./submit. in production ("R2 Upload
+    # Network Error"), surviving several targeted transport fixes (see
+    # directVideoUpload.js's retry/watchdog history) because none of them
+    # touch the actual CORS mismatch. New uploads always go through the
+    # Cloudinary chunked path below instead — the same one image uploads
+    # and the Global Talent Page's video uploads already use with no CORS
+    # dependency. `resign_r2_key` is only truthy when continuing an
+    # upload that already started on R2, so an in-flight session at
+    # deploy time can still finish rather than being orphaned.
+    if ENABLE_R2_MEDIA_PIPELINE and resign_r2_key:
         # P2 fix: the R2 leaf must be unique per FRESH upload attempt (a
         # re-sign still reuses resign_r2_key verbatim, unaffected). The old
         # fixed leaf meant re-recording while Cloudflare Stream was still

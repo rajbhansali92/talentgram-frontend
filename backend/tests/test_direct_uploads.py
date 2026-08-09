@@ -489,6 +489,18 @@ def _r2_presign_capture(captured):
     return _fake
 
 
+#
+# P0 fix (2026-08-09) — direct-to-R2 browser PUT requires the R2 bucket's CORS
+# allowlist to exactly match the calling origin, an out-of-repo config that
+# repeatedly drifted from apply./submit. in production ("R2 Upload Network
+# Error") and survived several targeted transport fixes because none of them
+# touched the actual CORS mismatch. app_video_signature/video_signature now
+# never mint a FRESH R2 key — only a resign continuing an upload that was
+# already targeting R2 (e.g. one in flight when this fix deployed) still
+# gets an R2 presigned URL, so it can finish instead of being orphaned. The
+# tests below simulate that "already on R2" state directly, since a fresh
+# call can no longer produce it.
+
 @patch("routers.submissions.decode_submitter")
 def test_submission_r2_resign_targets_the_same_key(mock_decode):
     mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
@@ -499,23 +511,17 @@ def test_submission_r2_resign_targets_the_same_key(mock_decode):
     mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
 
     keys = []
+    existing_r2_key = "raw-uploads/submissions/sid123/take/take_abcd1234.mp4"
     with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
          patch("core.generate_r2_presigned_url", _r2_presign_capture(keys)):
-        first = client.post(
-            "/api/public/submissions/sid123/video-signature",
-            json={"category": "take", "label": None, "public_id": None},
-            headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
-
         resigned = client.post(
             "/api/public/submissions/sid123/video-signature",
-            json={"category": "take", "label": None, "public_id": first},
+            json={"category": "take", "label": None, "public_id": existing_r2_key},
             headers={"Authorization": "Bearer dummy_token"},
         ).json()["public_id"]
 
-    assert first.startswith("raw-uploads/submissions/sid123/take/")
-    assert resigned == first
-    assert keys == [first, first]  # the URL actually signed, not just the echo
+    assert resigned == existing_r2_key
+    assert keys == [existing_r2_key]  # the URL actually signed, not just the echo
 
 
 @patch("routers.applications._check_app_token")
@@ -526,38 +532,25 @@ def test_application_r2_resign_targets_the_same_key(mock_check):
     mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
 
     keys = []
+    existing_r2_key = "raw-uploads/applications/aid123/intro_video/intro_video_abcd1234.mp4"
     with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
          patch("core.generate_r2_presigned_url", _r2_presign_capture(keys)):
-        first = client.post(
-            "/api/public/apply/aid123/video-signature",
-            json={"category": "intro_video", "label": None, "public_id": None},
-            headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
-
         resigned = client.post(
             "/api/public/apply/aid123/video-signature",
-            json={"category": "intro_video", "label": None, "public_id": first},
+            json={"category": "intro_video", "label": None, "public_id": existing_r2_key},
             headers={"Authorization": "Bearer dummy_token"},
         ).json()["public_id"]
 
-    assert first.startswith("raw-uploads/applications/aid123/")
-    assert resigned == first
-    assert keys == [first, first]
+    assert resigned == existing_r2_key
+    assert keys == [existing_r2_key]
 
 
-# ── P2: intro_video R2 leaf uniqueness (Stream overwrite-race fix) ─────────
-# Confirmed production issue: intro_video always wrote to a FIXED R2 key, so
-# re-recording while Cloudflare Stream was still fetching the previous object
-# overwrote it mid-fetch — corrupting that ingest (ERR_FETCH_ORIGIN_ERROR /
-# ERR_FETCH_BAD_USER_INPUT) and silently clobbering its asset_metadata row via
-# the second upload's upsert on the same key. Reproduced live against real R2
-# + real Cloudflare Stream before this fix; both uploads now reach `ready`.
+# ── Fresh uploads never use R2 (P0 CORS-fragility fix) ──────────────────────
+# Even with the pipeline flag on, a FRESH (non-resign) signature call must
+# get the Cloudinary chunked path — see the module-level note above.
 
 @patch("routers.submissions.decode_submitter")
-def test_submission_intro_video_fresh_uploads_get_distinct_r2_keys(mock_decode):
-    """Two SEPARATE (non-resign) intro_video signature calls must target
-    different R2 objects, so a re-record can never overwrite a video that
-    Cloudflare Stream might still be mid-fetch on."""
+def test_submission_intro_video_fresh_uploads_never_use_r2(mock_decode):
     mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
     mock_db.submissions.find_one = AsyncMock(return_value={
         "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
@@ -567,25 +560,19 @@ def test_submission_intro_video_fresh_uploads_get_distinct_r2_keys(mock_decode):
 
     with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
          patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
-        first = client.post(
+        res = client.post(
             "/api/public/submissions/sid123/video-signature",
             json={"category": "intro_video", "label": None, "public_id": None},
             headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
+        ).json()
 
-        second = client.post(
-            "/api/public/submissions/sid123/video-signature",
-            json={"category": "intro_video", "label": None, "public_id": None},
-            headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
-
-    assert first.startswith("raw-uploads/submissions/sid123/intro_video/intro_video_")
-    assert second.startswith("raw-uploads/submissions/sid123/intro_video/intro_video_")
-    assert first != second, "fresh intro_video uploads must never share an R2 key"
+    assert "use_r2" not in res
+    assert res["upload_url"].startswith("https://api.cloudinary.com/")
+    assert res["params"]["public_id"] == "intro_video"
 
 
 @patch("routers.applications._check_app_token")
-def test_application_intro_video_fresh_uploads_get_distinct_r2_keys(mock_check):
+def test_application_intro_video_fresh_uploads_never_use_r2(mock_check):
     mock_check.return_value = None
     mock_db.applications.find_one = AsyncMock(return_value={"id": "aid123", "status": "draft"})
     mock_db.applications.update_one = AsyncMock(return_value=None)
@@ -593,27 +580,21 @@ def test_application_intro_video_fresh_uploads_get_distinct_r2_keys(mock_check):
 
     with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
          patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
-        first = client.post(
+        res = client.post(
             "/api/public/apply/aid123/video-signature",
             json={"category": "intro_video", "label": None, "public_id": None},
             headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
+        ).json()
 
-        second = client.post(
-            "/api/public/apply/aid123/video-signature",
-            json={"category": "intro_video", "label": None, "public_id": None},
-            headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
-
-    assert first.startswith("raw-uploads/applications/aid123/intro_video/intro_video_")
-    assert second.startswith("raw-uploads/applications/aid123/intro_video/intro_video_")
-    assert first != second, "fresh intro_video uploads must never share an R2 key"
+    assert "use_r2" not in res
+    assert res["upload_url"].startswith("https://api.cloudinary.com/")
+    assert res["params"]["public_id"] == "intro_video"
 
 
 @patch("routers.submissions.decode_submitter")
 def test_submission_intro_video_resign_still_targets_same_unique_key(mock_decode):
-    """The re-sign path (403 recovery) must still hit the SAME key the first
-    signature minted — uniqueness must not break in-progress-upload retries."""
+    """The re-sign path (403 recovery) for an upload already on R2 must still
+    hit the SAME key the original signature minted."""
     mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
     mock_db.submissions.find_one = AsyncMock(return_value={
         "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
@@ -621,18 +602,13 @@ def test_submission_intro_video_resign_still_targets_same_unique_key(mock_decode
     mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
     mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
 
+    existing_r2_key = "raw-uploads/submissions/sid123/intro_video/intro_video_abcd1234.mp4"
     with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
          patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
-        first = client.post(
-            "/api/public/submissions/sid123/video-signature",
-            json={"category": "intro_video", "label": None, "public_id": None},
-            headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
-
         resigned = client.post(
             "/api/public/submissions/sid123/video-signature",
-            json={"category": "intro_video", "label": None, "public_id": first},
+            json={"category": "intro_video", "label": None, "public_id": existing_r2_key},
             headers={"Authorization": "Bearer dummy_token"},
         ).json()["public_id"]
 
-    assert resigned == first
+    assert resigned == existing_r2_key

@@ -114,6 +114,16 @@ async def _seed_contact_list(name: str, contacts) -> str:
     return list_id
 
 
+async def _seed_crm_client(name: str, phone: str, contact_type: str):
+    from bson import ObjectId
+    oid = ObjectId()
+    await db.clients.insert_one({
+        "_id": oid, "name": name, "phone_number": phone, "contact_type": contact_type,
+        "tags": [], "archived": False, "deleted": False, "created_at": _now(),
+    })
+    return oid
+
+
 async def _seed_group_list(name: str, groups) -> str:
     list_id = f"test-wca-gl-{uuid.uuid4().hex[:8]}"
     await db.whatsapp_group_lists.insert_one({
@@ -124,7 +134,9 @@ async def _seed_group_list(name: str, groups) -> str:
 
 
 async def _cleanup(phone: str, project_ids=(), talent_ids=(), template_ids=(),
-                    contact_list_ids=(), group_list_ids=()) -> None:
+                    contact_list_ids=(), group_list_ids=(), client_ids=()) -> None:
+    if client_ids:
+        await db.clients.delete_many({"_id": {"$in": list(client_ids)}})
     await db.projects.delete_many({"id": {"$in": list(project_ids)}})
     await db.talents.delete_many({"id": {"$in": list(talent_ids)}})
     await db.casting_pipeline.delete_many({"project_id": {"$in": list(project_ids)}})
@@ -526,6 +538,38 @@ async def test_saved_group_list_recipient():
         await _restore_config(original)
 
 
+async def test_crm_contact_type_recipient():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    template_name = f"Requirement {uuid.uuid4().hex[:6]}"
+    template_id = await _seed_template(template_name)
+    contact_type = f"UniqueRole{uuid.uuid4().hex[:6]}"
+    c1 = await _seed_crm_client("Client A", "917000000030", contact_type)
+    c2 = await _seed_crm_client("Client B", "917000000031", contact_type)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {contact_type}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "2 Phone Numbers" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        live = await db.whatsapp_batches.find_one({"id": batch_id})
+        assert live is not None
+        assert live["source_type"] == "CRM"
+    finally:
+        await _cleanup(phone, template_ids=[template_id], client_ids=[c1, c2])
+        await _restore_config(original)
+
+
 async def test_unresolvable_source_gives_clear_error():
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
@@ -543,6 +587,36 @@ async def test_unresolvable_source_gives_clear_error():
 
         stray = await db.whatsapp_batches.count_documents({"source_label": {"$regex": "zzz_nonexistent"}})
         assert stray == 0
+    finally:
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_unsupported_source_gives_explicit_not_silent_reply():
+    """(2026-08-09) "this"/"that"/"last generated"/"yesterday's" name a
+    capability (message-history / quoted-reply reuse / on-the-fly
+    requirement generation) this engine genuinely doesn't have — the reply
+    must say so explicitly, never a generic not-found or a silent no-op,
+    and never a stray fuzzy match against an unrelated template."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    talent_name = f"Kiran Unique{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(talent_name, phone="917000000017")
+    try:
+        for text in (
+            f"Forward this to {talent_name}",
+            f"Send this requirement to {talent_name}",
+            f"Send last generated requirement to {talent_name}",
+            f"Send yesterday's requirement to {talent_name}",
+        ):
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text=text,
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled, text
+            assert "can't reuse an earlier message" in r.reply.lower(), (text, r.reply)
+            assert "name an existing whatsapp template" in r.reply.lower(), (text, r.reply)
     finally:
         await _cleanup(phone, talent_ids=[t1])
         await _restore_config(original)

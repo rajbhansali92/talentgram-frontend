@@ -34,14 +34,20 @@ degradation every intent on this platform already has.
 
 Recipient resolution reuses the REAL existing engine end to end
 (`routers.whatsapp.resolve_recipients_engine` via `create_batch`) for
-PROJECT / MANUAL / SAVED_LISTS sources — the only new code is the free-text
-routing logic that decides WHICH existing source_type+params a recipient
-phrase means: a phone number, one or more named talents (reusing
-casting-agent's own hardened talent-selector/fuzzy-match machinery), an
-entire project's pipeline (reusing resolve_project_by_name, same as
-before), or a saved contact/group list (new tiny matchers in
+EVERY source type it supports — PROJECT, MANUAL, CRM, and SAVED_LISTS —
+the only new code is the free-text routing logic that decides WHICH
+existing source_type+params a recipient phrase means: a phone number, one
+or more named talents (reusing casting-agent's own hardened talent-
+selector/fuzzy-match machinery, routed as MANUAL so per-talent WhatsApp-
+group routing still applies), an entire project's pipeline (reusing
+resolve_project_by_name, same as before), a CRM contact_type category
+(reusing the same distinct-values query the web app's own CRM filter
+dropdown runs), or a saved contact/group list (small matchers in
 agents/modules/name_match.py, the SAME shared 4-tier shape templates
-already used, not a new algorithm).
+already used, not a new algorithm). None of these branches write to
+whatsapp_batches/whatsapp_jobs directly or render a message body
+themselves — every one of them ends by handing source_type+SourceParams to
+the same create_batch() call the web app's own Preview/Send buttons use.
 
 Attribution: every campaign launched via WhatsApp is created_by the single
 seeded ADMIN_EMAIL account (there is no phone-to-user mapping in this
@@ -155,6 +161,17 @@ async def _fetch_group_lists() -> List[Dict[str, str]]:
     return await db.whatsapp_group_lists.find(
         {"deleted": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1}
     ).sort("created_at", -1).to_list(500)
+
+
+async def _fetch_crm_contact_types() -> List[str]:
+    """Same distinct-values query the web app's own CRM filter dropdown
+    (`GET /crm/contact-types`) already runs — reused directly, not
+    reimplemented, so a new contact_type value never needs a code change
+    on either side to become sendable."""
+    types = await db.clients.distinct(
+        "contact_type", {"archived": {"$ne": True}, "deleted": {"$ne": True}}
+    )
+    return sorted([t for t in types if t])
 
 
 async def _service_admin() -> dict:
@@ -284,11 +301,30 @@ STAGE_QUERY_FIELD = FieldSpec(
 # "Toyota requirement" resolves via the bare project-ish word "Toyota"
 # against a template literally named after that project — confirmed real
 # production pattern, not a hypothetical).
+#
+# "this"/"that"/"last generated"/"yesterday's"/etc. are deliberately NOT
+# treated as filler to strip — those name a capability this engine doesn't
+# have (quoted-message reuse, message history, on-the-fly requirement
+# generation — see the module docstring's v1 scope). A phrase that's
+# ENTIRELY made of these reference/history words is caught before template
+# matching even runs, so it gets an explicit "not supported, name a
+# template instead" reply — never a silent no-match, and never a stray
+# fuzzy match against an unrelated template.
 # ---------------------------------------------------------------------------
 _SOURCE_FILLER_WORDS = {
     "requirement", "requirements", "brief", "briefs", "message", "template",
-    "the", "this", "that", "content", "info", "information",
+    "the", "content", "info", "information",
 }
+_UNSUPPORTED_REFERENCE_WORDS = {"this", "that", "it"}
+_UNSUPPORTED_HISTORY_WORDS = {
+    "last", "latest", "previous", "prior", "yesterday", "yesterdays",
+    "earlier", "history", "recent", "generated",
+}
+_UNSUPPORTED_SOURCE_REPLY = (
+    "I can't reuse an earlier message, a quoted reply, or message history — "
+    "there's no message-history lookup wired up for this agent. Please name "
+    "an existing WhatsApp template instead (e.g. \"Follow Up\")."
+)
 
 
 def _strip_source_filler(q: str) -> str:
@@ -296,10 +332,29 @@ def _strip_source_filler(q: str) -> str:
     return " ".join(tokens).strip()
 
 
+_TOKEN_PUNCT_RE = re.compile(r"[.,!?'\"]")
+
+
+def _unsupported_source_reply(q: str) -> Optional[str]:
+    tokens = {_TOKEN_PUNCT_RE.sub("", t).lower() for t in q.split()}
+    tokens.discard("")
+    non_filler = tokens - _SOURCE_FILLER_WORDS
+    if not non_filler:
+        return None
+    if non_filler <= _UNSUPPORTED_REFERENCE_WORDS:
+        return _UNSUPPORTED_SOURCE_REPLY
+    if non_filler & _UNSUPPORTED_HISTORY_WORDS:
+        return _UNSUPPORTED_SOURCE_REPLY
+    return None
+
+
 async def _resolve_source(source_query: str) -> TemplateMatch:
     q = (source_query or "").strip()
     if not q:
         return TemplateMatch(error="What should I send? (a project name or a template name)")
+    unsupported = _unsupported_source_reply(q)
+    if unsupported:
+        return TemplateMatch(error=unsupported)
     templates = await _fetch_templates()
     match = resolve_template_by_name(q, templates)
     if match.template or match.ambiguous:
@@ -401,7 +456,22 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
                 error=f'Multiple talents match "{q}":\n\n{options}\n\nPlease try again with the full name.',
             )
 
-    # Tier 4: a saved contact list.
+    # Tier 4: a CRM contact-type category ("send ... to Brand Managers") —
+    # bounded to REAL, known contact_type values (not a loose free-text CRM
+    # search), same reasoning as the project/talent tiers: a deterministic
+    # match against a real named category, not a fuzzy guess that could
+    # silently resolve to the wrong (or an empty) audience.
+    contact_types = await _fetch_crm_contact_types()
+    if contact_types:
+        ct_match = name_match.tiered_name_match(q, contact_types, lambda t: t, what="CRM contact type")
+        if ct_match.item:
+            return _RecipientTarget(
+                ok=True, source_type="CRM",
+                source_params=SourceParams(contact_type=ct_match.item),
+                display_label=f"CRM — {ct_match.item}",
+            )
+
+    # Tier 5: a saved contact list.
     lists = await _fetch_contact_lists()
     cl_match = name_match.tiered_name_match(
         q, lists, lambda it: it.get("name") or "", id_fn=lambda it: it["id"], what="saved list",
@@ -413,7 +483,7 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
             display_label=cl_match.item["name"],
         )
 
-    # Tier 5: a saved WhatsApp group list.
+    # Tier 6: a saved WhatsApp group list.
     glists = await _fetch_group_lists()
     gl_match = name_match.tiered_name_match(
         q, glists, lambda it: it.get("name") or "", id_fn=lambda it: it["id"], what="saved group",

@@ -233,6 +233,68 @@ _LEGACY_TEMPLATE_RE = re.compile(
 )
 _TO_OR_WITH_RE = re.compile(r"\b(?:to|with)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
+# ---------------------------------------------------------------------------
+# Pipeline/stage recipient support (2026-08-09) — "Follow Up pipeline of
+# Toyota Glanza" / "Approved pipeline of Toyota Glanza" / "Selected list" /
+# "Followup pipeline Toyota" (no connector) / "Follow Up of Toyota" (no
+# pipeline/stage/list word at all). Splits a recipient phrase that LOOKS
+# like a stage reference into (raw_stage_phrase, project_phrase) — the
+# stage phrase is NOT validated/normalized here (that's centralized in
+# _resolve_recipient via the reused nlu.match_stage_phrase, the same
+# function/alias table casting-agent's own stage matching already uses —
+# no duplicated stage synonym table). project_phrase is "" when no
+# project was named at all (e.g. "Selected list" alone).
+# ---------------------------------------------------------------------------
+_PIPELINE_CONNECTOR_RE = re.compile(r"\b(?:pipelines?|stages?|lists?)\b", re.IGNORECASE)
+_OF_PROJECT_RE = re.compile(r"\b(?:of|for)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def _split_stage_and_project(recipient_text: str) -> Optional["tuple[str, str]"]:
+    text = (recipient_text or "").strip()
+    if not text:
+        return None
+    project_phrase = ""
+    remainder = text
+    of_m = _OF_PROJECT_RE.search(text)
+    if of_m:
+        project_phrase = of_m.group(1).strip(" .!?")
+        remainder = text[:of_m.start()].strip()
+
+    conn_m = _PIPELINE_CONNECTOR_RE.search(remainder)
+    if not conn_m:
+        # No explicit pipeline/stage/list word. Only treat this as a stage
+        # reference when an explicit "of/for <project>" tail was ALSO
+        # found ("Follow Up of Toyota") — a bare phrase with neither a
+        # connector word nor an "of" tail is indistinguishable from a
+        # plain project/talent reference and must not be hijacked (e.g.
+        # "to Toyota Glanza" alone must keep resolving as a whole-project
+        # recipient, unchanged).
+        if not of_m:
+            return None
+        stage_phrase = remainder.strip()
+        return (stage_phrase, project_phrase) if stage_phrase else None
+
+    stage_phrase = remainder[:conn_m.start()].strip()
+    after = remainder[conn_m.end():].strip(" ,")
+    if not project_phrase and after:
+        # Bare juxtaposition, no "of"/"for" at all: "Followup pipeline Toyota".
+        project_phrase = after
+    if not stage_phrase:
+        return None
+    return (stage_phrase, project_phrase)
+
+
+# A stage was named but no project ("Selected list" / "Follow Up pipeline"
+# alone) — recipient_query can't be left empty (the field is required, so
+# an empty value would trigger the generic plain-text "Who should this go
+# to?" missing-field question instead of ever reaching build_confirmation,
+# where the richer "ask which project, numbered" disambiguation lives).
+# This sentinel keeps the field non-empty so the turn proceeds to
+# build_confirmation; _resolve_recipient recognizes it and resolves across
+# every ongoing project (auto-resolving if there's only one) instead of
+# treating it as a literal project name.
+_ALL_PROJECTS_SENTINEL = "__ANY_ONGOING_PROJECT__"
+
 
 def extract_send_requirement_fields(text: str) -> Dict[str, str]:
     _, remainder = nlu._strip_leading_trigger(text or "", SEND_TRIGGERS)
@@ -275,7 +337,13 @@ def extract_send_requirement_fields(text: str) -> Dict[str, str]:
         recipient_part = m.group(1).strip(" .!?")
         source_part = remainder[:m.start()].strip(" .!?")
         if recipient_part:
-            out["recipient_query"] = recipient_part
+            split = _split_stage_and_project(recipient_part)
+            if split:
+                stage_phrase, project_phrase = split
+                out["stage_query"] = stage_phrase  # validated centrally in _resolve_recipient
+                out["recipient_query"] = project_phrase or _ALL_PROJECTS_SENTINEL
+            else:
+                out["recipient_query"] = recipient_part
         if source_part:
             out["source_query"] = source_part
 
@@ -399,6 +467,12 @@ class _RecipientTarget:
     display_label: str = ""
     error: Optional[str] = None
     ambiguous: Optional[AmbiguousEntity] = None
+    # Set only when resolved via an EXPLICIT single pipeline stage (not the
+    # "whole project, every stage" default) — lets the confirmation-card
+    # builder show the richer Pipeline/Project/Stage/count summary instead
+    # of the generic per-recipient list.
+    project_label: Optional[str] = None
+    pipeline_stage_label: Optional[str] = None
 
 
 _PHONE_RE = re.compile(r"^[\d\s\+\-\(\)]{7,}$")
@@ -439,8 +513,75 @@ def _fuzzy_match_is_safe(query_fragment: str, matched_label: str) -> bool:
     return q_tokens <= l_tokens
 
 
+async def _resolve_pipeline_stage(stage_query: str) -> "tuple[Optional[str], Optional[_RecipientTarget]]":
+    """Normalizes a raw stage phrase (from either extraction tier) via the
+    REUSED casting-pipeline stage matcher — no separate stage synonym
+    table. Returns (normalized_key, None) on success, or (None,
+    _RecipientTarget) with either an `ambiguous` (routes through the
+    shared disambiguation engine, same as project/talent/CRM/saved-list)
+    or a plain `error` (unrecognized stage) already filled in, which the
+    caller returns immediately."""
+    if not stage_query:
+        return None, None
+    stage_match = nlu.match_stage_phrase(stage_query, PIPELINE_STAGE_ORDER)
+    if stage_match.key:
+        return stage_match.key, None
+    if stage_match.ambiguous and len(stage_match.ambiguous) >= 2:
+        # Genuine ambiguity (2+ real, comparably-close stages) is
+        # disambiguation-worthy. A SINGLE weak fuzzy suggestion (e.g.
+        # "Selected" scoring just above the cutoff against "Rejected" —
+        # spelling-similar, not remotely the same word) is NOT: that's a
+        # guess, not a choice, and matches this session's established
+        # "don't trust a lone low-confidence coincidence" safety principle
+        # (see _fuzzy_match_is_safe) — falls through to the same clear
+        # "I don't recognize this stage" error a totally unmatched phrase
+        # gets, rather than offering one probably-wrong option to pick.
+        return None, _RecipientTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="pipeline_stage", field_key="stage_query",
+                candidates=[disambiguation.Candidate(id=lbl, label=lbl) for lbl in stage_match.ambiguous],
+            ),
+        )
+    valid = ", ".join(nlu.stage_label(s) for s in PIPELINE_STAGE_ORDER)
+    return None, _RecipientTarget(
+        ok=False,
+        error=f'I don\'t recognize the stage "{stage_query}" — valid stages are: {valid}.',
+    )
+
+
 async def _resolve_recipient(recipient_query: str, stage_query: str) -> _RecipientTarget:
+    normalized_stage, stage_error = await _resolve_pipeline_stage(stage_query)
+    if stage_error:
+        return stage_error
+    stage_label_str = nlu.stage_label(normalized_stage) if normalized_stage else "All stages"
+
     q = (recipient_query or "").strip()
+
+    if q == _ALL_PROJECTS_SENTINEL:
+        # A stage was named but no project — ask which project, across
+        # every ongoing one (auto-resolving when there's only one),
+        # exactly like the worked example in the sprint spec.
+        projects = await _fetch_ongoing_projects()
+        if not projects:
+            return _RecipientTarget(ok=False, error="There are no ongoing projects to send to.")
+        if len(projects) == 1:
+            p = projects[0]
+            stage_list = [normalized_stage] if normalized_stage else list(PIPELINE_STAGE_ORDER)
+            return _RecipientTarget(
+                ok=True, source_type="PROJECT",
+                source_params=SourceParams(project_id=p["id"], pipeline_stages=stage_list),
+                display_label=f'{p["label"]} — {stage_label_str}',
+                project_label=p["label"], pipeline_stage_label=stage_label_str if normalized_stage else None,
+            )
+        return _RecipientTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="project", field_key="recipient_query",
+                candidates=[disambiguation.Candidate(id=p["id"], label=p["label"]) for p in projects],
+            ),
+        )
+
     if not q:
         return _RecipientTarget(ok=False, error="Who should this go to?")
 
@@ -467,19 +608,23 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
     # try the remaining tiers, since a project match this weak is just as
     # likely to actually be a talent/CRM/saved-list name instead.
     if proj_match.project and _fuzzy_match_is_safe(q, proj_match.project["label"]):
-        stage_list = [stage_query] if stage_query else list(PIPELINE_STAGE_ORDER)
-        stage_label = nlu.stage_label(stage_query) if stage_query else "All stages"
+        stage_list = [normalized_stage] if normalized_stage else list(PIPELINE_STAGE_ORDER)
         return _RecipientTarget(
             ok=True, source_type="PROJECT",
             source_params=SourceParams(project_id=proj_match.project["id"], pipeline_stages=stage_list),
-            display_label=f'{proj_match.project["label"]} — {stage_label}',
+            display_label=f'{proj_match.project["label"]} — {stage_label_str}',
+            project_label=proj_match.project["label"],
+            pipeline_stage_label=stage_label_str if normalized_stage else None,
         )
     if proj_match.ambiguous:
         # A genuine tie (multiple REAL matches) is disambiguation-worthy.
         # `.suggestions` (a weak fuzzy "did you mean" below the confident
         # bar) is deliberately NOT gated here — same as before this sprint,
         # it falls through to the talent tier next, since a suggestion
-        # this weak is just as likely to actually be a talent name.
+        # this weak is just as likely to actually be a talent name — UNLESS
+        # a stage was explicitly named, in which case "talent" makes no
+        # sense as an interpretation (see the stage-set short-circuit
+        # below `.suggestions` also respects this).
         return _RecipientTarget(
             ok=False,
             ambiguous=AmbiguousEntity(
@@ -487,6 +632,13 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
                 candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in proj_match.ambiguous],
             ),
         )
+    if normalized_stage:
+        # A stage was explicitly named ("Follow Up pipeline of X") but X
+        # didn't resolve to a real project — falling through to try X as a
+        # talent/CRM/saved-list name next doesn't make sense (a stage only
+        # ever applies to a project), and would just produce a confusing
+        # "I couldn't figure out who X refers to" at the end of the chain.
+        return _RecipientTarget(ok=False, error=f'I couldn\'t find a project matching "{q}".')
 
     # Tier 3: one or more named talents — global pool (same candidate set
     # ADD_INTENT already searches; a talent being messaged directly needn't
@@ -637,6 +789,8 @@ class _SendTarget:
     template: Optional[Dict[str, str]] = None
     error: Optional[str] = None
     ambiguous: Optional[AmbiguousEntity] = None
+    project_label: Optional[str] = None
+    pipeline_stage_label: Optional[str] = None
 
 
 async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
@@ -671,6 +825,7 @@ async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
     return _SendTarget(
         ok=True, source_type=recipient.source_type, source_params=recipient.source_params,
         recipient_label=recipient.display_label, template=tmpl_match.template,
+        project_label=recipient.project_label, pipeline_stage_label=recipient.pipeline_stage_label,
     )
 
 
@@ -744,6 +899,34 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
     jobs = preview["jobs"]
     skipped = preview["skipped"]
     template_label = target.template.get("name") or target.template.get("slug") or ""
+
+    if target.pipeline_stage_label:
+        # An EXPLICIT single pipeline stage was resolved (not the "whole
+        # project, every stage" default) — the richer, count-based summary
+        # from the sprint spec, instead of the generic per-recipient list.
+        groups = sum(1 for j in jobs if j.get("destination_type") == "group")
+        numbers = sum(1 for j in jobs if j.get("destination_type") == "number")
+        dest_parts = []
+        if groups:
+            dest_parts.append(f"{groups} WhatsApp Group{'s' if groups != 1 else ''}")
+        if numbers:
+            dest_parts.append(f"{numbers} Phone Number{'s' if numbers != 1 else ''}")
+        destination = ", ".join(dest_parts) if dest_parts else "(none)"
+        lines = [
+            "Template", template_label, "",
+            "Recipient Type", "Pipeline", "",
+            "Project", target.project_label or "", "",
+            "Stage", target.pipeline_stage_label, "",
+            "Recipients", f"{len(jobs)} talent{'s' if len(jobs) != 1 else ''}", "",
+            "Destination", destination,
+        ]
+        if skipped:
+            lines += ["", f"⚠ {len(skipped)} skipped (no phone/group on file)"]
+        if jobs:
+            lines += ["", "Sample message", "", _truncate(jobs[0]["message_body"])]
+        lines += ["", "Reply", "1 Approve", "2 Edit", "3 Cancel"]
+        return "\n".join(lines)
+
     recipients_block, delivery = _format_recipients_and_delivery(jobs, skipped)
 
     lines = [

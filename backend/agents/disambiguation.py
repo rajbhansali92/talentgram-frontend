@@ -63,6 +63,7 @@ _ENTITY_LABELS = {
     "talent": "talents",
     "crm_source": "CRM contacts",
     "saved_list": "saved lists",
+    "pipeline_stage": "pipeline stages",
 }
 _ENTITY_SINGULAR_NOUN = {
     "project": "project name",
@@ -70,6 +71,7 @@ _ENTITY_SINGULAR_NOUN = {
     "talent": "name",
     "crm_source": "category name",
     "saved_list": "list name",
+    "pipeline_stage": "stage name",
 }
 
 _CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩"

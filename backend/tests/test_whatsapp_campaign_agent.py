@@ -27,12 +27,15 @@ import uuid
 
 import pytest
 
+from unittest.mock import patch
+
 from core import db, _now, ADMIN_EMAIL
 from agents import modules as agent_modules
 from agents import registry
 from agents import disambiguation
 from agents.dispatcher import handle_inbound_message
 from agents.modules import whatsapp_campaign_agent as wca
+from agents.modules import casting_pipeline_nlu as nlu
 import agents.parser as parser
 
 agent_modules.register_all()
@@ -1271,3 +1274,403 @@ async def test_executor_ambiguous_recheck_never_returns_none_message():
     finally:
         await db.talents.delete_many({"id": {"$in": [t1, t2]}})
         await db.whatsapp_templates.delete_many({"id": {"$in": [template_id]}})
+
+
+# ---------------------------------------------------------------------------
+# Pipeline/Stage recipient support (2026-08-09).
+# ---------------------------------------------------------------------------
+def test_split_stage_and_project_helper():
+    assert wca._split_stage_and_project("Follow Up pipeline of Toyota Glanza") == ("Follow Up", "Toyota Glanza")
+    assert wca._split_stage_and_project("follow up list of Toyota Glanza") == ("follow up", "Toyota Glanza")
+    assert wca._split_stage_and_project("Follow Up stage of Toyota Glanza") == ("Follow Up", "Toyota Glanza")
+    assert wca._split_stage_and_project("Approved pipeline of Toyota Glanza") == ("Approved", "Toyota Glanza")
+    assert wca._split_stage_and_project("Selected list") == ("Selected", "")
+    assert wca._split_stage_and_project("Shortlisted pipeline of Tira Ahaan Film") == ("Shortlisted", "Tira Ahaan Film")
+    assert wca._split_stage_and_project("Followup pipeline Toyota") == ("Followup", "Toyota")
+    assert wca._split_stage_and_project("Follow Up of Toyota") == ("Follow Up", "Toyota")
+    # Must NOT hijack a plain project/talent reference — no connector word
+    # and no "of/for" tail at all.
+    assert wca._split_stage_and_project("Toyota Glanza") is None
+    assert wca._split_stage_and_project("Ahana Pocha") is None
+    assert wca._split_stage_and_project("") is None
+
+
+def test_extract_fields_pipeline_stage_phrasings():
+    # (stage assertions use match_stage_phrase since raw extraction keeps
+    # the phrase unvalidated/unnormalized until _resolve_recipient runs)
+    examples = [
+        "Send Reminder Template to Follow Up pipeline of Toyota Glanza",
+        "Send reminder template to follow up list of Toyota Glanza",
+        "Send reminder template to Follow Up stage of Toyota Glanza",
+        "Send Reminder Template to Approved pipeline of Toyota Glanza",
+        "Broadcast Reminder Template to Shortlisted pipeline of Tira Ahaan Film",
+        "Send Reminder Template to Followup pipeline Toyota",
+        "Send Reminder template to Follow Up of Toyota",
+    ]
+    expected_stage_key = [
+        "follow_up", "follow_up", "follow_up", "approved", "shortlisted", "follow_up", "follow_up",
+    ]
+    expected_project = [
+        "Toyota Glanza", "Toyota Glanza", "Toyota Glanza", "Toyota Glanza",
+        "Tira Ahaan Film", "Toyota", "Toyota",
+    ]
+    for text, exp_stage_key, exp_project in zip(examples, expected_stage_key, expected_project):
+        fields = wca.extract_send_requirement_fields(text)
+        assert fields.get("recipient_query") == exp_project, text
+        stage_match = nlu.match_stage_phrase(fields.get("stage_query", ""), wca.PIPELINE_STAGE_ORDER)
+        assert stage_match.key == exp_stage_key, (text, fields, stage_match)
+        assert fields.get("source_query", "").lower() == "reminder template", text
+
+    # No project named at all — recipient_query becomes the sentinel.
+    fields = wca.extract_send_requirement_fields("Send Toyota Reminder Template to Selected list")
+    assert fields.get("recipient_query") == wca._ALL_PROJECTS_SENTINEL
+    assert fields.get("stage_query") == "Selected"
+    assert fields.get("source_query") == "Toyota Reminder Template"
+
+
+async def test_pipeline_stage_success_follow_up_pipeline_of_project():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"ZPipe{tag} Glanza"
+    project_id = await _seed_project(label)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent A {tag}", phone="917000000060")
+    t2 = await _seed_talent(f"Talent B {tag}", phone="917000000061")
+    t3 = await _seed_talent(f"Talent C {tag}", phone="917000000062")  # different stage, must be excluded
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    await _seed_pipeline_row(project_id, t2, "follow_up")
+    await _seed_pipeline_row(project_id, t3, "approved")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to Follow Up pipeline of {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"Template\n{template_name}" in r.reply
+        assert "Recipient Type\nPipeline" in r.reply
+        assert f"Project\n{label}" in r.reply
+        assert "Stage\nFollow Up" in r.reply
+        assert "Recipients\n2 talents" in r.reply
+        assert "Destination\n2 Phone Numbers" in r.reply
+        assert "1 Approve" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        live = await db.whatsapp_batches.find_one({"id": batch_id})
+        assert live is not None
+        assert live["source_type"] == "PROJECT"
+        assert live["pipeline_stages"] == ["follow_up"]
+        assert live["total_jobs"] == 2
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 2
+        assert all(j["status"] == "pending" for j in jobs)
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2, t3], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_pipeline_stage_success_follow_up_list_of_project():
+    await _run_pipeline_stage_success_variant("Follow Up list", "follow_up")
+
+
+async def test_pipeline_stage_success_follow_up_stage_of_project():
+    await _run_pipeline_stage_success_variant("Follow Up stage", "follow_up")
+
+
+async def test_pipeline_stage_success_approved_pipeline_of_project():
+    await _run_pipeline_stage_success_variant("Approved pipeline", "approved")
+
+
+async def test_pipeline_stage_success_shortlisted_stage_of_project():
+    await _run_pipeline_stage_success_variant("Shortlisted stage", "shortlisted")
+
+
+async def _run_pipeline_stage_success_variant(stage_phrase: str, expected_stage_key: str):
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"ZPipe{tag} Variant"
+    project_id = await _seed_project(label)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000063")
+    await _seed_pipeline_row(project_id, t1, expected_stage_key)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to {stage_phrase} of {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, (stage_phrase, r.reply)
+        assert "Recipient Type\nPipeline" in r.reply
+        assert f"Project\n{label}" in r.reply
+        assert nlu.stage_label(expected_stage_key) in r.reply
+        assert "Recipients\n1 talent" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_pipeline_stage_bare_juxtaposition_no_connector_word():
+    """"Followup pipeline Toyota" — project named with no "of"/"for"."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"ZBare{tag}"
+    project_id = await _seed_project(label)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000064")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to Followup pipeline {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"Project\n{label}" in r.reply
+        assert "Stage\nFollow Up" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_pipeline_stage_no_connector_word_but_of_project():
+    """"Follow Up of Toyota" — no pipeline/stage/list word at all."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"ZOf{tag}"
+    project_id = await _seed_project(label)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000065")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to Follow Up of {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"Project\n{label}" in r.reply
+        assert "Stage\nFollow Up" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_pipeline_stage_ambiguous_project():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label_a = f"ZDup{tag} Toyota Alpha"
+    label_b = f"ZDup{tag} Toyota Beta"
+    project_a = await _seed_project(label_a)
+    project_b = await _seed_project(label_b)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000069")
+    await _seed_pipeline_row(project_a, t1, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to Follow Up pipeline of ZDup{tag} Toyota",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple projects." in r.reply
+        assert label_a in r.reply and label_b in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "Recipient Type\nPipeline" in r2.reply
+        assert "Stage\nFollow Up" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_pipeline_stage_ambiguous_stage_uses_shared_disambiguation():
+    """Uses a mocked match_stage_phrase to deterministically reproduce a
+    genuine 2+ candidate stage tie (e.g. "Selection" between "Selected"
+    and "Selection Pending" per the sprint spec's own example) without
+    depending on real vocabulary happening to produce one."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"ZStageAmbig{tag}"
+    project_id = await _seed_project(label)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000066")
+    await _seed_pipeline_row(project_id, t1, "approved")
+    try:
+        real_match = nlu.match_stage_phrase
+
+        def _fake_match(phrase, stage_order):
+            if phrase.strip().lower() == "selection":
+                return nlu.StageMatch(ambiguous=["Approved", "Rejected"])
+            return real_match(phrase, stage_order)
+
+        with patch.object(wca.nlu, "match_stage_phrase", side_effect=_fake_match):
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone,
+                text=f"Send {template_name} to Selection pipeline of {label}",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled
+            assert "I found multiple pipeline stages." in r.reply
+            assert "① Approved" in r.reply and "② Rejected" in r.reply
+
+            r2 = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text="1",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+        assert r2.handled
+        assert "Stage\nApproved" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_pipeline_stage_unknown_stage_returns_clear_error():
+    """"Selected" isn't a real stage in this system (only a single weak
+    fuzzy suggestion below the disambiguation threshold) — must return a
+    clear, honest error, never a confusing 1-option "did you mean" card
+    and never a silent wrong resolution."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    talent_name = f"Zoya Unknown{tag}"
+    t1 = await _seed_talent(talent_name, phone="917000000067")
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to Selected list",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "don't recognize the stage" in r.reply.lower()
+        assert "selected" in r.reply.lower()
+        assert "sent." not in r.reply.lower()
+
+        stray = await db.whatsapp_batches.count_documents({"template_id": template_id})
+        assert stray == 0
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_pipeline_stage_missing_project_asks_via_disambiguation():
+    """A stage is named but no project — asks which project, across every
+    ongoing project (numbered, via the shared disambiguation engine), per
+    the sprint spec's worked example. Seeds 2 extra uniquely-tagged
+    ongoing projects to guarantee the ambiguous (2+) case regardless of
+    whatever else is already ongoing in the shared dev DB."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    extra_a = await _seed_project(f"ZExtra{tag} A")
+    extra_b = await _seed_project(f"ZExtra{tag} B")
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} to Follow Up pipeline",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple projects." in r.reply
+        assert f"ZExtra{tag} A" in r.reply and f"ZExtra{tag} B" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="cancel",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[extra_a, extra_b], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_pipeline_stage_missing_template_asks():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"ZMissTpl{tag}"
+    project_id = await _seed_project(label)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Talent {tag}", phone="917000000068")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send to Follow Up pipeline of {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert r.reply == "What should I send? (a project name or a template name)"
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=template_name,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Recipient Type\nPipeline" in r2.reply
+        assert f"Project\n{label}" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)

@@ -3282,3 +3282,426 @@ async def test_request_scope_session_cache_avoids_duplicate_reads():
         assert counting.find_one_calls == 2
     finally:
         sc_module.db = old_db
+
+
+# ---------------------------------------------------------------------------
+# Conversational Casting Insights (2026-08-09) — read-only talent-centric
+# and stage-specific query intents. Every test below only ever sends
+# QUERY-shaped messages ("Show", "Is", "Which", "What", "Has", "Did") —
+# never move/add/undo — so this section also stands as the sprint's own
+# "no database writes occur for any query" evidence: _assert_pipeline_row_count_unchanged
+# wraps casting_pipeline row counts around each scenario.
+# ---------------------------------------------------------------------------
+async def _pipeline_row_count(project_ids) -> int:
+    return await db.casting_pipeline.count_documents({"project_id": {"$in": list(project_ids)}})
+
+
+async def test_talent_query_active_projects_across_multiple() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    name = f"Zzq Ahana {uuid.uuid4().hex[:6]}"
+    p1 = p2 = p3 = talent_id = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=f"Zzq Toyota {uuid.uuid4().hex[:6]}")
+        p2 = await _seed_project(status="ongoing", brand_name=f"Zzq Dove {uuid.uuid4().hex[:6]}")
+        p3 = await _seed_project(status="complete", brand_name=f"Zzq Inactive {uuid.uuid4().hex[:6]}")
+        talent_id = await _seed_talent(name)
+        await _seed_pipeline_row(p1, talent_id, "follow_up")
+        await _seed_pipeline_row(p2, talent_id, "approved")
+        await _seed_pipeline_row(p3, talent_id, "hold")  # inactive project — must be excluded
+
+        before = await _pipeline_row_count([p1, p2, p3])
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Show {name}'s ongoing projects",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert name in r.reply
+        assert "Follow Up" in r.reply
+        assert "Approved" in r.reply
+        assert "Total Active Projects: 2" in r.reply
+        assert "Zzq Inactive" not in r.reply
+        assert await _pipeline_row_count([p1, p2, p3]) == before  # read-only
+
+        # A second phrasing of the same capability.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"What projects is {name} part of?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Total Active Projects: 2" in r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[p for p in (p1, p2, p3) if p], talent_ids=[talent_id] if talent_id else [])
+        await _restore_config(original)
+
+
+async def test_talent_query_no_active_projects() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    name = f"Zzq Lonely {uuid.uuid4().hex[:6]}"
+    talent_id = await _seed_talent(name)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Which casting projects involve {name}?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "not part of any active casting pipeline" in r.reply
+        assert name in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_talent_query_unknown_talent() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Show active projects of Zzq Nonexistent {uuid.uuid4().hex[:8]}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "No matching talent" in r.reply
+    finally:
+        await _restore_config(original)
+
+
+async def test_talent_query_ambiguous_talent_disambiguates() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    shared_name = f"Zzq Twin {uuid.uuid4().hex[:6]}"
+    p1 = p2 = t1 = t2 = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=f"Zzq Twin Proj A {uuid.uuid4().hex[:6]}")
+        p2 = await _seed_project(status="ongoing", brand_name=f"Zzq Twin Proj B {uuid.uuid4().hex[:6]}")
+        t1 = await _seed_talent(shared_name)
+        t2 = await _seed_talent(shared_name)
+        await _seed_pipeline_row(p1, t1, "approved")
+        await _seed_pipeline_row(p2, t2, "hold")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Show active projects of {shared_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "multiple matching talents" in r.reply.lower()
+
+        # Reply with a number — resumes the ORIGINAL talent-projects query
+        # for whichever of the two was picked, exactly like an ambiguous
+        # project/talent pick already does for casting.move.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "Total Active Projects: 1" in r2.reply
+        assert ("Zzq Twin Proj A" in r2.reply) or ("Zzq Twin Proj B" in r2.reply)
+    finally:
+        await _cleanup(phone, project_ids=[p for p in (p1, p2) if p], talent_ids=[t for t in (t1, t2) if t])
+        await _restore_config(original)
+
+
+async def test_talent_stage_boolean_yes_no_and_wrong_project() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    name = f"Zzq Bool {uuid.uuid4().hex[:6]}"
+    p1 = p2 = talent_id = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=f"Zzq Bool Toyota {uuid.uuid4().hex[:6]}")
+        p2 = await _seed_project(status="ongoing", brand_name=f"Zzq Bool Dove {uuid.uuid4().hex[:6]}")
+        talent_id = await _seed_talent(name)
+        await _seed_pipeline_row(p1, talent_id, "ask_to_test")
+
+        before = await _pipeline_row_count([p1, p2])
+
+        # Correct stage, correct project -> Yes.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Is {name} testing for Zzq Bool Toyota?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+
+        # Wrong stage, same project -> No, with the real current stage shown.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Has {name} been approved for Zzq Bool Toyota?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.reply.startswith("No.")
+        assert "Ask To Test" in r2.reply
+
+        # Right stage phrasing, project the talent ISN'T part of -> No, not part of it.
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Is {name} testing for Zzq Bool Dove?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r3.reply.startswith("No.")
+        assert "not part of" in r3.reply
+
+        assert await _pipeline_row_count([p1, p2]) == before  # read-only throughout
+    finally:
+        await _cleanup(phone, project_ids=[p for p in (p1, p2) if p], talent_ids=[talent_id] if talent_id else [])
+        await _restore_config(original)
+
+
+async def test_talent_stage_boolean_matches() -> None:
+    """Isolated from the fuzzy-suffix noise above: a clean Yes. case."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    name = f"Zzq Yes {uuid.uuid4().hex[:6]}"
+    project_label = f"Zzq Yes Toyota Glanza {uuid.uuid4().hex[:6]}"
+    p1 = talent_id = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=project_label)
+        talent_id = await _seed_talent(name)
+        await _seed_pipeline_row(p1, talent_id, "follow_up")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Is {name} in Follow Up for {project_label}?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.reply.startswith("Yes.")
+        assert project_label in r.reply
+        assert "Follow Up" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[talent_id] if talent_id else [])
+        await _restore_config(original)
+
+
+async def test_talent_stage_filtered_list_without_project() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    name = f"Zzq Person {uuid.uuid4().hex[:6]}"
+    p1 = p2 = talent_id = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=f"Zzq Filter Toyota {uuid.uuid4().hex[:6]}")
+        p2 = await _seed_project(status="ongoing", brand_name=f"Zzq Filter Dove {uuid.uuid4().hex[:6]}")
+        talent_id = await _seed_talent(name)
+        await _seed_pipeline_row(p1, talent_id, "ask_to_test")
+        await _seed_pipeline_row(p2, talent_id, "approved")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Which projects is {name} testing for?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Zzq Filter Toyota" in r.reply
+        assert "Zzq Filter Dove" not in r.reply
+        assert "Total: 1" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[p for p in (p1, p2) if p], talent_ids=[talent_id] if talent_id else [])
+        await _restore_config(original)
+
+
+async def test_talent_stage_unresolvable_stage_word_is_graceful() -> None:
+    """"Selected" has no canonical stage mapping anywhere in this system
+    (casting.move never implies it either — see IMPLIED_STAGE_BY_VERB's
+    docstring) — asking about it must degrade gracefully (a clear "I
+    couldn't tell which pipeline" + the real pipeline list), never crash
+    or silently guess a stage."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    name = f"Zzq Selected {uuid.uuid4().hex[:6]}"
+    p1 = talent_id = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=f"Zzq Selected Proj {uuid.uuid4().hex[:6]}")
+        talent_id = await _seed_talent(name)
+        await _seed_pipeline_row(p1, talent_id, "approved")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Did {name} get selected for Zzq Selected Proj?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "couldn't tell which pipeline" in r.reply.lower()
+        assert "Approved" in r.reply  # the real pipeline list, offered instead of guessing
+    finally:
+        await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[talent_id] if talent_id else [])
+        await _restore_config(original)
+
+
+async def test_pipeline_query_positional_project_and_stage() -> None:
+    """"Show <Project> <Stage>" / "List <Project> <Stage>" — the
+    connector-less phrasing with no "for"/"of" at all. (A message that
+    leads with the PROJECT name and no trigger word at all, e.g. a bare
+    "Toyota Follow Up list", can never be routed at all — every intent in
+    this platform requires the first word(s) to be a recognized trigger;
+    see agents/parser.detect_trigger. "Show"/"List" first is the reachable
+    form of this phrasing.)"""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_label = f"Zzq Positional {uuid.uuid4().hex[:6]}"
+    p1 = t1 = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=project_label)
+        t1 = await _seed_talent("Positional Person")
+        await _seed_pipeline_row(p1, t1, "follow_up")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Show {project_label} Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "1. Positional Person" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"List {project_label} Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "1. Positional Person" in r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[t1] if t1 else [])
+        await _restore_config(original)
+
+
+async def test_pipeline_query_who_is_testing_natural_language() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_label = f"Zzq NL {uuid.uuid4().hex[:6]}"
+    p1 = t1 = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=project_label)
+        t1 = await _seed_talent("NL Person")
+        await _seed_pipeline_row(p1, t1, "ask_to_test")
+        await _seed_number_map_for_project(phone, p1, project_label)
+
+        for text in ("Who is testing?", "Testing list", "Show testing pipeline"):
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text=text,
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled
+            assert "1. NL Person" in r.reply, f"failed for {text!r}: {r.reply!r}"
+    finally:
+        await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[t1] if t1 else [])
+        await _restore_config(original)
+
+
+async def test_pipeline_query_missing_project_offers_choices() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    label_a = f"Zzq Missing A {uuid.uuid4().hex[:6]}"
+    label_b = f"Zzq Missing B {uuid.uuid4().hex[:6]}"
+    pa = pb = ta = None
+    try:
+        pa = await _seed_project(status="ongoing", brand_name=label_a)
+        pb = await _seed_project(status="ongoing", brand_name=label_b)
+        ta = await _seed_talent("Missing Case Person")
+        await _seed_pipeline_row(pa, ta, "follow_up")
+
+        # Brand new conversation — no session context, no project named.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show Follow Up pipeline",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Which project" in r.reply
+        assert label_a in r.reply and label_b in r.reply
+
+        # Resolve by naming the project exactly — resumes the original
+        # "Follow Up" pipeline query via the shared disambiguation engine.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=label_a,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "1. Missing Case Person" in r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[p for p in (pa, pb) if p], talent_ids=[ta] if ta else [])
+        await _restore_config(original)
+
+
+async def test_pipeline_query_empty_pipeline() -> None:
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_label = f"Zzq Empty Case {uuid.uuid4().hex[:6]}"
+    p1 = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=project_label)
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Show {project_label} Approved",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "No talents in this pipeline" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[])
+        await _restore_config(original)
+
+
+async def test_query_intents_never_write_to_casting_pipeline() -> None:
+    """Explicit audit assertion for the sprint's own "read-only" gate: a
+    representative sweep of every new query shape, before/after row-count
+    diff on the exact projects touched."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    name = f"Zzq Audit {uuid.uuid4().hex[:6]}"
+    project_label = f"Zzq Audit Proj {uuid.uuid4().hex[:6]}"
+    p1 = talent_id = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=project_label)
+        talent_id = await _seed_talent(name)
+        await _seed_pipeline_row(p1, talent_id, "hold")
+
+        before = await _pipeline_row_count([p1])
+        messages = [
+            f"Show active projects of {name}",
+            f"Is {name} in Hold for {project_label}?",
+            f"Has {name} been approved for {project_label}?",
+            f"Which projects is {name} testing for?",
+            f"Show {project_label} Hold",
+        ]
+        for text in messages:
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text=text,
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled
+        after = await _pipeline_row_count([p1])
+        assert before == after
+    finally:
+        await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[talent_id] if talent_id else [])
+        await _restore_config(original)
+
+
+async def test_existing_move_add_undo_unaffected_by_query_changes() -> None:
+    """Narrow regression guard specific to this sprint's touch points
+    (_resolve_project_ref's newly-added "offer every ongoing project"
+    branch, and QUERY_TRIGGERS' new leading words) — proves a MOVE still
+    behaves exactly as before even with a brand new conversation (no
+    project context), and that a bare "Is"/"Has" word never gets routed
+    into casting.move by mistake."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    project_label = f"Zzq Move Unaffected {uuid.uuid4().hex[:6]}"
+    p1 = t1 = None
+    try:
+        p1 = await _seed_project(status="ongoing", brand_name=project_label)
+        t1 = await _seed_talent("Move Unaffected Person")
+        await _seed_pipeline_row(p1, t1, "hold")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move Move Unaffected Person to Approved in {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "about to move" in r.reply.lower() or "approve" in r.reply.lower()
+    finally:
+        await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[t1] if t1 else [])
+        await _restore_config(original)

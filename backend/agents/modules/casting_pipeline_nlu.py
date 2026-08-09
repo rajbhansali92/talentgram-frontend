@@ -1156,6 +1156,28 @@ QUERY_TRIGGERS = [
     # "Show again"/"repeat" — replay the last listing without repeating
     # the project/pipeline.
     "again", "repeat",
+    # Conversational Casting Insights (2026-08-09) — talent-centric and
+    # stage-specific natural-language questions open with one of these
+    # instead of an imperative verb ("Which projects is Ahana working on?",
+    # "Is Ahana testing for Toyota Glanza?", "Has Ahana been approved for
+    # Dove?"). Purely additive: none of these collide with MOVE_TRIGGERS,
+    # ADD_TRIGGERS, or UNDO's triggers, so no other intent's routing changes.
+    "which", "is", "are", "was", "were", "has", "have", "did", "does",
+    # Bare stage-first phrasing with no leading verb at all ("Follow Up
+    # pipeline", "Testing list") needs the stage word itself recognized as
+    # a trigger — detect_trigger only ever looks at the FIRST word(s) of
+    # the message. Deliberately NOT every stage synonym: only the ones
+    # that cannot collide with MOVE_TRIGGERS/ADD_TRIGGERS/UNDO's own
+    # triggers (checked against agents/modules/casting_pipeline.py's
+    # MOVE_TRIGGERS below) — "hold"/"lock"/"approve"/"reject"/"shortlist"/
+    # "not available"/"not interested" are already MOVE triggers, and
+    # reusing any of those here would silently misroute an existing,
+    # tested bare-stage MOVE command ("Hold Sarah") into casting.query
+    # instead (detect_trigger picks whichever equal-length trigger it
+    # finds first when two intents both match) — see
+    # test_stage_first_commands. "testing"/"follow up" have no such
+    # collision.
+    "testing", "follow up", "followup",
 ]
 
 # Matches "Project 5", "project #5", and the "P5" / "P 5" shorthand alike.
@@ -1184,18 +1206,185 @@ _REPLAY_RE = re.compile(
 
 @dataclass
 class QueryIntent:
-    kind: str  # "list_projects" | "project_detail" | "pipeline" | "replay" | "unrecognized"
+    kind: str  # "list_projects" | "project_detail" | "pipeline" | "talent_projects" | "talent_stage_query" | "replay" | "unrecognized"
     project_ordinal: Optional[int] = None
     project_name_query: Optional[str] = None
     stage_key: Optional[str] = None
     stage_ambiguous: Optional[List[str]] = None
     count_only: bool = False
+    # Only set for "talent_projects"/"talent_stage_query" — the raw talent
+    # name span extracted from the message (see _extract_talent_stage_query).
+    talent_query: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Talent-centric query detection (Conversational Casting Insights, 2026-08-09)
+# — "Show Ahana's projects" / "Is Ahana approved for Dove?" style questions.
+# Hand-curated phrasing patterns, same rule-based approach as every other
+# matcher in this module (see module docstring) — NOT a new stage/name
+# synonym table: stage words still resolve through match_stage_phrase /
+# extract_stage_phrase (the one shared registry), and talent/project
+# IDENTITY resolution (fuzzy matching, disambiguation) still happens
+# entirely in resolve_against_candidates / resolve_project_by_name over
+# in casting_pipeline.py. This layer only decides WHICH SPAN of the
+# sentence is the talent name/stage/project reference.
+# ---------------------------------------------------------------------------
+# Alphanumeric (not letters-only) — a real name/slug can contain a digit
+# (test/seed data commonly does, "Ahaan 2" is a plausible display-name
+# suffix too), and a letters-only span would simply never match those,
+# falling through to a worse (or wrong) classification instead.
+_NAME_SPAN = r"([A-Za-z0-9][A-Za-z0-9.'’\-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.'’\-]*)*)"
+
+_TALENT_PROJECTS_PATTERNS = [
+    # "Show me all pending projects of Ahana Pocha" / "Show active projects of Ahana"
+    re.compile(
+        r"^\s*show\s+(?:me\s+)?(?:all\s+)?(?:the\s+)?(?:pending|active|ongoing|current)?\s*projects?\s+of\s+"
+        + _NAME_SPAN + r"\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    ),
+    # "Show Ahana's ongoing projects" / "Show Ahana Pocha's active projects"
+    re.compile(
+        r"^\s*show\s+" + _NAME_SPAN + r"['’]s\s+(?:ongoing|active|current|pending)\s+projects?\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    ),
+    # "What projects is Ahana Pocha part of?" / "Which projects is Ahana
+    # working on?" / "Which projects is Ahana testing for?" (the last one
+    # implies a stage — classify_query re-checks the whole matched text for
+    # an embedded stage phrase separately, below).
+    re.compile(
+        r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+(?:is|are)\s+" + _NAME_SPAN
+        + r"\s+(?:part\s+of|working\s+on|involved\s+in|testing\s+for)\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    ),
+    # "Which casting projects involve Ahana?"
+    re.compile(
+        r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+involve\s+" + _NAME_SPAN + r"\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    ),
+]
+
+# "What tests are pending for Ahana?" — a stage word up front ("tests"),
+# talent named at the end via "for <name>".
+_STAGE_PENDING_FOR_TALENT_RE = re.compile(
+    r"^\s*what\s+(.+?)\s+(?:are|is)\s+pending\s+for\s+" + _NAME_SPAN + r"\s*[.?!]*\s*$",
+    re.IGNORECASE,
+)
+
+# Boolean/status lead-in — "Is/Are/Was/Were/Has/Have/Did/Does <name> ...".
+_TALENT_STAGE_LEAD_RE = re.compile(
+    r"^\s*(?:is|are|was|were|has|have|did|does)\s+(.+?)\s*[.?!]*\s*$", re.IGNORECASE
+)
+_TRAILING_FOR_PROJECT_RE = re.compile(r"\bfor\s+(.+?)\s*$", re.IGNORECASE)
+# Connector words a talent-stage question can leave behind once the stage
+# phrase and project reference are removed ("Ahana been", "Ahana get",
+# "Ahana in") — none of these is ever plausibly part of a real person's
+# name in this system, so (like _NOISE_WORD_RE's "talent(s)" removal
+# above) they're stripped as whole words wherever they land, not just at
+# the edges.
+_TALENT_LEFTOVER_FILLER_RE = re.compile(r"\b(?:been|get|got|in|the)\b", re.IGNORECASE)
+
+
+def _clean_talent_leftover(s: str) -> str:
+    s = _TALENT_LEFTOVER_FILLER_RE.sub(" ", s or "")
+    return re.sub(r"\s+", " ", s).strip(" ?.!,")
+
+
+def _extract_talent_stage_query(stripped: str, stage_order: List[str]) -> Optional[QueryIntent]:
+    """Recognizes the two "stage-specific question" shapes and the
+    "talent's projects" shape from the Conversational Casting Insights
+    sprint. Returns None (never a partial/garbage classification) unless a
+    plausible talent name AND at least a stage or project signal were both
+    found — an unrelated "Is/Are/Was" message a group member sends for some
+    other reason falls through to whatever classify_query's existing logic
+    (or "unrecognized") would have done anyway, rather than triggering a
+    pointless talent lookup."""
+    m = _STAGE_PENDING_FOR_TALENT_RE.match(stripped)
+    if m:
+        stage_phrase, name = m.group(1), m.group(2)
+        stage_match = match_stage_phrase(stage_phrase, stage_order)
+        name = _clean_talent_leftover(name)
+        if name and (stage_match.key or stage_match.ambiguous):
+            return QueryIntent(
+                kind="talent_stage_query", talent_query=name,
+                stage_key=stage_match.key, stage_ambiguous=stage_match.ambiguous,
+            )
+
+    for pattern in _TALENT_PROJECTS_PATTERNS:
+        m = pattern.match(stripped)
+        if not m:
+            continue
+        name = _clean_talent_leftover(m.group(1))
+        if not name:
+            continue
+        stage_key, ambiguous, _rest = extract_stage_phrase(stripped, stage_order)
+        if stage_key or ambiguous:
+            return QueryIntent(
+                kind="talent_stage_query", talent_query=name,
+                stage_key=stage_key, stage_ambiguous=ambiguous,
+            )
+        return QueryIntent(kind="talent_projects", talent_query=name)
+
+    m = _TALENT_STAGE_LEAD_RE.match(stripped)
+    if m:
+        rest = m.group(1)
+        project_name_query = None
+        pm = _TRAILING_FOR_PROJECT_RE.search(rest)
+        if pm:
+            candidate = pm.group(1).strip(" ?.!")
+            if candidate:
+                project_name_query = candidate
+                rest = rest[:pm.start()].strip()
+        stage_key, ambiguous, rest_after_stage = extract_stage_phrase(rest, stage_order)
+        name = _clean_talent_leftover(rest_after_stage)
+        if name and (stage_key or ambiguous or project_name_query):
+            return QueryIntent(
+                kind="talent_stage_query", talent_query=name,
+                stage_key=stage_key, stage_ambiguous=ambiguous,
+                project_name_query=project_name_query,
+            )
+
+    return None
+
+
+# Fallback for the connector-less "<Project> <Stage>" phrasing ("Show
+# Toyota Follow Up", "Toyota Follow Up list") — every known trigger/noise
+# word stripped from what's left after the stage phrase itself is removed;
+# if 1-4 words of real content remain, that's treated as an implicit
+# project reference. Deliberately errs conservative (a broad noise list
+# covering every existing QUERY_TRIGGERS word plus the interrogative words
+# a stage-only question is built from — "how many talents in hold?" must
+# reduce to nothing) since a false positive here would misroute an
+# existing, already-working stage-only query into an unwanted project
+# lookup.
+_POSITIONAL_PROJECT_NOISE_WORDS = {
+    "show", "open", "list", "pipeline", "stage", "view", "current", "who",
+    "what", "which", "is", "are", "the", "a", "an", "again", "repeat",
+    "how", "many", "talents", "talent", "in", "for", "of", "count",
+    "summary", "project", "projects", "p",
+}
+
+
+def _extract_positional_project(rest: str) -> Optional[str]:
+    # Alphanumeric tokens (not letters-only) — a real project name can
+    # contain digits ("Google - Film 1 & 3"), and a letters-only pattern
+    # would shred something like "Glanza2026" or a hex-suffixed test/slug
+    # name into single-character fragments, blowing past the word cap
+    # below for no reason.
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", rest or "")
+    content = [w for w in words if w.lower() not in _POSITIONAL_PROJECT_NOISE_WORDS]
+    if 1 <= len(content) <= 6:
+        return " ".join(content)
+    return None
 
 
 def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
     stripped = (text or "").strip()
     if _REPLAY_RE.match(stripped):
         return QueryIntent(kind="replay")
+
+    talent_intent = _extract_talent_stage_query(stripped, stage_order)
+    if talent_intent is not None:
+        return talent_intent
 
     project_ref = None
     m = _PROJECT_REF_RE.search(text)
@@ -1211,6 +1400,14 @@ def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
         candidate = name_m.group(1).strip(" ?.!\n")
         if candidate:
             project_name_query = candidate
+
+    if (stage_key or ambiguous) and project_name_query is None and project_ref is None:
+        # No "for"/"of <project>" connector — try the connector-less
+        # "<Project> <Stage>" positional shape ("Show Toyota Follow Up",
+        # "Toyota Follow Up list"). See _extract_positional_project's
+        # docstring for why this is safe against existing stage-only
+        # queries like "How many talents in hold?".
+        project_name_query = _extract_positional_project(rest)
 
     if stage_key or ambiguous:
         return QueryIntent(

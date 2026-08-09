@@ -408,9 +408,25 @@ async def _resolve_project_ref(
 
     current_id = (session or {}).get("current_project_id")
     current_label = (session or {}).get("current_project_label")
-    if not current_id:
-        return None, 'I don\'t know which project. Send "Project N" or "Show ongoing projects" first.', None
-    return {"id": current_id, "label": current_label or ""}, None, None
+    if current_id:
+        return {"id": current_id, "label": current_label or ""}, None, None
+
+    # Nothing named/numbered in the message and no active project in
+    # stored context — offer every currently-ongoing project as a numbered
+    # pick, reusing the EXACT same (project, error, ambiguous_labels) shape
+    # an ambiguous NAME match already returns (see the `if name_query:`
+    # branch above), so the caller's existing _ask_project_clarification
+    # flow handles it identically, with zero new plumbing. Auto-picks
+    # silently only when there is exactly one ongoing project — no real
+    # choice to offer.
+    projects = await _fetch_ongoing_projects()
+    if len(projects) == 1:
+        return {"id": projects[0]["id"], "label": projects[0]["label"]}, None, None
+    if len(projects) > 1:
+        labels = [p["label"] for p in projects]
+        numbered = "\n".join(f"- {label}" for label in labels)
+        return None, f"Which project did you mean?\n{numbered}", labels
+    return None, 'I don\'t know which project. Send "Project N" or "Show ongoing projects" first.', None
 
 
 async def _handle_list_projects(ctx: ExecContext, classification: nlu.QueryIntent) -> ExecResult:
@@ -598,6 +614,208 @@ async def _handle_pipeline_query(
     return ExecResult(ok=True, message=rendered)
 
 
+# ---------------------------------------------------------------------------
+# Talent-centric + stage-specific queries (Conversational Casting Insights,
+# 2026-08-09) — "Show Ahana's projects", "Is Ahana approved for Dove?".
+# Read-only, exactly like the rest of casting.query: no pipeline row is
+# ever written here. Talent identity resolution reuses the SAME candidate
+# fetch + fuzzy matcher Add already uses (_fetch_all_talent_candidates +
+# nlu.resolve_against_candidates) rather than anything new, and ambiguity
+# is offered via the SAME session_context.pending_disambiguation +
+# _query_parse_edits_async plumbing project/stage ambiguity already use.
+# ---------------------------------------------------------------------------
+async def _resolve_talent_query_target(
+    raw: str
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[List[nlu.Candidate]]]:
+    """Resolve a talent-query subject to (talent_id, talent_label, error,
+    ambiguous_candidates). Reuses parse_talent_selector so a
+    disambiguation-pick marker (RESOLVED_TALENT_MARKER, set only by
+    _ask_talent_clarification's resume) bypasses name matching entirely —
+    exactly like casting.move's own selection resolution already does for
+    a talent picked from a numbered list a moment ago."""
+    selector = nlu.parse_talent_selector(raw)
+    if not selector.ok:
+        return None, None, selector.error, None
+    if selector.resolved_id:
+        return selector.resolved_id, selector.resolved_label, None, None
+
+    name_query = selector.name_query or (raw or "").strip()
+    if not name_query:
+        return None, None, "I didn't catch who you meant.", None
+    candidates = await _fetch_all_talent_candidates()
+    if not candidates:
+        return None, None, "No talents found.", None
+    with request_scope.stage("fuzzy"):
+        resolved = nlu.resolve_against_candidates(nlu.SelectorResult(ok=True, name_query=name_query), candidates)
+    _log_talent_resolve_timing(resolved)
+    if not resolved.ok:
+        return None, None, resolved.error, resolved.ambiguous_candidates
+    return resolved.talent_ids[0], resolved.talent_labels[0], None, None
+
+
+async def _ask_talent_clarification(
+    ctx: ExecContext, err: str, candidates: List[nlu.Candidate], resume: Dict[str, Any]
+) -> ExecResult:
+    """Talent-side counterpart of _ask_project_clarification — same
+    session_context.pending_disambiguation + resume shape, just with
+    options value-encoded via RESOLVED_TALENT_MARKER (id+label) instead of
+    a bare label, identical to how casting.move already disambiguates an
+    ambiguous talent match."""
+    options = [
+        {"id": c.id, "label": c.label, "value": f"{nlu.RESOLVED_TALENT_MARKER}{c.id}|{c.label}"}
+        for c in candidates
+    ]
+    await session_context.update_session(
+        AGENT_ID, ctx.sender_phone,
+        pending_disambiguation={"kind": "talent", "field_key": "query_text", "options": options, "resume": resume},
+    )
+    return ExecResult(ok=False, error="ambiguous_talent", message=err, needs_clarification=True)
+
+
+async def _fetch_talent_active_memberships(talent_id: str) -> List[Dict[str, Any]]:
+    """Every one of this talent's pipeline rows across currently-ONGOING
+    projects — same "ongoing only" scope every other query already uses.
+    Returns [{"project_id", "project_label", "stage"}], ordered oldest-
+    membership-first."""
+    projects = await _fetch_ongoing_projects()
+    if not projects:
+        return []
+    project_ids = [p["id"] for p in projects]
+    label_by_id = {p["id"]: p["label"] for p in projects}
+    rows = await _timed_talent_lookup(
+        db.casting_pipeline.find(
+            {"talent_id": talent_id, "project_id": {"$in": project_ids}},
+            {"_id": 0, "project_id": 1, "stage": 1},
+        ).sort("created_at", 1).to_list(2000),
+        collection="casting_pipeline", name="fetch_talent_memberships",
+    )
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        pid = r.get("project_id")
+        if pid not in label_by_id:
+            continue
+        stage = _normalise_stage(r.get("stage")) or r.get("stage")
+        out.append({"project_id": pid, "project_label": label_by_id[pid], "stage": stage})
+    return out
+
+
+def _render_talent_projects(talent_label: str, memberships: List[Dict[str, Any]]) -> str:
+    if not memberships:
+        return f"{talent_label} is currently not part of any active casting pipeline."
+    lines = [talent_label, ""]
+    for m in memberships:
+        lines.append(m["project_label"])
+        lines.append(f"• {nlu.stage_label(m['stage'])}")
+        lines.append("")
+    lines.append(f"Total Active Projects: {len(memberships)}")
+    return "\n".join(lines)
+
+
+async def _handle_talent_projects(ctx: ExecContext, raw_talent_ref: str) -> ExecResult:
+    talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(raw_talent_ref)
+    if err:
+        if ambiguous:
+            return await _ask_talent_clarification(ctx, err, ambiguous, {"query_kind": "talent_projects"})
+        return ExecResult(ok=False, error="talent_not_found", message=err)
+    memberships = await _fetch_talent_active_memberships(talent_id)
+    with request_scope.stage("response_formatting"):
+        rendered = _render_talent_projects(talent_label, memberships)
+    return ExecResult(ok=True, message=rendered)
+
+
+def _render_talent_stage_filtered(talent_label: str, stage: str, matching: List[Dict[str, Any]]) -> str:
+    if not matching:
+        return f"{talent_label} is not currently in {nlu.stage_label(stage)} for any active project."
+    lines = [talent_label, "", nlu.stage_label(stage), ""]
+    for m in matching:
+        lines.append(f'• {m["project_label"]}')
+    lines.append("")
+    lines.append(f"Total: {len(matching)}")
+    return "\n".join(lines)
+
+
+async def _render_talent_stage_boolean(
+    talent_id: str, talent_label: str, stage: str, project: Dict[str, str]
+) -> ExecResult:
+    row = await _timed_talent_lookup(
+        db.casting_pipeline.find_one(
+            {"talent_id": talent_id, "project_id": project["id"]}, {"_id": 0, "stage": 1}
+        ),
+        collection="casting_pipeline", name="talent_stage_lookup",
+    )
+    current_stage = _normalise_stage((row or {}).get("stage")) if row else None
+    if row and current_stage == stage:
+        message = f"Yes.\n\n{talent_label} is currently in {nlu.stage_label(stage)} for {project['label']}."
+    elif row:
+        message = f"No.\n\n{talent_label} is currently in {nlu.stage_label(current_stage)} for {project['label']}."
+    else:
+        message = f"No.\n\n{talent_label} is not part of {project['label']}."
+    return ExecResult(ok=True, message=message)
+
+
+async def _handle_talent_stage_query(
+    ctx: ExecContext, session: Optional[dict], classification: nlu.QueryIntent, raw_talent_ref: str
+) -> ExecResult:
+    if classification.stage_ambiguous:
+        options = [{"label": o, "value": o} for o in classification.stage_ambiguous]
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone,
+            pending_disambiguation={
+                "kind": "stage", "field_key": "query_text", "options": options,
+                "resume": {
+                    "query_kind": "talent_stage_pending",
+                    "talent_ref": raw_talent_ref,
+                    "project_name_query": classification.project_name_query,
+                },
+            },
+        )
+        bullets = "\n".join(f"- {o}" for o in classification.stage_ambiguous)
+        return ExecResult(
+            ok=False, error="ambiguous_stage",
+            message=f"Which pipeline did you mean?\n{bullets}", needs_clarification=True,
+        )
+
+    talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(raw_talent_ref)
+    if err:
+        if ambiguous:
+            resume = {
+                "query_kind": "talent_stage_query",
+                "stage_key": classification.stage_key,
+                "project_name_query": classification.project_name_query,
+            }
+            return await _ask_talent_clarification(ctx, err, ambiguous, resume)
+        return ExecResult(ok=False, error="talent_not_found", message=err)
+
+    stage = classification.stage_key
+    if not stage or stage not in PIPELINE_STAGES:
+        bullets = "\n".join(f"• {nlu.stage_label(s)}" for s in PIPELINE_STAGE_ORDER)
+        return ExecResult(
+            ok=False, error="pipeline_not_found",
+            message=f"I couldn't tell which pipeline you meant.\n\nAvailable pipelines:\n\n{bullets}",
+        )
+
+    project_name_query = classification.project_name_query
+    if project_name_query:
+        project, perr, pambiguous = await _resolve_project_ref(None, project_name_query, session)
+        if perr:
+            if pambiguous:
+                resume = {
+                    "query_kind": "talent_stage_query_project_pending",
+                    "talent_id": talent_id, "talent_label": talent_label, "stage_key": stage,
+                }
+                return await _ask_project_clarification(ctx, perr, pambiguous, resume)
+            return ExecResult(ok=False, error="project_not_found", message=perr)
+        with request_scope.stage("response_formatting"):
+            return await _render_talent_stage_boolean(talent_id, talent_label, stage, project)
+
+    # No project named — filtered listing across every active membership.
+    memberships = await _fetch_talent_active_memberships(talent_id)
+    matching = [m for m in memberships if m["stage"] == stage]
+    with request_scope.stage("response_formatting"):
+        rendered = _render_talent_stage_filtered(talent_label, stage, matching)
+    return ExecResult(ok=True, message=rendered)
+
+
 _IMPLICIT_COUNT_RE = re.compile(r"\b(how many|left|remaining)\b", re.IGNORECASE)
 
 # Set by _query_parse_edits_async when a pending project/stage
@@ -636,6 +854,45 @@ async def _resume_pending_query(session: Optional[dict], ctx: ExecContext) -> Ex
         )
         return await _handle_pipeline_query(ctx, session, classification)
 
+    if query_kind == "talent_projects":
+        # resolved_value is a RESOLVED_TALENT_MARKER-encoded pick (from an
+        # ambiguous-talent clarification) — _handle_talent_projects hands
+        # it straight to _resolve_talent_query_target, which bypasses name
+        # matching entirely for that shape (see parse_talent_selector).
+        return await _handle_talent_projects(ctx, resolved_value or "")
+
+    if query_kind == "talent_stage_query":
+        # Talent name was ambiguous; now resolved. Stage/project were
+        # already known before the clarification, carried via `resume`.
+        classification = nlu.QueryIntent(
+            kind="talent_stage_query",
+            stage_key=resume.get("stage_key"),
+            project_name_query=resume.get("project_name_query"),
+        )
+        return await _handle_talent_stage_query(ctx, session, classification, resolved_value or "")
+
+    if query_kind == "talent_stage_pending":
+        # Stage phrase was ambiguous; now resolved to one of the offered
+        # stage labels.
+        stage_match = nlu.match_stage_phrase(resolved_value or "", list(PIPELINE_STAGE_ORDER))
+        classification = nlu.QueryIntent(
+            kind="talent_stage_query",
+            stage_key=stage_match.key,
+            project_name_query=resume.get("project_name_query"),
+        )
+        return await _handle_talent_stage_query(ctx, session, classification, resume.get("talent_ref") or "")
+
+    if query_kind == "talent_stage_query_project_pending":
+        # Talent + stage were already known; the PROJECT name was
+        # ambiguous and is now resolved to an exact label.
+        talent_id = resume.get("talent_id")
+        talent_label = resume.get("talent_label") or "talent"
+        stage = resume.get("stage_key")
+        project, perr, _pambiguous = await _resolve_project_ref(None, resolved_value, session)
+        if perr:
+            return ExecResult(ok=False, error="project_not_found", message=perr)
+        return await _render_talent_stage_boolean(talent_id, talent_label, stage, project)
+
     return ExecResult(
         ok=False, error="unrecognized_query",
         message='I didn\'t understand that.\nTry "Show ongoing projects", "Project 3", or "Show Approved".',
@@ -669,6 +926,10 @@ async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         return await _handle_project_detail(ctx, session, classification)
     if classification.kind == "pipeline":
         return await _handle_pipeline_query(ctx, session, classification)
+    if classification.kind == "talent_projects":
+        return await _handle_talent_projects(ctx, classification.talent_query or "")
+    if classification.kind == "talent_stage_query":
+        return await _handle_talent_stage_query(ctx, session, classification, classification.talent_query or "")
     if classification.kind == "replay":
         return await _handle_replay(ctx, session)
     return ExecResult(

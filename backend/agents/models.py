@@ -133,6 +133,22 @@ class IntentDefinition:
     try_auto_execute: Optional[
         Callable[[Dict[str, str], "ExecContext"], Awaitable[Optional["ExecResult"]]]
     ] = None
+    # Interactive Campaign Editing (2026-08-09) — checked FIRST on every
+    # message received while a conversation is in the "confirming" step,
+    # before the generic approve/edit/cancel parsing. Lets a domain module
+    # recognize its own natural-language commands ("Exclude Ahana",
+    # "Change template to X", "Preview") directly on top of an already-
+    # shown confirmation card, mutate `collected` (via conversation.
+    # update_conversation, same collection, no new state store), and
+    # return the regenerated confirmation text — all WITHOUT leaving the
+    # "confirming" step, so "1"/"approve"/"2"/"edit"/"3"/"cancel" keep
+    # working exactly as before, untouched by this hook. Returns None to
+    # mean "not one of mine" — dispatcher.py falls through to the existing
+    # approve/edit/cancel handling unchanged. None (the default, every
+    # existing intent) means this checked branch is a complete no-op.
+    handle_confirming_reply: Optional[
+        Callable[[str, Dict[str, str], "ExecContext"], Awaitable[Optional[str]]]
+    ] = None
 
 
 @dataclass

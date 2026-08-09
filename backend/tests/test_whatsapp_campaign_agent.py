@@ -1674,3 +1674,529 @@ async def test_pipeline_stage_missing_template_asks():
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Interactive Campaign Editing (2026-08-09).
+# ---------------------------------------------------------------------------
+async def _setup_editing_campaign(n_talents: int = 3):
+    """Seeds a project + template + N talents (all follow_up) and opens the
+    confirmation card. Returns a dict of everything a test needs."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    label = f"ZEdit{tag}"
+    project_id = await _seed_project(label)
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    # Deliberately shares NO substring with template_name ("Reminder
+    # {tag}") — a name like "Second Reminder {tag}" would make every fuzzy/
+    # substring match against it ambiguous with the original template too.
+    template_name_2 = f"Final Notice {tag}"
+    template_id_2 = await _seed_template(template_name_2)
+    talents = []
+    for i in range(n_talents):
+        name = f"Talent{i} {tag}"
+        tid = await _seed_talent(name, phone=f"91700009{i:04d}")
+        await _seed_pipeline_row(project_id, tid, "follow_up")
+        talents.append((tid, name))
+    r = await handle_inbound_message(
+        group_name=group, sender_phone=phone,
+        text=f"Send {template_name} to Follow Up pipeline of {label}",
+        sender_name="Raj", sender_is_group_member=True,
+    )
+    return {
+        "group": group, "phone": phone, "original": original,
+        "project_id": project_id, "template_id": template_id,
+        "template_name": template_name, "template_id_2": template_id_2,
+        "template_name_2": template_name_2, "talents": talents, "label": label, "reply": r,
+    }
+
+
+async def _teardown_editing_campaign(ctx: dict):
+    await _cleanup(
+        ctx["phone"], project_ids=[ctx["project_id"]],
+        talent_ids=[t[0] for t in ctx["talents"]],
+        template_ids=[ctx["template_id"], ctx["template_id_2"]],
+    )
+    await _restore_config(ctx["original"])
+
+
+async def test_editing_exclude_single():
+    ctx = await _setup_editing_campaign(3)
+    try:
+        assert ctx["reply"].handled
+        assert "Recipients\n3 talents" in ctx["reply"].reply
+
+        _, name0 = ctx["talents"][0]
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients\n2 talents" in r.reply
+        assert f"Excluded\n{name0}" in r.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_exclude_multiple():
+    ctx = await _setup_editing_campaign(3)
+    try:
+        n0, n1 = ctx["talents"][0][1], ctx["talents"][1][1]
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {n0} and {n1}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients\n1 talent" in r.reply
+        assert n0 in r.reply and n1 in r.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_exclude_unknown_name():
+    ctx = await _setup_editing_campaign(2)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude ZzzNonexistentZzz",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "couldn't find" in r.reply.lower()
+        pending = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": ctx["phone"]})
+        assert pending is not None
+        assert pending["step"] == "confirming"
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_exclude_ambiguous_uses_shared_disambiguation():
+    ctx = await _setup_editing_campaign(1)
+    try:
+        tag = uuid.uuid4().hex[:6]
+        n1 = f"Priya Sharma{tag}"
+        n2 = f"Priya Verma{tag}"
+        t1 = await _seed_talent(n1, phone="917000001001")
+        t2 = await _seed_talent(n2, phone="917000001002")
+        await _seed_pipeline_row(ctx["project_id"], t1, "follow_up")
+        await _seed_pipeline_row(ctx["project_id"], t2, "follow_up")
+        ctx["talents"] += [(t1, n1), (t2, n2)]
+
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude Priya{tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple talents." in r.reply
+        assert n1 in r.reply and n2 in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "Excluded" in r2.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_exclude_already_excluded():
+    ctx = await _setup_editing_campaign(2)
+    try:
+        _, name0 = ctx["talents"][0]
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r2 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "already excluded" in r2.reply.lower()
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_include_restores_excluded():
+    ctx = await _setup_editing_campaign(3)
+    try:
+        _, name0 = ctx["talents"][0]
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Include {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients\n3 talents" in r.reply
+        assert f"Included\n{name0}" in r.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_include_via_add_back_and_restore_phrasing():
+    ctx = await _setup_editing_campaign(2)
+    try:
+        _, name0 = ctx["talents"][0]
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Add {name0} back",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Recipients\n2 talents" in r.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r2 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Restore {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Recipients\n2 talents" in r2.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_include_already_included_is_noop_error():
+    """"Already included" == never excluded in the first place — same
+    user-facing outcome ("nothing to include")."""
+    ctx = await _setup_editing_campaign(2)
+    try:
+        _, name0 = ctx["talents"][0]
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Include {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "nothing to include" in r.reply.lower()
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_include_not_previously_excluded():
+    ctx = await _setup_editing_campaign(3)
+    try:
+        _, name0 = ctx["talents"][0]
+        _, name1 = ctx["talents"][1]
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Include {name1}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "nothing to include" in r.reply.lower()
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_template_change_exact():
+    ctx = await _setup_editing_campaign(1)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"],
+            text=f"Change template to {ctx['template_name_2']}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"Template\n{ctx['template_name_2']}" in r.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_template_change_fuzzy_via_use():
+    ctx = await _setup_editing_campaign(1)
+    try:
+        partial = ctx["template_name_2"].replace("Final Notice", "Fnal Notice")
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Use {partial}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"Template\n{ctx['template_name_2']}" in r.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_template_change_ambiguous_uses_shared_disambiguation():
+    ctx = await _setup_editing_campaign(1)
+    try:
+        tag = uuid.uuid4().hex[:6]
+        tpl_a = await _seed_template(f"Final Reminder {tag} Alpha")
+        tpl_b = await _seed_template(f"Final Reminder {tag} Beta")
+        try:
+            r = await handle_inbound_message(
+                group_name=ctx["group"], sender_phone=ctx["phone"],
+                text=f"Switch template to Final Reminder {tag}",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled
+            assert "I found multiple templates." in r.reply
+
+            r2 = await handle_inbound_message(
+                group_name=ctx["group"], sender_phone=ctx["phone"], text="1",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r2.handled
+            assert "Template\n" in r2.reply
+
+            await handle_inbound_message(
+                group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+        finally:
+            await db.whatsapp_templates.delete_many({"id": {"$in": [tpl_a, tpl_b]}})
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_template_change_unknown():
+    ctx = await _setup_editing_campaign(1)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"],
+            text="Change template to ZzzNonexistentTemplateZzz",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "couldn't find a template" in r.reply.lower()
+        assert "unchanged" in r.reply.lower()
+        pending = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": ctx["phone"]})
+        assert pending["collected"]["source_query"] == ctx["template_name"]
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_preview_respects_exclusions_and_template_change_never_sends():
+    ctx = await _setup_editing_campaign(2)
+    try:
+        _, name0 = ctx["talents"][0]
+        _, name1 = ctx["talents"][1]
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"],
+            text=f"Change template to {ctx['template_name_2']}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Preview",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert name1 in r.reply
+        assert "Sent." not in r.reply
+
+        pending = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": ctx["phone"]})
+        assert pending is not None and pending["step"] == "confirming"
+        live_count = await db.whatsapp_batches.count_documents({
+            "template_id": ctx["template_id_2"], "is_dry_run": False,
+        })
+        assert live_count == 0
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_summary_counts_update():
+    ctx = await _setup_editing_campaign(3)
+    try:
+        _, name0 = ctx["talents"][0]
+        r1 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Summary",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Recipient Count\n3" in r1.reply
+        assert "Excluded\n(none)" in r1.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r2 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Who will receive this?",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "Recipient Count\n2" in r2.reply
+        assert f"Excluded\n{name0}" in r2.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_send_calls_create_batch_exactly_once_with_edits_applied():
+    ctx = await _setup_editing_campaign(3)
+    try:
+        _, name0 = ctx["talents"][0]
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"],
+            text=f"Change template to {ctx['template_name_2']}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+
+        real_create_batch = wca.create_batch
+        call_log = []
+
+        async def _wrapped(*args, **kwargs):
+            result = await real_create_batch(*args, **kwargs)
+            call_log.append(args[0].is_dry_run)
+            return result
+
+        with patch.object(wca, "create_batch", side_effect=_wrapped):
+            r = await handle_inbound_message(
+                group_name=ctx["group"], sender_phone=ctx["phone"], text="Send",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+        assert r.handled
+        assert "Sent." in r.reply
+        assert call_log.count(False) == 1
+
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        live = await db.whatsapp_batches.find_one({"id": batch_id})
+        assert live is not None
+        assert live["template_id"] == ctx["template_id_2"]
+        assert live["total_jobs"] == 2
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        job_talent_ids = {j["talent_id"] for j in jobs}
+        assert ctx["talents"][0][0] not in job_talent_ids
+        assert ctx["talents"][1][0] in job_talent_ids
+        assert ctx["talents"][2][0] in job_talent_ids
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_cancel_clears_pending_campaign():
+    ctx = await _setup_editing_campaign(2)
+    try:
+        _, name0 = ctx["talents"][0]
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Cancel",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Cancelled" in r.reply
+        pending = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": ctx["phone"]})
+        assert pending is None
+        live_count = await db.whatsapp_batches.count_documents({
+            "project_id": ctx["project_id"], "is_dry_run": False,
+        })
+        assert live_count == 0
+    finally:
+        await _teardown_editing_campaign(ctx)
+
+
+async def test_editing_restart_discards_previous_draft():
+    ctx = await _setup_editing_campaign(2)
+    try:
+        _, name0 = ctx["talents"][0]
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text=f"Exclude {name0}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"],
+            text=f"Send {ctx['template_name_2']} to Follow Up pipeline of {ctx['label']}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"Template\n{ctx['template_name_2']}" in r.reply
+        assert "Excluded" not in r.reply
+        assert "Recipients\n2 talents" in r.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_editing_campaign(ctx)

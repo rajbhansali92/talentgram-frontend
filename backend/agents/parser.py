@@ -128,6 +128,12 @@ def extract_initial_fields(intent: IntentDefinition, text: str) -> Dict[str, str
 _CONFIRM_APPROVE = {
     "1", "approve", "yes", "y", "confirm", "ok", "okay",
     "go ahead", "proceed", "do it",
+    # (2026-08-09, Interactive Campaign Editing) "send"/"launch" — a
+    # generic, shared addition (this set drives every agent's approve
+    # detection), not campaign-agent-specific: any confirmation card
+    # whose action IS sending/launching something reads naturally this
+    # way, not just campaigns.
+    "send", "launch",
 }
 _CONFIRM_EDIT = {"2", "edit", "change"}
 _CONFIRM_CANCEL = {"3", "cancel", "no", "n", "stop"}

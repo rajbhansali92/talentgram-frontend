@@ -603,8 +603,21 @@ async def handle_inbound_message(
             await conversation.clear_conversation(agent.agent_id, phone)
             conv = None
 
-        # A fresh trigger always restarts, even mid-conversation.
-        fresh_intent = detect_trigger(agent, working_message)
+        # A fresh trigger always restarts, even mid-conversation — UNLESS
+        # a confirmation is actively pending ("confirming"/"disambiguating")
+        # and this message is unambiguously a bare confirm/cancel word
+        # (2026-08-09, Interactive Campaign Editing: "send" was added as an
+        # approve synonym, but "send" is ALSO whatsapp-campaign-agent's own
+        # trigger verb — without this, replying "Send" to an open
+        # confirmation card would restart a brand-new campaign instead of
+        # approving the pending one). Generic, not campaign-agent-specific:
+        # any agent whose trigger vocabulary happens to overlap an approve/
+        # cancel word gets the same, correct priority.
+        pending_confirmation = conv is not None and conv.get("step") in ("confirming", "disambiguating")
+        fresh_intent = (
+            None if pending_confirmation and parse_confirmation_reply(working_message) is not None
+            else detect_trigger(agent, working_message)
+        )
 
         if conv is None or fresh_intent is not None:
             # (2026-08-09, production-readiness audit) A fresh trigger
@@ -798,6 +811,22 @@ async def handle_inbound_message(
             return DispatchResult(handled=False)
 
         if conv["step"] == "confirming":
+            if intent.handle_confirming_reply:
+                edit_ctx = ExecContext(
+                    agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+                    sender_name=sender_name, conversation_id=str(conv.get("_id") or ""),
+                )
+                intercepted = await intent.handle_confirming_reply(
+                    working_message, conv.get("collected") or {}, edit_ctx
+                )
+                if intercepted is not None:
+                    await audit.log_turn(
+                        agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+                        raw_message=raw_message, conversation_id=str(conv.get("_id") or ""),
+                        parsed_intent=intent.intent_id, confirmation_action="campaign_edit",
+                    )
+                    return DispatchResult(handled=True, reply=intercepted)
+
             action = parse_confirmation_reply(working_message)
             if action == "approve":
                 ctx = ExecContext(

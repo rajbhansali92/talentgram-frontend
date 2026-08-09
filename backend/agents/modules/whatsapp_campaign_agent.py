@@ -860,7 +860,70 @@ def _format_recipients_and_delivery(jobs: List[dict], skipped: List[dict]) -> "t
     return recipients_block, delivery
 
 
+async def _build_batch_in(target: "_SendTarget", collected: dict, *, is_dry_run: bool) -> BatchIn:
+    """Single place every create_batch() call in this module builds its
+    payload — threads excluded_ids into the EXISTING
+    BatchIn.excluded_recipient_ids / resolve_recipients_engine exclusion
+    support (routers/whatsapp.py, unmodified) so Interactive Campaign
+    Editing needs zero new filtering logic of its own."""
+    return BatchIn(
+        source_type=target.source_type, source_params=target.source_params,
+        excluded_recipient_ids=list(collected.get("excluded_ids") or []),
+        template_id=target.template["id"], is_dry_run=is_dry_run,
+    )
+
+
+async def _talent_names_by_id(ids: List[str]) -> Dict[str, str]:
+    ids = [i for i in dict.fromkeys(ids) if i]
+    if not ids:
+        return {}
+    docs = await db.talents.find(
+        {"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1}
+    ).to_list(len(ids))
+    return {d["id"]: d.get("name") or d["id"] for d in docs}
+
+
+async def _resume_pending_recipient_edit(collected: dict, ctx: ExecContext) -> dict:
+    """Interactive Campaign Editing (2026-08-09) — if the last turn opened
+    a disambiguation round for an ambiguous "Exclude X"/"Include X" (see
+    _apply_recipient_edit), the shared engine's own resolution (dispatcher.
+    py's _advance_disambiguation) has already written the picked
+    candidate's exact label into one of these two private keys and
+    resumed here via the normal confirming-step render. Applies it (now
+    unambiguous) and clears the marker. A no-op (returns `collected`
+    unchanged) when neither key is present — the overwhelmingly common
+    case."""
+    pending_exclude = collected.get("_pending_exclude_name")
+    pending_include = collected.get("_pending_include_name")
+    if not pending_exclude and not pending_include:
+        return collected
+    new_collected = dict(collected)
+    new_collected.pop("_pending_exclude_name", None)
+    new_collected.pop("_pending_include_name", None)
+    _, jobs = await _current_recipient_candidates(new_collected, apply_exclusions=False)
+    result = await _resolve_named_recipient(pending_exclude or pending_include, jobs)
+    if result.job:
+        excluded_ids = list(new_collected.get("excluded_ids") or [])
+        included_ids = list(new_collected.get("included_ids") or [])
+        rid = result.job["recipient_id"]
+        if pending_exclude:
+            if rid not in excluded_ids:
+                excluded_ids.append(rid)
+            if rid in included_ids:
+                included_ids.remove(rid)
+        else:
+            if rid in excluded_ids:
+                excluded_ids.remove(rid)
+            if rid not in included_ids:
+                included_ids.append(rid)
+        new_collected["excluded_ids"] = excluded_ids
+        new_collected["included_ids"] = included_ids
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    return new_collected
+
+
 async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext) -> str:
+    collected = await _resume_pending_recipient_edit(collected, ctx)
     target = await _resolve_send_target(collected)
     if not target.ok:
         if target.ambiguous:
@@ -884,12 +947,7 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
 
     try:
         preview = await create_batch(
-            BatchIn(
-                source_type=target.source_type,
-                source_params=target.source_params,
-                template_id=target.template["id"],
-                is_dry_run=True,
-            ),
+            await _build_batch_in(target, collected, is_dry_run=True),
             admin=await _service_admin(),
         )
     except HTTPException as exc:
@@ -899,6 +957,17 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
     jobs = preview["jobs"]
     skipped = preview["skipped"]
     template_label = target.template.get("name") or target.template.get("slug") or ""
+
+    excluded_ids = collected.get("excluded_ids") or []
+    included_ids = collected.get("included_ids") or []
+    name_map = await _talent_names_by_id(list(excluded_ids) + list(included_ids))
+    excluded_names = [name_map.get(i, i) for i in excluded_ids]
+    included_names = [name_map.get(i, i) for i in included_ids]
+    edit_lines: List[str] = []
+    if excluded_names:
+        edit_lines += ["", "Excluded", ", ".join(excluded_names)]
+    if included_names:
+        edit_lines += ["", "Included", ", ".join(included_names)]
 
     if target.pipeline_stage_label:
         # An EXPLICIT single pipeline stage was resolved (not the "whole
@@ -920,6 +989,7 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
             "Recipients", f"{len(jobs)} talent{'s' if len(jobs) != 1 else ''}", "",
             "Destination", destination,
         ]
+        lines += edit_lines
         if skipped:
             lines += ["", f"⚠ {len(skipped)} skipped (no phone/group on file)"]
         if jobs:
@@ -942,6 +1012,7 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
         "DELIVERY",
         delivery,
     ]
+    lines += edit_lines
     if jobs:
         lines += ["", "Sample message", "", _truncate(jobs[0]["message_body"])]
     lines += ["", "Reply", "1 Approve", "2 Edit", "3 Cancel"]
@@ -969,12 +1040,7 @@ async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecR
 
     try:
         result = await create_batch(
-            BatchIn(
-                source_type=target.source_type,
-                source_params=target.source_params,
-                template_id=target.template["id"],
-                is_dry_run=False,
-            ),
+            await _build_batch_in(target, collected, is_dry_run=False),
             admin=await _service_admin(),
         )
     except HTTPException as exc:
@@ -996,6 +1062,252 @@ async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecR
     return ExecResult(ok=True, message=message, data={"batch_id": batch["id"], "queued": queued})
 
 
+# ---------------------------------------------------------------------------
+# Interactive Campaign Editing (2026-08-09) — Exclude/Include/Change
+# template/Preview/Summary, typed directly on top of an already-shown
+# confirmation card, BEFORE create_batch() is ever called with is_dry_run=
+# False. No new conversation engine (see agents/models.py's
+# handle_confirming_reply docstring) — everything here mutates the SAME
+# `collected` dict conversation.py already persists for the "confirming"
+# step; create_batch() itself is called only from _build_send_requirement_
+# confirmation (dry-run, for every card re-render) and
+# _send_requirement_executor (live, on "Send") — both already existed
+# before this sprint, neither is duplicated or bypassed.
+# ---------------------------------------------------------------------------
+@dataclass
+class _NamedRecipientResult:
+    job: Optional[dict] = None
+    error: Optional[str] = None
+    ambiguous: Optional[List["nlu.Candidate"]] = None
+
+
+async def _current_recipient_candidates(
+    collected: dict, *, apply_exclusions: bool = True,
+) -> "tuple[Optional[_SendTarget], List[dict]]":
+    """Re-resolves the pending campaign and runs a fresh dry-run preview —
+    the SAME call _build_send_requirement_confirmation itself always
+    makes (no duplicate resolution/rendering).
+
+    `apply_exclusions=True` (the default — Preview/Summary/card-rendering
+    callers) applies whatever excluded_ids are already recorded, so those
+    surfaces always reflect the CURRENT sendable state.
+
+    `apply_exclusions=False` (name-RESOLUTION callers — see
+    _resolve_named_recipient) deliberately does NOT filter — an already-
+    excluded talent must still be findable by name, or "Exclude X" could
+    never detect "already excluded", and "Include X" (which by definition
+    targets someone currently excluded) could never find her at all."""
+    target = await _resolve_send_target(collected)
+    if not target.ok:
+        return None, []
+    lookup_collected = collected if apply_exclusions else {k: v for k, v in collected.items() if k != "excluded_ids"}
+    try:
+        preview = await create_batch(
+            await _build_batch_in(target, lookup_collected, is_dry_run=True), admin=await _service_admin(),
+        )
+    except HTTPException:
+        return target, []
+    return target, preview["jobs"]
+
+
+async def _resolve_named_recipient(name_query: str, jobs: List[dict]) -> _NamedRecipientResult:
+    """Resolves free text against the CURRENT campaign's OWN recipient
+    pool only (never the global talent database) — reuses the exact same
+    selector parsing (nlu.parse_talent_selector/resolve_against_candidates)
+    and the safety gate added after the Ami/Kripa Trivedi incident
+    (_fuzzy_match_is_safe), so "Exclude Ahana" can never remove — or
+    "Include" reference — someone who isn't genuinely, safely identified
+    among today's actual recipients."""
+    candidates = [nlu.Candidate(id=j["recipient_id"], label=j["talent_name"]) for j in jobs]
+    selector = nlu.parse_talent_selector(name_query)
+    if not selector.ok or selector.everyone or selector.ordinals:
+        return _NamedRecipientResult(error=f'I couldn\'t find "{name_query}" among the current recipients.')
+    resolved = nlu.resolve_against_candidates(selector, candidates)
+    if resolved.ambiguous_candidates:
+        return _NamedRecipientResult(ambiguous=resolved.ambiguous_candidates)
+    if not resolved.ok or not resolved.talent_ids:
+        return _NamedRecipientResult(error=f'I couldn\'t find "{name_query}" among the current recipients.')
+    fragments = nlu.split_multi_names(name_query)
+    label = resolved.talent_labels[0]
+    if not any(_fuzzy_match_is_safe(frag, label) for frag in fragments):
+        return _NamedRecipientResult(
+            error=f'"{name_query}" doesn\'t look like a safe match for "{label}" — please use the exact name.'
+        )
+    job = next((j for j in jobs if j["recipient_id"] == resolved.talent_ids[0]), None)
+    if not job:
+        return _NamedRecipientResult(error=f'I couldn\'t find "{name_query}" among the current recipients.')
+    return _NamedRecipientResult(job=job)
+
+
+async def _apply_recipient_edit(name_query: str, collected: dict, ctx: ExecContext, *, exclude: bool) -> str:
+    target, jobs = await _current_recipient_candidates(collected, apply_exclusions=False)
+    if target is None:
+        return "I couldn't re-check the current campaign — please try again, or Cancel and start over."
+
+    names = nlu.split_multi_names(name_query)
+    excluded_ids = list(collected.get("excluded_ids") or [])
+    included_ids = list(collected.get("included_ids") or [])
+    action_label = "excluded" if exclude else "included"
+
+    for nm in names:
+        result = await _resolve_named_recipient(nm, jobs)
+        if result.ambiguous:
+            # Reuses the SAME shared disambiguation engine every other
+            # ambiguity on this platform goes through — never a separate
+            # clarification flow. field_key is a private marker (see
+            # _resume_pending_recipient_edit) rather than "recipient_query"
+            # itself: picking a candidate here must EXCLUDE/INCLUDE them,
+            # not replace the whole campaign's recipient.
+            await disambiguation.start(
+                agent_id=ctx.agent_id, phone=ctx.sender_phone, entity_type="talent",
+                candidates=[disambiguation.Candidate(id=c.id, label=c.label) for c in result.ambiguous],
+                intent_id=SEND_REQUIREMENT_INTENT.intent_id,
+                field_key="_pending_exclude_name" if exclude else "_pending_include_name",
+                collected=collected,
+            )
+            await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="disambiguating")
+            return disambiguation.format_prompt(
+                "talent", [disambiguation.Candidate(id=c.id, label=c.label) for c in result.ambiguous],
+            )
+        if result.error:
+            return result.error
+
+        rid = result.job["recipient_id"]
+        name = result.job["talent_name"]
+        if exclude:
+            if rid in excluded_ids:
+                return f"{name} is already excluded."
+            excluded_ids.append(rid)
+            if rid in included_ids:
+                included_ids.remove(rid)
+        else:
+            if rid not in excluded_ids:
+                return f"{name} hasn't been excluded — nothing to include."
+            excluded_ids.remove(rid)
+            if rid not in included_ids:
+                included_ids.append(rid)
+
+    new_collected = dict(collected)
+    new_collected["excluded_ids"] = excluded_ids
+    new_collected["included_ids"] = included_ids
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    return await _build_send_requirement_confirmation(new_collected, ctx)
+
+
+async def _apply_template_change(template_query: str, collected: dict, ctx: ExecContext) -> str:
+    tmpl_match = await _resolve_source(template_query)
+    if tmpl_match.template:
+        new_collected = dict(collected)
+        new_collected["source_query"] = (
+            tmpl_match.template.get("name") or tmpl_match.template.get("slug") or template_query
+        )
+        await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+        return await _build_send_requirement_confirmation(new_collected, ctx)
+    if tmpl_match.ambiguous:
+        candidates = [disambiguation.Candidate(id=c.get("id", c["label"]), label=c["label"]) for c in tmpl_match.ambiguous]
+        await disambiguation.start(
+            agent_id=ctx.agent_id, phone=ctx.sender_phone, entity_type="template",
+            candidates=candidates, intent_id=SEND_REQUIREMENT_INTENT.intent_id,
+            field_key="source_query", collected=collected,
+        )
+        await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="disambiguating")
+        return disambiguation.format_prompt("template", candidates)
+    return f'I couldn\'t find a template matching "{template_query}" — the current campaign is unchanged.'
+
+
+async def _render_preview(collected: dict) -> str:
+    target, jobs = await _current_recipient_candidates(collected)
+    if target is None:
+        return "I couldn't prepare a preview right now — please try again."
+    if not jobs:
+        return "No recipients to preview — everyone has been excluded."
+    j = jobs[0]
+    return f"Preview — exactly what {j['talent_name']} would receive:\n\n{j['message_body']}"
+
+
+async def _render_summary(collected: dict) -> str:
+    target, jobs = await _current_recipient_candidates(collected)
+    if target is None:
+        return "I couldn't prepare a summary right now — please try again."
+    template_label = (target.template.get("name") or target.template.get("slug") or "") if target.template else ""
+    excluded_ids = collected.get("excluded_ids") or []
+    included_ids = collected.get("included_ids") or []
+    name_map = await _talent_names_by_id(list(excluded_ids) + list(included_ids))
+    lines = ["Project", target.project_label or target.recipient_label or "", ""]
+    if target.pipeline_stage_label:
+        lines += ["Pipeline", target.pipeline_stage_label, ""]
+    lines += [
+        "Template", template_label, "",
+        "Recipient Count", str(len(jobs)), "",
+        "Excluded", ", ".join(name_map.get(i, i) for i in excluded_ids) or "(none)", "",
+        "Included", ", ".join(name_map.get(i, i) for i in included_ids) or "(none)",
+    ]
+    return "\n".join(lines)
+
+
+_LEADING_CONNECTOR_RE = re.compile(r"^\s*(?:also|and|then)\s+", re.IGNORECASE)
+_EXCLUDE_TRIGGERS = ["exclude", "remove", "skip", "leave out", "don't send to", "do not send to"]
+_INCLUDE_TRIGGERS = ["include", "restore", "undo"]
+# "Add <Name> back" — the name sits BETWEEN the trigger words, not after
+# them, so it can't use the simple prefix-strip _strip_leading_phrase every
+# other trigger list uses.
+_ADD_BACK_RE = re.compile(r"^\s*add\s+(.+?)\s+back\s*$", re.IGNORECASE)
+_CHANGE_TEMPLATE_RE = re.compile(
+    r"^\s*(?:change template to|switch template to|use)\s+(.+)$", re.IGNORECASE | re.DOTALL,
+)
+_PREVIEW_TRIGGERS = {"preview", "show preview", "preview message", "what will they receive"}
+_SUMMARY_TRIGGERS = {"summary", "show recipients", "who will receive this"}
+
+
+def _strip_leading_phrase(text: str, triggers: List[str]) -> Optional[str]:
+    """Same longest-match-first shape as _strip_leading_trigger, plus a
+    tolerant leading "also"/"and"/"then" strip for natural multi-turn
+    editing ("Also exclude Kripa")."""
+    t = _LEADING_CONNECTOR_RE.sub("", text or "").strip()
+    low = t.lower()
+    best: Optional[str] = None
+    for trig in triggers:
+        tl = trig.lower()
+        if low == tl or low.startswith(tl + " ") or low.startswith(tl + ":"):
+            if best is None or len(tl) > len(best):
+                best = tl
+    if best is None:
+        return None
+    return t[len(best):].strip(" :")
+
+
+async def _handle_campaign_confirming_edit(text: str, collected: dict, ctx: ExecContext) -> Optional[str]:
+    """The AgentDefinition.handle_confirming_reply hook — see its
+    docstring in agents/models.py. Returns None for anything that isn't
+    one of THIS agent's editing commands, letting dispatcher.py fall
+    through to the existing, untouched approve ("1")/edit ("2")/
+    cancel ("3") handling."""
+    norm = (text or "").strip()
+    low = norm.lower().rstrip("?.!")
+
+    if low in _PREVIEW_TRIGGERS:
+        return await _render_preview(collected)
+    if low in _SUMMARY_TRIGGERS:
+        return await _render_summary(collected)
+
+    excl_phrase = _strip_leading_phrase(norm, _EXCLUDE_TRIGGERS)
+    if excl_phrase:
+        return await _apply_recipient_edit(excl_phrase, collected, ctx, exclude=True)
+
+    incl_phrase = _strip_leading_phrase(norm, _INCLUDE_TRIGGERS)
+    if incl_phrase:
+        return await _apply_recipient_edit(incl_phrase, collected, ctx, exclude=False)
+    add_back_m = _ADD_BACK_RE.match(_LEADING_CONNECTOR_RE.sub("", norm))
+    if add_back_m:
+        return await _apply_recipient_edit(add_back_m.group(1).strip(), collected, ctx, exclude=False)
+
+    tmpl_m = _CHANGE_TEMPLATE_RE.match(norm)
+    if tmpl_m:
+        return await _apply_template_change(tmpl_m.group(1).strip(" .!?"), collected, ctx)
+
+    return None
+
+
 SEND_REQUIREMENT_INTENT = IntentDefinition(
     intent_id="whatsapp_campaign.send_requirement",
     triggers=SEND_TRIGGERS,
@@ -1003,6 +1315,7 @@ SEND_REQUIREMENT_INTENT = IntentDefinition(
     executor=_send_requirement_executor,
     extract_fields=extract_send_requirement_fields,
     build_confirmation=_build_send_requirement_confirmation,
+    handle_confirming_reply=_handle_campaign_confirming_edit,
     summary_title="You are about to send:",
 )
 

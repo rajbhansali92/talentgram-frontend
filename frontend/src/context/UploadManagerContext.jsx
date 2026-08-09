@@ -250,59 +250,23 @@ export function UploadManagerProvider({ children }) {
         let fileToUpload = file;
         let skipCompression = false;
         let compressedFile = null;
-        let preFetchedSig = null;
 
         if (file && isVideoSlot) {
-            // R2 Ingestion Check: Retrieve signature and determine if R2 is active
-            const chunkedVideoMatch = CHUNKED_VIDEO_ENDPOINT_RE.exec(dynamicEndpoint || "");
-            if (chunkedVideoMatch) {
-                const isApp = chunkedVideoMatch[1] === "apply";
-                const targetId = chunkedVideoMatch[2];
-                const signatureEndpoint = isApp
-                    ? `/public/apply/${targetId}/video-signature`
-                    : `/public/submissions/${targetId}/video-signature`;
-                try {
-                    const headers = dynamicToken ? { Authorization: `Bearer ${dynamicToken}` } : {};
-                    // Same never-dedupe requirement as the image /sign call
-                    // above — a fresh upload slot must be minted every call,
-                    // even when two attempts share an identical body (e.g.
-                    // two "intro_video" re-record attempts in a row, both
-                    // with public_id: null).
-                    const res = await api.post(
-                        signatureEndpoint,
-                        { category, label: label || null, content_type: file.type || null, public_id: null },
-                        { headers, key: `video-signature-${category}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` }
-                    );
-                    if (res.data && res.data.use_r2) {
-                        preFetchedSig = {
-                            use_r2: true,
-                            uploadUrl: res.data.upload_url,
-                            publicId: res.data.public_id,
-                        };
-                        skipCompression = true;
-                    }
-                } catch (err) {
-                    console.warn("[R2 PIPELINE WARNING] Signature pre-fetch failed:", err);
-                }
-            }
+            try {
+                const { getCompressionProfile, COMPRESS_THRESHOLD } = await import("../lib/videoCompress");
+                const { deviceType } = getCompressionProfile();
+                const isMobileOrTablet = deviceType === "MOBILE" || deviceType === "TABLET";
 
-            if (!skipCompression) {
-                try {
-                    const { getCompressionProfile, COMPRESS_THRESHOLD } = await import("../lib/videoCompress");
-                    const { deviceType } = getCompressionProfile();
-                    const isMobileOrTablet = deviceType === "MOBILE" || deviceType === "TABLET";
-                    
-                    if (file.size <= COMPRESS_THRESHOLD) {
-                        skipCompression = true;
-                    } else if (isMobileOrTablet && file.size > 300 * 1024 * 1024) {
-                        skipCompression = true;
-                        toast.info("Large video detected. Uploading directly.");
-                    } else if (!isMobileOrTablet && file.size > 700 * 1024 * 1024) {
-                        skipCompression = true;
-                    }
-                } catch (err) {
-                    console.error("Failed to check compression profile:", err);
+                if (file.size <= COMPRESS_THRESHOLD) {
+                    skipCompression = true;
+                } else if (isMobileOrTablet && file.size > 300 * 1024 * 1024) {
+                    skipCompression = true;
+                    toast.info("Large video detected. Uploading directly.");
+                } else if (!isMobileOrTablet && file.size > 700 * 1024 * 1024) {
+                    skipCompression = true;
                 }
+            } catch (err) {
+                console.error("Failed to check compression profile:", err);
             }
         }
 
@@ -466,7 +430,6 @@ export function UploadManagerProvider({ children }) {
                     label,
                     file: fileToUpload,
                     isApplication: isApp,
-                    preFetchedSig: preFetchedSig,
                     onProgress: (loaded, total) => {
                         const pct = total ? Math.round((loaded / total) * 100) : 0;
                         setActiveUploads((prev) => {
@@ -478,31 +441,6 @@ export function UploadManagerProvider({ children }) {
                                     status: pct >= 100 ? "processing" : "uploading",
                                     pct,
                                     statusText: pct >= 100 ? "Processing complete" : `Uploading video... (${pct}%)`
-                                },
-                            };
-                        });
-                    },
-                    // P0 upload-reliability fix: the R2 transport retries a
-                    // dropped/stalled PUT automatically, but a whole-file PUT
-                    // can't resume mid-byte — a retry genuinely restarts from
-                    // 0%. Say so honestly (never silently reset the bar back
-                    // to 0 under an unchanged "Uploading..." label, which
-                    // would read as the upload going backwards for no reason).
-                    onRetryStatus: ({ attempt, maxAttempts, reason }) => {
-                        const reasonText = reason === "stalled"
-                            ? "connection stalled"
-                            : reason === "upload_rejected"
-                                ? "upload link expired"
-                                : "network interruption";
-                        setActiveUploads((prev) => {
-                            if (!prev[slotKey]) return prev;
-                            return {
-                                ...prev,
-                                [slotKey]: {
-                                    ...prev[slotKey],
-                                    status: "retrying",
-                                    pct: 0,
-                                    statusText: `Upload restarted after a ${reasonText} — attempt ${attempt} of ${maxAttempts}…`,
                                 },
                             };
                         });

@@ -474,35 +474,22 @@ def test_submission_video_complete_ownership_failure_reproduction(mock_decode):
             assert response_complete.status_code == 200
 
 
-# ── R2 re-sign key stability ────────────────────────────────────────────────
-# A re-sign echoes back the `public_id` we returned, which for the R2 pipeline
-# IS the full object key. Re-deriving the key from it nested the whole key
-# inside a fresh prefix, so the refreshed presigned URL pointed at a DIFFERENT
-# object than the upload was targeting: the retried bytes landed on a bogus
-# key, /video-complete then attached metadata for an object that did not exist,
-# and the doubled key left an orphaned asset_metadata row behind.
-
-def _r2_presign_capture(captured):
-    def _fake(key, method="PUT", expiry=3600):
-        captured.append(key)
-        return f"https://r2.example/{key}?sig=x"
-    return _fake
-
-
-#
-# P0 fix (2026-08-09) — direct-to-R2 browser PUT requires the R2 bucket's CORS
-# allowlist to exactly match the calling origin, an out-of-repo config that
-# repeatedly drifted from apply./submit. in production ("R2 Upload Network
-# Error") and survived several targeted transport fixes because none of them
-# touched the actual CORS mismatch. app_video_signature/video_signature now
-# never mint a FRESH R2 key — only a resign continuing an upload that was
-# already targeting R2 (e.g. one in flight when this fix deployed) still
-# gets an R2 presigned URL, so it can finish instead of being orphaned. The
-# tests below simulate that "already on R2" state directly, since a fresh
-# call can no longer produce it.
+# ── R2 upload compatibility layer fully retired (2026-08-09) ────────────────
+# The temporary `resign_r2_key` branch (kept for in-flight sessions that
+# started on R2 before the CORS-fragility fix deployed) has been removed:
+# production evidence showed zero live sessions could still reach it — every
+# pending R2 asset_metadata row's presigned PUT URL had already expired
+# (default 60 min) with no new ones possible, and the two most-recent
+# candidates' parent application/submission documents no longer exist in
+# production (deleted), making the resign endpoint 404 before any R2 logic
+# could run. video-signature now ALWAYS returns the Cloudinary chunked path,
+# unconditionally — a resign with an R2-shaped public_id is rejected as
+# invalid, same as any other malformed id. R2 itself is untouched for
+# playback (presigned GET, Cloudflare Stream webhook, storage cleanup) —
+# only the upload-initiation path was removed.
 
 @patch("routers.submissions.decode_submitter")
-def test_submission_r2_resign_targets_the_same_key(mock_decode):
+def test_submission_video_signature_always_cloudinary_even_with_r2_flag_on(mock_decode):
     mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
     mock_db.submissions.find_one = AsyncMock(return_value={
         "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
@@ -510,56 +497,7 @@ def test_submission_r2_resign_targets_the_same_key(mock_decode):
     mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
     mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
 
-    keys = []
-    existing_r2_key = "raw-uploads/submissions/sid123/take/take_abcd1234.mp4"
-    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
-         patch("core.generate_r2_presigned_url", _r2_presign_capture(keys)):
-        resigned = client.post(
-            "/api/public/submissions/sid123/video-signature",
-            json={"category": "take", "label": None, "public_id": existing_r2_key},
-            headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
-
-    assert resigned == existing_r2_key
-    assert keys == [existing_r2_key]  # the URL actually signed, not just the echo
-
-
-@patch("routers.applications._check_app_token")
-def test_application_r2_resign_targets_the_same_key(mock_check):
-    mock_check.return_value = None
-    mock_db.applications.find_one = AsyncMock(return_value={"id": "aid123", "status": "draft"})
-    mock_db.applications.update_one = AsyncMock(return_value=None)
-    mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
-
-    keys = []
-    existing_r2_key = "raw-uploads/applications/aid123/intro_video/intro_video_abcd1234.mp4"
-    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
-         patch("core.generate_r2_presigned_url", _r2_presign_capture(keys)):
-        resigned = client.post(
-            "/api/public/apply/aid123/video-signature",
-            json={"category": "intro_video", "label": None, "public_id": existing_r2_key},
-            headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
-
-    assert resigned == existing_r2_key
-    assert keys == [existing_r2_key]
-
-
-# ── Fresh uploads never use R2 (P0 CORS-fragility fix) ──────────────────────
-# Even with the pipeline flag on, a FRESH (non-resign) signature call must
-# get the Cloudinary chunked path — see the module-level note above.
-
-@patch("routers.submissions.decode_submitter")
-def test_submission_intro_video_fresh_uploads_never_use_r2(mock_decode):
-    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
-    mock_db.submissions.find_one = AsyncMock(return_value={
-        "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
-    })
-    mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
-    mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
-
-    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
-         patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True):
         res = client.post(
             "/api/public/submissions/sid123/video-signature",
             json={"category": "intro_video", "label": None, "public_id": None},
@@ -572,14 +510,13 @@ def test_submission_intro_video_fresh_uploads_never_use_r2(mock_decode):
 
 
 @patch("routers.applications._check_app_token")
-def test_application_intro_video_fresh_uploads_never_use_r2(mock_check):
+def test_application_video_signature_always_cloudinary_even_with_r2_flag_on(mock_check):
     mock_check.return_value = None
     mock_db.applications.find_one = AsyncMock(return_value={"id": "aid123", "status": "draft"})
     mock_db.applications.update_one = AsyncMock(return_value=None)
     mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
 
-    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
-         patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True):
         res = client.post(
             "/api/public/apply/aid123/video-signature",
             json={"category": "intro_video", "label": None, "public_id": None},
@@ -592,23 +529,114 @@ def test_application_intro_video_fresh_uploads_never_use_r2(mock_check):
 
 
 @patch("routers.submissions.decode_submitter")
-def test_submission_intro_video_resign_still_targets_same_unique_key(mock_decode):
-    """The re-sign path (403 recovery) for an upload already on R2 must still
-    hit the SAME key the original signature minted."""
+def test_submission_resign_with_r2_shaped_public_id_is_rejected(mock_decode):
+    """A resign carrying an R2-shaped key (from a session that started
+    before the compatibility layer was removed) must now be rejected as an
+    invalid public_id, not silently signed for Cloudinary."""
     mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
     mock_db.submissions.find_one = AsyncMock(return_value={
         "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
     })
-    mock_db.asset_metadata.update_one = AsyncMock(return_value=None)
     mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
 
-    existing_r2_key = "raw-uploads/submissions/sid123/intro_video/intro_video_abcd1234.mp4"
-    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True), \
-         patch("core.generate_r2_presigned_url", _r2_presign_capture([])):
-        resigned = client.post(
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True):
+        res = client.post(
             "/api/public/submissions/sid123/video-signature",
-            json={"category": "intro_video", "label": None, "public_id": existing_r2_key},
+            json={"category": "intro_video", "label": None,
+                  "public_id": "raw-uploads/submissions/sid123/intro_video/intro_video_abcd1234.mp4"},
             headers={"Authorization": "Bearer dummy_token"},
-        ).json()["public_id"]
+        )
 
-    assert resigned == existing_r2_key
+    assert res.status_code == 400
+
+
+@patch("routers.applications._check_app_token")
+def test_application_resign_with_r2_shaped_public_id_is_rejected(mock_check):
+    mock_check.return_value = None
+    mock_db.applications.find_one = AsyncMock(return_value={"id": "aid123", "status": "draft"})
+
+    with patch("core.ENABLE_R2_MEDIA_PIPELINE", True):
+        res = client.post(
+            "/api/public/apply/aid123/video-signature",
+            json={"category": "intro_video", "label": None,
+                  "public_id": "raw-uploads/applications/aid123/intro_video/intro_video_abcd1234.mp4"},
+            headers={"Authorization": "Bearer dummy_token"},
+        )
+
+    assert res.status_code == 400
+
+
+# ── video-complete R2 branch: reject fabricated public_ids (API hardening) ──
+# video-signature can never mint a fresh R2 key anymore, but video-complete's
+# R2 branch had no check that the caller-supplied public_id was ever actually
+# issued — any valid submitter/applicant token (self-issued for free on the
+# apply flow) could POST a made-up raw-uploads/... id and still trigger a
+# real Cloudflare Stream transcode enqueue for an object that was never
+# uploaded. Hardened to require a matching pending/processing asset_metadata
+# row — the exact row a genuine video-signature call would have upserted.
+
+@patch("routers.submissions.decode_submitter")
+def test_submission_video_complete_r2_rejects_unknown_public_id(mock_decode):
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
+    })
+    mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
+    mock_db.asset_metadata.find_one = AsyncMock(return_value=None)  # never issued
+
+    res = client.post(
+        "/api/public/submissions/sid123/video-complete",
+        json={
+            "public_id": "raw-uploads/submissions/sid123/take/take_deadbeef.mp4",
+            "bytes": 12345,
+        },
+        headers={"Authorization": "Bearer dummy_token"},
+    )
+    assert res.status_code == 400
+
+
+@patch("routers.applications._check_app_token")
+def test_application_video_complete_r2_rejects_unknown_public_id(mock_check):
+    mock_check.return_value = None
+    mock_db.applications.find_one = AsyncMock(return_value={"id": "aid123", "status": "draft"})
+    mock_db.asset_metadata.find_one = AsyncMock(return_value=None)  # never issued
+
+    res = client.post(
+        "/api/public/apply/aid123/video-complete",
+        json={
+            "public_id": "raw-uploads/applications/aid123/intro_video/intro_video_deadbeef.mp4",
+            "bytes": 12345,
+        },
+        headers={"Authorization": "Bearer dummy_token"},
+    )
+    assert res.status_code == 400
+
+
+@patch("routers.submissions.decode_submitter")
+def test_submission_video_complete_r2_accepts_genuinely_issued_session(mock_decode):
+    """A pre-existing legitimate session (asset_metadata row a real
+    video-signature call upserted before the R2 write-path was removed)
+    must still be able to complete."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123", "project_id": "pid123", "talent_id": "tid1", "media": [],
+    })
+    mock_db.talents.find_one = AsyncMock(return_value={"id": "tid1", "name": "Test"})
+    mock_db.asset_metadata.find_one = AsyncMock(return_value={
+        "public_id": "raw-uploads/submissions/sid123/take/take_abcd1234.mp4",
+        "upload_status": "pending",
+    })
+    mock_db.asset_metadata.update_one = AsyncMock()
+
+    with patch("core.trigger_cloudinary_transcode", new=AsyncMock()), \
+         patch("core.generate_r2_presigned_url", return_value="https://r2.example/get?sig=x"):
+        res = client.post(
+            "/api/public/submissions/sid123/video-complete",
+            json={
+                "public_id": "raw-uploads/submissions/sid123/take/take_abcd1234.mp4",
+                "bytes": 12345,
+            },
+            headers={"Authorization": "Bearer dummy_token"},
+        )
+    assert res.status_code == 200
+    assert res.json()["ok"] is True

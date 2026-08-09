@@ -1553,27 +1553,14 @@ async def video_signature(
     folder = audition_submission_folder(tid, tname, sub.get("project_id"), sid)
 
     is_resign = bool(payload.public_id)
-    # A re-sign for the R2 pipeline carries the FULL object key (the client
-    # echoes back the `public_id` we returned, which is the key itself), not a
-    # leaf. Carry it through verbatim — re-deriving the key from it would nest
-    # the whole key inside a fresh prefix and sign a DIFFERENT object than the
-    # one the upload is already targeting.
-    resign_r2_key = None
     if is_resign:
         # Re-sign the SAME in-progress target. The public_id is a leaf
         # (e.g. "intro_video" or "take_abcd1234"); validate it matches
         # the expected format so a token can never sign arbitrary IDs.
         import re as _re
-        is_r2_key = payload.public_id.startswith("raw-uploads/")
-        if is_r2_key:
-            if not payload.public_id.startswith(f"raw-uploads/submissions/{sid}/"):
-                raise HTTPException(400, "Invalid public_id for this submission")
-            public_id = payload.public_id
-            resign_r2_key = payload.public_id
-        else:
-            if not _re.fullmatch(r"intro_video|take_[0-9a-f]{8}", payload.public_id):
-                raise HTTPException(400, "Invalid public_id for this submission")
-            public_id = payload.public_id
+        if not _re.fullmatch(r"intro_video|take_[0-9a-f]{8}", payload.public_id):
+            raise HTTPException(400, "Invalid public_id for this submission")
+        public_id = payload.public_id
     else:
         # First signature for a new upload: enforce the take limit (a re-sign is
         # a continuation of an existing in-flight upload, not a new take).
@@ -1585,56 +1572,6 @@ async def video_signature(
             if existing_takes >= MAX_SUBMISSION_TAKES:
                 raise HTTPException(400, f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another")
         public_id = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex[:8]}"
-
-    from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
-    # Direct-to-R2 browser PUT requires the R2 bucket's CORS allowlist to
-    # exactly match the calling origin — an out-of-repo config that has
-    # repeatedly drifted from apply./submit. in production ("R2 Upload
-    # Network Error"), surviving several targeted transport fixes (see
-    # directVideoUpload.js's retry/watchdog history) because none of them
-    # touch the actual CORS mismatch. New uploads always go through the
-    # Cloudinary chunked path below instead — the same one image uploads
-    # and the Global Talent Page's video uploads already use with no CORS
-    # dependency. `resign_r2_key` is only truthy when continuing an
-    # upload that already started on R2, so an in-flight session at
-    # deploy time can still finish rather than being orphaned.
-    if ENABLE_R2_MEDIA_PIPELINE and resign_r2_key:
-        # P2 fix: intro_video's R2 leaf must be unique per FRESH upload attempt
-        # (a re-sign still reuses resign_r2_key verbatim, unaffected). The old
-        # fixed leaf meant a re-record while Cloudflare Stream was still
-        # fetching the PREVIOUS object overwrote it mid-fetch, corrupting that
-        # ingest (ERR_FETCH_ORIGIN_ERROR / ERR_FETCH_BAD_USER_INPUT) and
-        # leaving its asset_metadata row's public_id key silently clobbered by
-        # the second upload's upsert. Scoped to the R2 leaf only — Cloudinary's
-        # public_id (used when ENABLE_R2_MEDIA_PIPELINE is off) is untouched,
-        # since Cloudinary's own overwrite:"true" replacement is a different,
-        # non-racy mechanism and giving it a unique id per attempt would leak
-        # Cloudinary storage instead of fixing anything.
-        r2_leaf = f"{public_id}_{uuid.uuid4().hex[:8]}" if (category == "intro_video" and not resign_r2_key) else public_id
-        r2_key = resign_r2_key or f"raw-uploads/submissions/{sid}/{category}/{r2_leaf}.mp4"
-        upload_url = generate_r2_presigned_url(r2_key, "PUT")
-        try:
-            await db.asset_metadata.update_one(
-                {"public_id": r2_key},
-                {"$set": {
-                    "public_id": r2_key, "submission_id": sid, "talent_id": tid,
-                    "project_id": sub.get("project_id"), "category": category,
-                    "asset_type": "intro_video" if category == "intro_video" else "audition_video",
-                    "resource_type": "video", "upload_status": "pending",
-                    "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
-                }},
-                upsert=True,
-            )
-        except Exception as e:
-            logger.warning(f"video-signature R2: pending asset_metadata write failed: {e}")
-        return {
-            "use_r2": True,
-            "upload_url": upload_url,
-            "public_id": r2_key,
-            "folder": folder,
-            "filename": f"{public_id}.mp4",
-            "max_duration_seconds": MAX_AUDITION_VIDEO_SECONDS,
-        }
 
     # Pinned, string-encoded transformation + eager poster (signed verbatim).
     eager = "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg"
@@ -1713,6 +1650,20 @@ async def video_complete(
     if is_r2:
         if not public_id.startswith(f"raw-uploads/submissions/{sid}/"):
             raise HTTPException(400, "Asset does not belong to this submission")
+
+        # Hardening: only accept a public_id that a genuine video-signature
+        # call actually issued (it upserts this exact asset_metadata row at
+        # signature time). Without this, any caller holding a valid
+        # submitter token for this sid could fabricate an R2-shaped
+        # public_id that was never signed or uploaded, registering a
+        # phantom "processing" media row and enqueueing a real Cloudflare
+        # Stream transcode job for an object that doesn't exist. New
+        # video-signature calls can never mint a fresh R2 key anymore
+        # (Cloudinary-only), so this can only ever match a session that was
+        # legitimately issued before that change.
+        existing_meta = await db.asset_metadata.find_one({"public_id": public_id})
+        if not existing_meta or existing_meta.get("upload_status") not in ("pending", "processing"):
+            raise HTTPException(400, "No matching upload session for this asset")
 
         parts = public_id.split("/")
         category = parts[3]
@@ -1818,61 +1769,6 @@ async def video_complete(
 
     media = await attach_video_media(sub, asset, category)
     return {"ok": True, "media": media}
-
-
-class VideoUploadEventIn(BaseModel):
-    public_id: str
-    stage: str
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
-    retry_count: int = 0
-    bytes_transferred: Optional[int] = None
-    upload_duration_ms: Optional[float] = None
-    # Diagnostic-only fields (P0 real-user-failure investigation): let a
-    # suspended/backgrounded tab be proven from telemetry instead of inferred
-    # from retry timing alone. Never used for any control-flow decision.
-    attempt_duration_ms: Optional[float] = None
-    ms_since_last_progress: Optional[float] = None
-    visibility_events: Optional[List[Dict[str, Any]]] = None
-    file_size: Optional[int] = None
-    file_type: Optional[str] = None
-    client: Optional[Dict[str, Any]] = None
-
-
-@router.post("/public/submissions/{sid}/video-upload-event")
-async def video_upload_event(
-    sid: str,
-    payload: VideoUploadEventIn,
-    authorization: Optional[str] = Header(None),
-):
-    """Best-effort upload telemetry beacon (P0 upload-reliability fix). Fired
-    by the frontend transport at each stage of an R2 upload attempt so a
-    stuck/orphaned asset_metadata row is diagnosable without live device
-    access. Never blocks or fails the upload itself — always 200s."""
-    from core import record_upload_telemetry
-    submitter = await decode_submitter(authorization)
-    if not submitter or submitter.get("sid") != sid:
-        return {"ok": False}
-    if not payload.public_id.startswith(f"raw-uploads/submissions/{sid}/"):
-        return {"ok": False}
-    await record_upload_telemetry(
-        payload.public_id,
-        payload.stage,
-        error_type=payload.error_type,
-        error_message=payload.error_message,
-        retry_count=payload.retry_count,
-        bytes_transferred=payload.bytes_transferred,
-        upload_duration_ms=payload.upload_duration_ms,
-        client_info=payload.client,
-        extra={
-            "attempt_duration_ms": payload.attempt_duration_ms,
-            "ms_since_last_progress": payload.ms_since_last_progress,
-            "visibility_events": payload.visibility_events,
-            "file_size": payload.file_size,
-            "file_type": payload.file_type,
-        },
-    )
-    return {"ok": True}
 
 
 async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_type: str, decision: Optional[str] = None):

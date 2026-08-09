@@ -978,24 +978,13 @@ async def app_video_signature(
 
     folder = f"{APP_NAME}/applications/{aid}"
     is_resign = bool(payload.public_id)
-    # An R2 re-sign carries the FULL object key (the client echoes back the
-    # `public_id` we returned, which is the key itself). Carry it through
-    # verbatim — re-deriving the key from it would nest the whole key inside a
-    # fresh prefix and sign a DIFFERENT object than the upload is targeting.
-    resign_r2_key = None
-
     if is_resign:
-        # Support R2 key structures on resign
-        is_r2_key = payload.public_id.startswith("raw-uploads/")
-        if is_r2_key:
-            if not payload.public_id.startswith(f"raw-uploads/applications/{aid}/"):
-                raise HTTPException(400, "Invalid public_id for this application")
-            public_id = payload.public_id
-            resign_r2_key = payload.public_id
-        else:
-            if payload.public_id != "intro_video":
-                raise HTTPException(400, "Invalid public_id for this application")
-            public_id = payload.public_id
+        # Re-sign the SAME in-progress target — a resign must never sign an
+        # arbitrary caller-supplied id, only the one fixed leaf this slot
+        # ever uses.
+        if payload.public_id != "intro_video":
+            raise HTTPException(400, "Invalid public_id for this application")
+        public_id = payload.public_id
     else:
         # NOTE: the previous intro_video is intentionally NOT removed here.
         # Removing it at signature time (before any byte of the replacement
@@ -1004,58 +993,6 @@ async def app_video_signature(
         # removes the old entry only once the new one is confirmed, mirroring
         # routers/submissions.py's attach_video_media single-slot pattern.
         public_id = "intro_video"
-
-    from core import ENABLE_R2_MEDIA_PIPELINE, generate_r2_presigned_url
-    # Direct-to-R2 browser PUT requires the R2 bucket's CORS allowlist to
-    # exactly match the calling origin — an out-of-repo config that has
-    # repeatedly drifted from apply./submit. in production ("R2 Upload
-    # Network Error"), surviving several targeted transport fixes (see
-    # directVideoUpload.js's retry/watchdog history) because none of them
-    # touch the actual CORS mismatch. New uploads always go through the
-    # Cloudinary chunked path below instead — the same one image uploads
-    # and the Global Talent Page's video uploads already use with no CORS
-    # dependency. `resign_r2_key` is only truthy when continuing an
-    # upload that already started on R2, so an in-flight session at
-    # deploy time can still finish rather than being orphaned.
-    if ENABLE_R2_MEDIA_PIPELINE and resign_r2_key:
-        # P2 fix: the R2 leaf must be unique per FRESH upload attempt (a
-        # re-sign still reuses resign_r2_key verbatim, unaffected). The old
-        # fixed leaf meant re-recording while Cloudflare Stream was still
-        # fetching the PREVIOUS object overwrote it mid-fetch, corrupting that
-        # ingest and silently clobbering its asset_metadata row via the second
-        # upload's upsert on the same key. Scoped to the R2 leaf only —
-        # Cloudinary's public_id (used when ENABLE_R2_MEDIA_PIPELINE is off)
-        # is untouched; its overwrite:"true" replacement is a different,
-        # non-racy mechanism, and a unique id there would leak Cloudinary
-        # storage instead of fixing anything.
-        r2_leaf = f"{public_id}_{uuid.uuid4().hex[:8]}" if not resign_r2_key else public_id
-        r2_key = resign_r2_key or f"raw-uploads/applications/{aid}/{category}/{r2_leaf}.mp4"
-        upload_url = generate_r2_presigned_url(r2_key, "PUT")
-        try:
-            await db.asset_metadata.update_one(
-                {"public_id": r2_key},
-                {"$set": {
-                    "public_id": r2_key,
-                    "application_id": aid,
-                    "category": category,
-                    "asset_type": "intro_video",
-                    "resource_type": "video",
-                    "upload_status": "pending",
-                    "created_at": datetime.now(timezone.utc),
-                    "updated_at": datetime.now(timezone.utc),
-                }},
-                upsert=True,
-            )
-        except Exception as e:
-            logger.warning(f"app-video-signature R2: pending asset_metadata write failed: {e}")
-        return {
-            "use_r2": True,
-            "upload_url": upload_url,
-            "public_id": r2_key,
-            "folder": folder,
-            "filename": f"{public_id}.mp4",
-            "max_duration_seconds": MAX_AUDITION_VIDEO_SECONDS,
-        }
 
     eager = "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg"
     tags = f"application_id={aid},category=intro_video,asset_kind=application_video"
@@ -1142,6 +1079,20 @@ async def app_video_complete(
     if is_r2:
         if not public_id.startswith(f"raw-uploads/applications/{aid}/"):
             raise HTTPException(400, "Asset does not belong to this application")
+
+        # Hardening: only accept a public_id that a genuine video-signature
+        # call actually issued (it upserts this exact asset_metadata row at
+        # signature time). Without this, any caller holding a valid
+        # applicant token for this aid could fabricate an R2-shaped
+        # public_id that was never signed or uploaded, registering a
+        # phantom "processing" media row and enqueueing a real Cloudflare
+        # Stream transcode job for an object that doesn't exist. New
+        # video-signature calls can never mint a fresh R2 key anymore
+        # (Cloudinary-only), so this can only ever match a session that was
+        # legitimately issued before that change.
+        existing_meta = await db.asset_metadata.find_one({"public_id": public_id})
+        if not existing_meta or existing_meta.get("upload_status") not in ("pending", "processing"):
+            raise HTTPException(400, "No matching upload session for this asset")
 
         parts = public_id.split("/")
         category = parts[3]
@@ -1249,61 +1200,6 @@ async def app_video_complete(
     await sync_media_to_global_talent(updated, media)
 
     return {"ok": True, "media": media}
-
-
-class AppVideoUploadEventIn(BaseModel):
-    public_id: str
-    stage: str
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
-    retry_count: int = 0
-    bytes_transferred: Optional[int] = None
-    upload_duration_ms: Optional[float] = None
-    # Diagnostic-only fields (P0 real-user-failure investigation) — see the
-    # matching model in routers/submissions.py for the full rationale.
-    attempt_duration_ms: Optional[float] = None
-    ms_since_last_progress: Optional[float] = None
-    visibility_events: Optional[List[Dict[str, Any]]] = None
-    file_size: Optional[int] = None
-    file_type: Optional[str] = None
-    client: Optional[Dict[str, Any]] = None
-
-
-@router.post("/public/apply/{aid}/video-upload-event")
-async def app_video_upload_event(
-    aid: str,
-    payload: AppVideoUploadEventIn,
-    authorization: Optional[str] = Header(None),
-):
-    """Best-effort upload telemetry beacon (P0 upload-reliability fix). See
-    submissions.video_upload_event for the rationale — same contract, mirrored
-    for the Talent Invite Link's application flow. Never blocks or fails the
-    upload itself — always 200s."""
-    from core import record_upload_telemetry
-    try:
-        await _check_app_token(authorization, aid)
-    except HTTPException:
-        return {"ok": False}
-    if not payload.public_id.startswith(f"raw-uploads/applications/{aid}/"):
-        return {"ok": False}
-    await record_upload_telemetry(
-        payload.public_id,
-        payload.stage,
-        error_type=payload.error_type,
-        error_message=payload.error_message,
-        retry_count=payload.retry_count,
-        bytes_transferred=payload.bytes_transferred,
-        upload_duration_ms=payload.upload_duration_ms,
-        client_info=payload.client,
-        extra={
-            "attempt_duration_ms": payload.attempt_duration_ms,
-            "ms_since_last_progress": payload.ms_since_last_progress,
-            "visibility_events": payload.visibility_events,
-            "file_size": payload.file_size,
-            "file_type": payload.file_type,
-        },
-    )
-    return {"ok": True}
 
 
 @router.delete("/public/apply/{aid}/media/{mid}")

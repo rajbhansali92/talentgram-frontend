@@ -177,6 +177,79 @@ def _remove_phrase(text: str, words: List[str]) -> str:
     return text[:m.start()] + " " + text[m.end():]
 
 
+# ---------------------------------------------------------------------------
+# Query-only "selected" support (UX polish, 2026-08-09). "Selected"/"select"/
+# "selection" has no single, unambiguous meaning in this vocabulary —
+# "Approved" and "Locked" are both plausible "chosen for the role" readings,
+# and the sibling WhatsApp campaign agent's own stage matcher deliberately
+# refuses to resolve "Selected" to any one stage for exactly this reason
+# (see whatsapp_campaign_agent.py's _resolve_pipeline_stage). Rather than
+# guess, this is wired through the SAME "ambiguous" shape a genuine fuzzy
+# near-tie already produces (StageMatch.ambiguous / extract_stage_phrase's
+# second return value) — so it flows through the one existing stage-
+# ambiguous clarification path with zero new UI/plumbing.
+#
+# Deliberately NOT added to _STAGE_SHORTHAND/build_stage_registry: that
+# registry is shared by casting.move's own stage resolution
+# (extract_move_fields's tier-3 fallback, _validate_target_stage) — mixing
+# an intentionally-ambiguous entry into it would change what "Mark Sarah
+# Selected" does in a MOVE command, which this polish sprint must not touch.
+# These wrappers are consulted ONLY from classify_query and this module's
+# talent-query detection (i.e. only by casting.query) — extract_stage_phrase
+# and match_stage_phrase themselves are completely unmodified, so
+# extract_move_fields/_validate_target_stage behave byte-for-byte as before.
+_QUERY_AMBIGUOUS_STAGE_WORDS: Dict[str, Tuple[str, ...]] = {
+    "selected": ("approved", "locked"),
+    "select": ("approved", "locked"),
+    "selection": ("approved", "locked"),
+}
+_QUERY_AMBIGUOUS_STAGE_RE = re.compile(
+    r"\b(?:" + "|".join(_QUERY_AMBIGUOUS_STAGE_WORDS.keys()) + r")\b", re.IGNORECASE
+)
+
+
+def _query_ambiguous_stage_lookup(word: str, stage_order: List[str]) -> Optional[StageMatch]:
+    targets = _QUERY_AMBIGUOUS_STAGE_WORDS.get((word or "").strip().lower())
+    if not targets:
+        return None
+    live = [t for t in targets if t in stage_order]
+    if len(live) > 1:
+        return StageMatch(ambiguous=[stage_label(t) for t in live])
+    if len(live) == 1:
+        return StageMatch(key=live[0])
+    return None  # neither candidate stage is live anymore — fall through as usual
+
+
+def match_stage_phrase_for_query(phrase: str, stage_order: List[str]) -> StageMatch:
+    """Query-only counterpart of match_stage_phrase — tries the small
+    deliberately-ambiguous word set above FIRST (an exact, case-insensitive
+    whole-phrase check, not fuzzy matching — "selected" doesn't score high
+    enough against any real stage to reach match_stage_phrase's own fuzzy
+    tier anyway), then delegates to the real, unmodified match_stage_phrase
+    for everything else."""
+    hit = _query_ambiguous_stage_lookup(phrase, stage_order)
+    if hit is not None:
+        return hit
+    return match_stage_phrase(phrase, stage_order)
+
+
+def extract_stage_phrase_for_query(
+    text: str, stage_order: List[str]
+) -> "tuple[Optional[str], Optional[List[str]], str]":
+    """Query-only counterpart of extract_stage_phrase — scans for the
+    ambiguous word set as a whole word anywhere in the text first (cheap
+    regex, no difflib involved), then delegates to the real, unmodified
+    extract_stage_phrase for everything else, including every stage this
+    system already understands unambiguously."""
+    m = _QUERY_AMBIGUOUS_STAGE_RE.search(text or "")
+    if m:
+        hit = _query_ambiguous_stage_lookup(m.group(0), stage_order)
+        if hit is not None:
+            remaining = text[:m.start()] + " " + text[m.end():]
+            return hit.key, hit.ambiguous, remaining
+    return extract_stage_phrase(text, stage_order)
+
+
 # Verbs that unambiguously imply their own target stage (only applied when
 # the implied stage is actually live). Move/Mark/Shift/Transfer/Select/
 # Restore are deliberately excluded — those always require an explicit
@@ -1301,7 +1374,7 @@ def _extract_talent_stage_query(stripped: str, stage_order: List[str]) -> Option
     m = _STAGE_PENDING_FOR_TALENT_RE.match(stripped)
     if m:
         stage_phrase, name = m.group(1), m.group(2)
-        stage_match = match_stage_phrase(stage_phrase, stage_order)
+        stage_match = match_stage_phrase_for_query(stage_phrase, stage_order)
         name = _clean_talent_leftover(name)
         if name and (stage_match.key or stage_match.ambiguous):
             return QueryIntent(
@@ -1316,7 +1389,7 @@ def _extract_talent_stage_query(stripped: str, stage_order: List[str]) -> Option
         name = _clean_talent_leftover(m.group(1))
         if not name:
             continue
-        stage_key, ambiguous, _rest = extract_stage_phrase(stripped, stage_order)
+        stage_key, ambiguous, _rest = extract_stage_phrase_for_query(stripped, stage_order)
         if stage_key or ambiguous:
             return QueryIntent(
                 kind="talent_stage_query", talent_query=name,
@@ -1334,7 +1407,7 @@ def _extract_talent_stage_query(stripped: str, stage_order: List[str]) -> Option
             if candidate:
                 project_name_query = candidate
                 rest = rest[:pm.start()].strip()
-        stage_key, ambiguous, rest_after_stage = extract_stage_phrase(rest, stage_order)
+        stage_key, ambiguous, rest_after_stage = extract_stage_phrase_for_query(rest, stage_order)
         name = _clean_talent_leftover(rest_after_stage)
         if name and (stage_key or ambiguous or project_name_query):
             return QueryIntent(
@@ -1377,6 +1450,46 @@ def _extract_positional_project(rest: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Verb-less pipeline queries (UX polish, 2026-08-09) — "Toyota Follow Up",
+# "Toyota Selected", with no leading "Show"/trigger word at all. Every
+# intent on this platform requires the message to START WITH a recognized
+# trigger (agents/parser.detect_trigger) — this can never change that
+# (out of scope, shared by every agent) — but casting-agent's own
+# `resolve_bare_reply` hook (see casting_pipeline.py) already gets one
+# last look at a message that matched no trigger and has no active
+# conversation, and can claim it. This function is the PURE, DB-free half
+# of that decision: does the message even LOOK like a "<Project> <Stage>"
+# reference at all? It reuses extract_stage_phrase_for_query (which
+# already covers "Selected" per the section above, plus everything
+# extract_stage_phrase itself understands) and the exact same
+# _extract_positional_project heuristic classify_query's own "pipeline"
+# kind already relies on — no new stage/project matching logic.
+# resolve_bare_reply then does the other, DB-aware half itself (verifying
+# the candidate against the REAL live project list via
+# resolve_project_by_name, the one shared project matcher) before
+# claiming the message — this function alone is deliberately not enough
+# to claim it, since without that verification step, ordinary group
+# chatter that happens to contain a real stage word ("put him on hold for
+# now") would otherwise get silently intercepted.
+# ---------------------------------------------------------------------------
+def extract_bare_pipeline_candidate(
+    text: str, stage_order: List[str]
+) -> Optional["Tuple[Optional[str], Optional[List[str]], str]"]:
+    """Returns (stage_key, stage_ambiguous, project_name_candidate) when the
+    text looks like a verb-less "<Project> <Stage>" reference, else None."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    stage_key, ambiguous, rest = extract_stage_phrase_for_query(stripped, stage_order)
+    if not (stage_key or ambiguous):
+        return None
+    project = _extract_positional_project(rest)
+    if not project:
+        return None
+    return stage_key, ambiguous, project
+
+
 def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
     stripped = (text or "").strip()
     if _REPLAY_RE.match(stripped):
@@ -1392,7 +1505,7 @@ def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
         project_ref = int(m.group(1))
         text = text[:m.start()] + " " + text[m.end():]
 
-    stage_key, ambiguous, rest = extract_stage_phrase(text, stage_order)
+    stage_key, ambiguous, rest = extract_stage_phrase_for_query(text, stage_order)
 
     project_name_query = None
     name_m = _FOR_PROJECT_RE.search(rest)

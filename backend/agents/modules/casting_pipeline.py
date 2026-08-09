@@ -2285,15 +2285,40 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
     exactly like "Project 14" would, without making the user repeat the
     word. Scoped to projects only (talent-list numbers already work today
     via an explicit "Move N ..." command, which has its own richer
-    selector grammar this isn't trying to replace)."""
+    selector grammar this isn't trying to replace).
+
+    Also handles verb-less pipeline queries (UX polish, 2026-08-09) —
+    "Toyota Follow Up", "Toyota Selected" with no leading "Show"/trigger
+    word at all. nlu.extract_bare_pipeline_candidate does the pure,
+    DB-free half of recognizing the "<Project> <Stage>" shape; here we do
+    the DB-aware half — verifying the candidate text actually resolves to
+    a REAL ongoing project via the one shared project matcher
+    (resolve_project_by_name) before claiming the message. That
+    verification is the whole safety net: without it, ordinary group
+    chatter that happens to contain a real stage word ("put him on hold
+    for now") would otherwise get silently intercepted as a pipeline
+    query. Only claims the message when a real project resolves (uniquely
+    or ambiguously) — an unresolvable candidate is left alone, falling
+    through to "unrelated chatter, ignore", exactly as before this
+    existed."""
     stripped = (text or "").strip()
-    if not stripped.isdigit():
+    if stripped.isdigit():
+        session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+        number_map = (session or {}).get("number_map") or {}
+        if number_map.get("type") != "projects":
+            return None
+        return QUERY_INTENT, {"query_text": f"Project {stripped}"}
+
+    candidate = nlu.extract_bare_pipeline_candidate(stripped, list(PIPELINE_STAGE_ORDER))
+    if candidate is None:
         return None
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
-    number_map = (session or {}).get("number_map") or {}
-    if number_map.get("type") != "projects":
+    _stage_key, _ambiguous, project_text = candidate
+    projects = await _fetch_ongoing_projects()
+    with request_scope.stage("fuzzy"):
+        match = nlu.resolve_project_by_name(project_text, projects)
+    if not (match.project or match.ambiguous):
         return None
-    return QUERY_INTENT, {"query_text": f"Project {stripped}"}
+    return QUERY_INTENT, {"query_text": stripped}
 
 
 CASTING_AGENT = AgentDefinition(

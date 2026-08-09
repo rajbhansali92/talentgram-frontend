@@ -1521,6 +1521,10 @@ async def _apply_recipient_edit_by_ordinal(
 
 
 async def _apply_recipient_edit(name_query: str, collected: dict, ctx: ExecContext, *, exclude: bool) -> str:
+    logger.info(
+        "recipient_edit_handler_called phone=%s exclude=%s name_query=%r",
+        ctx.sender_phone, exclude, name_query,
+    )
     target, jobs = await _current_recipient_candidates(collected, apply_exclusions=False)
     if target is None:
         return "I couldn't re-check the current campaign — please try again, or Cancel and start over."
@@ -1529,6 +1533,10 @@ async def _apply_recipient_edit(name_query: str, collected: dict, ctx: ExecConte
     if _NUMERIC_LIST_RE.match(stripped_query):
         selector = nlu.parse_talent_selector(_normalize_numeric_list_text(stripped_query))
         if selector.ok and selector.ordinals:
+            logger.info(
+                "recipient_edit_handler_called phone=%s path=numeric ordinals=%s",
+                ctx.sender_phone, selector.ordinals,
+            )
             return await _apply_recipient_edit_by_ordinal(
                 selector.ordinals, _stable_sorted_jobs(jobs), collected, ctx, exclude=exclude,
             )
@@ -1684,46 +1692,104 @@ def _strip_leading_phrase(text: str, triggers: List[str]) -> Optional[str]:
     return t[len(best):].strip(" :")
 
 
+# (2026-08-09, production routing bug fix) Every confirmation card this
+# agent renders ends with "Reply / 1 Approve / 2 Edit / 3 Cancel" — its
+# OWN stated instructions. But a bare "2"/"edit"/"change" is exactly what
+# agents/parser.py's generic parse_confirmation_reply treats as the
+# generic "edit" action (_CONFIRM_EDIT), which dispatcher.py resolves by
+# moving the conversation to step="editing" — the platform's generic
+# "Key = Value" field editor (agents/parser.parse_edit_instructions),
+# which has zero knowledge of "Exclude 5"/"Remove 6,11"/pagination/etc.
+# Once there, THIS hook (handle_confirming_reply) is never consulted
+# again for the rest of the conversation — dispatcher.py only calls it
+# while step=="confirming" — so a user who follows the card's own
+# instructions gets permanently locked out of every recipient-editing
+# command, stuck seeing "Tell me what to change. Example: Role = Casting
+# Director" no matter what they type next. Confirmed via a full
+# production-conversation repro (ambiguous template -> disambiguation ->
+# confirmation card -> bare "2") and dispatcher.py's own new
+# confirming_reply_fallthrough_to_generic_parser trace log.
+#
+# Fix: intercept the SAME bare "2"/"edit"/"change" set here, BEFORE it
+# ever reaches parse_confirmation_reply, and redirect with a concrete
+# example instead of letting dispatcher.py change the step out from under
+# this hook. The conversation stays in "confirming" (this hook returning
+# non-None never changes the step), so every command below keeps working
+# on the very next reply. Approve ("1"/"approve"/"yes"/...) and Cancel
+# ("3"/"cancel"/...) are deliberately NOT intercepted — those still fall
+# through to the existing, unmodified generic handling exactly as before.
+_BARE_EDIT_TOKENS = {"2", "edit", "change"}
+_EDIT_REDIRECT_MESSAGE = (
+    'To change something, just tell me directly — for example '
+    '"Exclude 5", "Exclude Kripa", "Include 7", "Change template to Reminder", '
+    'or "Preview". Reply 1 to Approve or 3 to Cancel.'
+)
+
+
 async def _handle_campaign_confirming_edit(text: str, collected: dict, ctx: ExecContext) -> Optional[str]:
     """The AgentDefinition.handle_confirming_reply hook — see its
     docstring in agents/models.py. Returns None for anything that isn't
     one of THIS agent's editing commands, letting dispatcher.py fall
-    through to the existing, untouched approve ("1")/edit ("2")/
-    cancel ("3") handling."""
+    through to the existing, untouched approve ("1")/cancel ("3")
+    handling (bare "2"/"edit"/"change" is handled directly below instead
+    — see _BARE_EDIT_TOKENS' docstring)."""
     norm = (text or "").strip()
     low = norm.lower().rstrip("?.!")
 
+    logger.info(
+        "campaign_confirming_edit_entered phone=%s text=%r", ctx.sender_phone, text,
+    )
+
+    if low in _BARE_EDIT_TOKENS:
+        logger.info(
+            "campaign_confirming_edit_detected phone=%s command=bare_edit_redirect", ctx.sender_phone,
+        )
+        return _EDIT_REDIRECT_MESSAGE
+
     if low in _PREVIEW_TRIGGERS:
+        logger.info("campaign_confirming_edit_detected phone=%s command=preview", ctx.sender_phone)
         return await _render_preview(collected)
     if low in _SUMMARY_TRIGGERS:
+        logger.info("campaign_confirming_edit_detected phone=%s command=summary", ctx.sender_phone)
         return await _render_summary(collected)
 
     if low in _NEXT_PAGE_TRIGGERS:
+        logger.info("campaign_confirming_edit_detected phone=%s command=next_page", ctx.sender_phone)
         return await _change_recipient_page(collected, ctx, delta=1)
     if low in _PREV_PAGE_TRIGGERS:
+        logger.info("campaign_confirming_edit_detected phone=%s command=prev_page", ctx.sender_phone)
         return await _change_recipient_page(collected, ctx, delta=-1)
     page_m = _PAGE_N_RE.match(low)
     if page_m:
+        logger.info("campaign_confirming_edit_detected phone=%s command=page_n page=%s", ctx.sender_phone, page_m.group(1))
         return await _set_recipient_page(collected, ctx, page=int(page_m.group(1)))
     if low in _SHOW_ALL_TRIGGERS:
+        logger.info("campaign_confirming_edit_detected phone=%s command=show_all", ctx.sender_phone)
         return await _set_recipient_page(collected, ctx, page=1, show_all=True)
     if low in _SHOW_REMAINING_TRIGGERS:
+        logger.info("campaign_confirming_edit_detected phone=%s command=show_remaining", ctx.sender_phone)
         return await _set_recipient_page(collected, ctx, page=int(collected.get("recipient_page") or "1"), show_remaining=True)
 
     excl_phrase = _strip_leading_phrase(norm, _EXCLUDE_TRIGGERS)
     if excl_phrase:
+        logger.info("campaign_confirming_edit_detected phone=%s command=exclude phrase=%r", ctx.sender_phone, excl_phrase)
         return await _apply_recipient_edit(excl_phrase, collected, ctx, exclude=True)
 
     incl_phrase = _strip_leading_phrase(norm, _INCLUDE_TRIGGERS)
     if incl_phrase:
+        logger.info("campaign_confirming_edit_detected phone=%s command=include phrase=%r", ctx.sender_phone, incl_phrase)
         return await _apply_recipient_edit(incl_phrase, collected, ctx, exclude=False)
     add_back_m = _ADD_BACK_RE.match(_LEADING_CONNECTOR_RE.sub("", norm))
     if add_back_m:
+        logger.info("campaign_confirming_edit_detected phone=%s command=add_back phrase=%r", ctx.sender_phone, add_back_m.group(1))
         return await _apply_recipient_edit(add_back_m.group(1).strip(), collected, ctx, exclude=False)
 
     tmpl_m = _CHANGE_TEMPLATE_RE.match(norm)
     if tmpl_m:
+        logger.info("campaign_confirming_edit_detected phone=%s command=change_template", ctx.sender_phone)
         return await _apply_template_change(tmpl_m.group(1).strip(" .!?"), collected, ctx)
+
+    logger.info("campaign_confirming_edit_detected phone=%s command=none (falling through)", ctx.sender_phone)
 
     return None
 

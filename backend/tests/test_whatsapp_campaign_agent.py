@@ -2815,3 +2815,90 @@ async def test_numbered_and_name_based_editing_both_work_on_same_campaign():
         )
     finally:
         await _teardown_big_editing_campaign(ctx)
+
+# ---------------------------------------------------------------------------
+# Production bug fix (2026-08-09) — "2 Edit" trap. Every confirmation card
+# ends with "Reply / 1 Approve / 2 Edit / 3 Cancel", its OWN documented
+# instructions. Before this fix, a bare "2" (or "edit"/"change") fell
+# through to agents/parser.py's generic parse_confirmation_reply, which
+# moved the conversation to step="editing" — the platform's generic
+# "Key = Value" field editor, with zero knowledge of Exclude/Include/
+# pagination — permanently locking the user out of every campaign-
+# specific editing command for the rest of that conversation (dispatcher.py
+# only ever calls handle_confirming_reply while step=="confirming").
+# Confirmed via a full production-conversation repro before the fix, then
+# reverified working after it (see _handle_campaign_confirming_edit's
+# _BARE_EDIT_TOKENS interception).
+# ---------------------------------------------------------------------------
+async def test_bare_edit_reply_no_longer_traps_recipient_editing():
+    """The exact regression: confirmation card -> bare "2" -> numbered
+    exclude must still reach the recipient editor afterward, not the
+    generic "Tell me what to change" dead end."""
+    ctx = await _setup_big_editing_campaign(6)
+    try:
+        assert ctx["reply"].handled
+
+        r1 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r1.handled
+        assert "Tell me what to change" not in r1.reply
+        assert "Exclude" in r1.reply
+
+        r2 = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "I couldn't understand that" not in r2.reply
+        assert "Recipients (5)" in r2.reply
+
+        await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _teardown_big_editing_campaign(ctx)
+
+
+async def test_bare_edit_word_synonyms_also_redirect():
+    """"edit" and "change" (agents/parser._CONFIRM_EDIT's other two
+    synonyms) must be intercepted the same way as bare "2"."""
+    for word in ("edit", "change"):
+        ctx = await _setup_big_editing_campaign(4)
+        try:
+            r = await handle_inbound_message(
+                group_name=ctx["group"], sender_phone=ctx["phone"], text=word,
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled, word
+            assert "Tell me what to change" not in r.reply, word
+
+            r2 = await handle_inbound_message(
+                group_name=ctx["group"], sender_phone=ctx["phone"], text="Exclude 1",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "Recipients (3)" in r2.reply, word
+
+            await handle_inbound_message(
+                group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+        finally:
+            await _teardown_big_editing_campaign(ctx)
+
+
+async def test_approve_and_cancel_unaffected_by_bare_edit_fix():
+    """Approve ("1") and Cancel ("3") must keep working normally on a
+    fresh confirmation card — the fix only intercepts the edit set."""
+    ctx = await _setup_big_editing_campaign(2)
+    try:
+        r = await handle_inbound_message(
+            group_name=ctx["group"], sender_phone=ctx["phone"], text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Cancelled" in r.reply
+    finally:
+        await _teardown_big_editing_campaign(ctx)

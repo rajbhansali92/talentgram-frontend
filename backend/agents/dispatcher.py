@@ -810,6 +810,17 @@ async def handle_inbound_message(
             await conversation.clear_conversation(agent.agent_id, phone)
             return DispatchResult(handled=False)
 
+        # Routing trace (2026-08-09, campaign-agent recipient-editing
+        # production bug) — cheap, always-on breadcrumbs for exactly the
+        # question "which confirmation handler did this turn enter, and
+        # was the agent's own rich edit hook ever tried before falling
+        # back to the generic editor". Generic (every agent's confirming-
+        # step turn logs this, not just the campaign agent's).
+        logger.info(
+            "confirming_step_trace agent=%s phone=%s intent=%s step=%r has_confirming_reply_hook=%s",
+            agent.agent_id, phone, intent.intent_id, conv["step"], bool(intent.handle_confirming_reply),
+        )
+
         if conv["step"] == "confirming":
             if intent.handle_confirming_reply:
                 edit_ctx = ExecContext(
@@ -819,6 +830,10 @@ async def handle_inbound_message(
                 intercepted = await intent.handle_confirming_reply(
                     working_message, conv.get("collected") or {}, edit_ctx
                 )
+                logger.info(
+                    "confirming_reply_hook_result agent=%s phone=%s intercepted=%s",
+                    agent.agent_id, phone, intercepted is not None,
+                )
                 if intercepted is not None:
                     await audit.log_turn(
                         agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
@@ -826,6 +841,17 @@ async def handle_inbound_message(
                         parsed_intent=intent.intent_id, confirmation_action="campaign_edit",
                     )
                     return DispatchResult(handled=True, reply=intercepted)
+                # Hook declined (returned None) -- falling through to the
+                # generic approve/edit/cancel parser below. If THIS turn's
+                # text was meant as a recipient-edit command, this is the
+                # exact point it got bypassed (see the module docstring's
+                # "2 Edit" trap, and _handle_campaign_confirming_edit's own
+                # interception of bare "2"/"edit"/"change" that prevents
+                # ever reaching this fallthrough for that specific case).
+                logger.info(
+                    "confirming_reply_fallthrough_to_generic_parser agent=%s phone=%s text=%r",
+                    agent.agent_id, phone, working_message,
+                )
 
             action = parse_confirmation_reply(working_message)
             if action == "approve":

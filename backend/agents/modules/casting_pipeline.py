@@ -451,6 +451,7 @@ async def _handle_list_projects(ctx: ExecContext, classification: nlu.QueryInten
         current_project_id=None, current_project_label=None, current_stage=None,
         number_map={"type": "projects", "items": items},
         talent_search=None,
+        selection_basket=None,
     )
     with request_scope.stage("response_formatting"):
         lines = [f'{it["ordinal"]}. {it["label"]}' for it in items]
@@ -515,6 +516,7 @@ async def _handle_project_detail(
         current_stage=None,
         number_map={"type": None, "items": []},
         talent_search=None,
+        selection_basket=None,
     )
     return ExecResult(ok=True, message=rendered)
 
@@ -598,6 +600,7 @@ async def _handle_pipeline_query(
             current_project_id=project["id"], current_project_label=project["label"],
             current_stage=stage,
             talent_search=None,
+            selection_basket=None,
         )
         return ExecResult(
             ok=True,
@@ -620,6 +623,7 @@ async def _handle_pipeline_query(
         current_stage=stage,
         number_map={"type": "talents", "items": items},
         talent_search=None,
+        selection_basket=None,
     )
     return ExecResult(ok=True, message=rendered)
 
@@ -1232,6 +1236,113 @@ async def _handle_talent_search_pending_resume(ctx: ExecContext, session: Option
     return await _run_talent_search(ctx, filters)
 
 
+# ---------------------------------------------------------------------------
+# Talent Selection & Add to Project (Phase 2, 2026-08-10) — "Select
+# 1,3,5"/"Remove 2"/"Clear selection"/"Show selected" against the CURRENT
+# talent-search number_map, and "Add/Attach selected to <project>" reusing
+# casting.add's existing project-resolution/confirmation machinery
+# unchanged (see _resolve_add_selection below). Session-only until an add
+# actually runs — nothing here writes to db.casting_pipeline.
+# ---------------------------------------------------------------------------
+def _render_selection_status(count: int) -> str:
+    return (
+        f"Selected: {count} talent{'' if count == 1 else 's'}\n\n"
+        "Available commands:\n\n"
+        "• Show selected\n"
+        "• Add selected to a project\n"
+        "• Remove 3\n"
+        "• Clear selection"
+    )
+
+
+def _render_selection_action_result(verb: str, affected_labels: List[str], count: int) -> str:
+    """UX polish (2026-08-10): shows only the talents affected by THIS
+    action (never the whole basket — that's what "Show selected" is for),
+    then the same compact status block. affected_labels is empty when the
+    action was a no-op (e.g. "Select 1" for an already-selected talent) —
+    in that case the checkmark block is skipped entirely rather than
+    printing an empty one."""
+    lines = []
+    if affected_labels:
+        lines.append(f"✓ {verb}")
+        lines.append("")
+        lines.extend(f"• {name}" for name in affected_labels)
+        lines.append("")
+    lines.append(_render_selection_status(count))
+    return "\n".join(lines)
+
+
+def _render_selection_basket(session: Optional[dict]) -> ExecResult:
+    items = ((session or {}).get("selection_basket") or {}).get("items") or []
+    if not items:
+        return ExecResult(
+            ok=True,
+            message="No talents are currently selected.\n\nSearch and select talents first.",
+        )
+    lines = [f"Currently selected ({len(items)})", ""]
+    lines += [f'{i}. {it["label"]}' for i, it in enumerate(items, start=1)]
+    return ExecResult(ok=True, message="\n".join(lines))
+
+
+async def _handle_selection_command(
+    ctx: ExecContext, session: Optional[dict], action: str, spec: Optional[str]
+) -> ExecResult:
+    if action == "clear":
+        await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
+        return ExecResult(ok=True, message="Selection cleared.")
+
+    number_map = (session or {}).get("number_map") or {}
+    if number_map.get("type") != "talent_search":
+        return ExecResult(
+            ok=False, error="no_active_search",
+            message='No active talent search. Try "Show female models from Mumbai" first.',
+        )
+
+    items_by_ordinal = {it["ordinal"]: it for it in number_map.get("items") or []}
+    ordinals, err = nlu.resolve_selection_spec(spec or "", list(items_by_ordinal.keys()))
+    if err:
+        return ExecResult(ok=False, error="invalid_selection", message=err)
+
+    basket_items = list(((session or {}).get("selection_basket") or {}).get("items") or [])
+    ids_in_basket = {it["id"] for it in basket_items}
+    affected_labels: List[str] = []
+
+    if action == "select":
+        for o in ordinals:
+            entry = items_by_ordinal[o]
+            if entry["id"] not in ids_in_basket:
+                basket_items.append({"id": entry["id"], "label": entry["label"]})
+                ids_in_basket.add(entry["id"])
+                affected_labels.append(entry["label"])
+    else:  # "remove" — a talent not currently in the basket is a silent
+        # no-op for that one, matching this codebase's "never error on an
+        # already-satisfied state" convention (e.g. _split_by_existing_membership).
+        remove_ids = {items_by_ordinal[o]["id"] for o in ordinals}
+        affected_labels = [it["label"] for it in basket_items if it["id"] in remove_ids]
+        basket_items = [it for it in basket_items if it["id"] not in remove_ids]
+
+    await session_context.update_session(
+        AGENT_ID, ctx.sender_phone, selection_basket={"items": basket_items},
+    )
+    if not basket_items:
+        return ExecResult(ok=True, message="Selection cleared.")
+    verb = "Selected" if action == "select" else "Removed"
+    return ExecResult(ok=True, message=_render_selection_action_result(verb, affected_labels, len(basket_items)))
+
+
+async def _handle_move_selection_shorthand(collected: dict, ctx: ExecContext) -> ExecResult:
+    """"Select 1,3,5" arriving via casting.move's own "select" trigger (see
+    SELECTION_CMD_MARKER / _extract_move_fields's pre-check) — a
+    session-only basket mutation, never a real pipeline write."""
+    raw = collected.get("talent_selector") or ""
+    remainder = raw[len(nlu.SELECTION_CMD_MARKER):]
+    command = nlu.extract_selection_command("select " + remainder)
+    if not command:
+        return ExecResult(ok=False, error="unrecognized_selection", message="I didn't understand that.")
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    return await _handle_selection_command(ctx, session, command["action"], command.get("spec"))
+
+
 async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     raw_text = collected.get("query_text", "")
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
@@ -1251,6 +1362,19 @@ async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         refinement = nlu.extract_talent_search_refinement(refine_text) or {}
         classification = nlu.QueryIntent(kind="talent_search", search_filters=refinement)
         return await _handle_talent_search(ctx, session, classification, is_refinement=True)
+
+    # Phase 2 — "Show selected" etc. only wins over the pre-existing
+    # ambiguous Approved/Locked stage query when a basket actually has
+    # something in it (see module-level docstring on the "select"
+    # vocabulary collision); an empty basket falls through unchanged.
+    if nlu.SHOW_SELECTED_RE.match(raw_text) and ((session or {}).get("selection_basket") or {}).get("items"):
+        return _render_selection_basket(session)
+
+    selection_cmd = nlu.extract_selection_command(raw_text)
+    if selection_cmd and selection_cmd["action"] != "select":
+        # "select" itself only ever reaches casting.query via the MOVE-side
+        # interception (_extract_move_fields) — see the collision note above.
+        return await _handle_selection_command(ctx, session, selection_cmd["action"], selection_cmd.get("spec"))
 
     with request_scope.stage("nlu"):
         classification = nlu.classify_query(raw_text, list(PIPELINE_STAGE_ORDER))
@@ -1430,7 +1554,27 @@ PROJECT_QUERY_FIELD = FieldSpec(
 )
 
 
+_SELECT_TRIGGER_RE = re.compile(r"^\s*select\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+
 def _extract_move_fields(text: str) -> Dict[str, str]:
+    # Phase 2 (Talent Selection & Add to Project, 2026-08-10) — "select" is
+    # already a live casting.move trigger word, so "Select 1,3,5" reaches
+    # HERE via the normal move-trigger path. Intercept ONLY the pure
+    # selection shape (no "to"/"into" stage connector at all —
+    # extract_selection_command itself won't match "select Priya to
+    # Approved" or a bare name like "select Priya"): everything else falls
+    # through to the untouched move-extraction logic below, byte-for-byte.
+    stripped = (text or "").strip()
+    m = _SELECT_TRIGGER_RE.match(stripped)
+    if m:
+        remainder = m.group(1).strip()
+        if nlu.extract_selection_command("select " + remainder):
+            return {
+                "talent_selector": nlu.SELECTION_CMD_MARKER + remainder,
+                "target_stage": _PLAN_PLACEHOLDER,
+            }
+
     with request_scope.stage("nlu"):
         chunks, auto_confirm = nlu.preprocess_command(text)
         out: Dict[str, str] = {}
@@ -1933,6 +2077,14 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
 
 
 async def _move_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    if (collected.get("talent_selector") or "").startswith(nlu.SELECTION_CMD_MARKER):
+        # Phase 2 selection shorthand ("Select 1,3,5") arriving via
+        # casting.move's own "select" trigger — a session-only basket
+        # mutation, never a real pipeline write, so it always fires here
+        # immediately regardless of _auto_confirm (unlike every other
+        # branch in this function, which only auto-executes when the
+        # user explicitly chained "and confirm").
+        return await _handle_move_selection_shorthand(collected, ctx)
     if collected.get(PLAN_FIELD.key):
         if not collected.get(AUTO_CONFIRM_FIELD.key):
             return None
@@ -1953,6 +2105,13 @@ async def _move_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[
 
 
 async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
+    if (collected.get("talent_selector") or "").startswith(nlu.SELECTION_CMD_MARKER):
+        # Defensive — _move_try_auto_execute always intercepts this
+        # sentinel first via the primary dispatch path, so this branch is
+        # normally unreachable; kept as a safety net against the
+        # Concurrent Task Engine's independent dispatch path.
+        result = await _handle_move_selection_shorthand(collected, ctx)
+        return result.message
     if collected.get(PLAN_FIELD.key):
         return await _build_plan_confirmation(collected, ctx)
 
@@ -2019,6 +2178,9 @@ async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
 
 
 async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    if (collected.get("talent_selector") or "").startswith(nlu.SELECTION_CMD_MARKER):
+        # Defensive — same safety net as _build_move_confirmation above.
+        return await _handle_move_selection_shorthand(collected, ctx)
     if collected.get(PLAN_FIELD.key):
         return await _execute_plan(collected, ctx)
 
@@ -2033,6 +2195,11 @@ async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         return ExecResult(ok=False, error="move_resolution_failed", message=err)
 
     await _remember_last_talent(ctx, resolved)
+
+    # A real move (not the Phase 2 selection shorthand, intercepted above)
+    # is an unrelated workflow — PART 10's session-reset rule, same as
+    # every other query/move/add success path in this file.
+    await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
 
     if collected.get("project_query"):
         # An explicit project named in a natural-language move ("... in
@@ -2237,6 +2404,19 @@ def _extract_add_fields(text: str) -> Dict[str, str]:
             fields = nlu.extract_add_fields(chunks[0])
             project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
             if len(project_names) <= 1:
+                # UX polish (2026-08-10) — "Add 1,3,5 to X"/"Add first 5 to
+                # X" direct shortcut: extract_add_fields already correctly
+                # separated the talent_selector from the project tail; if
+                # THAT selector looks like a pure selection spec (reusing
+                # extract_selection_command's grammar via a synthetic
+                # "select " prefix — the exact same shape Select/Remove
+                # recognize), re-encode it so _resolve_add_selection
+                # resolves it against the current talent-search
+                # number_map instead of trying to fuzzy-match it as a name.
+                selector_text = fields.get("talent_selector") or ""
+                spec_cmd = nlu.extract_selection_command("select " + selector_text)
+                if spec_cmd and spec_cmd["action"] == "select":
+                    fields["talent_selector"] = nlu.ADD_ORDINAL_SPEC_MARKER + spec_cmd["spec"]
                 out.update(fields)
                 if auto_confirm:
                     out[AUTO_CONFIRM_FIELD.key] = "1"
@@ -2289,6 +2469,48 @@ class ResolvedAdd:
     project_label: str
     talent_ids: List[str]
     talent_labels: List[str]
+    # Phase 2 (2026-08-10) — set when talent_ids came from the session's
+    # selection basket ("Add selected to X") rather than name resolution;
+    # tells _add_executor to auto-clear the basket on success (PART 7).
+    came_from_basket: bool = False
+    # UX polish (2026-08-10) — set when talent_ids came from a direct
+    # "Add 1,3,5 to X" ordinal shortcut, resolved fresh against the
+    # current talent-search number_map. Deliberately a SEPARATE flag from
+    # came_from_basket: this path never reads or writes
+    # session.selection_basket at all, so _add_executor must NOT clear it
+    # or announce "Selection cleared." — there is no real basket involved,
+    # and doing so would silently wipe out an unrelated selection the user
+    # might already be building.
+    came_from_ordinal_shortcut: bool = False
+
+
+async def _resolve_add_project(
+    project_query: str,
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[Dict[str, Any]]]:
+    """(project_id, project_label, error_message, disambiguation) — the
+    project-resolution half of _resolve_add_selection, factored out so
+    both the name-based path and Phase 2's basket path share the exact
+    same resolution/ambiguity/suggestion handling (never duplicated)."""
+    if not project_query:
+        return None, None, 'Which project? e.g. "Add Prajal Tushir to Toyota Glanza".', None
+
+    projects = await _fetch_ongoing_projects()
+    with request_scope.stage("fuzzy"):
+        match = nlu.resolve_project_by_name(project_query, projects)
+    if match.project:
+        return match.project["id"], match.project["label"], None, None
+    if match.ambiguous:
+        options = [{"label": o["label"], "value": o["label"]} for o in match.ambiguous]
+        msg = nlu.format_numbered_options("I found multiple projects.", [[o["label"]] for o in match.ambiguous])
+        return None, None, msg, {"kind": "project", "field_key": "project_query", "options": options}
+    if match.suggestions:
+        bullets = "\n".join(f"• {o['label']}" for o in match.suggestions)
+        return None, None, (
+            f"I couldn't find a project matching:\n\n{project_query}\n\nDid you mean:\n\n{bullets}"
+        ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
+    return None, None, (
+        match.error or f'I couldn\'t find a project matching "{project_query}".'
+    ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
 
 
 async def _resolve_add_selection(
@@ -2299,39 +2521,63 @@ async def _resolve_add_selection(
     ambiguous_candidates payload) but against the global talent candidate
     set instead of a project's pipeline rows, and with no stage/ordinal/
     number_map concept at all — Add never has a "displayed list" to index
-    into."""
+    into (except Phase 2's selection basket, see selector.use_basket
+    below, which arrives with already-known ids, no matching needed)."""
     selector_text = collected.get("talent_selector") or ""
     selector = nlu.parse_talent_selector(selector_text)
     if not selector.ok:
         return None, selector.error, None
+
+    if selector.use_basket:
+        items = ((session or {}).get("selection_basket") or {}).get("items") or []
+        if not items:
+            return None, "No talents are currently selected.\n\nSearch and select talents first.", None
+        project_query = (collected.get("project_query") or "").strip()
+        project_id, project_label, err, disambiguation = await _resolve_add_project(project_query)
+        if err:
+            return None, err, disambiguation
+        if not await _project_exists(project_id):
+            return None, "Project doesn't exist.", None
+        return ResolvedAdd(
+            project_id=project_id, project_label=project_label,
+            talent_ids=[it["id"] for it in items], talent_labels=[it["label"] for it in items],
+            came_from_basket=True,
+        ), None, None
+
+    if selector.selection_spec is not None:
+        # "Add 1,3,5 to X" / "Add first 5 to X" — resolved against the
+        # CURRENT talent-search number_map, the exact same resolution
+        # Select/Remove use (nlu.resolve_selection_spec). Never touches
+        # session.selection_basket.
+        number_map = (session or {}).get("number_map") or {}
+        if number_map.get("type") != "talent_search":
+            return None, 'No active talent search. Try "Show female models from Mumbai" first.', None
+        items_by_ordinal = {it["ordinal"]: it for it in number_map.get("items") or []}
+        ordinals, err = nlu.resolve_selection_spec(selector.selection_spec, list(items_by_ordinal.keys()))
+        if err:
+            return None, err, None
+        project_query = (collected.get("project_query") or "").strip()
+        project_id, project_label, err, disambiguation = await _resolve_add_project(project_query)
+        if err:
+            return None, err, disambiguation
+        if not await _project_exists(project_id):
+            return None, "Project doesn't exist.", None
+        return ResolvedAdd(
+            project_id=project_id, project_label=project_label,
+            talent_ids=[items_by_ordinal[o]["id"] for o in ordinals],
+            talent_labels=[items_by_ordinal[o]["label"] for o in ordinals],
+            came_from_ordinal_shortcut=True,
+        ), None, None
+
     if selector.ordinals or selector.everyone:
         # No numbered listing exists for Add to index into — defensive,
         # not reachable via extract_add_fields's own grammar.
         return None, 'Please name who to add, e.g. "Add Prajal Tushir to Toyota Glanza".', None
 
     project_query = (collected.get("project_query") or "").strip()
-    if not project_query:
-        return None, 'Which project? e.g. "Add Prajal Tushir to Toyota Glanza".', None
-
-    projects = await _fetch_ongoing_projects()
-    with request_scope.stage("fuzzy"):
-        match = nlu.resolve_project_by_name(project_query, projects)
-    if match.project:
-        project_id = match.project["id"]
-        project_label = match.project["label"]
-    elif match.ambiguous:
-        options = [{"label": o["label"], "value": o["label"]} for o in match.ambiguous]
-        msg = nlu.format_numbered_options("I found multiple projects.", [[o["label"]] for o in match.ambiguous])
-        return None, msg, {"kind": "project", "field_key": "project_query", "options": options}
-    elif match.suggestions:
-        bullets = "\n".join(f"• {o['label']}" for o in match.suggestions)
-        return None, (
-            f"I couldn't find a project matching:\n\n{project_query}\n\nDid you mean:\n\n{bullets}"
-        ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
-    else:
-        return None, (
-            match.error or f'I couldn\'t find a project matching "{project_query}".'
-        ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
+    project_id, project_label, err, disambiguation = await _resolve_add_project(project_query)
+    if err:
+        return None, err, disambiguation
 
     candidates, project_ok = await asyncio.gather(
         _fetch_all_talent_candidates(),
@@ -2448,6 +2694,15 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         return ExecResult(ok=False, error="add_resolution_failed", message=err)
 
     await _remember_last_talent(ctx, resolved)
+    if not resolved.came_from_basket and not resolved.came_from_ordinal_shortcut:
+        # A real, name-based add is an unrelated workflow — PART 10's
+        # session-reset rule. The basket-add path clears it separately,
+        # paired with the "Selection cleared." confirmation (PART 7). The
+        # ordinal-shortcut path ("Add 1,3,5 to X") never touches
+        # selection_basket in either direction — it must NOT be swept up
+        # by this reset, or it would silently wipe out an unrelated, real
+        # selection the user might already be building.
+        await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
     if collected.get("project_query"):
         await session_context.update_session(
             AGENT_ID, ctx.sender_phone,
@@ -2480,6 +2735,15 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if split.already_labels:
         lines.append("")
         lines.append(f"({len(split.already_labels)} already in this pipeline — skipped)")
+
+    if resolved.came_from_basket:
+        # PART 7: auto-clear the selection basket after a successful
+        # "Add/Attach selected to X" — the whole point of the basket was
+        # this one action, and leaving it populated risks a later,
+        # unrelated "Add selected to Y" silently re-adding the same people.
+        await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
+        lines.append("")
+        lines.append("Selection cleared.")
 
     collected["project"] = resolved.project_label
     collected["talents_added"] = split.actionable_labels[:50]
@@ -2546,6 +2810,9 @@ async def _undo_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if undo_store.is_expired(doc):
         await undo_store.clear_undo(AGENT_ID, ctx.sender_phone)
         return ExecResult(ok=False, error="undo_expired", message="Undo period has expired.")
+
+    # An unrelated workflow — PART 10's session-reset rule.
+    await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
 
     operation = doc["operation"]
     # One-shot: clear BEFORE restoring so a duplicate/concurrent "UNDO"

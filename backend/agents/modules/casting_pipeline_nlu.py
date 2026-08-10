@@ -291,6 +291,27 @@ class SelectorResult:
     resolved_id: Optional[str] = None
     resolved_label: Optional[str] = None
     error: Optional[str] = None
+    # Phase 2 (Talent Selection & Add to Project, 2026-08-10) — set when the
+    # raw selector text was literally "selected"/"the selection"/"my
+    # selection", meaning "use the session's selection basket" rather than
+    # a name to fuzzy-match. See casting_pipeline.py's _resolve_add_selection.
+    use_basket: bool = False
+    # Set when the raw selector text carried SELECTION_CMD_MARKER — a
+    # Phase-2 "Select N"/"first 5"/... shorthand that arrived via
+    # casting.move's own "select" trigger (see module-level docstring on
+    # SELECTION_CMD_MARKER). Carries the raw command text (post-trigger)
+    # for casting_pipeline.py to re-parse with extract_selection_command.
+    raw_command: Optional[str] = None
+    # UX polish (2026-08-10) — "Add 1,3,5 to X"/"Add first 5 to X" direct
+    # shortcut. Set when the raw selector text carried
+    # ADD_ORDINAL_SPEC_MARKER; carries the spec text ("1,3,5"/"first 5"/
+    # "all"/...) for casting_pipeline.py to resolve via
+    # resolve_selection_spec against the CURRENT talent-search
+    # number_map — the exact same resolution Select/Remove use. Distinct
+    # from use_basket: this never reads or writes session.selection_basket
+    # at all, so it can never clobber an unrelated, real selection the
+    # user might already be building.
+    selection_spec: Optional[str] = None
 
 
 _RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)$")
@@ -322,6 +343,31 @@ FORCE_GLOBAL_MARKER = "__force_global__"
 # and cross-command follow-ups.
 PRONOUN_LAST_MARKER = "__last_referenced_talent__"
 _PRONOUN_WORDS = {"him", "her", "them", "this one", "that one", "this", "that"}
+
+# Phase 2 (Talent Selection & Add to Project, 2026-08-10) — "select" is
+# already a live casting.move trigger ("Select Priya to Approved" is a real
+# stage-move using "select" as a generic verb, same as "move"/"mark"). A
+# Phase-2 shorthand ("Select 1,3,5") only ever reaches here because
+# casting_pipeline.py's _extract_move_fields pre-checks the raw text BEFORE
+# calling extract_move_fields at all — it recognizes a pure selection shape
+# (no "to"/"into" stage connector) and hands it off encoded with this
+# marker instead, so it sails through _validate_selector/parse_talent_selector
+# unchanged rather than being (mis)parsed as a name or bare-ordinal move
+# selector. See casting_pipeline.py's _handle_move_selection_shorthand.
+SELECTION_CMD_MARKER = "__phase2_select__:"
+
+# UX polish (2026-08-10) — "Add 1,3,5 to X"/"Add first 5 to X" direct
+# shortcut. casting_pipeline.py's _extract_add_fields pre-checks the
+# talent_selector text it already extracted (BEFORE this marker exists) —
+# if it looks like a pure selection spec (digits/range/first-N/last-N/all,
+# recognized via extract_selection_command), it's re-encoded with this
+# marker so it passes _validate_selector/parse_talent_selector unchanged
+# rather than being (mis)parsed as a name.
+ADD_ORDINAL_SPEC_MARKER = "__add_ordinal_spec__:"
+
+# "Add selected to X" / "Attach selected to X" — the literal word meaning
+# "use the session's selection basket," never a talent's actual name.
+_BASKET_SELECTOR_WORDS = {"selected", "the selection", "my selection"}
 
 # "Talent" is a noise word ("Move Talent 3 and 7 to Approved") and "and" is
 # a valid list separator alongside commas ("Talent 3 and 7") — stripped/
@@ -361,11 +407,20 @@ def parse_talent_selector(raw: str) -> SelectorResult:
         if tid and label:
             return SelectorResult(ok=True, resolved_id=tid, resolved_label=label)
 
+    if (raw or "").startswith(SELECTION_CMD_MARKER):
+        return SelectorResult(ok=True, raw_command=raw[len(SELECTION_CMD_MARKER):])
+
+    if (raw or "").startswith(ADD_ORDINAL_SPEC_MARKER):
+        return SelectorResult(ok=True, selection_spec=raw[len(ADD_ORDINAL_SPEC_MARKER):])
+
     if (raw or "") == PRONOUN_LAST_MARKER:
         return SelectorResult(ok=True, name_query=PRONOUN_LAST_MARKER)
 
     if (raw or "").strip().lower() in _PRONOUN_WORDS:
         return SelectorResult(ok=True, name_query=PRONOUN_LAST_MARKER)
+
+    if (raw or "").strip().lower() in _BASKET_SELECTOR_WORDS:
+        return SelectorResult(ok=True, use_basket=True)
 
     text = _clean_selector_text(raw)
     if not text:
@@ -1173,9 +1228,9 @@ def extract_move_fields(text: str, stage_order: List[str]) -> Dict[str, str]:
 #   to
 #   Toyota Glanza
 # ---------------------------------------------------------------------------
-ADD_TRIGGERS = ["add"]
+ADD_TRIGGERS = ["add", "attach"]  # "attach" added for Phase 2's "Attach selected to X" synonym.
 
-_ADD_TRIGGER_RE = re.compile(r"^\s*add\b[\s:]*", re.IGNORECASE)
+_ADD_TRIGGER_RE = re.compile(r"^\s*(?:add|attach)\b[\s:]*", re.IGNORECASE)
 # Tolerant of a comma (from the newline-join below) OR plain whitespace on
 # either side of the connector, so both message shapes above resolve to
 # the same project tail.
@@ -1262,6 +1317,26 @@ QUERY_TRIGGERS = [
     # are too generic (risk of misrouting ordinary group chatter that
     # happens to start with one of them).
     "find", "search",
+    # Talent Selection & Add to Project (Phase 2, 2026-08-10) — "remove"/
+    # "clear"/"unselect"/"deselect" have zero collisions against
+    # MOVE_TRIGGERS/ADD_TRIGGERS/undo's triggers (confirmed by grep before
+    # adding). "select" itself is deliberately NOT added here — it's
+    # already a MOVE_TRIGGERS entry ("Select Priya to Approved" is a real
+    # stage-move); a Phase-2 "Select 1,3,5" reaches casting.query's
+    # selection handling via a different path — see
+    # casting_pipeline.py's _extract_move_fields pre-check and
+    # SELECTION_CMD_MARKER above.
+    "remove", "clear", "unselect", "deselect",
+    # UX polish (2026-08-10) — bare "Selected"/"Selection"/"My selection"
+    # must show the basket without requiring a "Show" prefix. Confirmed
+    # (empirically, via agents.parser.detect_trigger) these do NOT collide
+    # with MOVE_TRIGGERS' "select" entry: detect_trigger requires an exact
+    # word match ("select" alone, "select ", "select:", or "select" glued
+    # to a digit) — "selected"/"selection" are different tokens entirely
+    # and never satisfy any of those conditions against the "select"
+    # trigger. "who" (for "Who have I selected") and "current" (for
+    # "Current selection") are ALREADY triggers — no new word needed there.
+    "selected", "selection", "my selection",
 ]
 
 # Matches "Project 5", "project #5", and the "P5" / "P 5" shorthand alike.
@@ -1857,6 +1932,98 @@ def extract_talent_search_pagination(text: str) -> Optional[Dict[str, Any]]:
     if _PAGE_ALL_RE.match(stripped):
         return {"action": "all"}
     return None
+
+
+# ---------------------------------------------------------------------------
+# Talent Selection & Add to Project (Phase 2, 2026-08-10) — "Select
+# 1,3,5"/"Remove 2"/"Clear selection"/... against the CURRENT talent-search
+# number_map. Pure grammar only — spec resolution against actual ordinals
+# (and the "not part of the current search" validation) is
+# resolve_selection_spec below; the session-aware basket mutation itself
+# lives in casting_pipeline.py's _handle_selection_command.
+# ---------------------------------------------------------------------------
+_SELECT_SPEC = r"(all|first\s+\d+|last\s+\d+|[\d,\-\s]+)"
+_SELECTION_SELECT_RE = re.compile(r"^\s*select\s+" + _SELECT_SPEC + r"\s*[.!?]*\s*$", re.IGNORECASE)
+_SELECTION_REMOVE_RE = re.compile(
+    r"^\s*(?:remove|unselect|deselect)\s+" + _SELECT_SPEC + r"\s*[.!?]*\s*$", re.IGNORECASE
+)
+_SELECTION_REMOVE_ALL_RE = re.compile(r"^\s*(?:remove|unselect|deselect)\s+all\s*[.!?]*\s*$", re.IGNORECASE)
+_SELECTION_CLEAR_RE = re.compile(r"^\s*clear(?:\s+selection)?\s*[.!?]*\s*$", re.IGNORECASE)
+
+# "Show selected" / "Selected" / "Selection" / "Selected talents" /
+# "Current selection" / "My selection" / "Who have I selected" — matched
+# ONLY as a candidate; the caller (casting_pipeline.py's _query_executor)
+# additionally requires a non-empty basket before treating it as Phase 2's
+# "show basket" rather than the pre-existing ambiguous Approved/Locked
+# stage query these same phrases already resolve to
+# (_QUERY_AMBIGUOUS_STAGE_WORDS) — see that module's docstring on the
+# "select" vocabulary collision.
+SHOW_SELECTED_RE = re.compile(
+    r"^\s*(?:show\s+)?(?:who\s+have\s+i\s+selected|my\s+selection|the\s+selection|"
+    r"current\s+selection|selection|selected(?:\s+talents)?)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def extract_selection_command(text: str) -> Optional[Dict[str, Any]]:
+    """Recognizes a selection-basket command shape and nothing else — a
+    talent NAME ("Select Priya"), a real move ("Select Priya to Approved"),
+    or unrelated chatter all return None. Deliberately narrow (same
+    "never guess" philosophy as every other parser in this module)."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    if _SELECTION_CLEAR_RE.match(stripped):
+        return {"action": "clear"}
+    m = _SELECTION_SELECT_RE.match(stripped)
+    if m:
+        return {"action": "select", "spec": m.group(1).strip()}
+    if _SELECTION_REMOVE_ALL_RE.match(stripped):
+        return {"action": "remove", "spec": "all"}
+    m = _SELECTION_REMOVE_RE.match(stripped)
+    if m:
+        return {"action": "remove", "spec": m.group(1).strip()}
+    return None
+
+
+_FIRST_N_RE = re.compile(r"^first\s+(\d+)$", re.IGNORECASE)
+_LAST_N_RE = re.compile(r"^last\s+(\d+)$", re.IGNORECASE)
+
+
+def resolve_selection_spec(
+    spec: str, current_ordinals: List[int]
+) -> Tuple[Optional[List[int]], Optional[str]]:
+    """(ordinals, error) — resolves "1,3,5"/"2-6"/"first 5"/"last 3"/"all"
+    against the CURRENT page's actual ordinals (never the total match
+    count — the number_map only ever holds what's actually displayed,
+    same as Phase 1's pagination). ANY out-of-range ordinal rejects the
+    WHOLE spec (never a partial selection) — "never guess" applies here
+    exactly as everywhere else in this module."""
+    ordered = sorted(current_ordinals)
+    if not ordered:
+        return None, "No talents are currently shown to select from."
+
+    spec = (spec or "").strip().lower()
+    if spec == "all":
+        return list(ordered), None
+
+    m = _FIRST_N_RE.match(spec)
+    if m:
+        return ordered[: int(m.group(1))], None
+    m = _LAST_N_RE.match(spec)
+    if m:
+        n = int(m.group(1))
+        return ordered[-n:] if n > 0 else [], None
+
+    selector = parse_talent_selector(spec)
+    if not selector.ok or not selector.ordinals:
+        return None, f'"{spec}" isn\'t a valid selection.'
+
+    valid = set(ordered)
+    for o in selector.ordinals:
+        if o not in valid:
+            return None, f"Talent {o} is not part of the current search."
+    return sorted(selector.ordinals), None
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import random
+import re
 import string
 import uuid
 from datetime import date
@@ -271,7 +272,7 @@ async def test_talent_search_basic_and_zero_results():
         assert "Zz Ahana" in r.reply
         assert "Zz Sneha" in r.reply
         assert "Zz Rohan" not in r.reply
-        assert "Instagram: @ahanapocha" in r.reply
+        assert "Instagram:\n   https://instagram.com/ahanapocha" in r.reply
         assert "Gender: Female" in r.reply
         assert "Category: Modeling" in r.reply
         assert "Showing 2 of 2 results." in r.reply
@@ -685,6 +686,102 @@ async def test_talent_search_result_index_persists_across_pagination():
         assert len(number_map["items"]) == 2
         assert number_map["items"][0]["ordinal"] == 21
         assert number_map["items"][1]["ordinal"] == 22
+    finally:
+        await _cleanup(phone, talent_ids=talent_ids)
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Post-Phase 1 UX polish (2026-08-10): only the talent line is numbered
+# (metadata lines are indented, unnumbered), and Instagram renders as a
+# clickable https://instagram.com/... URL instead of "@handle".
+# ---------------------------------------------------------------------------
+async def test_format_talent_card_only_name_line_is_numbered():
+    from agents.modules.casting_pipeline import _format_talent_card
+
+    talent = {
+        "name": "Ahana Pocha", "age": 22, "height": "5'7\"",
+        "location": [{"city": "Mumbai"}], "gender": "female",
+        "interested_in": ["Modeling"], "instagram_handle": "ahanapocha",
+    }
+    card = _format_talent_card(3, talent)
+    lines = card.splitlines()
+    assert lines[0] == "3. Ahana Pocha"
+    # No other line starts with a digit-dot ordinal — only metadata labels.
+    for line in lines[1:]:
+        assert not re.match(r"^\d+\.", line.strip()), line
+    assert "   Age: 22" in card
+    assert "   Height: 5'7\"" in card
+    assert "   City: Mumbai" in card
+    assert "   Gender: Female" in card
+    assert "   Category: Modeling" in card
+    assert "   Instagram:" in card
+    assert "   https://instagram.com/ahanapocha" in card
+
+
+async def test_format_talent_card_omits_missing_fields_cleanly():
+    from agents.modules.casting_pipeline import _format_talent_card
+
+    card = _format_talent_card(1, {"name": "No Data Talent"})
+    assert card == "1. No Data Talent"
+
+
+async def test_format_instagram_link_normalization_rules():
+    from agents.modules.casting_pipeline import _format_instagram_link
+
+    # Already a valid, canonical URL -> unchanged.
+    assert _format_instagram_link("https://instagram.com/ahanapocha") == "https://instagram.com/ahanapocha"
+    # URL variants (www, http, trailing slash) -> normalized to canonical form.
+    assert _format_instagram_link("http://www.instagram.com/ahanapocha/") == "https://instagram.com/ahanapocha"
+    assert _format_instagram_link("instagram.com/ahanapocha") == "https://instagram.com/ahanapocha"
+    # "@username" -> strip "@", prepend the canonical URL.
+    assert _format_instagram_link("@ahanapocha") == "https://instagram.com/ahanapocha"
+    # bare username -> prepend the canonical URL.
+    assert _format_instagram_link("ahanapocha") == "https://instagram.com/ahanapocha"
+    # empty/missing -> omitted (None), never a broken/partial line.
+    assert _format_instagram_link(None) is None
+    assert _format_instagram_link("") is None
+    assert _format_instagram_link("   ") is None
+    # invalid characters -> omitted rather than rendered broken.
+    assert _format_instagram_link("not a real handle!!") is None
+
+
+async def test_talent_search_result_index_ordinals_unchanged_by_card_layout_change():
+    """The persistent ordinal used for future selection (Phase 2) must be
+    completely unaffected by the card-formatting change above — same
+    skip+i+1 numbering, same number_map population."""
+    group = f"Test Talent Search {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    talent_ids = []
+    try:
+        city = _unique_city()
+        prefix = uuid.uuid4().hex[:6]
+        names = [f"Zz Ord {prefix} {i:02d}" for i in range(1, 23)]  # 22 talents
+        for n in names:
+            talent_ids.append(await _seed_talent_full(n, gender="female", city=city))
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Show female talents from {city}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "1. " + names[0] in r.reply
+        assert "20. " + names[19] in r.reply
+        session = await session_context.get_session(AGENT_ID, phone)
+        assert session["number_map"]["items"][0]["ordinal"] == 1
+        assert session["number_map"]["items"][19]["ordinal"] == 20
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show next 20",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "21. " + names[20] in r.reply
+        assert "22. " + names[21] in r.reply
+        session = await session_context.get_session(AGENT_ID, phone)
+        assert session["number_map"]["items"][0]["ordinal"] == 21
+        assert session["number_map"]["items"][1]["ordinal"] == 22
     finally:
         await _cleanup(phone, talent_ids=talent_ids)
         await _restore_config(original)

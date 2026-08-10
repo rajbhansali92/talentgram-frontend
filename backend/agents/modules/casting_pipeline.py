@@ -992,6 +992,38 @@ def _active_filter_labels(filters: Dict[str, Any]) -> List[str]:
     return labels
 
 
+_INSTAGRAM_USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
+_INSTAGRAM_URL_RE = re.compile(r"^(?:https?://)?(?:www\.)?instagram\.com/(.+)$", re.IGNORECASE)
+
+
+def _format_instagram_link(raw: Optional[str]) -> Optional[str]:
+    """Presentation-only normalization to a clickable https://instagram.com/
+    URL — never touches the stored instagram_handle field. Already-correct
+    URLs round-trip unchanged; a URL variant (http, www, trailing slash) is
+    normalized to the canonical form; "@handle" or a bare username is
+    turned into a full URL; empty/invalid input is omitted entirely
+    (returns None) rather than rendered as a broken or partial line."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+
+    m = _INSTAGRAM_URL_RE.match(value)
+    if m:
+        path = m.group(1).strip("/")
+        return f"https://instagram.com/{path}" if path else None
+
+    username = value[1:] if value.startswith("@") else value
+    if not _INSTAGRAM_USERNAME_RE.match(username):
+        return None
+    return f"https://instagram.com/{username}"
+
+
+# Metadata lines under a numbered talent entry are indented, never
+# numbered — only the talent's own line carries the persistent ordinal
+# (Phase 2 selection/bulk actions will resolve against THAT number only).
+_CARD_INDENT = "   "
+
+
 def _format_talent_card(ordinal: int, t: Dict[str, Any]) -> str:
     lines = [f'{ordinal}. {t.get("name") or "Unnamed"}']
 
@@ -1001,28 +1033,23 @@ def _format_talent_card(ordinal: int, t: Dict[str, Any]) -> str:
     # bad talent in an otherwise-valid result page.
     locations = t.get("location") or []
     city = "/".join([l["city"] for l in locations if isinstance(l, dict) and l.get("city")]) or None
-    top_bits = []
-    if t.get("age") is not None:
-        top_bits.append(f'Age: {t["age"]}')
-    if t.get("height"):
-        top_bits.append(f'Height: {t["height"]}')
-    if city:
-        top_bits.append(city)
-    if top_bits:
-        lines.append(" | ".join(top_bits))
 
-    bottom_bits = []
+    if t.get("age") is not None:
+        lines.append(f'{_CARD_INDENT}Age: {t["age"]}')
+    if t.get("height"):
+        lines.append(f'{_CARD_INDENT}Height: {t["height"]}')
+    if city:
+        lines.append(f'{_CARD_INDENT}City: {city}')
     if t.get("gender"):
-        bottom_bits.append(f'Gender: {_gender_display(t["gender"])}')
+        lines.append(f'{_CARD_INDENT}Gender: {_gender_display(t["gender"])}')
     categories = t.get("interested_in") or []
     if categories:
-        bottom_bits.append(f'Category: {"/".join(categories)}')
-    if bottom_bits:
-        lines.append(" | ".join(bottom_bits))
+        lines.append(f'{_CARD_INDENT}Category: {"/".join(categories)}')
 
-    handle = t.get("instagram_handle")
-    if handle:
-        lines.append(f'Instagram: {handle if handle.startswith("@") else "@" + handle}')
+    instagram_url = _format_instagram_link(t.get("instagram_handle"))
+    if instagram_url:
+        lines.append(f'{_CARD_INDENT}Instagram:')
+        lines.append(f'{_CARD_INDENT}{instagram_url}')
 
     return "\n".join(lines)
 

@@ -31,6 +31,36 @@ import {
 
 function PipelineBoard({ projectId, projectName }) {
     const { data, setData, loading, error, fetchPipeline } = usePipelineData(projectId);
+
+    // Admin Submission ("Upload on Behalf") — project slug (needed to build
+    // the /submit/{slug}?admin=1 deep link) and the batched submission
+    // lookup that drives each card's Create/Continue Draft/Open Submission
+    // quick action. One board-level fetch each, not a per-card network call.
+    const [projectSlug, setProjectSlug] = useState(null);
+    useEffect(() => {
+        if (!projectId) return;
+        let alive = true;
+        adminApi.get(`/projects/${projectId}`)
+            .then(({ data: proj }) => { if (alive) setProjectSlug(proj?.slug || null); })
+            .catch(() => {});
+        return () => { alive = false; };
+    }, [projectId]);
+
+    const [submissionLookup, setSubmissionLookup] = useState({});
+    useEffect(() => {
+        if (!projectId || data.length === 0) return;
+        const emails = [...new Set(data.map((i) => i.talent_email || i.email).filter(Boolean))];
+        const ids = [...new Set(data.map((i) => i.talent_id).filter(Boolean))];
+        if (emails.length === 0 && ids.length === 0) return;
+        let alive = true;
+        adminApi.post(`/projects/${projectId}/submissions/lookup-by-talent`, {
+            talent_emails: emails,
+            talent_ids: ids,
+        })
+            .then(({ data: map }) => { if (alive) setSubmissionLookup(map || {}); })
+            .catch(() => {});
+        return () => { alive = false; };
+    }, [projectId, data]);
     const {
         searchQuery,
         setSearchQuery,
@@ -258,6 +288,46 @@ function PipelineBoard({ projectId, projectName }) {
     // endpoint, no parallel workflow.
     const handleBulkReachedOut = () => handleBulkMove("follow_up");
 
+    // Batch Draft Creation (Phase 2, item 8) — same batch-endpoint pattern
+    // every other bulk action here already follows. Never finalizes; each
+    // draft is created (or resumed if one already exists) via the same
+    // create_or_resume_submission_doc + Smart Defaults logic admin-start
+    // already uses for a single talent, just looped server-side. Individual
+    // drafts stay editable one at a time via the existing per-card
+    // Create/Continue Draft action once submissionLookup refreshes.
+    const [bulkCreatingSubmissions, setBulkCreatingSubmissions] = useState(false);
+    const handleBulkCreateSubmissions = async () => {
+        const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
+        if (talentIds.length === 0) return;
+        setBulkCreatingSubmissions(true);
+        try {
+            const { data: results } = await adminApi.post(`/projects/${projectId}/submissions/batch-start`, {
+                talent_ids: talentIds,
+            });
+            const entries = Object.values(results || {});
+            const created = entries.filter((r) => r.submission_id && !r.resumed).length;
+            const resumed = entries.filter((r) => r.submission_id && r.resumed).length;
+            const failed = entries.filter((r) => r.error).length;
+            const parts = [];
+            if (created) parts.push(`${created} created`);
+            if (resumed) parts.push(`${resumed} already had drafts`);
+            if (failed) parts.push(`${failed} failed`);
+            toast.success(parts.length ? parts.join(", ") : "No submissions created");
+            handleClearBulk();
+            // Refreshes `data`, which the submissionLookup effect (below,
+            // keyed on [projectId, data]) depends on — without this, each
+            // card's Create/Continue Draft/Open Submission action rail icon
+            // would keep showing its PRE-batch-create state until some
+            // unrelated board reload happened to run.
+            await fetchPipeline();
+        } catch (e) {
+            console.error("Bulk create submissions failed:", e);
+            toast.error(formatErrorDetail(e, "Failed to create submissions"));
+        } finally {
+            setBulkCreatingSubmissions(false);
+        }
+    };
+
     const handleBulkLabel = async () => {
         const talentIds = Array.from(bulkIds).map(id => data.find(i => i.id === id)?.talent_id).filter(Boolean);
         if (talentIds.length === 0 || !labelText.trim()) return;
@@ -457,6 +527,8 @@ function PipelineBoard({ projectId, projectName }) {
 
     const columnCommons = {
         projectId,
+        projectSlug,
+        submissionLookup,
         refresh: fetchPipeline,
         bulkMode,
         bulkIds,
@@ -716,6 +788,8 @@ function PipelineBoard({ projectId, projectName }) {
                     onArchive={handleBulkArchive}
                     onReachedOut={handleBulkReachedOut}
                     showReachedOut={bulkAllAskToTest}
+                    onCreateSubmissions={handleBulkCreateSubmissions}
+                    creatingSubmissions={bulkCreatingSubmissions}
                 />
 
                 <TalentBrowserModal

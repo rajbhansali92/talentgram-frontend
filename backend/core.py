@@ -20,6 +20,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from pymongo.errors import DuplicateKeyError
 
 # --------------------------------------------------------------------------
 # Config
@@ -1788,14 +1789,19 @@ MAX_VIDEO_FILE_BYTES = 100 * 1024 * 1024  # 100 MB
 #   take_1/take_2/take_3 — LEGACY fixed slots (read-only back-compat; auto-labelled "Take N")
 #   image            — generic portfolio images (MIN/MAX_SUBMISSION_IMAGES bounds)
 #   indian / western — look-specific portfolio images (Phase 2 schema unification)
-SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take", "take_1", "take_2", "take_3", "image", "indian", "western"}
+#   selfie / profiles / full_length / side_profile / ethnic / additional_portfolio
+#   — Admin Mode "Upload on Behalf" categories (Admin Submission feature,
+#   Phase 2 added ethnic + additional_portfolio). Same image-category rules
+#   (per-category cap, reusable to Talent Profile) as indian/western/image.
+ADMIN_EXTRA_PORTFOLIO_CATEGORIES = {"selfie", "profiles", "full_length", "side_profile", "ethnic", "additional_portfolio"}
+SUBMISSION_UPLOAD_CATEGORIES = {"intro_video", "take", "take_1", "take_2", "take_3", "image", "indian", "western"} | ADMIN_EXTRA_PORTFOLIO_CATEGORIES
 LEGACY_TAKE_CATEGORIES = {"take_1", "take_2", "take_3"}
-PORTFOLIO_IMAGE_CATEGORIES = {"image", "indian", "western"}
+PORTFOLIO_IMAGE_CATEGORIES = {"image", "indian", "western"} | ADMIN_EXTRA_PORTFOLIO_CATEGORIES
 # Talent Profile Migration, Phase 4 — categories that MAY become the
 # canonical Talent Profile (db.talents.media) if the talent consents.
 # Audition takes (take/take_1..3) are never in this set and never reach the
 # consent dialog — they are always project-only, no exceptions.
-REUSABLE_MEDIA_CATEGORIES = {"intro_video", "image", "indian", "western"}
+REUSABLE_MEDIA_CATEGORIES = {"intro_video", "image", "indian", "western"} | ADMIN_EXTRA_PORTFOLIO_CATEGORIES
 MAX_SUBMISSION_TAKES = 5
 MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5
@@ -2157,6 +2163,156 @@ class SubmissionStartIn(BaseModel):
     phone: Optional[str] = None
     alternate_contact_number: Optional[str] = None
     form_data: Optional[Dict[str, Any]] = None
+
+
+async def create_or_resume_submission_doc(
+    project: dict,
+    email: str,
+    name: str,
+    phone: Optional[str],
+    alternate_contact_number: Optional[str],
+    form_data: Optional[Dict[str, Any]],
+    *,
+    created_by: Optional[str] = None,
+    created_from: str = "talent_link",
+    talent_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a new submission doc, or resume an existing one for (project, email).
+
+    Extracted from the talent-facing `start_submission` route so the exact
+    same doc-construction/resume logic can be driven by an admin-authed caller
+    (Admin Mode "Upload on Behalf") without duplicating it. Callers own their
+    own authorization gating (OTP/email-ownership for talents, admin auth for
+    admins) — this function only owns document semantics.
+
+    `created_by`/`created_from` are stamped ONLY when a brand-new doc is
+    inserted; resuming an existing draft never retroactively relabels who
+    created it.
+    """
+    slug = project["slug"]
+    existing = await db.submissions.find_one({
+        "project_id": project["id"],
+        "talent_email": email,
+    })
+    if existing:
+        sid = existing["id"]
+        atk = existing.get("access_token")
+        if not atk:
+            atk = make_access_token()
+            await db.submissions.update_one({"id": sid}, {"$set": {"access_token": atk}})
+        token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
+        return {
+            "id": sid,
+            "token": token,
+            "access_token": atk,
+            "resumed": True,
+            "status": existing.get("status", "draft"),
+        }
+
+    fd = form_data or {}
+    talent_age = None
+    # Phase 1 — Canonical Profile Monotonicity: record how fresh the
+    # canonical Talent Profile was at the moment this draft's form_data was
+    # captured, so finalize() can later tell whether the profile has since
+    # moved on (ADR Part 4 / Invariant #4). None when no talent exists yet.
+    talent_profile_snapshot_at = None
+    if email:
+        talent_doc = await db.talents.find_one(
+            {"$or": [
+                {"normalized_email": email},
+                {"email": email},
+                {"source.talent_email": email}
+            ]},
+            {"age": 1, "dob": 1, "updated_at": 1}
+        )
+        if talent_doc:
+            talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
+            talent_profile_snapshot_at = talent_doc.get("updated_at")
+
+    submitted_age_override_val = None
+    override_active = fd.get("overrideAge") or fd.get("override_age")
+    if override_active and fd.get("submitted_age_override") not in (None, ""):
+        try:
+            submitted_age_override_val = int(fd["submitted_age_override"])
+        except Exception:
+            pass
+
+    effective_age_val = compute_effective_age(fd, talent_age)
+
+    cb_visible = True
+    fv_defaults = {**DEFAULT_FIELD_VISIBILITY, "competitive_brand": cb_visible}
+
+    sid = str(uuid.uuid4())
+    atk = make_access_token()
+    # Talent Profile Migration, Phase 3: a new submission starts with NO
+    # media. Reusable media is no longer auto-injected — the talent sees
+    # it via `library_media` (computed live, see GET .../submissions/{sid})
+    # and explicitly picks what applies to THIS project via
+    # POST .../media/from-library. No silent synchronization.
+    doc = {
+        "id": sid,
+        "project_id": project["id"],
+        "project_slug": slug,
+        "talent_name": name,
+        "talent_email": email,
+        "talent_phone": phone,
+        "alternate_contact_number": alternate_contact_number,
+        "talent_id": talent_id,
+        "form_data": fd,
+        "talent_profile_snapshot_at": talent_profile_snapshot_at,
+        "field_visibility": fv_defaults,
+        "submitted_age_override": submitted_age_override_val,
+        "effective_age": effective_age_val,
+        "media": [],
+        "status": "draft",
+        "decision": "pending",
+        "access_token": atk,
+        "created_at": _now(),
+        "submitted_at": None,
+        "created_by": created_by,
+        "created_from": created_from,
+    }
+    try:
+        await db.submissions.insert_one(doc)
+    except DuplicateKeyError:
+        # Race: parallel start hit the unique (project_id, talent_email)
+        # index. Fall through to the existing-submission resume path.
+        existing = await db.submissions.find_one({
+            "project_id": project["id"],
+            "talent_email": email,
+        })
+        if existing:
+            sid = existing["id"]
+            atk = existing.get("access_token")
+            if not atk:
+                atk = make_access_token()
+                await db.submissions.update_one({"id": sid}, {"$set": {"access_token": atk}})
+            token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
+            return {
+                "id": sid,
+                "token": token,
+                "access_token": atk,
+                "resumed": True,
+                "status": existing.get("status", "draft"),
+            }
+        raise HTTPException(409, "Submission already exists for this email")
+    token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
+    return {"id": sid, "token": token, "access_token": atk, "resumed": False, "status": "draft"}
+
+
+def actor_stamp(submitter: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Returns `{"last_modified_by": email}` to merge into a submission
+    update when `submitter` carries an `acting_admin_email` claim (minted by
+    the Admin Mode / "Upload on Behalf" start endpoint), else `{}`.
+
+    Talent-driven requests carry no such claim and are completely unaffected
+    — every existing public submission handler stays byte-for-byte identical
+    for talent traffic; this only adds an audit trail when an admin is
+    driving the same endpoints via an attributed token.
+    """
+    if submitter and submitter.get("acting_admin_email"):
+        return {"last_modified_by": submitter["acting_admin_email"]}
+    return {}
 
 
 class SubmissionUpdateIn(BaseModel):
@@ -2618,6 +2774,17 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
             image_items.append({**m, "category": "western"})
             if not cover_mid:
                 cover_mid = m.get("id")
+        elif cat in ADMIN_EXTRA_PORTFOLIO_CATEGORIES:
+            # Admin Submission feature — same visibility gating as the other
+            # look categories above, data-driven by category name rather than
+            # a hand-written branch per category (portfolio_<cat>_visibility
+            # is an optional per-category hide toggle, same convention as
+            # portfolio_indian_visibility/portfolio_western_visibility).
+            if not fv.get("portfolio", True) or reqs.get(f"portfolio_{cat}_visibility") == "hidden":
+                continue
+            image_items.append({**m, "category": cat})
+            if not cover_mid:
+                cover_mid = m.get("id")
         elif cat == "intro_video":
             if not fv.get("intro_video", True):
                 continue
@@ -2947,7 +3114,14 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
         "intro_video": "video",
         "headshot": "headshot",
         "headshots": "headshot",
-        "additional_portfolio": "additional_portfolio"
+        "additional_portfolio": "additional_portfolio",
+        # Admin Submission feature — same 1:1 pass-through mirroring as the
+        # existing look categories above.
+        "selfie": "selfie",
+        "profiles": "profiles",
+        "full_length": "full_length",
+        "side_profile": "side_profile",
+        "ethnic": "ethnic",
     }
     cat = media.get("category")
     if cat not in cat_mapping:

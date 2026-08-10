@@ -115,6 +115,20 @@ export default function FloatingUploadManager({ activeUploads = {}, completedCou
                                             <X className="w-3 h-3" />
                                         </button>
                                     )}
+                                    {/* True cancel (item 10) — same onDismiss handler; while
+                                        still active it aborts the in-flight upload instead of
+                                        just hiding a terminal entry (see dismissUpload() in
+                                        UploadManagerContext.jsx). */}
+                                    {item.status !== "completed" && item.status !== "failed" && (
+                                        <button
+                                            type="button"
+                                            onClick={() => onDismiss(item.key)}
+                                            className="text-[#333333] hover:text-rose-600 p-0.5"
+                                            title="Cancel upload"
+                                        >
+                                            <X className="w-3 h-3" />
+                                        </button>
+                                    )}
                                 </div>
                             </div>
 

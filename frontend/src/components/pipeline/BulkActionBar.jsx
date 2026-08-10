@@ -12,7 +12,8 @@ import {
     Trash2, 
     X,
     FolderOpen,
-    Check
+    Check,
+    UploadCloud
 } from "lucide-react";
 
 /**
@@ -34,6 +35,8 @@ const BulkActionBar = memo(function BulkActionBar({
     onArchive,
     onReachedOut,
     showReachedOut,
+    onCreateSubmissions,
+    creatingSubmissions,
 }) {
     const visible = count > 0;
     const [busy, setBusy] = useState(false);
@@ -195,6 +198,27 @@ const BulkActionBar = memo(function BulkActionBar({
                             document.body
                         )}
                     </div>
+
+                    {/* Batch Draft Creation (Phase 2, item 8) — creates (or
+                        resumes) a submission draft for every selected
+                        talent in one call. Never auto-submits. */}
+                    <button
+                        type="button"
+                        onClick={onCreateSubmissions}
+                        disabled={busy || creatingSubmissions}
+                        data-testid="pipeline-bulk-create-submissions"
+                        className="
+                            flex items-center gap-1.5 shrink-0
+                            px-3 py-2 rounded-lg
+                            text-[10.5px] tracking-wide uppercase font-semibold
+                            text-white bg-indigo-500/15 hover:bg-indigo-500/25
+                            border border-indigo-400/25 hover:border-indigo-400/40
+                            transition-all duration-200 disabled:opacity-40
+                        "
+                    >
+                        <UploadCloud className="w-3.5 h-3.5 text-indigo-300" />
+                        <span>{creatingSubmissions ? "Creating…" : "Create Submissions"}</span>
+                    </button>
 
                     {/* Labels */}
                     <button

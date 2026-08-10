@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { adminApi, isAdmin, IMAGE_URL } from "@/lib/api";
 import { toast } from "sonner";
+import { useUploadManager } from "@/context/UploadManagerContext";
 import {
     ArrowLeft,
     ChevronLeft,
@@ -212,6 +213,167 @@ function MediaVisControls({ media, onChange }) {
     );
 }
 
+// Review Center Quick Edit (Phase 2, item 7) — a file-picker-triggering
+// "Replace" button, reused across every media type (intro video, takes,
+// portfolio-style images). Purely a UI trigger; the actual upload always
+// goes through the caller's `onReplace(file)` — same shared upload engine
+// every other Replace/Add path in this feature uses, never a new one here.
+function QuickReplaceButton({ onReplace, busy, accept = "image/*,video/*", label = "Replace" }) {
+    const inputRef = useRef(null);
+    return (
+        <>
+            <input
+                ref={inputRef}
+                type="file"
+                accept={accept}
+                className="hidden"
+                onChange={(e) => {
+                    if (e.target.files?.[0]) onReplace(e.target.files[0]);
+                    e.target.value = "";
+                }}
+            />
+            <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
+                disabled={busy}
+                title={label}
+                className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border border-black/[0.08] bg-white/90 hover:bg-black/[0.05] text-black/60 disabled:opacity-40"
+            >
+                {busy ? "…" : label}
+            </button>
+        </>
+    );
+}
+
+// Review Center Quick Edit parity (item 7 follow-up) — every submission-
+// scoped image category (Indian/Western/Portfolio/Selfie/Profiles/Full
+// Length/Side Profile/Ethnic/Additional Portfolio) gets identical Replace/
+// Delete/Reorder/Add behavior through this ONE component, parameterized by
+// category+label. Replaces what used to be two near-identical hand-written
+// blocks (Indian, Western) — no per-category duplication.
+function ReviewImageCategorySection({
+    category,
+    label,
+    images,
+    isPreviewMode,
+    setMediaList,
+    setMediaVisibility,
+    moveMediaItem,
+    quickEditBusyId,
+    replaceSubmissionMedia,
+    handleRemoveMedia,
+    addSubmissionMedia,
+}) {
+    const addInputRef = useRef(null);
+    if (isPreviewMode && images.length === 0) return null;
+
+    return (
+        <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
+            <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
+                <p className="eyebrow">{label} ({images.length})</p>
+                {!isPreviewMode && images.length > 0 && (
+                    <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setMediaList((prev) => prev.map((m) => (m.category === category ? { ...m, client_visible: true, internal_only: false } : m)));
+                                toast.success(`All ${label} set to Visible`);
+                            }}
+                            className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                        >
+                            Show All
+                        </button>
+                        <span className="text-black/10 self-center">|</span>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setMediaList((prev) => prev.map((m) => (m.category === category ? { ...m, client_visible: false, internal_only: false } : m)));
+                                toast.success(`All ${label} set to Hidden`);
+                            }}
+                            className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
+                        >
+                            Hide All
+                        </button>
+                    </div>
+                )}
+                {!isPreviewMode && (
+                    <>
+                        <input
+                            ref={addInputRef}
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            className="hidden"
+                            onChange={(e) => {
+                                if (e.target.files?.length) addSubmissionMedia(e.target.files, category);
+                                e.target.value = "";
+                            }}
+                        />
+                        <button
+                            type="button"
+                            onClick={() => addInputRef.current?.click()}
+                            className="ml-2 text-[9px] font-mono uppercase tracking-wider px-2 py-1 rounded border border-black/[0.08] bg-white hover:bg-black/[0.04] text-black/60"
+                        >
+                            + Add Images
+                        </button>
+                    </>
+                )}
+            </div>
+            {images.length === 0 ? (
+                <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
+                    No {label.toLowerCase()} yet
+                </div>
+            ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    {images.map((m, idx) => (
+                        <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
+                            <PremiumImage src={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" />
+                            {(m.client_visible === false || m.internal_only) && (
+                                <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
+                                    Hidden
+                                </span>
+                            )}
+                            {!isPreviewMode && (
+                                <>
+                                    <div className="absolute bottom-1 left-1 z-10">
+                                        <MediaVisControls media={m} onChange={setMediaVisibility} />
+                                    </div>
+                                    <div className="absolute top-1 left-1 z-10 flex gap-0.5">
+                                        <button type="button" disabled={idx === 0} onClick={() => moveMediaItem(m.id, category, -1)} className="w-4 h-4 flex items-center justify-center bg-white/90 rounded text-[10px] disabled:opacity-30">‹</button>
+                                        <button type="button" disabled={idx === images.length - 1} onClick={() => moveMediaItem(m.id, category, 1)} className="w-4 h-4 flex items-center justify-center bg-white/90 rounded text-[10px] disabled:opacity-30">›</button>
+                                    </div>
+                                    <div className="absolute bottom-1 right-1 z-10 flex gap-1">
+                                        <QuickReplaceButton accept="image/*" busy={quickEditBusyId === m.id} onReplace={(file) => replaceSubmissionMedia(m, file)} />
+                                        <button type="button" onClick={() => handleRemoveMedia(m.id)} className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border border-red-200 bg-white/90 text-red-600 hover:bg-red-50">Del</button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            )}
+        </section>
+    );
+}
+
+// Every submission-scoped image category Admin Submission Mode can upload
+// into (mirrors backend PORTFOLIO_IMAGE_CATEGORIES in core.py) — driving
+// ReviewImageCategorySection generically instead of one block per category.
+// "additional_portfolio" here is the submission's OWN uploaded media, distinct
+// from the talent-library "Additional Portfolio" section below (Section 6,
+// sourced from db.talents) — labeled differently to avoid confusion.
+const IMAGE_CATEGORY_SECTIONS = [
+    { key: "indian", label: "Indian Look Images" },
+    { key: "western", label: "Western Look Images" },
+    { key: "image", label: "Portfolio Images" },
+    { key: "selfie", label: "Selfie Images" },
+    { key: "profiles", label: "Profile Images" },
+    { key: "full_length", label: "Full Length Images" },
+    { key: "side_profile", label: "Side Profile Images" },
+    { key: "ethnic", label: "Ethnic Look Images" },
+    { key: "additional_portfolio", label: "Additional Portfolio (This Submission)" },
+];
+
 function EditableTextarea({ initialValue, onChange, placeholder, className, rows }) {
     const [val, setVal] = useState(initialValue ?? "");
     useEffect(() => {
@@ -362,7 +524,9 @@ function getCompleteness(s, project) {
 export default function SubmissionReviewCenter() {
     const { id } = useParams();
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
     const isAdminRole = isAdmin();
+    const { uploadFile } = useUploadManager();
 
     const [project, setProject] = useState(null);
     const [submissions, setSubmissions] = useState([]);
@@ -462,9 +626,14 @@ export default function SubmissionReviewCenter() {
             const { data } = await adminApi.get(`/projects/${id}/submissions`);
             setSubmissions(data);
             setSelectedId(prev => {
-                if (!prev && data.length > 0) {
-                    return data[0].id;
-                }
+                if (prev) return prev;
+                // Admin Submission ("Upload on Behalf") Pipeline quick-action
+                // deep-links here as ?open={submission_id} — honour it over
+                // the "first item" default so "Open Submission" actually
+                // opens the submission it was clicked for.
+                const openId = searchParams.get("open");
+                if (openId && data.some((s) => s.id === openId)) return openId;
+                if (data.length > 0) return data[0].id;
                 return prev;
             });
         } catch (e) {
@@ -623,21 +792,45 @@ export default function SubmissionReviewCenter() {
 
     const handleAdminMediaUpload = async (file) => {
         if (!file || !selectedId) return;
+        // `pdf` (raw resource type) has no concept in the shared submission
+        // media engine (image/video only) — stays on the original plain
+        // multipart endpoint, explicitly scoped as a legacy document attach,
+        // not part of the submission media model. Image/video categories
+        // route through the real upload engine (compression, progress,
+        // retry — same UploadManagerContext every talent-facing category
+        // and Admin Submission's own uploads already use) instead of the
+        // old no-compression, no-progress plain-POST bypass.
+        if (adminMediaCategory === "pdf") {
+            setAdminMediaUploading(true);
+            try {
+                const formData = new FormData();
+                formData.append("file", file);
+                formData.append("category", adminMediaCategory);
+                const { data } = await adminApi.post(
+                    `/projects/${id}/submissions/${selectedId}/admin-media`,
+                    formData,
+                    { headers: { "Content-Type": "multipart/form-data" } }
+                );
+                setDetail(data);
+                setMediaList(data?.media || []);
+                toast.success("Media uploaded successfully");
+            } catch (e) {
+                toast.error(e?.response?.data?.detail || "Failed to upload media");
+            } finally {
+                setAdminMediaUploading(false);
+            }
+            return;
+        }
         setAdminMediaUploading(true);
         try {
-            const formData = new FormData();
-            formData.append("file", file);
-            formData.append("category", adminMediaCategory);
-            const { data } = await adminApi.post(
-                `/projects/${id}/submissions/${selectedId}/admin-media`,
-                formData,
-                { headers: { "Content-Type": "multipart/form-data" } }
-            );
-            setDetail(data);
-            setMediaList(data?.media || []);
-            toast.success("Media uploaded successfully");
-        } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to upload media");
+            await uploadFile(file, adminMediaCategory, undefined, {
+                endpoint: `/projects/${id}/submissions/${selectedId}/admin-media-v2`,
+                token: localStorage.getItem("tg_admin_token"),
+                onSuccess: (data) => {
+                    setDetail(data);
+                    setMediaList(data?.media || []);
+                },
+            });
         } finally {
             setAdminMediaUploading(false);
         }
@@ -658,6 +851,99 @@ export default function SubmissionReviewCenter() {
         } finally {
             setSaving(false);
         }
+    };
+
+    // Review Center Quick Edit (Phase 2, item 7) — Replace / Add Images.
+    // Reuses the exact real upload engine (compression, progress, retry)
+    // via the SAME public sign/upload/complete endpoints Admin Mode and the
+    // talent flow already drive, instead of a third upload implementation.
+    // The admin-token is a short-lived attributed submitter token (see
+    // POST .../admin-token) — every edit made through it is attributed via
+    // actor_stamp() exactly like Admin Mode's own uploads. This is a
+    // DIFFERENT concept from "Admin Added Media" above (admin-media-v2):
+    // that media is intentionally tagged admin_added and stays visually
+    // distinguishable; a Quick Edit replace/add writes ordinary talent-scope
+    // submission media, indistinguishable from the talent's own — editing
+    // the submission itself, not attaching extra admin-only assets.
+    const [adminUploadToken, setAdminUploadToken] = useState(null);
+    useEffect(() => {
+        setAdminUploadToken(null);
+        if (!selectedId) return;
+        let alive = true;
+        adminApi.post(`/projects/${id}/submissions/${selectedId}/admin-token`)
+            .then(({ data }) => { if (alive) setAdminUploadToken(data.token); })
+            .catch(() => {});
+        return () => { alive = false; };
+    }, [id, selectedId]);
+
+    const [quickEditBusyId, setQuickEditBusyId] = useState(null);
+    const replaceSubmissionMedia = async (oldMedia, file) => {
+        if (!selectedId || !adminUploadToken) {
+            toast.error("Still preparing edit access — try again in a moment.");
+            return;
+        }
+        setQuickEditBusyId(oldMedia.id);
+        try {
+            // Single-slot categories (intro_video/take_1/2/3) auto-evict the
+            // old item server-side on upload — no explicit delete needed or
+            // wanted (deleting first would race the single-slot pull/push).
+            // Every other category (indian/western/selfie/portfolio/…) has
+            // no slot concept, so "replace" there means delete-then-add.
+            const singleSlot = ["intro_video", "take_1", "take_2", "take_3"];
+            if (!singleSlot.includes(oldMedia.category)) {
+                await adminApi.delete(`/projects/${id}/submissions/${selectedId}/media/${oldMedia.id}`);
+            }
+            await uploadFile(file, oldMedia.category, oldMedia.label, {
+                endpoint: `/public/submissions/${selectedId}/upload`,
+                token: adminUploadToken,
+                onSuccess: (data) => {
+                    setDetail(data);
+                    setMediaList(data?.media || []);
+                    toast.success("Replaced");
+                },
+            });
+        } catch (e) {
+            toast.error("Failed to replace media");
+        } finally {
+            setQuickEditBusyId(null);
+        }
+    };
+
+    const addSubmissionMedia = async (files, category) => {
+        if (!selectedId || !adminUploadToken) {
+            toast.error("Still preparing edit access — try again in a moment.");
+            return;
+        }
+        for (const file of Array.from(files)) {
+            await uploadFile(file, category, undefined, {
+                endpoint: `/public/submissions/${selectedId}/upload`,
+                token: adminUploadToken,
+                onSuccess: (data) => {
+                    setDetail(data);
+                    setMediaList(data?.media || []);
+                },
+            });
+        }
+    };
+
+    // Reorder Images (item 7) — moves one media item earlier/later within
+    // its own category, writing straight into mediaList; flows through the
+    // existing curation autosave (buildCurationPayload → PUT .../submissions)
+    // the same way a visibility toggle already does. No new endpoint.
+    const moveMediaItem = (mediaId, category, direction) => {
+        setMediaList((prev) => {
+            const categoryIndices = prev
+                .map((m, i) => (m.category === category ? i : -1))
+                .filter((i) => i !== -1);
+            const posInCategory = categoryIndices.findIndex((i) => prev[i].id === mediaId);
+            const swapWith = posInCategory + direction;
+            if (posInCategory === -1 || swapWith < 0 || swapWith >= categoryIndices.length) return prev;
+            const next = [...prev];
+            const a = categoryIndices[posInCategory];
+            const b = categoryIndices[swapWith];
+            [next[a], next[b]] = [next[b], next[a]];
+            return next;
+        });
     };
 
     // Reset visible count when filters or sorting change
@@ -874,8 +1160,6 @@ export default function SubmissionReviewCenter() {
 
     const introVideo = getCuratedMedia("video")[0];
     const takes = getCuratedMedia("takes");
-    const indianImages = getCuratedMedia("indian");
-    const westernImages = getCuratedMedia("western");
 
     // Talent-level portfolio media (fetched from db.talents). Visibility is
     // controlled per-submission; in client preview, hidden/internal disappear —
@@ -1978,6 +2262,12 @@ export default function SubmissionReviewCenter() {
                                                             </span>
                                                         )}
                                                         <MediaVisControls media={introVideo} onChange={setMediaVisibility} />
+                                                        <QuickReplaceButton
+                                                            accept="video/*"
+                                                            label="Replace Video"
+                                                            busy={quickEditBusyId === introVideo.id}
+                                                            onReplace={(file) => replaceSubmissionMedia(introVideo, file)}
+                                                        />
                                                     </div>
                                                 )}
                                             </div>
@@ -2013,7 +2303,14 @@ export default function SubmissionReviewCenter() {
                                                                     <span className="text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Primary</span>
                                                                 )}
                                                                 {!isPreviewMode && (
-                                                                    <MediaVisControls media={t} onChange={setMediaVisibility} />
+                                                                    <>
+                                                                        <MediaVisControls media={t} onChange={setMediaVisibility} />
+                                                                        <QuickReplaceButton
+                                                                            accept="video/*"
+                                                                            busy={quickEditBusyId === t.id}
+                                                                            onReplace={(file) => replaceSubmissionMedia(t, file)}
+                                                                        />
+                                                                    </>
                                                                 )}
                                                             </div>
                                                         </div>
@@ -2036,119 +2333,26 @@ export default function SubmissionReviewCenter() {
                                     images grid was redundant. Any legacy category="image" media keep
                                     their stored visibility and still reach the client as portfolio. */}
 
-                                {/* Section 3: Indian Look Images */}
-                                {(!isPreviewMode || indianImages.length > 0) && (
-                                    <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
-                                        <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
-                                            <p className="eyebrow">Indian Look Images ({indianImages.length})</p>
-                                            {!isPreviewMode && indianImages.length > 0 && (
-                                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setMediaList(prev => prev.map(m => m.category === "indian" ? { ...m, client_visible: true, internal_only: false } : m));
-                                                            toast.success("All Indian look images set to Visible");
-                                                        }}
-                                                        className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
-                                                    >
-                                                        Show All
-                                                     </button>
-                                                     <span className="text-black/10 self-center">|</span>
-                                                     <button
-                                                         type="button"
-                                                         onClick={() => {
-                                                             setMediaList(prev => prev.map(m => m.category === "indian" ? { ...m, client_visible: false, internal_only: false } : m));
-                                                             toast.success("All Indian look images set to Hidden");
-                                                         }}
-                                                         className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
-                                                     >
-                                                         Hide All
-                                                     </button>
-                                                </div>
-                                            )}
-                                        </div>
-                                        {indianImages.length === 0 ? (
-                                            <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
-                                                No Indian look images
-                                            </div>
-                                        ) : (
-                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                                                {indianImages.map((m) => (
-                                                    <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" />
-                                                        {(m.client_visible === false || m.internal_only) && (
-                                                            <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                                {"Hidden"}
-                                                            </span>
-                                                        )}
-                                                        {!isPreviewMode && (
-                                                            <div className="absolute bottom-1 left-1 z-10">
-                                                                <MediaVisControls media={m} onChange={setMediaVisibility} />
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </section>
-                                )}
-
-                                {/* Section 4: Western Look Images */}
-                                {(!isPreviewMode || westernImages.length > 0) && (
-                                    <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
-                                        <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
-                                            <p className="eyebrow">Western Look Images ({westernImages.length})</p>
-                                            {!isPreviewMode && westernImages.length > 0 && (
-                                                <div className="flex bg-black/[0.04] p-0.5 rounded-full border border-black/[0.02] text-[9px] font-mono uppercase tracking-wider select-none">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setMediaList(prev => prev.map(m => m.category === "western" ? { ...m, client_visible: true, internal_only: false } : m));
-                                                            toast.success("All Western look images set to Visible");
-                                                        }}
-                                                        className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
-                                                    >
-                                                        Show All
-                                                     </button>
-                                                     <span className="text-black/10 self-center">|</span>
-                                                     <button
-                                                         type="button"
-                                                         onClick={() => {
-                                                             setMediaList(prev => prev.map(m => m.category === "western" ? { ...m, client_visible: false, internal_only: false } : m));
-                                                             toast.success("All Western look images set to Hidden");
-                                                         }}
-                                                         className="px-2 py-0.5 hover:text-black text-black/55 transition-colors"
-                                                     >
-                                                         Hide All
-                                                     </button>
-                                                </div>
-                                            )}
-                                        </div>
-                                        {westernImages.length === 0 ? (
-                                            <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] h-28 flex items-center justify-center text-black/45 text-xs font-mono rounded-lg">
-                                                No Western look images
-                                            </div>
-                                        ) : (
-                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                                                {westernImages.map((m) => (
-                                                    <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" />
-                                                        {(m.client_visible === false || m.internal_only) && (
-                                                            <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
-                                                                {"Hidden"}
-                                                            </span>
-                                                        )}
-                                                        {!isPreviewMode && (
-                                                            <div className="absolute bottom-1 left-1 z-10">
-                                                                <MediaVisControls media={m} onChange={setMediaVisibility} />
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </section>
-                                )}
+                                {/* Sections 3+: image-category parity — one generic component
+                                    (ReviewImageCategorySection) drives every submission-scoped
+                                    image category so Replace/Delete/Reorder/Add behave
+                                    identically everywhere, not just Indian/Western. */}
+                                {IMAGE_CATEGORY_SECTIONS.map(({ key, label }) => (
+                                    <ReviewImageCategorySection
+                                        key={key}
+                                        category={key}
+                                        label={label}
+                                        images={getCuratedMedia(key)}
+                                        isPreviewMode={isPreviewMode}
+                                        setMediaList={setMediaList}
+                                        setMediaVisibility={setMediaVisibility}
+                                        moveMediaItem={moveMediaItem}
+                                        quickEditBusyId={quickEditBusyId}
+                                        replaceSubmissionMedia={replaceSubmissionMedia}
+                                        handleRemoveMedia={handleRemoveMedia}
+                                        addSubmissionMedia={addSubmissionMedia}
+                                    />
+                                ))}
 
                                 {/* Section 5: Talent Portfolio Images (from db.talents) */}
                                 {(!isPreviewMode || talentPortfolioImages.length > 0) && (

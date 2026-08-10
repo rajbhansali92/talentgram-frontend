@@ -37,6 +37,7 @@ import {
     X,
     Loader2,
     Eye,
+    UploadCloud,
 } from "lucide-react";
 
 // ============================================================================
@@ -122,6 +123,7 @@ const getWhatsAppUrl = (phoneNumber) => {
 
 const PipelineCard = memo(function PipelineCard({
     projectId,
+    projectSlug,
     item,
     refresh,
     bulkMode,
@@ -133,6 +135,11 @@ const PipelineCard = memo(function PipelineCard({
     onDragStart,
     onDragEnd,
     compact = false,
+    // Admin Submission ("Upload on Behalf") — batched lookup-by-talent map
+    // from the board level (see PipelineBoard.jsx), keyed by talent email
+    // and talent id: { submission_id, status, decision, created_from } |
+    // undefined. One board-level fetch, not a per-card network call.
+    submissionLookup,
 }) {
     const navigate = useNavigate();
     const [moving, setMoving] = useState(false);
@@ -197,6 +204,22 @@ const PipelineCard = memo(function PipelineCard({
     const displayEmail = item.talent_email || item.email || null;
     const displayPhone = item.talent_phone || null;
     const displayIg = item.instagram_handle || null;
+
+    // Admin Submission — resolve this card's existing submission (if any)
+    // from the board-level batched lookup. Email is the primary key (a
+    // talent-created draft may not have talent_id set on the submission
+    // doc yet — see submissions_lookup_by_talent's docstring); talent_id is
+    // a secondary/defense-in-depth match once available.
+    const existingSubmission =
+        (displayEmail && submissionLookup?.[displayEmail.toLowerCase()]) ||
+        (item.talent_id && submissionLookup?.[item.talent_id]) ||
+        null;
+    // Real pipeline stage keys (ALL_PIPELINE_STAGES above) have no literal
+    // "pending" stage — "hold" is the closest analog to talents awaiting a
+    // decision, which is what the feature's "Follow Up / Ask To Test /
+    // Pending" framing meant.
+    const showUploadOnBehalf =
+        !readOnly && ["follow_up", "ask_to_test", "hold"].includes(canonicalStage);
     
     // Recruiter metadata
     const recruiterName = item.assigned_recruiter || item.recruiter_name || 'Unassigned';
@@ -822,7 +845,7 @@ const PipelineCard = memo(function PipelineCard({
             {!readOnly && !bulkMode && showActionRail && (
                 <div
                     ref={actionRailRef}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 bg-white/95 backdrop-blur-sm rounded-lg p-1.5 shadow-sm border border-black/[0.06] z-10"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 grid grid-cols-2 gap-1.5 bg-white/95 backdrop-blur-sm rounded-lg p-1.5 shadow-sm border border-black/[0.06] z-10"
                     style={{ maxHeight: 'calc(100% - 16px)' }}
                     onMouseEnter={() => {
                         if (isTouchDevice) return;
@@ -908,6 +931,33 @@ const PipelineCard = memo(function PipelineCard({
                             <Eye className="w-3.5 h-3.5" />
                         )}
                     </button>
+                    {showUploadOnBehalf && projectSlug && item.talent_id && (
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                // Cross-router navigation: /submit/[slug] is a
+                                // separate Next.js App Router page outside this
+                                // react-router tree (same reasoning as the
+                                // Dashboard back-link elsewhere) — a real
+                                // browser navigation, not useNavigate().
+                                if (existingSubmission && existingSubmission.status !== "draft") {
+                                    navigate(`/admin/projects/${projectId}/submissions?open=${existingSubmission.submission_id}`);
+                                    return;
+                                }
+                                const url = `/submit/${projectSlug}?admin=1&pid=${projectId}&talentId=${item.talent_id}` +
+                                    (existingSubmission ? `&sid=${existingSubmission.submission_id}` : "");
+                                window.location.href = url;
+                            }}
+                            className="w-7 h-7 rounded-md flex items-center justify-center text-black/50 hover:text-black/80 hover:bg-black/[0.04] transition-colors"
+                            title={
+                                existingSubmission
+                                    ? (existingSubmission.status === "draft" ? "Continue Draft" : "Open Submission")
+                                    : "Create Submission"
+                            }
+                        >
+                            <UploadCloud className="w-3.5 h-3.5" />
+                        </button>
+                    )}
                 </div>
             )}
 

@@ -123,6 +123,8 @@ const FocusedPipelineView = memo(function FocusedPipelineView({
 const PipelineColumn = memo(function PipelineColumn({
     stage,
     projectId,
+    projectSlug,
+    submissionLookup,
     items,
     refresh,
     bulkMode,
@@ -441,6 +443,8 @@ const PipelineColumn = memo(function PipelineColumn({
                                     <PipelineCard
                                         key={`${stage}-${item.id}`}
                                         projectId={projectId}
+                                        projectSlug={projectSlug}
+                                        submissionLookup={submissionLookup}
                                         item={item}
                                         refresh={refresh}
                                         bulkMode={bulkMode && !readOnly}

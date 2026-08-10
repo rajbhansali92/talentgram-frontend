@@ -2000,11 +2000,20 @@ function TalentDetail({
     const indianOn = portfolioOn && (vis.indian_images ?? true);
     const westernOn = portfolioOn && (vis.western_images ?? true);
     const portfolioGenericOn = portfolioOn;
+    // Admin Submission feature — selfie/profiles/full_length/side_profile are
+    // additional look categories (same server-side gating as indian/western,
+    // see _submission_to_client_shape's ADMIN_EXTRA_PORTFOLIO_CATEGORIES
+    // branch). No dedicated per-link visibility toggle for these yet — they
+    // ride on the same master "portfolio" toggle generic images use.
+    const ADMIN_EXTRA_PORTFOLIO_CATEGORIES = ["selfie", "profiles", "full_length", "side_profile", "ethnic", "additional_portfolio"];
     const images = useMemo(() => {
         const pImgs = portfolioGenericOn ? mediaAll.filter((m) => m.category === "portfolio") : [];
         const iImgs = indianOn ? mediaAll.filter((m) => m.category === "indian") : [];
         const wImgs = westernOn ? mediaAll.filter((m) => m.category === "western") : [];
-        return [...pImgs, ...iImgs, ...wImgs];
+        const extraImgs = portfolioGenericOn
+            ? mediaAll.filter((m) => ADMIN_EXTRA_PORTFOLIO_CATEGORIES.includes(m.category))
+            : [];
+        return [...pImgs, ...iImgs, ...wImgs, ...extraImgs];
     }, [mediaAll, portfolioGenericOn, indianOn, westernOn]);
     const intro = mediaAll.find((m) => m.category === "video") || null;
     const takes = mediaAll.filter((m) => m.category === "take");

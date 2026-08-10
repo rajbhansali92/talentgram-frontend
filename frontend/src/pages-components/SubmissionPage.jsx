@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "next/navigation";
-import { api as axios, IMAGE_URL } from "@/lib/api";
+import { useParams, useSearchParams } from "next/navigation";
+import { api as axios, adminApi, IMAGE_URL } from "@/lib/api";
 import { sendOtp, verifyOtp, buildGoogleAuthUrl, persistPortalToken } from "@/lib/talentAuth";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
@@ -11,6 +11,7 @@ import { revealAndJumpToRequirementItem } from "@/lib/scrollHighlight";
 import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS, SECTION_STATUS, OPERATIONAL_STATES } from "@/lib/readinessStatus";
 import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
+import LibraryMediaPicker from "@/components/submission/LibraryMediaPicker";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
@@ -19,6 +20,9 @@ import DobInput from "@/components/DobInput";
 import ThemeToggle from "@/components/ThemeToggle";
 import HlsVideo from "@/components/HlsVideo";
 import { thumbnailUrl, posterUrl, normalizeInstagramHandle } from "@/lib/mediaUtils";
+import { collectDroppedFiles } from "@/lib/collectDroppedFiles";
+import { suggestCategoriesForBatch } from "@/lib/mediaCategorization";
+import CategorizationReviewModal from "@/components/submission/CategorizationReviewModal";
 import {
     Select,
     SelectContent,
@@ -392,19 +396,53 @@ const formatMediaTimestamp = (m) => {
     }
 };
 
+// Admin Mode ("Upload on Behalf") — persistent banner so it's always clear
+// this session is an admin acting for a talent, never mistakable for the
+// talent's own view. The client never sees any trace of this — it's purely
+// this page's own chrome.
+function AdminModeBanner({ talentName }) {
+    return (
+        <div
+            className="sticky top-0 z-50 w-full bg-[#0c2340] text-white text-xs sm:text-sm font-medium py-2 px-4 text-center"
+            data-testid="admin-mode-banner"
+        >
+            Admin Mode — submitting on behalf of {talentName || "this talent"}
+        </div>
+    );
+}
+
 function SubmissionPage() {
     const { slug } = useParams();
+    const searchParams = useSearchParams();
+    // Admin Mode ("Upload on Behalf") — entered only via a Pipeline card
+    // action, never by a talent. `pid`/`talentId` identify who this session
+    // is for; `sid` (optional) resumes an existing draft instead of creating
+    // a new one. The submitter token itself is never carried in the URL —
+    // see the admin-start bootstrap effect below, which mints it fresh into
+    // React state on every mount.
+    const adminMode = searchParams?.get("admin") === "1";
+    const adminProjectId = searchParams?.get("pid") || null;
+    const adminTalentId = searchParams?.get("talentId") || null;
+    const adminExistingSid = searchParams?.get("sid") || null;
     const [project, setProject] = useState(null);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState(null);   // {kind,status} — drives retryable vs not-found
     const [reloadNonce, setReloadNonce] = useState(0);  // bumped by the Retry button
-    const [saved, setSaved] = useState(() => readSaved(slug));
+    const [saved, setSaved] = useState(() => (adminMode ? null : readSaved(slug)));
     const [showMaterial, setShowMaterial] = useState(false);
     const [activeLightboxImage, setActiveLightboxImage] = useState(null);
+    // Admin Mode bootstrap state — populated by the admin-start effect
+    // further down, once `project` has loaded (admin-start needs `pid`,
+    // which we already have from the URL, so it doesn't actually wait on
+    // `project`, but the talent's display name for the banner comes back in
+    // the same response).
+    const [adminBootstrapping, setAdminBootstrapping] = useState(adminMode);
+    const [adminBootstrapError, setAdminBootstrapError] = useState(null);
+    const [adminTalentName, setAdminTalentName] = useState(null);
 
     // Full form (with draft restoration from localStorage)
     const [form, setForm] = useState(() => {
-        const draft = readDraft(slug);
+        const draft = adminMode ? null : readDraft(slug);
         const base = {
             first_name: "",
             last_name: "",
@@ -501,6 +539,12 @@ function SubmissionPage() {
     // Initialised here (rather than later in the component body) so
     // validateForm / validateStep1 can read it without TDZ surprises.
     const [emailGateUnlocked, setEmailGateUnlocked] = useState(() => {
+        // Admin Mode — the admin's own authenticated session is the identity
+        // proof (no OTP/email-ownership gate applies to on-behalf
+        // submissions), so every section is unlocked from the start. The
+        // talent is already known from the Pipeline card that launched this
+        // page, not re-entered here.
+        if (adminMode) return true;
         if (typeof window === "undefined") return false;
         // Issue 1: every project submission link must ALWAYS begin on the
         // landing page and require fresh authentication. Only a per-slug
@@ -532,6 +576,18 @@ function SubmissionPage() {
     const cameraImagesRef = useRef(); // mobile camera-first photo capture
     const indianImagesRef = useRef();
     const westernImagesRef = useRef();
+    // Admin Mode extra look categories
+    const selfieImagesRef = useRef();
+    const profilesImagesRef = useRef();
+    const fullLengthImagesRef = useRef();
+    const sideProfileImagesRef = useRef();
+    const ethnicImagesRef = useRef();
+    const additionalPortfolioImagesRef = useRef();
+    // Automatic Media Categorization (item 3) — generic bulk-add zone state.
+    const bulkCategorizeInputRef = useRef();
+    const [isBulkDragOver, setIsBulkDragOver] = useState(false);
+    const [categorizingBatch, setCategorizingBatch] = useState(false);
+    const [categorizationBatch, setCategorizationBatch] = useState(null); // {groups, uncategorized} | null
     const uploadsSectionRef = useRef();
 
     // Load project — classify failures, retry transient errors with backoff,
@@ -647,6 +703,13 @@ function SubmissionPage() {
     //   • a per-slug Google auth (GoogleCallback writes `tg_google_done_<slug>`)
     //   • the per-slug JWT/ATK submission session (handled by the resume effects)
     useEffect(() => {
+        // Admin Mode never uses Google Sign-In, the ?email= deep-link, or any
+        // localStorage-keyed identity signal — the talent is already known
+        // from the Pipeline card (adminTalentId), and reading these stale
+        // per-slug keys here could hijack the session with a DIFFERENT
+        // talent's leftover browser state if the admin previously tested the
+        // public link on this same slug.
+        if (adminMode) return;
         const urlParams = new URLSearchParams(window.location.search);
         const queryEmail = urlParams.get("email");
 
@@ -774,11 +837,53 @@ function SubmissionPage() {
                     });
                 }
             } catch {
-                localStorage.removeItem(LS_KEY(slug));
+                if (!adminMode) localStorage.removeItem(LS_KEY(slug));
                 setSaved(null);
             }
         })();
     }, [saved, slug]);
+
+    // Admin Mode ("Upload on Behalf") bootstrap — mints an attributed
+    // submitter session for `adminTalentId` on `adminProjectId` via the
+    // admin-authed start endpoint, then feeds it into the SAME `saved` state
+    // the talent-facing JWT resume effect above already watches — so the
+    // rest of this 5,000-line component (every form-patch call, every media
+    // call, finalize) runs completely unmodified regardless of which flow
+    // minted the token. Never touches localStorage: this page runs in the
+    // ADMIN's browser, where one admin may work several different talents'
+    // on-behalf submissions for the same project slug in one session, and
+    // the existing localStorage keys are namespaced only by slug — reusing
+    // them here would let a second talent's session read/clobber the
+    // first's leftover draft. The server-persisted draft is already the
+    // source of truth in Admin Mode, so localStorage adds nothing.
+    useEffect(() => {
+        if (!adminMode) return;
+        if (!adminProjectId || !adminTalentId) {
+            setAdminBootstrapError("Missing project or talent — reopen this from the Pipeline card.");
+            setAdminBootstrapping(false);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const { data } = await adminApi.post(
+                    `/projects/${adminProjectId}/talents/${adminTalentId}/submissions/admin-start`,
+                );
+                if (cancelled) return;
+                setSaved({ id: data.id, token: data.token });
+                setAdminTalentName(data.talent_name || null);
+            } catch (err) {
+                if (cancelled) return;
+                setAdminBootstrapError(
+                    err?.response?.data?.detail || "Could not start this submission. Please try again."
+                );
+            } finally {
+                if (!cancelled) setAdminBootstrapping(false);
+            }
+        })();
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [adminMode, adminProjectId, adminTalentId]);
 
     // Persistent ATK-based resume — runs after JWT resume path so it only
     // fires when `saved` is null (no valid JWT in localStorage). Uses the
@@ -786,6 +891,7 @@ function SubmissionPage() {
     // /public/projects/{slug}/submission/me endpoint and restore the full
     // submission state without re-entering any identity details.
     useEffect(() => {
+        if (adminMode) return;      // Admin Mode never uses the ATK/localStorage resume path.
         if (saved) return;          // JWT resume already handled this session
         if (atkTriedRef.current) return; // already attempted once this mount
         const atk = localStorage.getItem(LS_ATK_KEY(slug));
@@ -948,6 +1054,11 @@ function SubmissionPage() {
     // loses progress before the talent record is created on the backend.
     // Also drives the subtle "Saving… / Saved" autosave indicator (Sprint 1).
     useEffect(() => {
+        // Admin Mode: the server-persisted draft is the source of truth (the
+        // submission doc is already saved via admin-start + every field
+        // patch), so localStorage draft persistence adds nothing and risks
+        // cross-talent contamination — see the admin-start bootstrap effect.
+        if (adminMode) return;
         const first = !draftMountRef.current;
         if (first) draftMountRef.current = true;
         else setSaveStatus("saving");
@@ -1433,6 +1544,16 @@ function SubmissionPage() {
             onBeforeUpload: async () => {
                 let currentSaved = saved;
                 if (!currentSaved) {
+                    // Admin Mode never falls back to the talent-facing start
+                    // endpoint — that would create a second, non-admin-
+                    // attributed submission instead of using the one the
+                    // admin-start bootstrap effect already created/resumed.
+                    // If `saved` isn't set yet, bootstrap is still in flight
+                    // (or failed) — surface that instead of racing it.
+                    if (adminMode) {
+                        toast.error(adminBootstrapping ? "Still starting this submission — please wait a moment and try again." : "Could not start this submission. Please reload and try again.");
+                        return null;
+                    }
                     const err = validateStep1();
                     if (err) {
                         toast.error("Please complete the required Profile fields first before uploading files.");
@@ -1476,6 +1597,17 @@ function SubmissionPage() {
     const images = media.filter((m) => m.category === "image");
     const indianImages = media.filter((m) => m.category === "indian");
     const westernImages = media.filter((m) => m.category === "western");
+    // Admin Mode — additional look categories (Selfie/Profiles/Full Length/
+    // Side Profile). Each is its own independent bucket (own per-category
+    // cap), same as indian/western above — not counted into `allImages`,
+    // matching how indian/western are already excluded from the generic
+    // portfolio bucket.
+    const selfieImages = media.filter((m) => m.category === "selfie");
+    const profilesImages = media.filter((m) => m.category === "profiles");
+    const fullLengthImages = media.filter((m) => m.category === "full_length");
+    const sideProfileImages = media.filter((m) => m.category === "side_profile");
+    const ethnicImages = media.filter((m) => m.category === "ethnic");
+    const additionalPortfolioImages = media.filter((m) => m.category === "additional_portfolio");
     const allImages = [...images, ...indianImages, ...westernImages];
 
     const intro = media.find((m) => m.category === "intro_video");
@@ -1511,11 +1643,22 @@ function SubmissionPage() {
     const removedFromProfileItems = media.filter(
         (m) => m.source_talent_media_id && m.removed_from_profile,
     );
+    // Phase 2 — every REUSABLE_MEDIA_CATEGORIES category the backend
+    // recognizes gets a picker section, not just the original 4. Audition
+    // takes are never here (never reusable — project-only by design).
+    // Data-driven by category name, not a hardcoded branch per category, so
+    // a future custom project media category needs no code change here.
     const LIBRARY_CATEGORIES = [
         { key: "intro_video", label: "Intro" },
         { key: "image", label: "Portfolio" },
         { key: "indian", label: "Indian" },
         { key: "western", label: "Western" },
+        { key: "selfie", label: "Selfie" },
+        { key: "profiles", label: "Profiles" },
+        { key: "full_length", label: "Full Length" },
+        { key: "side_profile", label: "Side Profile" },
+        { key: "ethnic", label: "Ethnic" },
+        { key: "additional_portfolio", label: "Additional Portfolio" },
     ];
     const libraryByCategory = Object.fromEntries(
         LIBRARY_CATEGORIES.map(({ key }) => [key, libraryMedia.filter((m) => m.category === key)]),
@@ -1534,6 +1677,12 @@ function SubmissionPage() {
         image: ["Portfolio Image", "Portfolio Images"],
         indian: ["Indian Look Image", "Indian Look Images"],
         western: ["Western Look Image", "Western Look Images"],
+        selfie: ["Selfie", "Selfies"],
+        profiles: ["Profile Image", "Profile Images"],
+        full_length: ["Full Length Image", "Full Length Images"],
+        side_profile: ["Side Profile Image", "Side Profile Images"],
+        ethnic: ["Ethnic Look Image", "Ethnic Look Images"],
+        additional_portfolio: ["Additional Portfolio Image", "Additional Portfolio Images"],
     };
     const pendingConsentSummary = Object.entries(
         pendingMediaConsent.reduce((acc, m) => {
@@ -1625,6 +1774,35 @@ function SubmissionPage() {
         );
     };
 
+    // Automatic Media Categorization (item 3) — runs the heuristic over a
+    // dropped/selected batch and opens the review modal. Nothing uploads
+    // here; upload only happens from handleCategorizationConfirm, via the
+    // exact same uploadImages() every other zone already uses.
+    const runBulkCategorization = async (files) => {
+        if (!files?.length) return;
+        setCategorizingBatch(true);
+        try {
+            const result = await suggestCategoriesForBatch(files);
+            setCategorizationBatch(result);
+        } finally {
+            setCategorizingBatch(false);
+        }
+    };
+
+    const handleBulkCategorizeDrop = async (e) => {
+        e.preventDefault();
+        setIsBulkDragOver(false);
+        const files = await collectDroppedFiles(e.dataTransfer);
+        await runBulkCategorization(files);
+    };
+
+    const handleCategorizationConfirm = (finalGroups) => {
+        setCategorizationBatch(null);
+        Object.entries(finalGroups).forEach(([category, files]) => {
+            uploadImages(files, category);
+        });
+    };
+
     const removeMedia = async (mid) => {
         try {
             await axios.delete(
@@ -1649,6 +1827,10 @@ function SubmissionPage() {
     const toggleLibraryMedia = async (item, isSelected) => {
         let currentSaved = saved;
         if (!currentSaved) {
+            if (adminMode) {
+                toast.error(adminBootstrapping ? "Still starting this submission — please wait a moment and try again." : "Could not start this submission. Please reload and try again.");
+                return;
+            }
             const err = validateStep1();
             if (err) {
                 toast.error("Please complete the required Profile fields first.");
@@ -1712,28 +1894,54 @@ function SubmissionPage() {
     // currently-pending item in a single call (see
     // apply_media_consent_decision() server-side), whether the talent
     // uploaded 1 intro video, 3 images, or a mix.
-    const submitMediaConsent = async (decision) => {
+    // `mediaIds` (Phase 2, item 5) — Admin Mode's per-item "Save to Master
+    // Profile" checkbox scopes resolution to ONE media item instead of every
+    // currently-pending item; omitted (undefined), this is byte-for-byte the
+    // original talent-flow batch behavior. The generic toast/dialog-reset
+    // side effects only make sense for that batch dialog, so they're skipped
+    // for a scoped per-item call — the checkbox itself is the feedback.
+    const submitMediaConsent = async (decision, mediaIds) => {
         if (!saved?.id) return;
         setMediaConsentSubmitting(true);
         try {
             const { data } = await axios.post(
                 `/public/submissions/${saved.id}/media-consent`,
-                { decision },
+                mediaIds ? { decision, media_ids: mediaIds } : { decision },
                 authCfg,
             );
             applySubmissionResponse(data);
-            setMediaConsentChoice("only_this_project");
-            toast.success(
-                decision === "update_profile"
-                    ? "Your Talent Profile has been updated."
-                    : "Saved for this project only.",
-            );
+            if (!mediaIds) {
+                setMediaConsentChoice("only_this_project");
+                toast.success(
+                    decision === "update_profile"
+                        ? "Your Talent Profile has been updated."
+                        : "Saved for this project only.",
+                );
+            }
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Could not save your choice");
         } finally {
             setMediaConsentSubmitting(false);
         }
     };
+
+    // Admin Mode per-item "Save to Master Profile" checkbox (item 5). Only
+    // reusable categories (REUSABLE_MEDIA_CATEGORIES server-side) ever carry
+    // a pending consent item — checking/unchecking a non-reusable category's
+    // media (e.g. an audition take) is simply never offered this control.
+    const setMediaConsentForItem = (mediaId, saveToMasterProfile) => {
+        submitMediaConsent(saveToMasterProfile ? "update_profile" : "only_this_project", [mediaId]);
+    };
+
+    // Phase 2, item 5 — Admin Mode no longer auto-resolves every pending
+    // item to "update_profile" in one blanket batch call (Phase 1's
+    // behavior). It still skips the TALENT-facing modal dialog (the admin's
+    // own session is the identity/consent proof, so no "how would you like
+    // to use this?" prompt is shown) — but each admin-uploaded item now gets
+    // its own "Save to Master Profile" checkbox (rendered per-thumbnail,
+    // see setMediaConsentForItem above) instead of one decision for the
+    // whole batch. Nothing auto-resolves; an unchecked item just stays
+    // "only_this_project" until the admin explicitly checks it.
 
     const replaceMediaFile = async (oldMedia, file) => {
         const isVideoSlot = ["intro_video", "take", "take_1", "take_2", "take_3"].includes(oldMedia.category);
@@ -1795,11 +2003,27 @@ function SubmissionPage() {
 
         let currentSaved = saved;
         if (!currentSaved) {
+            if (adminMode) {
+                toast.error(adminBootstrapping ? "Still starting this submission — please wait a moment and try again." : "Could not start this submission. Please reload and try again.");
+                return;
+            }
             const next = await startSubmissionDirect();
             if (!next) return;
             currentSaved = next;
         } else {
             await saveForm();
+        }
+        // Phase 2, item 5 safety net — the per-item "Save to Master Profile"
+        // checkbox means an item can be left genuinely pending if the admin
+        // never touched its checkbox. The backend blocks finalize while
+        // anything is still pending ("Please choose how to use your new
+        // photo/video uploads"); rather than surface that as a confusing
+        // error, default anything still-pending to the conservative choice
+        // (project-only, no master-profile promotion) right before
+        // finalizing — the admin can still promote it manually beforehand
+        // via the checkbox for anything they DO want promoted.
+        if (adminMode && pendingMediaConsent.length > 0) {
+            await submitMediaConsent("only_this_project");
         }
         setFinalizing(true);
         try {
@@ -2034,6 +2258,29 @@ function SubmissionPage() {
         );
     }
 
+    if (adminMode && adminBootstrapping) {
+        return (
+            <div className="min-h-dvh flex flex-col items-center justify-center bg-gradient-to-b from-slate-50 to-white gap-3">
+                <Loader2 className="w-6 h-6 animate-spin text-[#333333]" />
+                <p className="text-sm text-[#666666]">Starting submission…</p>
+            </div>
+        );
+    }
+    if (adminMode && adminBootstrapError) {
+        return (
+            <div className="min-h-dvh flex flex-col items-center justify-center bg-gradient-to-b from-slate-50 to-white text-[#333333] p-6 text-center gap-4">
+                <p className="max-w-sm font-medium">{adminBootstrapError}</p>
+                <button
+                    type="button"
+                    onClick={() => window.location.reload()}
+                    className="px-4 py-2 rounded-lg bg-[#333333] text-white text-sm font-medium hover:opacity-90 active:scale-95 transition"
+                >
+                    Try again
+                </button>
+            </div>
+        );
+    }
+
     // Status system — reused as-is, only extended with the one value
     // (`selected`) it was already missing (confirmed via
     // draft-talent-migration's own `$in` query in server.py: submitted /
@@ -2177,6 +2424,7 @@ function SubmissionPage() {
     if (isSubmitted && !editMode) {
         return (
             <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden">
+                {adminMode && <AdminModeBanner talentName={adminTalentName} />}
                 <div className="absolute inset-0 pointer-events-none opacity-20 blur-3xl bg-[#0c2340]/20" />
                 <div className="absolute top-5 right-5 z-10">
                     <ThemeToggle />
@@ -2238,6 +2486,23 @@ function SubmissionPage() {
 
     return (
         <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page">
+            {adminMode && <AdminModeBanner talentName={adminTalentName} />}
+            {/* Submission Readiness Dashboard (item 6) — pinned right under the
+                banner so an admin sees it before scrolling into the form,
+                instead of only inline further down. Same live experience
+                model (useSubmissionExperienceModel → requirementEngine.js)
+                every other instance of this panel already renders from — no
+                separate validation logic, just an earlier render of it. */}
+            {adminMode && emailGateUnlocked && (
+                <div className="max-w-2xl mx-auto px-5 pt-4" data-testid="admin-pinned-readiness">
+                    <SubmissionReadinessPanel
+                        items={experience.checklist}
+                        onItemClick={focusRequirementItem}
+                        saveStatus={experience.saveStatus}
+                        progress={experience.overallProgress}
+                    />
+                </div>
+            )}
             {/* Ambient luxury background blobs */}
             <div className="absolute inset-0 pointer-events-none opacity-30 blur-3xl">
                 <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-[#0c2340]/10 mix-blend-multiply animate-blob" />
@@ -3478,118 +3743,60 @@ function SubmissionPage() {
                         {!collapsedSections.uploads && (
                             <div className="animate-fadeIn">
 
-                                {libraryMedia.length > 0 && (
-                                    <div
-                                        className="mb-6 bg-indigo-50/40 border border-indigo-100 rounded-2xl p-4"
-                                        data-testid="library-media-section"
-                                    >
-                                        <div className="flex items-center justify-between gap-3 mb-3">
-                                            <div>
-                                                <h3 className="font-display text-lg font-bold text-slate-900">
-                                                    My Saved Media
-                                                </h3>
-                                                <p className="text-xs text-slate-500 mt-0.5">
-                                                    From your Talent Profile — choose what applies to this project. No re-upload needed.
-                                                </p>
-                                            </div>
-                                            <button
-                                                type="button"
-                                                onClick={selectAllLibraryMedia}
-                                                className="shrink-0 text-xs font-medium px-3 py-1.5 rounded-full border border-indigo-200 bg-white hover:bg-indigo-50 transition-colors"
-                                                data-testid="library-select-all"
-                                            >
-                                                Select All
-                                            </button>
-                                        </div>
+                                <LibraryMediaPicker
+                                    categories={LIBRARY_CATEGORIES}
+                                    libraryByCategory={libraryByCategory}
+                                    removedByCategory={removedByCategory}
+                                    dismissedRemovedWarnings={dismissedRemovedWarnings}
+                                    selectedLibrarySourceIds={selectedLibrarySourceIds}
+                                    libraryBusyId={libraryBusyId}
+                                    toggleLibraryMedia={toggleLibraryMedia}
+                                    dismissRemovedWarning={dismissRemovedWarning}
+                                    removeMedia={removeMedia}
+                                    selectAllLibraryMedia={selectAllLibraryMedia}
+                                    hasAnyLibraryMedia={libraryMedia.length > 0}
+                                />
 
-                                        {LIBRARY_CATEGORIES.map(({ key, label }) => {
-                                            const items = libraryByCategory[key];
-                                            const removedItems = removedByCategory[key].filter(
-                                                (m) => !dismissedRemovedWarnings.has(m.id),
-                                            );
-                                            if (items.length === 0 && removedItems.length === 0) return null;
-                                            return (
-                                                <div key={key} className="mb-4 last:mb-0">
-                                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                                        {label}
-                                                    </p>
-                                                    <div className="flex flex-wrap gap-3">
-                                                        {items.map((item) => {
-                                                            const isSelected = selectedLibrarySourceIds.has(item.id);
-                                                            const isBusy = libraryBusyId === item.id;
-                                                            return (
-                                                                <button
-                                                                    key={item.id}
-                                                                    type="button"
-                                                                    disabled={isBusy}
-                                                                    onClick={() => toggleLibraryMedia(item, isSelected)}
-                                                                    data-testid={`library-item-${item.id}`}
-                                                                    data-selected={isSelected ? "true" : "false"}
-                                                                    className={`relative w-24 h-24 rounded-xl overflow-hidden border-2 transition-all ${
-                                                                        isSelected ? "border-emerald-500" : "border-transparent"
-                                                                    } ${isBusy ? "opacity-50" : ""}`}
-                                                                    title={isSelected ? "Selected — click to remove from this submission" : "Not selected — click to use for this submission"}
-                                                                >
-                                                                    {item.category === "intro_video" ? (
-                                                                        <div className="w-full h-full bg-slate-900 flex items-center justify-center">
-                                                                            <Video className="w-6 h-6 text-white/70" />
-                                                                        </div>
-                                                                    ) : (
-                                                                        <img
-                                                                            src={thumbnailUrl(item)}
-                                                                            alt=""
-                                                                            className="w-full h-full object-cover"
-                                                                        />
-                                                                    )}
-                                                                    <div
-                                                                        className={`absolute top-1 right-1 w-5 h-5 rounded-full flex items-center justify-center ${
-                                                                            isSelected
-                                                                                ? "bg-emerald-500"
-                                                                                : "bg-white/85 border border-slate-300"
-                                                                        }`}
-                                                                    >
-                                                                        {isBusy ? (
-                                                                            <Loader2 className="w-3 h-3 animate-spin text-slate-500" />
-                                                                        ) : (
-                                                                            isSelected && <Check className="w-3 h-3 text-white" />
-                                                                        )}
-                                                                    </div>
-                                                                </button>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                    {removedItems.map((m) => (
-                                                        <div
-                                                            key={m.id}
-                                                            className="mt-2 flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3"
-                                                            data-testid={`removed-from-profile-${m.id}`}
-                                                        >
-                                                            <span className="text-xs text-amber-800">
-                                                                This media has been removed from your Talent Profile.
-                                                            </span>
-                                                            <div className="flex gap-2 shrink-0">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => dismissRemovedWarning(m.id)}
-                                                                    className="text-xs px-2.5 py-1 rounded-full border border-amber-300 bg-white hover:bg-amber-50 transition-colors"
-                                                                    data-testid={`keep-removed-${m.id}`}
-                                                                >
-                                                                    Keep for this submission
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => removeMedia(m.id)}
-                                                                    className="text-xs px-2.5 py-1 rounded-full border border-red-300 bg-white text-red-600 hover:bg-red-50 transition-colors"
-                                                                    data-testid={`remove-removed-${m.id}`}
-                                                                >
-                                                                    Remove from this submission
-                                                                </button>
-                                                            </div>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            );
-                                        })}
+                                {/* Automatic Media Categorization (item 3) — Admin Mode only.
+                                    A generic bulk-add zone, separate from every per-category
+                                    zone below (which keep working unchanged for a direct
+                                    single-category drop). Dropping a batch here runs the
+                                    heuristic suggestion + review modal; per-category zones
+                                    skip straight to upload as before. */}
+                                {adminMode && (
+                                    <div
+                                        className={`mb-6 rounded-2xl border-2 border-dashed p-6 text-center transition-colors ${
+                                            isBulkDragOver ? "border-[#0c2340]/50 bg-[#0c2340]/5" : "border-slate-300 bg-slate-50/40"
+                                        }`}
+                                        data-testid="bulk-categorize-dropzone"
+                                        onDragOver={(e) => { e.preventDefault(); setIsBulkDragOver(true); }}
+                                        onDragLeave={() => setIsBulkDragOver(false)}
+                                        onDrop={handleBulkCategorizeDrop}
+                                    >
+                                        <p className="text-sm font-semibold text-slate-800">
+                                            {categorizingBatch ? "Analyzing files…" : "Drop a batch here — we'll suggest categories"}
+                                        </p>
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            Select or drop 2+ images (or a whole folder) and review the suggested categorization before anything uploads.
+                                        </p>
+                                        <input
+                                            ref={bulkCategorizeInputRef}
+                                            type="file"
+                                            accept="image/*"
+                                            multiple
+                                            className="hidden"
+                                            onChange={(e) => {
+                                                if (e.target.files?.length) runBulkCategorization(Array.from(e.target.files));
+                                                e.target.value = "";
+                                            }}
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => bulkCategorizeInputRef.current?.click()}
+                                            className="mt-3 text-xs font-medium px-3 py-1.5 rounded-full border border-slate-300 bg-white hover:bg-slate-50"
+                                        >
+                                            Select Files
+                                        </button>
                                     </div>
                                 )}
 
@@ -3735,6 +3942,8 @@ function SubmissionPage() {
                                             setActivePortfolioThumbId={setActivePortfolioThumbId}
                                             setActiveLightboxImage={setActiveLightboxImage}
                                             replaceMediaFile={replaceMediaFile}
+                                            adminMode={adminMode}
+                                            setMediaConsentForItem={setMediaConsentForItem}
                                         />
                                     )}
 
@@ -3757,8 +3966,45 @@ function SubmissionPage() {
                                             setActivePortfolioThumbId={setActivePortfolioThumbId}
                                             setActiveLightboxImage={setActiveLightboxImage}
                                             replaceMediaFile={replaceMediaFile}
+                                            adminMode={adminMode}
+                                            setMediaConsentForItem={setMediaConsentForItem}
                                         />
                                     )}
+
+                                    {/* Admin Mode — additional look categories. Not part of the
+                                        talent-facing form; these exist because an admin uploading
+                                        on a talent's behalf may have Selfie/Profiles/Full Length/
+                                        Side Profile material to place, same as Indian/Western above. */}
+                                    {adminMode && [
+                                        { key: "selfie", label: "Selfie", hint: "A clear, recent selfie — no filters.", items: selfieImages, ref: selfieImagesRef },
+                                        { key: "profiles", label: "Profiles", hint: "Profile-angle reference shots.", items: profilesImages, ref: profilesImagesRef },
+                                        { key: "full_length", label: "Full Length", hint: "Full-body reference shots.", items: fullLengthImages, ref: fullLengthImagesRef },
+                                        { key: "side_profile", label: "Side Profile", hint: "Side-angle reference shots.", items: sideProfileImages, ref: sideProfileImagesRef },
+                                        { key: "ethnic", label: "Ethnic", hint: "Ethnic-look reference shots.", items: ethnicImages, ref: ethnicImagesRef },
+                                        { key: "additional_portfolio", label: "Additional Portfolio", hint: "Extra portfolio material beyond the general set.", items: additionalPortfolioImages, ref: additionalPortfolioImagesRef },
+                                    ].map((c) => (
+                                        <PremiumPortfolioGroup
+                                            key={c.key}
+                                            label={`${c.label} (optional)`}
+                                            hint={c.hint}
+                                            items={c.items}
+                                            category={c.key}
+                                            allImagesCount={c.items.length}
+                                            maxImages={MAX_IMAGES_PER_CATEGORY}
+                                            inputRef={c.ref}
+                                            uploadImages={uploadImages}
+                                            removeMedia={removeMedia}
+                                            activeUploads={activeUploads}
+                                            onRetry={retryUpload}
+                                            testidPrefix={c.key}
+                                            activePortfolioThumbId={activePortfolioThumbId}
+                                            setActivePortfolioThumbId={setActivePortfolioThumbId}
+                                            setActiveLightboxImage={setActiveLightboxImage}
+                                            replaceMediaFile={replaceMediaFile}
+                                            adminMode={adminMode}
+                                            setMediaConsentForItem={setMediaConsentForItem}
+                                        />
+                                    ))}
 
                                     {/* Generic Portfolio collapsible group */}
                                     {requirements.portfolio_image_visibility !== REQUIREMENT_TIERS.HIDDEN && (
@@ -4076,6 +4322,15 @@ function SubmissionPage() {
                 />
             )}
 
+            {categorizationBatch && (
+                <CategorizationReviewModal
+                    groups={categorizationBatch.groups}
+                    uncategorized={categorizationBatch.uncategorized}
+                    onConfirm={handleCategorizationConfirm}
+                    onCancel={() => setCategorizationBatch(null)}
+                />
+            )}
+
             {/* Talent Profile Migration, Phase 4 — reusable-media consent.
                 No backdrop-dismiss / no close button: the talent must make an
                 explicit choice (default is pre-selected to "only this
@@ -4083,7 +4338,7 @@ function SubmissionPage() {
                 They can still navigate away and resume later — resuming
                 re-shows this exact dialog (pendingMediaConsent comes fresh
                 from the server on every load), it is never lost. */}
-            {pendingMediaConsent.length > 0 && (
+            {pendingMediaConsent.length > 0 && !adminMode && (
                 <div
                     className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
                     data-testid="media-consent-dialog"
@@ -4219,13 +4474,38 @@ function PremiumPortfolioGroup({
     setActivePortfolioThumbId,
     setActiveLightboxImage,
     replaceMediaFile,
+    adminMode,
+    setMediaConsentForItem,
 }) {
     const reachedCap = allImagesCount >= maxImages;
     const [isCollapsed, setIsCollapsed] = useState(() => {
         return typeof window !== "undefined" && window.innerWidth < 768;
     });
+    // Drag & drop — drop a batch of images (e.g. 20-100 at once) straight
+    // into this category's zone; auto-placed via the same `uploadImages`
+    // handler the click-to-add input already uses (unique-slotKey-per-file
+    // fix included), so drag-drop and click-to-add share one upload path.
+    const [isDragOver, setIsDragOver] = useState(false);
+    const handleDrop = async (e) => {
+        e.preventDefault();
+        setIsDragOver(false);
+        if (reachedCap) return;
+        // Folder drop (item 2/10) — walks any dropped directories via the
+        // File System Entries API and flattens to a plain file list; a
+        // non-folder drop resolves immediately to the same list `e.dataTransfer.files`
+        // already gave us. Same uploadImages() call either way.
+        const dt = e.dataTransfer;
+        const files = await collectDroppedFiles(dt);
+        if (files?.length) uploadImages(files, category);
+    };
     return (
-        <div className="mb-6 bg-slate-50/50 border border-[#eaeaea]/60 rounded-2xl p-4" data-testid={`portfolio-group-${testidPrefix}`}>
+        <div
+            className={`mb-6 bg-slate-50/50 border rounded-2xl p-4 transition-colors ${isDragOver ? "border-[#0c2340]/40 bg-[#0c2340]/5" : "border-[#eaeaea]/60"}`}
+            data-testid={`portfolio-group-${testidPrefix}`}
+            onDragOver={(e) => { e.preventDefault(); if (!reachedCap) setIsDragOver(true); }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={handleDrop}
+        >
             <div
                 className="flex items-center justify-between cursor-pointer select-none"
                 onClick={() => setIsCollapsed(!isCollapsed)}
@@ -4281,6 +4561,26 @@ function PremiumPortfolioGroup({
                                     />
                                     {m.origin === "project" && (
                                         <ProjectOnlyBadge className="absolute top-1.5 left-1.5 text-white bg-black/60 backdrop-blur-sm" />
+                                    )}
+                                    {/* Project-Specific Media Override (item 5) — only shown for a
+                                        just-uploaded item still awaiting a consent decision. Checking
+                                        it promotes THIS item to the Talent Profile; leaving it
+                                        unchecked keeps it project-only (the finalize-time safety net
+                                        resolves any still-pending items to project-only). */}
+                                    {adminMode && m.profile_sync_status === "pending" && (
+                                        <label
+                                            className="absolute top-1.5 right-1.5 flex items-center gap-1 bg-white/90 backdrop-blur-sm rounded-full pl-1.5 pr-2 py-1 text-[9px] font-medium text-slate-700 shadow-sm cursor-pointer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            title="Save this item to the talent's Master Profile"
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                className="w-3 h-3"
+                                                data-testid={`${testidPrefix}-save-to-master-${m.id}`}
+                                                onChange={(e) => setMediaConsentForItem(m.id, e.target.checked)}
+                                            />
+                                            Master
+                                        </label>
                                     )}
                                     <div
                                         className={`absolute bottom-0 inset-x-0 h-10 bg-gradient-to-t from-black/70 via-black/45 to-transparent flex items-center justify-end px-2 gap-2 transition-opacity duration-200 ${

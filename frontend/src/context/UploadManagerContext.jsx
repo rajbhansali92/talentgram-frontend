@@ -80,6 +80,13 @@ export function UploadManagerProvider({ children }) {
     const [activeUploads, setActiveUploads] = useState({});
     const [retryQueue, setRetryQueue] = useState({});
     const inFlightUploads = useRef({});
+    // True cancel support (Phase 2, item 10) — one AbortController per
+    // active slotKey, wired into every network call below. dismissUpload()
+    // aborts it when the upload is still active instead of only hiding a
+    // completed/failed entry; the in-flight sign/Cloudinary-upload/complete
+    // request that was mid-flight rejects immediately and the retry loop
+    // treats it as a normal (non-retried) failure.
+    const abortControllers = useRef({});
     // Two independent gates per provider instance (singletons, same lifetime
     // as activeUploads) — every uploadFile() call across the page shares
     // both, so a burst of selected files is throttled globally, not per call
@@ -226,6 +233,8 @@ export function UploadManagerProvider({ children }) {
             return;
         }
         inFlightUploads.current[slotKey] = true;
+        const abortController = new AbortController();
+        abortControllers.current[slotKey] = abortController;
 
         // Phase 6/7 — bounded concurrency: mark this slot QUEUED immediately.
         // It may wait on the COMPRESSION gate below (if it's a video that
@@ -391,6 +400,7 @@ export function UploadManagerProvider({ children }) {
             
             // Release synchronization lock
             delete inFlightUploads.current[slotKey];
+            delete abortControllers.current[slotKey];
             uploadGate.release();
             return;
         }
@@ -476,6 +486,7 @@ export function UploadManagerProvider({ children }) {
                     });
                 }, 3000);
                 delete inFlightUploads.current[slotKey]; // release lock on success
+                delete abortControllers.current[slotKey];
                 uploadGate.release();
                 return;
             } catch (err) {
@@ -497,6 +508,7 @@ export function UploadManagerProvider({ children }) {
                 }));
                 toast.error(`${msg} — tap Retry to try again`);
                 delete inFlightUploads.current[slotKey]; // release lock on failure
+                delete abortControllers.current[slotKey];
                 uploadGate.release();
                 return;
             }
@@ -572,6 +584,16 @@ export function UploadManagerProvider({ children }) {
                         "Content-Type": "multipart/form-data",
                     },
                     timeout: 0,
+                    // True cancel (Phase 2, item 10) — this is the long-running
+                    // leg of the sequence (the actual file transfer), so this is
+                    // the one call worth wiring an AbortSignal into. The sign/
+                    // complete calls go through the shared Request Manager
+                    // (`api`), which has its own retry/circuit-breaker layer —
+                    // left untouched rather than risking an AbortSignal
+                    // interacting with that in an unreviewed way; a cancel
+                    // requested during those short JSON round-trips is instead
+                    // caught cooperatively (see the `aborted` check below).
+                    signal: abortController.signal,
                     onUploadProgress: (e) => {
                         if (e.total) {
                             const pct = Math.round((e.loaded / e.total) * 100);
@@ -635,9 +657,32 @@ export function UploadManagerProvider({ children }) {
 
                 if (attempt > 1) toast.success(`Recovered after ${attempt} attempts`);
                 delete inFlightUploads.current[slotKey]; // release lock on success
+                delete abortControllers.current[slotKey];
                 uploadGate.release();
                 return;
             } catch (err) {
+                // True cancel (item 10) — checked FIRST, before the network-
+                // retry heuristic below: an aborted request has no `response`
+                // either, so without this check it would otherwise look
+                // identical to a network blip and get silently retried,
+                // defeating the whole point of cancelling it.
+                if (abortController.signal.aborted || axios.isCancel(err)) {
+                    // dismissUpload() already deleted this slot's entry (it
+                    // removes from state immediately, then aborts) — guard
+                    // against resurrecting a dismissed entry the same way
+                    // every other setActiveUploads call in this file does.
+                    setActiveUploads((prev) => {
+                        if (!prev[slotKey]) return prev;
+                        return {
+                            ...prev,
+                            [slotKey]: { ...prev[slotKey], status: "failed", error: "Cancelled", statusText: undefined },
+                        };
+                    });
+                    delete inFlightUploads.current[slotKey];
+                    delete abortControllers.current[slotKey];
+                    uploadGate.release();
+                    return;
+                }
                 lastErr = err;
                 const isNetwork = !err?.response;
                 if (!isNetwork || attempt === MAX_ATTEMPTS) break;
@@ -694,6 +739,7 @@ export function UploadManagerProvider({ children }) {
 
         toast.error(formattedErr + " — tap Retry to try again");
         delete inFlightUploads.current[slotKey]; // release lock on failure
+        delete abortControllers.current[slotKey];
         uploadGate.release();
     };
 
@@ -707,6 +753,13 @@ export function UploadManagerProvider({ children }) {
     };
 
     const dismissUpload = (slotKey) => {
+        // True cancel (item 10) — if this slot is still genuinely uploading
+        // (not merely a completed/failed entry the user is clearing), abort
+        // the in-flight Cloudinary transfer. The catch-block cancel handler
+        // in uploadFile() takes it from there (marks it "Cancelled",
+        // releases the concurrency gate and in-flight lock) — this call only
+        // has to trigger it, not duplicate that cleanup.
+        abortControllers.current[slotKey]?.abort();
         setActiveUploads((prev) => {
             const n = { ...prev };
             delete n[slotKey];

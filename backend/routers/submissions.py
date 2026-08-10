@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 import time
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 import cloudinary
 from core import (
@@ -38,7 +38,9 @@ from core import (
     _public_project,
     _resolve_cover_url,
     _submission_to_client_shape,
+    actor_stamp,
     cloudinary_upload,
+    create_or_resume_submission_doc,
     upload_and_track_asset,
     compute_age,
     compute_effective_age,
@@ -448,109 +450,10 @@ async def start_submission(
                 "Please verify your email to continue. We'll send you a one-time code.",
             )
 
-    if existing:
-        sid = existing["id"]
-        # Reuse the existing persistent access_token, or mint one if legacy
-        # records pre-date this feature.
-        atk = existing.get("access_token")
-        if not atk:
-            atk = make_access_token()
-            await db.submissions.update_one({"id": sid}, {"$set": {"access_token": atk}})
-        token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
-        return {
-            "id": sid,
-            "token": token,
-            "access_token": atk,
-            "resumed": True,
-            "status": existing.get("status", "draft"),
-        }
-
-    fd = payload.form_data or {}
-    talent_age = None
-    # Phase 1 — Canonical Profile Monotonicity: record how fresh the
-    # canonical Talent Profile was at the moment this draft's form_data was
-    # captured, so finalize() can later tell whether the profile has since
-    # moved on (ADR Part 4 / Invariant #4). None when no talent exists yet.
-    talent_profile_snapshot_at = None
-    if email:
-        talent_doc = await db.talents.find_one(
-            {"$or": [
-                {"normalized_email": email},
-                {"email": email},
-                {"source.talent_email": email}
-            ]},
-            {"age": 1, "dob": 1, "updated_at": 1}
-        )
-        if talent_doc:
-            talent_age = talent_doc.get("age") or (compute_age(talent_doc.get("dob")) if talent_doc.get("dob") else None)
-            talent_profile_snapshot_at = talent_doc.get("updated_at")
-
-    submitted_age_override_val = None
-    override_active = fd.get("overrideAge") or fd.get("override_age")
-    if override_active and fd.get("submitted_age_override") not in (None, ""):
-        try:
-            submitted_age_override_val = int(fd["submitted_age_override"])
-        except Exception:
-            pass
-
-    effective_age_val = compute_effective_age(fd, talent_age)
-
-    cb_visible = True
-    fv_defaults = {**DEFAULT_FIELD_VISIBILITY, "competitive_brand": cb_visible}
-
-    sid = str(uuid.uuid4())
-    atk = make_access_token()
-    # Talent Profile Migration, Phase 3: a new submission starts with NO
-    # media. Reusable media is no longer auto-injected — the talent sees
-    # it via `library_media` (computed live, see GET .../submissions/{sid})
-    # and explicitly picks what applies to THIS project via
-    # POST .../media/from-library. No silent synchronization.
-    doc = {
-        "id": sid,
-        "project_id": project["id"],
-        "project_slug": slug,
-        "talent_name": payload.name,
-        "talent_email": email,
-        "talent_phone": payload.phone,
-        "alternate_contact_number": payload.alternate_contact_number,
-        "form_data": fd,
-        "talent_profile_snapshot_at": talent_profile_snapshot_at,
-        "field_visibility": fv_defaults,
-        "submitted_age_override": submitted_age_override_val,
-        "effective_age": effective_age_val,
-        "media": [],
-        "status": "draft",
-        "decision": "pending",
-        "access_token": atk,
-        "created_at": _now(),
-        "submitted_at": None,
-    }
-    try:
-        await db.submissions.insert_one(doc)
-    except DuplicateKeyError:
-        # Race: parallel start hit the unique (project_id, talent_email)
-        # index. Fall through to the existing-submission resume path.
-        existing = await db.submissions.find_one({
-            "project_id": project["id"],
-            "talent_email": email,
-        })
-        if existing:
-            sid = existing["id"]
-            atk = existing.get("access_token")
-            if not atk:
-                atk = make_access_token()
-                await db.submissions.update_one({"id": sid}, {"$set": {"access_token": atk}})
-            token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
-            return {
-                "id": sid,
-                "token": token,
-                "access_token": atk,
-                "resumed": True,
-                "status": existing.get("status", "draft"),
-            }
-        raise HTTPException(409, "Submission already exists for this email")
-    token = make_token({"role": "submitter", "sid": sid, "slug": slug}, days=3)
-    return {"id": sid, "token": token, "access_token": atk, "resumed": False, "status": "draft"}
+    return await create_or_resume_submission_doc(
+        project, email, payload.name, payload.phone, payload.alternate_contact_number,
+        payload.form_data, created_from="talent_link",
+    )
 
 
 @router.put("/public/submissions/{sid}")
@@ -600,6 +503,7 @@ async def submission_update(
         update["submitted_age_override"] = submitted_age_override_val
         update["effective_age"] = compute_effective_age(merged_fd, talent_age)
     if update:
+        update.update(actor_stamp(submitter))
         await db.submissions.update_one({"id": sid}, {"$set": update})
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
     return updated
@@ -644,7 +548,7 @@ async def submission_upload(
             1 for m in sub.get("media", []) if m.get("category") == category
         )
         if existing >= MAX_IMAGES_PER_CATEGORY:
-            label_name = {"image": "Portfolio", "indian": "Indian look", "western": "Western look"}.get(category, category)
+            label_name = {"image": "Portfolio", "indian": "Indian look", "western": "Western look", "selfie": "Selfie", "profiles": "Profiles", "full_length": "Full Length", "side_profile": "Side Profile", "ethnic": "Ethnic Look", "additional_portfolio": "Additional Portfolio"}.get(category, category)
             raise HTTPException(400, f"{label_name} image limit reached ({MAX_IMAGES_PER_CATEGORY})")
 
     if category == "take":
@@ -772,17 +676,18 @@ async def submission_upload(
     # Re-upload after finalize flips status back to "updated" and decision → pending
     was_finalized = has_been_submitted_once(sub)
     re_approval = True
+    set_patch: Dict[str, Any] = {}
     if was_finalized:
         proj = await db.projects.find_one(
             {"id": sub["project_id"]}, {"_id": 0, "require_reapproval_on_edit": 1, "brand_name": 1}
         )
         re_approval = bool((proj or {}).get("require_reapproval_on_edit", True))
-        set_patch = {
-            "status": "updated",
-            "updated_at": _now(),
-        }
+        set_patch["status"] = "updated"
+        set_patch["updated_at"] = _now()
         if re_approval:
             set_patch["decision"] = "pending"
+    set_patch.update(actor_stamp(submitter))
+    if set_patch:
         patch["$set"] = set_patch
     await db.submissions.update_one({"id": sid}, patch)
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
@@ -1048,17 +953,18 @@ async def submission_complete_upload(
     patch: Dict[str, Any] = {"$push": {"media": media}}
     was_finalized = has_been_submitted_once(sub)
     re_approval = True
+    set_patch: Dict[str, Any] = {}
     if was_finalized:
         proj = await db.projects.find_one(
             {"id": sub["project_id"]}, {"_id": 0, "require_reapproval_on_edit": 1, "brand_name": 1}
         )
         re_approval = bool((proj or {}).get("require_reapproval_on_edit", True))
-        set_patch = {
-            "status": "updated",
-            "updated_at": _now(),
-        }
+        set_patch["status"] = "updated"
+        set_patch["updated_at"] = _now()
         if re_approval:
             set_patch["decision"] = "pending"
+    set_patch.update(actor_stamp(submitter))
+    if set_patch:
         patch["$set"] = set_patch
 
     await db.submissions.update_one({"id": sid}, patch)
@@ -1104,7 +1010,7 @@ async def submission_update_media(
         raise HTTPException(400, "Label cannot be empty")
     await db.submissions.update_one(
         {"id": sid, "media.id": mid},
-        {"$set": {"media.$.label": new_label}},
+        {"$set": {"media.$.label": new_label, **actor_stamp(submitter)}},
     )
     updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
     return updated
@@ -1123,12 +1029,14 @@ async def submission_delete_media(
     target_media = next((m for m in (sub.get("media") or []) if m.get("id") == mid), None)
     already_submitted = has_been_submitted_once(sub)
     patch: Dict[str, Any] = {"$pull": {"media": {"id": mid}}}
+    set_patch: Dict[str, Any] = {}
     if already_submitted:
-        patch["$set"] = {
-            "status": "updated",
-            "decision": "pending",
-            "updated_at": _now(),
-        }
+        set_patch["status"] = "updated"
+        set_patch["decision"] = "pending"
+        set_patch["updated_at"] = _now()
+    set_patch.update(actor_stamp(submitter))
+    if set_patch:
+        patch["$set"] = set_patch
     await db.submissions.update_one({"id": sid}, patch)
     # Phase 3 v37i — keep the global talent profile in sync, but ONLY while the
     # submission is still ORIGINAL. Deleting media from an already-submitted
@@ -1192,7 +1100,7 @@ async def submission_add_media_from_library(
     if category in PORTFOLIO_IMAGE_CATEGORIES:
         existing = sum(1 for m in (sub.get("media") or []) if m.get("category") == category)
         if existing >= MAX_IMAGES_PER_CATEGORY:
-            label_name = {"image": "Portfolio", "indian": "Indian look", "western": "Western look"}.get(category, category)
+            label_name = {"image": "Portfolio", "indian": "Indian look", "western": "Western look", "selfie": "Selfie", "profiles": "Profiles", "full_length": "Full Length", "side_profile": "Side Profile", "ethnic": "Ethnic Look", "additional_portfolio": "Additional Portfolio"}.get(category, category)
             raise HTTPException(400, f"{label_name} image limit reached ({MAX_IMAGES_PER_CATEGORY})")
 
     old_slot_items = [m for m in (sub.get("media") or []) if m.get("category") == category] if category in single_slot else []
@@ -1207,14 +1115,18 @@ async def submission_add_media_from_library(
 
     was_finalized = has_been_submitted_once(sub)
     push_patch: Dict[str, Any] = {"$push": {"media": new_item}}
+    set_patch: Dict[str, Any] = {}
     if was_finalized:
         proj = await db.projects.find_one(
             {"id": sub["project_id"]}, {"_id": 0, "require_reapproval_on_edit": 1}
         )
         re_approval = bool((proj or {}).get("require_reapproval_on_edit", True))
-        set_patch = {"status": "updated", "updated_at": _now()}
+        set_patch["status"] = "updated"
+        set_patch["updated_at"] = _now()
         if re_approval:
             set_patch["decision"] = "pending"
+    set_patch.update(actor_stamp(submitter))
+    if set_patch:
         push_patch["$set"] = set_patch
 
     # Atomically guarded push: the filter only matches if no item with this
@@ -1263,16 +1175,25 @@ async def submission_add_media_from_library(
 MEDIA_CONSENT_DECISIONS = {"only_this_project", "update_profile"}
 
 
-async def apply_media_consent_decision(sub: dict, decision: str) -> int:
+async def apply_media_consent_decision(sub: dict, decision: str, media_ids: Optional[List[str]] = None) -> int:
     """Talent Profile Migration, Phase 4 — the single place a consent
     decision is ever applied. Every reusable-category upload, regardless of
     which of the four construction sites created it (submission_upload,
     submission_upload_complete, attach_video_media, video_complete's R2
-    branch), lands here as one batch: whatever is currently
-    `profile_sync_status="pending"` on this submission gets resolved by
-    ONE decision, in one call — a batch of 5 uploads is one decision, not
-    five, satisfying "the dialog must appear only once per submission
-    session, aggregate them".
+    branch), lands here.
+
+    `media_ids=None` (default, used by the talent flow — UNCHANGED): every
+    currently-`profile_sync_status="pending"` item on this submission is
+    resolved by ONE decision in one call — a batch of 5 uploads is one
+    decision, not five, satisfying "the dialog must appear only once per
+    submission session, aggregate them".
+
+    `media_ids=[...]` (Admin Mode's per-item "Save to Master Profile"
+    checkbox, Phase 2): only the pending items whose id is in the list are
+    resolved — lets one batch of uploads have some items promoted to the
+    Talent Profile and others left project-only, instead of one blanket
+    choice for the whole batch. Still the exact same resolution logic below,
+    just scoped to a subset.
 
     "update_profile": syncs each pending item into db.talents.media via the
     exact same sync_media_to_global_talent() every other path already used
@@ -1290,6 +1211,9 @@ async def apply_media_consent_decision(sub: dict, decision: str) -> int:
     """
     media = sub.get("media") or []
     pending = [m for m in media if m.get("profile_sync_status") == "pending"]
+    if media_ids is not None:
+        wanted = set(media_ids)
+        pending = [m for m in pending if m.get("id") in wanted]
     if not pending:
         return 0
     pending_ids = [m["id"] for m in pending]
@@ -1323,6 +1247,11 @@ async def apply_media_consent_decision(sub: dict, decision: str) -> int:
 
 class MediaConsentIn(BaseModel):
     decision: str
+    # Phase 2 — Admin Mode's per-item "Save to Master Profile" checkbox.
+    # None (default) preserves the exact existing talent-flow behavior
+    # (resolve every pending item). A list scopes resolution to just those
+    # media ids — see apply_media_consent_decision()'s docstring.
+    media_ids: Optional[List[str]] = None
 
 
 @router.post("/public/submissions/{sid}/media-consent")
@@ -1343,7 +1272,7 @@ async def submission_media_consent(
     if not sub:
         raise HTTPException(404, "Submission not found")
 
-    await apply_media_consent_decision(sub, payload.decision)
+    await apply_media_consent_decision(sub, payload.decision, media_ids=payload.media_ids)
 
     fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
     return await build_talent_submission_view(fresh_sub)
@@ -1412,7 +1341,7 @@ def _category_from_cloudinary_tags(tags) -> Optional[str]:
     return None
 
 
-async def attach_video_media(sub: dict, asset: dict, category: str, label: Optional[str] = None) -> Optional[dict]:
+async def attach_video_media(sub: dict, asset: dict, category: str, label: Optional[str] = None, submitter: Optional[dict] = None) -> Optional[dict]:
     """Attach a Cloudinary video asset to a submission. Single-slot for
     intro_video; dedup by public_id (idempotent); preserves the re-approval
     flip used by the Railway upload path."""
@@ -1464,13 +1393,17 @@ async def attach_video_media(sub: dict, asset: dict, category: str, label: Optio
 
     push: Dict[str, Any] = {"$push": {"media": media}}
     fresh = await db.submissions.find_one({"id": sid})
+    set_patch: Dict[str, Any] = {}
     if fresh and fresh.get("status") in ("submitted", "updated"):
         proj = await db.projects.find_one(
             {"id": sub.get("project_id")}, {"_id": 0, "require_reapproval_on_edit": 1}
         )
-        set_patch = {"status": "updated", "updated_at": _now()}
+        set_patch["status"] = "updated"
+        set_patch["updated_at"] = _now()
         if bool((proj or {}).get("require_reapproval_on_edit", True)):
             set_patch["decision"] = "pending"
+    set_patch.update(actor_stamp(submitter))
+    if set_patch:
         push["$set"] = set_patch
     await db.submissions.update_one({"id": sid}, push)
     try:
@@ -1705,7 +1638,11 @@ async def video_complete(
         if category == "intro_video":
             await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"category": "intro_video"}}})
 
-        await db.submissions.update_one({"id": sid}, {"$push": {"media": media}})
+        push_patch: Dict[str, Any] = {"$push": {"media": media}}
+        stamp = actor_stamp(submitter)
+        if stamp:
+            push_patch["$set"] = stamp
+        await db.submissions.update_one({"id": sid}, push_patch)
 
         # Update metadata state to "processing"
         try:
@@ -1767,7 +1704,7 @@ async def video_complete(
             pass
         raise HTTPException(400, f"Audition video must be {MAX_AUDITION_VIDEO_SECONDS // 60} minutes or less.")
 
-    media = await attach_video_media(sub, asset, category)
+    media = await attach_video_media(sub, asset, category, submitter=submitter)
     return {"ok": True, "media": media}
 
 
@@ -2155,6 +2092,13 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         "status": new_status,
         "submitted_at": sub.get("submitted_at") or _now(),
     }
+    stamp = actor_stamp(submitter)
+    if stamp:
+        patch.update(stamp)
+        # Admin Mode "Upload on Behalf" — record who actually clicked finalize,
+        # not just who last touched the draft. Talent-driven finalizes leave
+        # this unset (absence = talent-submitted, per the audit-trail schema).
+        patch["submitted_by"] = stamp["last_modified_by"]
     re_approval = True
     if is_retest:
         proj = await db.projects.find_one(
@@ -2520,6 +2464,219 @@ async def list_submissions(
     return _paginated(items, total, p, s)
 
 
+def _build_admin_prefill_form_data(talent: dict, email: str) -> Dict[str, Any]:
+    """Shared by admin-start and batch-start — same fields `/public/prefill`
+    returns, reshaped into the keys the submission page's own `form` state
+    (and saveForm()) already use, so the resume effect that runs right after
+    admin-start populates every field exactly like a talent's own resumed
+    session would."""
+    name = talent.get("name") or ""
+    parts = name.split(" ", 1)
+    return {
+        "first_name": parts[0] if parts else "",
+        "last_name": parts[1] if len(parts) > 1 else "",
+        "email": email,
+        "phone": talent.get("phone") or "",
+        "dob": talent.get("dob"),
+        "age": str(talent.get("age")) if talent.get("age") is not None else "",
+        "height": talent.get("height") or "",
+        "location": talent.get("location") or [],
+        "gender": talent.get("gender") or "",
+        "ethnicity": talent.get("ethnicity") or "",
+        "instagram_handle": talent.get("instagram_handle") or "",
+        "instagram_followers": talent.get("instagram_followers") or "",
+        "bio": talent.get("bio") or "",
+        "work_links": talent.get("work_links") or [],
+        "skills": talent.get("skills") or [],
+    }
+
+
+def _project_wants_category(requirements: dict, category: str) -> bool:
+    """Smart Defaults gate (item 11) — same "hidden" opt-out convention
+    `_submission_to_client_shape` already uses for visibility, reused here to
+    decide which reusable categories are worth auto-attaching. Absence of an
+    explicit "hidden" override means the project is treated as wanting it
+    (matches the existing default-visible convention), not as excluding it —
+    an unconfigured project still gets useful defaults."""
+    reqs = requirements or {}
+    if category == "intro_video":
+        return reqs.get("intro_video") != "hidden"
+    vis_key = "portfolio_image_visibility" if category == "image" else f"portfolio_{category}_visibility"
+    return reqs.get(vis_key) != "hidden"
+
+
+async def _auto_attach_existing_media(sid: str, talent: dict, project: dict) -> int:
+    """Smart Defaults (item 11) — on a BRAND NEW draft only (callers must
+    guard on `resumed is False`), copy-by-reference any of the talent's
+    existing reusable-category Library media into the new draft, scoped to
+    categories the project actually asks for. Reuses the exact same
+    copy-by-reference item shape `submission_add_media_from_library`
+    constructs for a single manual pick — this just does it in bulk, once,
+    at creation time. No race-guard needed (nothing else can be concurrently
+    editing a submission that didn't exist a moment ago), no single-slot
+    eviction needed (nothing occupies the slot yet on a fresh doc).
+    """
+    library_media = await build_prefill_media(talent, email=talent.get("email"))
+    if not library_media:
+        return 0
+    requirements = (project or {}).get("submission_requirements") or {}
+    per_category_count: Dict[str, int] = {}
+    to_attach: List[Dict[str, Any]] = []
+    for lib_item in library_media:
+        category = lib_item.get("category")
+        if category not in REUSABLE_MEDIA_CATEGORIES:
+            continue
+        if not _project_wants_category(requirements, category):
+            continue
+        if category in PORTFOLIO_IMAGE_CATEGORIES:
+            if per_category_count.get(category, 0) >= MAX_IMAGES_PER_CATEGORY:
+                continue
+            per_category_count[category] = per_category_count.get(category, 0) + 1
+        elif category == "intro_video":
+            # Single slot — build_prefill_media already returns at most one
+            # intro_video item, but stay defensive against future changes.
+            if any(m["category"] == "intro_video" for m in to_attach):
+                continue
+        new_item = {k: v for k, v in lib_item.items() if k != "id"}
+        new_item.update({
+            "id": str(uuid.uuid4()),
+            "source_talent_media_id": lib_item["id"],
+            "origin": "global",
+            "created_at": _now(),
+        })
+        to_attach.append(new_item)
+    if not to_attach:
+        return 0
+    await db.submissions.update_one({"id": sid}, {"$push": {"media": {"$each": to_attach}}})
+    return len(to_attach)
+
+
+@router.post("/projects/{pid}/talents/{talent_id}/submissions/admin-start")
+async def admin_start_submission(
+    pid: str,
+    talent_id: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Admin Mode "Upload on Behalf" entry point.
+
+    Creates (or resumes) a submission for `talent_id` on project `pid` and
+    mints a submitter token exactly like `start_submission` does for the
+    talent-facing link — but with no OTP gate (the admin's own authenticated
+    session is the identity proof) and with an `acting_admin_email` claim
+    baked into the token so every subsequent request through the existing
+    public submission endpoints is attributed via `actor_stamp()`.
+
+    Returns the same response shape as `start_submission`
+    (`id, token, access_token, resumed, status`) so the frontend's admin-mode
+    bootstrap can reuse the exact same handling code.
+    """
+    project = await db.projects.find_one({"id": pid})
+    if not project:
+        raise HTTPException(404, "Project not found")
+    talent = await db.talents.find_one({"id": talent_id})
+    if not talent:
+        raise HTTPException(404, "Talent not found")
+    email = normalize_email(talent.get("email") or (talent.get("source") or {}).get("talent_email"))
+    if not email:
+        raise HTTPException(400, "Talent has no email on file — add one before creating a submission")
+
+    # Prefill form_data — only applied on first CREATE
+    # (create_or_resume_submission_doc never touches form_data when
+    # resuming an existing draft) — admin edits after that are never
+    # silently overwritten by a later admin-start call.
+    prefill_form_data = _build_admin_prefill_form_data(talent, email)
+
+    result = await create_or_resume_submission_doc(
+        project, email, talent.get("name") or "", talent.get("phone"), None,
+        prefill_form_data, created_by=admin.get("email"), created_from="admin_upload", talent_id=talent_id,
+    )
+    # Smart Defaults (item 11) — same insert-only guard as form_data prefill
+    # above: never touch an already-existing draft's media on a later
+    # admin-start call (resume), only a genuinely brand-new one.
+    if not result.get("resumed") and project.get("auto_attach_existing_media", True):
+        await _auto_attach_existing_media(result["id"], talent, project)
+    # Re-mint the token with the acting_admin_email claim (create_or_resume_submission_doc
+    # mints a plain submitter token; admin-start needs the extra attribution claim).
+    token = make_token(
+        {"role": "submitter", "sid": result["id"], "slug": project["slug"], "acting_admin_email": admin.get("email")},
+        days=3,
+    )
+    return {**result, "token": token, "talent_name": talent.get("name")}
+
+
+class BatchStartIn(BaseModel):
+    talent_ids: List[str]
+
+
+@router.post("/projects/{pid}/submissions/batch-start")
+async def admin_batch_start_submissions(
+    pid: str,
+    payload: BatchStartIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Pipeline batch draft creation (item 8) — create-or-resume a draft for
+    every selected talent in one call. Reuses the exact same
+    create_or_resume_submission_doc + Smart Defaults auto-attach
+    admin_start_submission already uses per-talent — this is a loop over
+    that same logic, not a second creation path. Never finalizes, never
+    mints tokens (those are minted lazily, per-talent, when the admin
+    actually opens one via the existing admin-start — keeps token lifetimes
+    short and avoids minting 40 tokens nobody may ever use).
+    """
+    project = await db.projects.find_one({"id": pid})
+    if not project:
+        raise HTTPException(404, "Project not found")
+    auto_attach = project.get("auto_attach_existing_media", True)
+
+    results: Dict[str, Any] = {}
+    for talent_id in payload.talent_ids:
+        talent = await db.talents.find_one({"id": talent_id})
+        if not talent:
+            results[talent_id] = {"error": "Talent not found"}
+            continue
+        email = normalize_email(talent.get("email") or (talent.get("source") or {}).get("talent_email"))
+        if not email:
+            results[talent_id] = {"error": "Talent has no email on file"}
+            continue
+        prefill_form_data = _build_admin_prefill_form_data(talent, email)
+        result = await create_or_resume_submission_doc(
+            project, email, talent.get("name") or "", talent.get("phone"), None,
+            prefill_form_data, created_by=admin.get("email"), created_from="admin_upload", talent_id=talent_id,
+        )
+        if not result.get("resumed") and auto_attach:
+            await _auto_attach_existing_media(result["id"], talent, project)
+        results[talent_id] = {"submission_id": result["id"], "resumed": result.get("resumed", False)}
+    return results
+
+
+@router.post("/projects/{pid}/submissions/{sid}/admin-token")
+async def admin_submission_token(
+    pid: str,
+    sid: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Review Center Quick Edit — mints a short-lived attributed submitter
+    token for an EXISTING submission, so Review Center's Replace/Add Images
+    actions can drive the exact same public upload endpoints
+    (`/public/submissions/{sid}/upload/sign` etc.) that Admin Mode and the
+    talent flow already use, instead of a third upload implementation.
+
+    Deliberately short-lived (1 day, vs admin-start's 3) — this token is
+    fetched once per Review Center session for in-place media edits, not
+    held across a multi-day drafting session the way Admin Mode's is.
+    Carries the same `acting_admin_email` claim, so every edit made through
+    it is attributed via `actor_stamp()` exactly like Admin Mode's uploads.
+    """
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0, "id": 1, "project_slug": 1})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    token = make_token(
+        {"role": "submitter", "sid": sid, "slug": sub.get("project_slug"), "acting_admin_email": admin.get("email")},
+        days=1,
+    )
+    return {"token": token}
+
+
 class BulkPendingCountIn(BaseModel):
     project_ids: List[str]
 
@@ -2543,6 +2700,57 @@ async def bulk_pending_submissions_count(
         "decision": "pending",
     })
     return {"pending": count}
+
+
+class LookupByTalentIn(BaseModel):
+    talent_emails: List[str] = Field(default_factory=list)
+    talent_ids: List[str] = Field(default_factory=list)
+
+
+@router.post("/projects/{pid}/submissions/lookup-by-talent")
+async def submissions_lookup_by_talent(
+    pid: str,
+    payload: LookupByTalentIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Batched submission-status lookup for the Pipeline board's "Create
+    Submission / Continue Draft / Open Submission" quick action.
+
+    Matches by email primarily: `talent_id` is only ever set on a submission
+    at admin-created time or once `_resolve_submission_talent` later resolves
+    it, so a pre-existing talent-created draft may still have `talent_id`
+    unset — an id-only filter would miss it. Mirrors the single-aggregation
+    batching pattern in `bulk_pending_submissions_count` above instead of a
+    per-card N+1 (one request per Pipeline board load, not one per card).
+    """
+    emails = [normalize_email(e) for e in payload.talent_emails if e]
+    ids = [i for i in payload.talent_ids if i]
+    if not emails and not ids:
+        return {}
+    or_clauses = []
+    if emails:
+        or_clauses.append({"talent_email": {"$in": emails}})
+    if ids:
+        or_clauses.append({"talent_id": {"$in": ids}})
+    items = await db.submissions.find(
+        {"project_id": pid, "$or": or_clauses},
+        {"_id": 0, "id": 1, "status": 1, "decision": 1, "talent_email": 1, "talent_id": 1, "created_from": 1},
+    ).to_list(len(emails) + len(ids) + 50)
+    out: Dict[str, Any] = {}
+    for it in items:
+        entry = {
+            "submission_id": it["id"],
+            "status": it.get("status"),
+            "decision": it.get("decision"),
+            "created_from": it.get("created_from", "talent_link"),
+        }
+        email = it.get("talent_email")
+        if email:
+            out[email] = entry
+        tid = it.get("talent_id")
+        if tid:
+            out[tid] = entry
+    return out
 
 
 @router.get("/projects/{pid}/submissions/stats")
@@ -3026,6 +3234,148 @@ async def admin_add_media(
         })
     except Exception as e:
         logger.warning(f"admin-media: asset_metadata write failed: {e}")
+    fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return fresh_sub
+
+
+@router.post("/projects/{pid}/submissions/{sid}/admin-media-v2/sign")
+async def admin_add_media_sign(
+    pid: str,
+    sid: str,
+    payload: SignUploadIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Admin-authed counterpart to `submission_sign_upload` — same signed
+    direct-to-Cloudinary flow `UploadManagerContext.uploadFile()` already
+    drives for every talent-facing category (compression, progress, retry),
+    reused here so Review Center's "Admin Added Media" gets the real upload
+    engine instead of the old plain-multipart bypass (`admin_add_media`
+    above, kept for pdf/raw and as a fallback — see `admin_add_media_complete`
+    docstring). Image/video categories only; `pdf` stays on the old endpoint.
+    """
+    from core import DIRECT_UPLOAD_ENABLED
+    if not DIRECT_UPLOAD_ENABLED:
+        raise HTTPException(400, "Direct uploads are currently disabled")
+    category = payload.category
+    if category not in SUBMISSION_UPLOAD_CATEGORIES:
+        raise HTTPException(400, "Invalid category")
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+
+    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
+    media_id = f"adm_{str(uuid.uuid4())[:8]}"
+    folder = f"talentgram/admin_media/{pid}/{sid}"
+    public_id = media_id
+    rt = "video" if is_video_slot else "image"
+
+    eager = None
+    transformation = None
+    if is_video_slot:
+        transformation = "w_1280,h_720,c_limit,q_auto,vc_auto"
+        eager = "w_600,h_338,c_fill,q_auto,f_jpg"
+    else:
+        eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
+
+    import time as _time
+    import cloudinary.utils as _cu
+    timestamp = int(_time.time())
+    params = {"folder": folder, "public_id": public_id, "timestamp": timestamp}
+    if eager:
+        params["eager"] = eager
+    if transformation:
+        params["transformation"] = transformation
+    api_secret = cloudinary.config().api_secret
+    signature = _cu.api_sign_request(params, api_secret)
+
+    return {
+        "signature": signature,
+        "timestamp": timestamp,
+        "api_key": cloudinary.config().api_key,
+        "cloud_name": cloudinary.config().cloud_name,
+        "folder": folder,
+        "public_id": public_id,
+        "resource_type": rt,
+        "eager": eager,
+        "transformation": transformation,
+        "media_id": media_id,
+    }
+
+
+@router.post("/projects/{pid}/submissions/{sid}/admin-media-v2/complete")
+async def admin_add_media_complete(
+    pid: str,
+    sid: str,
+    payload: CompleteUploadIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Completes an admin-media-v2 sign→direct-Cloudinary upload, preserving
+    the exact semantics `admin_add_media` above already established
+    (`scope: "admin_added"`, `admin_added_by`, `client_visible: True`
+    default) — this media stays intentionally DISTINGUISHABLE in Review
+    Center, unlike Admin Submission ("Upload on Behalf") media which is
+    intentionally indistinguishable from a talent's own. Different concept,
+    not folded together.
+    """
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+
+    category = payload.category
+    is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
+    eager_list = payload.eager or []
+    thumbnail_url = None
+    poster_url = None
+    if is_video_slot:
+        poster_url = next((x.get("secure_url") for x in eager_list if x.get("format") == "jpg"), None)
+        compressed_mp4 = next((x.get("secure_url") for x in eager_list if x.get("format") == "mp4"), None)
+        url = compressed_mp4 or payload.url
+        if not poster_url:
+            poster_url = video_poster_url(payload.public_id)
+    else:
+        url = payload.url
+        thumbnail_url = media_url(payload.public_id, preset="thumb", resource_type="image")
+
+    media_obj: Dict[str, Any] = {
+        "id": payload.media_id,
+        "category": category,
+        "url": url,
+        "public_id": payload.public_id,
+        "resource_type": "video" if is_video_slot else "image",
+        "content_type": payload.content_type or ("video/mp4" if is_video_slot else "image/jpeg"),
+        "original_filename": payload.original_filename,
+        "size": payload.bytes,
+        "created_at": _now(),
+        "scope": "admin_added",
+        "submission_id": sid,
+        "project_id": pid,
+        "admin_added": True,
+        "admin_added_by": admin.get("email"),
+        "label": (payload.label or "").strip() or category,
+        "client_visible": True,
+        "duration": payload.duration,
+        "poster_url": poster_url if is_video_slot else None,
+        "thumbnail_url": thumbnail_url,
+        "origin": "project",
+    }
+    await db.submissions.update_one({"id": sid}, {"$push": {"media": media_obj}})
+    try:
+        await db.asset_metadata.insert_one({
+            "id": payload.media_id,
+            "public_id": payload.public_id,
+            "folder": f"talentgram/admin_media/{pid}/{sid}",
+            "resource_type": media_obj["resource_type"],
+            "asset_type": "admin_upload",
+            "talent_id": sub.get("talent_id") or "unknown_talent",
+            "talent_name": sub.get("talent_name") or "",
+            "project_id": pid,
+            "submission_id": sid,
+            "file_size": payload.bytes,
+            "created_at": _now(),
+            "status": "completed",
+        })
+    except Exception as e:
+        logger.warning(f"admin-media-v2: asset_metadata write failed: {e}")
     fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
     return fresh_sub
 

@@ -3297,8 +3297,23 @@ async def admin_add_media_sign(
     eager = None
     transformation = None
     if is_video_slot:
-        transformation = "w_1280,h_720,c_limit,q_auto,vc_auto"
-        eager = "w_600,h_338,c_fill,q_auto,f_jpg"
+        # P1 fix: force an MP4/H.264 eager derivative, matching the
+        # talent-facing intro_video sign path (submission_sign_upload
+        # above) — the only pattern in this file proven to guarantee
+        # browser-playable output. This branch previously only requested a
+        # JPG poster and applied a codec-only transformation
+        # (`vc_auto`, no `f_mp4`) to the main upload, so the delivered
+        # `url` kept whatever container/codec the source file already had.
+        # A talent's upload is typically already a browser-native phone
+        # camera recording, so this went unnoticed there; an admin can
+        # source a video from anywhere (desktop export, downloaded file,
+        # screen recording), and a non-browser-safe container (e.g.
+        # QuickTime .mov) still lets Cloudinary generate a poster frame
+        # (works for any container) while the client's <video> element
+        # silently fails to decode playback — exactly the reported bug.
+        # admin_add_media_complete already parses a two-entry eager list
+        # (mp4 + jpg) correctly; this was the only missing piece.
+        eager = "w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4|w_600,h_338,c_fill,q_auto,f_jpg"
     else:
         eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
 

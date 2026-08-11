@@ -1064,6 +1064,30 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
     if rows is None:
         return None
     if not rows:
+        # TEMPORARY (2026-08-11, participant-lookup fix) — one-shot structural
+        # probe of whatever the panel_sel actually matched, so the real fix
+        # can be written from evidence instead of a guess. Removed as soon as
+        # a working fix is confirmed; does not change rows/participants/None
+        # in any way — read-only, additive to this exact failure branch only.
+        try:
+            probe = await page.evaluate("""(panelSel) => {
+                const panel = document.querySelector(panelSel);
+                if (!panel) return null;
+                const child_summary = Array.from(panel.querySelectorAll('*')).slice(0, 40).map(el => ({
+                    tag: el.tagName, testid: el.getAttribute('data-testid'),
+                    role: el.getAttribute('role'), cls: (el.className || '').toString().slice(0, 80),
+                    text: (el.textContent || '').trim().slice(0, 60),
+                }));
+                return {
+                    inner_text_len: (panel.innerText || '').length,
+                    outer_html_head: panel.outerHTML.slice(0, 1500),
+                    child_count: panel.querySelectorAll('*').length,
+                    child_summary,
+                };
+            }""", panel_sel)
+        except Exception as exc:
+            probe = {"error": str(exc)}
+        logger.warning("sender: group-info: PROBE panel_sel=%r probe=%s", panel_sel, probe)
         logger.warning(
             "sender: group-info: drawer opened but no participant rows matched for %r "
             "(panel_selector=%r) — selectors likely need updating",

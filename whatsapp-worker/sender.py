@@ -17,7 +17,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
-import config
 from db import get_db
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -514,9 +513,7 @@ async def _msg_timestamp(page: Page, full_selector: str) -> str:
         return ""
 
 
-async def _is_outgoing_msg(
-    page: Page, css_selector: str, index: int, self_display_name: Optional[str] = None
-) -> Optional[bool]:
+async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optional[bool]:
     """Best-effort directional check on a matched message element.
     Returns True (outgoing), False (incoming), or None (can't determine).
     Uses multiple heuristics and walks up to 6 ancestors. None means the DOM
@@ -533,12 +530,20 @@ async def _is_outgoing_msg(
     Both, however, are only rendered on the FIRST bubble of a consecutive run
     from the same sender — two messages sent back-to-back by the same person
     (human or the worker itself), with no reply from the other side in
-    between, render with neither marker on the second one. The
-    data-pre-plain-text attribute (already used elsewhere to extract the
-    sender's display name) does NOT depend on grouping — it's present on
-    every message — so when self_display_name is supplied and neither marker
-    above resolved anything, the parsed name is compared against it as a
-    final fallback before giving up and returning None."""
+    between, render with neither marker on the second one.
+
+    Reconnect reliability (2026-08-11): the final fallback used to compare
+    the sender name (parsed from data-pre-plain-text) against a static,
+    per-account config value — which meant this whole function silently
+    depended on knowing which WhatsApp account was authenticated, and went
+    wrong the moment that changed (see git history around this date for the
+    incident). Replaced with a geometry check instead: WhatsApp Web
+    unconditionally right-aligns every one of the AUTHENTICATED account's
+    own message bubbles and left-aligns everyone else's — true for any
+    account, computed live by WhatsApp Web itself, nothing this code has to
+    know or assume. Finds the nearest full-width ancestor row and compares
+    the bubble's horizontal center against it. Still returns None (fail
+    closed, never guess) if even that's inconclusive — unchanged contract."""
     try:
         result = await page.evaluate("""([sel, idx]) => {
             const els = document.querySelectorAll(sel);
@@ -564,8 +569,23 @@ async def _is_outgoing_msg(
                 + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
             );
             if (checks.length > 0) return {dir: true};
-            const pp = el.querySelector('[data-pre-plain-text]');
-            return {dir: null, prePlainText: pp ? pp.getAttribute('data-pre-plain-text') : null};
+            // Geometry fallback — no tail/class/checkmark marker resolved
+            // anything (typically the 2nd+ bubble of a consecutive run).
+            // Walk up for the nearest wide ("row-like") ancestor and see
+            // which half of it the bubble's center falls into.
+            let row = el;
+            for (let i = 0; i < 8 && row && row !== document.body; i++) {
+                if (row.offsetWidth && row.offsetWidth > 400) break;
+                row = row.parentElement;
+            }
+            if (row && row.offsetWidth > 400) {
+                const rowRect = row.getBoundingClientRect();
+                const elRect = el.getBoundingClientRect();
+                const rowCenter = (rowRect.left + rowRect.right) / 2;
+                const elCenter = (elRect.left + elRect.right) / 2;
+                return {dir: elCenter > rowCenter};
+            }
+            return {dir: null};
         }""", [css_selector, index])
     except Exception as exc:
         logger.info("sender: direction check error: %s", exc)
@@ -573,14 +593,7 @@ async def _is_outgoing_msg(
 
     if result is None:
         return None
-    if result.get("dir") is not None:
-        return result["dir"]
-    if self_display_name:
-        pre_plain = result.get("prePlainText")
-        m = re.match(r"^\[[^\]]*\]\s*(.+?):\s*$", pre_plain) if pre_plain else None
-        if m:
-            return m.group(1).strip().lower() == self_display_name.strip().lower()
-    return None
+    return result.get("dir")
 
 
 async def _snapshot_msg_baselines(page: Page) -> dict:
@@ -642,9 +655,7 @@ async def _find_outgoing_with_text(
             except Exception:
                 continue
             if needle and (needle in t or (norm_needle and norm_needle in _norm(t))):
-                direction = await _is_outgoing_msg(
-                    page, full, i, self_display_name=config.WA_SELF_DISPLAY_NAME
-                )
+                direction = await _is_outgoing_msg(page, full, i)
                 if direction is False:
                     logger.info("sender: verify — text matched at element#%d but message is "
                                 "INCOMING — skipping", i)

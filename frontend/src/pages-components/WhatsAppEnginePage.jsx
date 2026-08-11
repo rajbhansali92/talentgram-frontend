@@ -223,6 +223,27 @@ function WESessionPanel() {
   const errMsg = session?.error_message;
   const heartbeat = session?.last_heartbeat;
 
+  // Reconnect reliability (2026-08-11) — pipeline sub-statuses the worker
+  // now writes onto the same session doc (whatsapp-worker/inbound.py's
+  // _update_worker_status), so a dead listener/dispatcher/reply-path is
+  // visible here even while status/last_heartbeat still look fine — that
+  // gap (a completely silent pipeline reporting "healthy") is exactly what
+  // this panel used to be unable to show.
+  const pipelineRows = [
+    { label: "Connected", ok: status !== "disconnected" && status !== "error" },
+    { label: "Authenticated", ok: status === "authenticated" },
+    { label: "Listener Registered", ok: session?.listener_status === "active" },
+    { label: "Receiving Messages", ok: session?.listener_status === "active" },
+    { label: "Dispatcher Ready", ok: session?.dispatcher_status === "ready" },
+    { label: "Reply Pipeline Ready", ok: session?.reply_pipeline_status === "ready" },
+  ];
+  // "Ready" is the AND of every subsystem above — mirrors worker.py's own
+  // live-recomputed worker_ready (see inbound_listener_loop), not just the
+  // raw WhatsApp Web connection state. Heartbeat alone can't tell you the
+  // listener/dispatcher/reply path are actually alive — this can.
+  const workerReady = session?.worker_ready === true;
+  const notReadyReasons = pipelineRows.filter((r) => !r.ok).map((r) => r.label);
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
       
@@ -236,6 +257,18 @@ function WESessionPanel() {
             status === "qr_pending" ? "bg-amber-500 animate-pulse" : "bg-red-500"
           }`} />
           <span className="text-lg font-semibold capitalize text-[#111111]">{status.replace("_", " ")}</span>
+        </div>
+
+        <div
+          className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs font-semibold ${
+            workerReady ? "bg-emerald-500/10 text-emerald-700" : "bg-red-500/10 text-red-700"
+          }`}
+          data-testid="we-worker-ready-banner"
+        >
+          <span className={`w-2 h-2 rounded-full shrink-0 ${workerReady ? "bg-emerald-500" : "bg-red-500"}`} />
+          {workerReady
+            ? "Worker Ready"
+            : `Not Ready — ${notReadyReasons.length ? notReadyReasons.join(", ") : "unknown subsystem"}`}
         </div>
 
         <div className="pt-4 space-y-3 text-xs border-t border-black/[0.04]">
@@ -257,6 +290,65 @@ function WESessionPanel() {
               </span>
             </div>
           )}
+          <div className="flex justify-between">
+            <span className="text-[#6B7280] font-medium">Session Generation</span>
+            <span className="text-[#111111] font-mono">
+              {session?.generation != null ? session.generation : "—"}
+            </span>
+          </div>
+        </div>
+
+        <div className="pt-4 space-y-2.5 text-xs border-t border-black/[0.04]" data-testid="we-pipeline-health">
+          <p className="text-[#6B7280] font-semibold uppercase tracking-wide text-[10px] mb-1">
+            Pipeline Health
+          </p>
+          {pipelineRows.map((row) => (
+            <div key={row.label} className="flex items-center justify-between">
+              <span className="flex items-center gap-2 text-[#6B7280] font-medium">
+                <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                  row.ok ? "bg-emerald-500" : "bg-red-500"
+                }`} />
+                {row.label}
+              </span>
+              <span className="text-[#111111] font-mono">{row.ok ? "Yes" : "No"}</span>
+            </div>
+          ))}
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-2 text-[#6B7280] font-medium">
+              <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                session?.last_incoming_at ? "bg-emerald-500" : "bg-gray-300"
+              }`} />
+              Last Message Received
+            </span>
+            <span className="text-[#111111] font-mono">
+              {session?.last_incoming_at ? new Date(session.last_incoming_at).toLocaleTimeString() : "Never"}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-2 text-[#6B7280] font-medium">
+              <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                session?.last_reply_at ? "bg-emerald-500" : "bg-gray-300"
+              }`} />
+              Last Reply Sent
+            </span>
+            <span className="text-[#111111] font-mono">
+              {session?.last_reply_at ? new Date(session.last_reply_at).toLocaleTimeString() : "Never"}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#6B7280] font-medium">Last Processed</span>
+            <span className="text-[#111111] font-mono">
+              {session?.last_processed_at ? new Date(session.last_processed_at).toLocaleTimeString() : "Never"}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#6B7280] font-medium">Session ID</span>
+            <span className="text-[#111111] font-mono">{session?.session_id || "—"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#6B7280] font-medium">Connected Account</span>
+            <span className="text-[#111111] font-mono">{session?.connected_phone_number || "Unknown"}</span>
+          </div>
         </div>
 
         {errMsg && (

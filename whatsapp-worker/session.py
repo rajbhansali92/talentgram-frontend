@@ -15,7 +15,9 @@ import asyncio
 import base64
 import io
 import logging
+import re
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -75,6 +77,28 @@ LOGGED_IN_SELECTORS = [
     '#side',                                # left column container
     'header [data-icon="new-chat-outline"]',
 ]
+
+# ---------------------------------------------------------------------------
+# Diagnostics-only (2026-08-11): best-effort read of the connected account's
+# OWN phone number, purely for the admin status panel — nothing in the
+# message-processing pipeline reads this value; see _read_own_phone_number's
+# docstring for why. These candidates are our best guess at WhatsApp Web's
+# current own-profile trigger/panel — unlike QR_SELECTORS/LOGGED_IN_SELECTORS
+# above (which are load-bearing and were verified against live behavior),
+# these have NOT been verified against a live session. A miss here just
+# means the diagnostic shows "unknown" — it cannot affect authentication or
+# message processing either way.
+PROFILE_TRIGGER_SELECTORS = [
+    '[data-testid="menu-bar-avatar"]',
+    'header [data-testid="avatar-image"]',
+    'header [aria-label="Profile"]',
+    'header img[draggable="false"]',
+]
+PROFILE_PANEL_SELECTORS = [
+    '[data-testid="drawer-right"]',
+    'div[data-animate-drawer-title]',
+]
+_PHONE_LIKE_RE = re.compile(r"\+\d[\d\s\-()]{7,}\d")
 
 
 def _utcnow() -> str:
@@ -150,6 +174,24 @@ class WhatsAppSession:
         # replaced on restart) so callers holding a reference to the
         # session never need to re-fetch the lock.
         self.page_lock: asyncio.Lock = asyncio.Lock()
+        # Reconnect reliability (2026-08-11) — `generation` increments every
+        # time `_authenticate()` succeeds, first boot AND every subsequent
+        # re-auth (e.g. the account was switched via a fresh QR scan).
+        # inbound.py polls this each cycle and rebuilds every account-
+        # specific cache/global the moment it changes — this counter is the
+        # ONLY signal that connects "an authentication just happened" to
+        # "account-specific state must be rebuilt", so nothing downstream
+        # ever needs to know or assume WHICH account is now authenticated.
+        # session_id is a fresh opaque id regenerated alongside it, purely
+        # for diagnostics (lets an operator see in the admin UI that a
+        # reconnect actually took effect, distinct from the process just
+        # sitting on the same session).
+        self.generation: int = 0
+        self.session_id: str = ""
+        # Diagnostics-only (2026-08-11) — best-effort, may be None. Never
+        # read by any matching/routing/direction-detection logic anywhere
+        # in this codebase; see _read_own_phone_number's docstring.
+        self.own_phone_number: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -195,6 +237,11 @@ class WhatsAppSession:
     async def stop(self) -> None:
         """Graceful shutdown."""
         self._healthy = False
+        # Diagnostics only — the account may be different by the time we
+        # come back up (start() -> _authenticate() re-derives this and
+        # bumps generation); showing a stale phone number while genuinely
+        # disconnected would be actively misleading.
+        self.own_phone_number = None
         try:
             if self._context:
                 await self._context.close()
@@ -275,12 +322,94 @@ class WhatsAppSession:
             await dismiss_blocking_dialogs(self.page, "login")
         except Exception as exc:
             logger.warning("session: post-login dialog sweep failed: %s", exc)
+
+        # Reconnect reliability (2026-08-11) — this fires on EVERY successful
+        # authentication, first boot and every subsequent re-auth alike. The
+        # generation bump is what lets inbound.py notice "an authentication
+        # just happened" and rebuild every account-specific cache/global —
+        # see inbound_listener_loop's re-arm logic. Order matters: bump
+        # generation/session_id and persist BEFORE setting self._healthy so
+        # a concurrent heartbeat/poll cycle never observes "healthy" without
+        # the new generation already being visible.
+        self.generation += 1
+        self.session_id = uuid.uuid4().hex[:12]
+        self.own_phone_number = await self._read_own_phone_number()
         self._healthy = True
         await self._update_session_doc(
             "authenticated",
-            extra={"authenticated_at": _utcnow(), "qr_code_base64": None, "qr_expires_at": None},
+            extra={
+                "authenticated_at": _utcnow(),
+                "qr_code_base64": None,
+                "qr_expires_at": None,
+                "generation": self.generation,
+                "session_id": self.session_id,
+                "connected_phone_number": self.own_phone_number,
+            },
         )
-        logger.info("session: ready ✅")
+        logger.info(
+            "session: ready ✅ generation=%d session_id=%s connected_phone_number=%s",
+            self.generation, self.session_id, self.own_phone_number or "unknown",
+        )
+
+    async def _read_own_phone_number(self) -> Optional[str]:
+        """Best-effort, diagnostics-ONLY read of the connected account's own
+        phone number from WhatsApp Web's own profile panel — displayed in the
+        admin status panel so an operator can see at a glance which account
+        is currently linked. Deliberately never used by any matching/
+        routing/direction-detection logic anywhere in this codebase: the
+        whole point of the reconnect fix this belongs to is that the
+        pipeline must not depend on which account is authenticated, so this
+        stays purely decorative. Any failure (trigger not found, panel
+        didn't open, no phone-shaped text inside it, timeout) is swallowed
+        and logged at INFO — returns None, never raises, never blocks
+        authentication. Scoped to read text only from within the opened
+        panel (not the whole page), so a miss degrades to "unknown" rather
+        than ever risking picking up an unrelated contact's number from the
+        visible chat list."""
+        if not self.page:
+            return None
+        async with self.page_lock:
+            try:
+                trigger = None
+                for sel in PROFILE_TRIGGER_SELECTORS:
+                    loc = self.page.locator(sel)
+                    if await loc.count() and await loc.first.is_visible():
+                        trigger = loc.first
+                        break
+                if trigger is None:
+                    logger.info("session: own-phone-number read skipped — no profile trigger found "
+                                "(diagnostics only, not fatal)")
+                    return None
+                await trigger.click(timeout=3000)
+                panel = None
+                for sel in PROFILE_PANEL_SELECTORS:
+                    loc = self.page.locator(sel)
+                    try:
+                        await loc.first.wait_for(state="visible", timeout=2000)
+                        panel = loc.first
+                        break
+                    except PlaywrightTimeoutError:
+                        continue
+                phone = None
+                if panel is not None:
+                    panel_text = await panel.inner_text()
+                    m = _PHONE_LIKE_RE.search(panel_text)
+                    if m:
+                        phone = m.group(0).strip()
+                await self.page.keyboard.press("Escape")
+                if phone:
+                    logger.info("session: own phone number read from profile panel")
+                else:
+                    logger.info("session: own-phone-number read — panel did not yield a phone-shaped "
+                                "value (diagnostics only, not fatal)")
+                return phone
+            except Exception as exc:
+                logger.info("session: own-phone-number read failed (non-fatal, diagnostics only): %s", exc)
+                try:
+                    await self.page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return None
 
     async def _wait_for_login_after_qr(self) -> Optional[str]:
         """After a QR is shown, poll for a logged-in signal and refresh the

@@ -85,12 +85,16 @@ DOM_SNAPSHOT_TTL_SEC: int = int(os.environ.get("WA_DOM_SNAPSHOT_TTL_SEC", str(7 
 AGENTS_BACKEND_URL: str = os.environ.get("AGENTS_BACKEND_URL", "https://api.talentgramagency.com")
 AGENTS_INBOUND_SECRET: str = os.environ.get("AGENTS_INBOUND_SECRET", "")
 
-# The connected WhatsApp account's own display name, as WhatsApp Web renders
-# it inside data-pre-plain-text on the account's own messages (confirmed live
-# 2026-07-21: "Talentgram Team"). Used as a message-direction fallback for
-# messages that lack a tail/aria-label marker (consecutive messages from the
-# same sender with nothing in between don't render a fresh tail).
-WA_SELF_DISPLAY_NAME: str = os.environ.get("WA_SELF_DISPLAY_NAME", "Talentgram Team")
+# Reconnect reliability (2026-08-11) — after a fresh QR authentication
+# (first boot OR the account switched), WhatsApp Web's app shell (chat list
+# pane) can be visible before the chat list itself has finished syncing, so
+# a group-open probe can spuriously report NOT_FOUND for a group that
+# genuinely exists. For this long after each authentication, a NOT_FOUND
+# is treated as "still settling" (logged, retried next cycle) instead of
+# being marked permanently invalid — see inbound.py's re-arm-on-generation-
+# change logic. Chosen to comfortably exceed observed WhatsApp Web sync
+# time with margin; tunable without a code change if that changes.
+REAUTH_GRACE_SEC: int = int(os.environ.get("WA_REAUTH_GRACE_SEC", "60"))
 
 # Set to "false" to disable the inbound listener entirely (outbound sending
 # keeps working) — an emergency kill switch that needs no redeploy of the

@@ -576,6 +576,18 @@ async def main() -> None:
 
             if not session.is_healthy:
                 logger.error("worker: session is unhealthy, attempting restart...")
+                # Reconnect reliability (2026-08-11) — flip this the instant
+                # we know the pipeline is degraded, rather than waiting for
+                # inbound.py's own next poll cycle to notice (it will too,
+                # but this makes the UI honest immediately instead of
+                # showing stale "Ready" through the reconnect window).
+                # session.start() below re-authenticates and bumps
+                # session.generation, which is what makes inbound.py rebuild
+                # every account-specific cache/global on its very next
+                # cycle — no process restart needed for that part either.
+                await db.whatsapp_sessions.update_one(
+                    {"id": "default"}, {"$set": {"worker_ready": False}}, upsert=True,
+                )
                 await session.stop()
                 await asyncio.sleep(10)
                 await session.start()

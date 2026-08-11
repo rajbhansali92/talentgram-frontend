@@ -187,6 +187,15 @@ class KnownGroupsCache:
         self._groups: list[str] = []
         self._last_refresh: float = 0.0
 
+    def clear(self) -> None:
+        """Force the next .get() to refetch immediately, ignoring the TTL.
+        Called on a detected re-authentication (see _rearm_for_new_generation)
+        — the mapped group NAMES aren't account-specific, but re-fetching
+        anyway costs one cheap HTTP call and guarantees this cache can never
+        itself be the stale piece after a reconnect."""
+        self._groups = []
+        self._last_refresh = 0.0
+
     async def get(self) -> list[str]:
         now = time.monotonic()
         if now - self._last_refresh < config.INBOUND_GROUPS_REFRESH_SEC and self._groups:
@@ -211,6 +220,7 @@ class KnownGroupsCache:
             self._groups = groups
             self._last_refresh = now
             logger.info("inbound: known-groups refreshed -> %s", groups)
+            await _update_worker_status(dispatcher_status="ready")
             if _INVALID_GROUPS and (list_changed or await _flag_cleared_externally()):
                 logger.info("inbound: configuration changed — revalidating previously invalid "
                             "group(s) %s", sorted(_INVALID_GROUPS))
@@ -220,6 +230,7 @@ class KnownGroupsCache:
                 _PENDING_REVALIDATION.update(_INVALID_GROUPS)
                 _INVALID_GROUPS.clear()
         except Exception:
+            await _update_worker_status(dispatcher_status="unreachable")
             logger.exception(
                 "inbound: failed to refresh known-groups from backend; "
                 "keeping previous list %s", self._groups
@@ -238,6 +249,17 @@ class GroupParticipantsCache:
     def __init__(self):
         self._by_group: dict[str, list] = {}
         self._last_refresh: dict[str, float] = {}
+
+    def clear(self) -> None:
+        """Called on a detected re-authentication (see
+        _rearm_for_new_generation). Unlike KnownGroupsCache, this one IS
+        genuinely account-sensitive — it's scraped from the currently
+        authenticated account's own Group Info view and directly gates
+        security_mode="group_members" access decisions — so a stale entry
+        here after a switch is a real correctness risk, not just a
+        performance one."""
+        self._by_group = {}
+        self._last_refresh = {}
 
     async def get(self, page, group_name: str, force: bool = False) -> Optional[list]:
         now = time.monotonic()
@@ -535,12 +557,20 @@ async def _scan_group_for_new_messages(
             continue
         message_id = testid or None
 
-        direction = await sender._is_outgoing_msg(
-            page, full_sel, i, self_display_name=config.WA_SELF_DISPLAY_NAME
-        )
+        direction = await sender._is_outgoing_msg(page, full_sel, i)
         if direction is True:
             # Ours — mark seen (if we have a stable id) so we never
-            # re-evaluate it, and never dispatch it.
+            # re-evaluate it, and never dispatch it. Previously silent;
+            # logged at DEBUG (not INFO — this fires on every one of the
+            # worker's own sent messages too, so INFO would be noisy) now
+            # that this class of bug (an account-dependent signal silently
+            # misclassifying a real incoming message as "ours") has real
+            # production history — see _is_outgoing_msg's docstring for why
+            # this tier is now geometry-based, not identity-based.
+            logger.debug(
+                "inbound: message classified OUTGOING (skipped) group=%r index=%d testid=%r",
+                group_name, i, testid,
+            )
             if message_id:
                 await _mark_processed(message_id)
             continue
@@ -677,6 +707,7 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
             "inbound: dispatched group=%r sender=%r message_id=%r handled=%s latency_ms=%d",
             group_name, sender_phone, message_id, body.get("handled"), latency_ms,
         )
+        await _update_worker_status(dispatcher_status="ready")
         return body
     except Exception:
         logger.exception(
@@ -685,6 +716,7 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
             "it will not, since marking-seen happens after a successful dispatch)",
             group_name, sender_phone, message_id,
         )
+        await _update_worker_status(dispatcher_status="unreachable")
         return None
 
 
@@ -784,12 +816,106 @@ INVALID_CONFIGURATION = "INVALID_CONFIGURATION"
 #   _PENDING_REVALIDATION — known-flagged in the DB and due one probe; a
 #                           successful open clears the DB flag.
 #
-# Revalidation happens on exactly three events, never on a timer:
+# Revalidation happens on exactly four events, never on a timer:
 #   worker start        -> load_invalid_state() seeds from the DB
 #   Refresh Groups      -> KnownGroupsCache.get() moves invalid -> pending
 #   config change       -> same refresh path (and the API clears the flag too)
+#   re-authentication   -> _rearm_for_new_generation() (2026-08-11) — the
+#                          account was switched (or the same account
+#                          reconnected); see that function's docstring for
+#                          why a switch specifically needs this on top of
+#                          the three events above.
 _INVALID_GROUPS: set[str] = set()
 _PENDING_REVALIDATION: set[str] = set()
+
+# Reconnect reliability (2026-08-11) — the generation this process last saw
+# from WhatsAppSession.generation. None until the first check, so the very
+# first poll cycle always treats itself as "a fresh (re-)auth" and runs the
+# rebuild path once — cheap (everything it clears starts empty anyway) and
+# means first boot and every subsequent reconnect go through the exact same
+# code path, rather than first boot being a special case that's never
+# actually exercised until the first real reconnect happens in production.
+_last_seen_generation: Optional[int] = None
+
+# Grace window start (monotonic) — see config.REAUTH_GRACE_SEC. Sharing one
+# module-level timestamp (rather than per-group) is deliberate: the race
+# this guards against (WhatsApp Web's chat list still syncing right after a
+# fresh login) affects every group identically, not one at a time.
+_state_rebuilt_at: float = 0.0
+
+# Rate-limits the previously-completely-silent _INVALID_GROUPS skip log
+# (see poll_once) to once per group per this many seconds, so a poisoned
+# group is now visible in logs without spamming one line per 2s poll.
+_INVALID_GROUP_SKIP_LOG_INTERVAL_SEC = 300.0
+_invalid_group_last_logged: Dict[str, float] = {}
+
+# Live worker-health sub-statuses, mirrored onto whatsapp_sessions so the
+# admin UI can show them (see _update_worker_status). Kept in-process too so
+# each write only happens on an actual transition, not every 2s poll cycle.
+_last_written_status: Dict[str, object] = {}
+
+
+async def _update_worker_status(**fields) -> None:
+    """Upsert onto the SAME whatsapp_sessions singleton doc session.py
+    already owns (session.py:_update_session_doc) — deliberately not a new
+    collection. Only writes when something actually changed, so this never
+    turns into a write on every 2s poll cycle for fields that rarely move."""
+    changed = {k: v for k, v in fields.items() if _last_written_status.get(k) != v}
+    if not changed:
+        return
+    _last_written_status.update(changed)
+    try:
+        await get_db().whatsapp_sessions.update_one(
+            {"id": "default"}, {"$set": changed}, upsert=True,
+        )
+    except Exception:
+        logger.exception("inbound: failed to write worker status %s", changed)
+
+
+async def _rearm_for_new_generation(
+    session, groups_cache: "KnownGroupsCache", participants_cache: "GroupParticipantsCache",
+) -> None:
+    """The account just (re-)authenticated (WhatsAppSession.generation
+    changed) — every piece of state this module holds that could plausibly
+    depend on WHICH account is authenticated gets rebuilt here, unconditionally,
+    with no assumption about whether the account is actually different from
+    before (cheap either way — everything it touches self-heals in at most
+    one more probe/refresh cycle if nothing actually changed).
+
+    This is the fix for the bug where switching accounts via a fresh QR
+    scan left the inbound pipeline permanently silent: previously nothing
+    connected "an authentication just happened" to "account-specific state
+    must be rebuilt" — only a full process restart reset these Python
+    module globals. Now it's a single trigger this module checks on every
+    poll cycle, so a reconnect that happens entirely in-process (the
+    existing worker.py heartbeat-failure restart path, session.stop() +
+    session.start(), no OS-level restart) still gets picked up here on the
+    very next 2s tick."""
+    global _state_rebuilt_at
+    # Same safe pattern the existing config-change path already uses
+    # (KnownGroupsCache.get): move to pending-revalidation rather than
+    # blindly clearing, so each previously-flagged group still gets exactly
+    # one real probe before the dashboard reports it healthy again.
+    if _INVALID_GROUPS:
+        _PENDING_REVALIDATION.update(_INVALID_GROUPS)
+        _INVALID_GROUPS.clear()
+    _seen_cache.clear()
+    _invalid_group_last_logged.clear()
+    groups_cache.clear()
+    participants_cache.clear()
+    _state_rebuilt_at = time.monotonic()
+    logger.warning(
+        "inbound: (re-)authentication detected — generation=%d session_id=%s — "
+        "rebuilding all account-specific state (invalid-group cache, message-seen "
+        "cache, group-participants cache, known-groups cache)",
+        session.generation, session.session_id,
+    )
+    await _update_worker_status(
+        generation=session.generation,
+        session_id=session.session_id,
+        connected_phone_number=session.own_phone_number,
+        listener_status="active",
+    )
 
 
 async def load_invalid_state() -> None:
@@ -885,12 +1011,26 @@ async def poll_once(
     session, http: httpx.AsyncClient, groups_cache: KnownGroupsCache,
     participants_cache: "GroupParticipantsCache",
 ) -> None:
+    global _last_seen_generation
+    if session.generation != _last_seen_generation:
+        _last_seen_generation = session.generation
+        await _rearm_for_new_generation(session, groups_cache, participants_cache)
+
     groups = await groups_cache.get()
     if not groups:
         return
 
     for group_name in groups:
         if group_name in _INVALID_GROUPS:
+            now = time.monotonic()
+            if now - _invalid_group_last_logged.get(group_name, 0.0) > _INVALID_GROUP_SKIP_LOG_INTERVAL_SEC:
+                _invalid_group_last_logged[group_name] = now
+                logger.warning(
+                    "inbound: group=%r still flagged INVALID_CONFIGURATION — skipping "
+                    "every poll cycle until the operator fixes the mapping or a "
+                    "re-authentication re-arms it (this line is rate-limited to once "
+                    "per %.0fs per group)", group_name, _INVALID_GROUP_SKIP_LOG_INTERVAL_SEC,
+                )
             continue
         async with session.page_lock:
             page = session.page
@@ -905,7 +1045,21 @@ async def poll_once(
             if status != "OPENED":
                 logger.info("inbound: group=%r not opened (status=%s) — skipping this cycle", group_name, status)
                 if status == "NOT_FOUND":
-                    await _mark_invalid_configuration(group_name)
+                    grace_remaining = config.REAUTH_GRACE_SEC - (time.monotonic() - _state_rebuilt_at)
+                    if grace_remaining > 0:
+                        # A fresh (re-)auth happened recently enough that
+                        # WhatsApp Web's chat list may still be syncing —
+                        # this is exactly the race that used to poison every
+                        # group permanently on an account switch. Don't
+                        # judge it yet; just retry next cycle.
+                        logger.info(
+                            "inbound: group=%r NOT_FOUND within %.0fs of last (re-)auth "
+                            "(%.0fs of grace remaining) — treating as still-settling, "
+                            "not marking invalid", group_name, config.REAUTH_GRACE_SEC,
+                            grace_remaining,
+                        )
+                    else:
+                        await _mark_invalid_configuration(group_name)
                 continue
             if group_name in _PENDING_REVALIDATION:
                 # Flagged in the DB, but it opened this time — the operator
@@ -960,6 +1114,7 @@ async def poll_once(
                     group_name, msg["sender_name"], phone, msg["sender_is_group_member"],
                     msg["message_id"], msg["text"][:120],
                 )
+                await _update_worker_status(last_incoming_at=_now().isoformat())
 
                 reply_context = msg.get("reply_context") or {}
                 backend_task = asyncio.create_task(_post_inbound(
@@ -993,6 +1148,7 @@ async def poll_once(
                     continue
 
                 await _mark_processed(msg["message_id"])
+                await _update_worker_status(last_processed_at=_now().isoformat())
 
                 reply = result.get("reply")
                 operation_id = result.get("operation_id")
@@ -1000,6 +1156,8 @@ async def poll_once(
                 send_timing: Dict[str, float] = {}
                 if reply:
                     reply_elapsed, send_timing, sent_message_id = await _send_reply(page, group_name, reply)
+                    if sent_message_id:
+                        await _update_worker_status(last_reply_at=_now().isoformat())
                     # Concurrent Task Engine (2026-08-05) — operation_id is only
                     # set when `reply` is a task's confirmation/clarification
                     # card; report the WhatsApp message id it actually got so a
@@ -1029,7 +1187,17 @@ async def inbound_listener_loop(session) -> None:
     """Spawned once as an asyncio task from worker.py, alongside the
     existing heartbeat_task, right after session.start(). Runs for the
     lifetime of the process; worker.py cancels it in its shutdown finally
-    block exactly like heartbeat_task."""
+    block exactly like heartbeat_task.
+
+    Startup/readiness verification (2026-08-11): rather than a one-shot
+    check run once at boot, `worker_ready` is a LIVE value recomputed every
+    poll cycle from the current sub-statuses (session healthy, dispatcher
+    reachable, reply pipeline structurally available) — self-correcting by
+    construction, so it can never get stuck reporting healthy after
+    something actually breaks, and never needs a separate retry-with-
+    backoff mechanism: the sub-statuses it's built from are already
+    refreshed every cycle by the existing poll loop."""
+    global _state_rebuilt_at
     if not config.INBOUND_LISTENER_ENABLED:
         logger.info("inbound: listener disabled via WA_INBOUND_LISTENER_ENABLED — outbound sending unaffected")
         return
@@ -1038,21 +1206,42 @@ async def inbound_listener_loop(session) -> None:
     # DB is authoritative: seed the cache so groups flagged by a previous
     # process are revalidated once here, and recover with no manual cleanup.
     await load_invalid_state()
+    # First boot gets the same grace window a reconnect does — a freshly
+    # launched, persisted-profile browser's chat list can race the exact
+    # same way a re-authentication's does.
+    _state_rebuilt_at = time.monotonic()
+    await _update_worker_status(listener_status="starting", worker_ready=False)
+
     async with httpx.AsyncClient() as http:
         groups_cache = KnownGroupsCache(http)
         participants_cache = GroupParticipantsCache()
         logger.info(
-            "inbound: listener started (poll_sec=%d, groups_refresh_sec=%d)",
-            config.INBOUND_POLL_SEC, config.INBOUND_GROUPS_REFRESH_SEC,
+            "inbound: listener started (poll_sec=%d, groups_refresh_sec=%d, reauth_grace_sec=%d)",
+            config.INBOUND_POLL_SEC, config.INBOUND_GROUPS_REFRESH_SEC, config.REAUTH_GRACE_SEC,
         )
+        # "Listener attached" / "incoming events subscribed" — true from here
+        # on: this loop IS the listener, and it's about to start polling.
+        await _update_worker_status(listener_status="active")
         while True:
+            reply_pipeline_status = "not_ready"
             try:
                 if session.is_healthy:
                     await poll_once(session, http, groups_cache, participants_cache)
+                    reply_pipeline_status = "ready" if session.page is not None else "not_ready"
                 else:
                     logger.info("inbound: session unhealthy — skipping this poll cycle")
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("inbound: unexpected error in poll cycle — will retry next cycle")
+            dispatcher_status = _last_written_status.get("dispatcher_status", "unknown")
+            worker_ready = (
+                session.is_healthy
+                and reply_pipeline_status == "ready"
+                and dispatcher_status == "ready"
+            )
+            await _update_worker_status(
+                reply_pipeline_status=reply_pipeline_status,
+                worker_ready=worker_ready,
+            )
             await asyncio.sleep(config.INBOUND_POLL_SEC)

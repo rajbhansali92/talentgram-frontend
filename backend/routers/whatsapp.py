@@ -1457,6 +1457,20 @@ async def get_session_status(admin: dict = Depends(current_team_or_admin)):
             "last_heartbeat": None,
             "authenticated_at": None,
             "error_message": None,
+            # Reconnect reliability (2026-08-11) — see whatsapp-worker/
+            # inbound.py's _update_worker_status / session.py's generation
+            # bump. Doc-not-found default kept in sync with those writers
+            # purely for response-shape parity with the frontend.
+            "generation": None,
+            "session_id": None,
+            "connected_phone_number": None,
+            "listener_status": None,
+            "dispatcher_status": None,
+            "reply_pipeline_status": None,
+            "worker_ready": False,
+            "last_incoming_at": None,
+            "last_processed_at": None,
+            "last_reply_at": None,
         }
 
     # Clear QR if expired

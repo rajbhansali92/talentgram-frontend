@@ -927,17 +927,57 @@ RESULT_TITLE_SELECTORS = [
 ]
 
 # Clicking the conversation header opens the Group Info drawer. Ordered
-# most-specific first, same convention as SEARCH_BOX_SELECTORS.
+# most-specific first, same convention as SEARCH_BOX_SELECTORS. The group
+# NAME/title text is tried before the whole header bar (2026-08-11,
+# participant-lookup fix) — a click on the broad header container doesn't
+# reliably land on the actual "open info" region in the current build; the
+# title text itself is the one part of the header that's always the intended
+# target for opening Group Info.
 GROUP_INFO_TRIGGER_SELECTORS = [
+    '#main header[data-testid="conversation-header"] span[title]',
     '#main header[data-testid="conversation-header"]',
     '#main header',
 ]
 
-# The Group Info drawer itself, once opened.
+# The Group Info drawer itself, once opened. `[data-testid="drawer-right"]`
+# is kept first (still the right container in most builds) but is no
+# longer trusted on PRESENCE alone (2026-08-11) — live evidence showed it
+# permanently mounted in the DOM as an empty placeholder
+# (`<div data-testid="drawer-right"><span></span></div>`, 0 chars of text)
+# regardless of whether Group Info is actually showing, which silently won
+# the old presence-only selection over `role="complementary"` ever being
+# tried. See _find_populated_panel below — every candidate is now checked
+# for actual content, not just existence.
 GROUP_INFO_PANEL_SELECTORS = [
     '[data-testid="drawer-right"]',
     'div[role="complementary"]',
 ]
+
+
+async def _find_populated_panel(page: Page, selectors: list, *, timeout_sec: float = 3.0) -> Optional[str]:
+    """Poll `selectors` in priority order for the first one that both exists
+    AND actually has content (not just an empty placeholder mount point —
+    see GROUP_INFO_PANEL_SELECTORS' comment for why presence alone isn't
+    enough). Retries for up to `timeout_sec` since the real content can
+    still be rendering asynchronously after the container itself mounts.
+    Returns the matched selector, or None if nothing populated in time."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        for sel in selectors:
+            try:
+                has_content = await page.evaluate(
+                    """(s) => {
+                        const el = document.querySelector(s);
+                        return !!el && (el.innerText || '').trim().length > 20;
+                    }""",
+                    sel,
+                )
+            except Exception:
+                has_content = False
+            if has_content:
+                return sel
+        await asyncio.sleep(0.25)
+    return None
 
 
 
@@ -983,17 +1023,14 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
         logger.warning("sender: group-info: header click failed for %r: %s", group_name, exc)
         return None
 
-    panel_sel = None
-    for sel in GROUP_INFO_PANEL_SELECTORS:
-        try:
-            if await page.locator(sel).count():
-                panel_sel = sel
-                break
-        except Exception:
-            pass
+    # 2026-08-11 — was a single presence-only pass over GROUP_INFO_PANEL_SELECTORS;
+    # now polls for actual CONTENT (see _find_populated_panel's docstring for
+    # why presence alone silently locked onto a permanently-empty placeholder).
+    panel_sel = await _find_populated_panel(page, GROUP_INFO_PANEL_SELECTORS)
     if not panel_sel:
         logger.warning(
-            "sender: group-info: panel did not open for %r (header clicked, no drawer found)",
+            "sender: group-info: panel did not open (or never populated) for %r "
+            "(header clicked, no non-empty drawer found within the wait window)",
             group_name,
         )
         await _capture_open_failure(page, "group_info_panel_absent", {"group": group_name})
@@ -1062,37 +1099,15 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
             pass
 
     if rows is None:
+        logger.warning("sender: group-info: Participant extraction failed for %r", group_name)
         return None
     if not rows:
-        # TEMPORARY (2026-08-11, participant-lookup fix) — one-shot structural
-        # probe of whatever the panel_sel actually matched, so the real fix
-        # can be written from evidence instead of a guess. Removed as soon as
-        # a working fix is confirmed; does not change rows/participants/None
-        # in any way — read-only, additive to this exact failure branch only.
-        try:
-            probe = await page.evaluate("""(panelSel) => {
-                const panel = document.querySelector(panelSel);
-                if (!panel) return null;
-                const child_summary = Array.from(panel.querySelectorAll('*')).slice(0, 40).map(el => ({
-                    tag: el.tagName, testid: el.getAttribute('data-testid'),
-                    role: el.getAttribute('role'), cls: (el.className || '').toString().slice(0, 80),
-                    text: (el.textContent || '').trim().slice(0, 60),
-                }));
-                return {
-                    inner_text_len: (panel.innerText || '').length,
-                    outer_html_head: panel.outerHTML.slice(0, 1500),
-                    child_count: panel.querySelectorAll('*').length,
-                    child_summary,
-                };
-            }""", panel_sel)
-        except Exception as exc:
-            probe = {"error": str(exc)}
-        logger.warning("sender: group-info: PROBE panel_sel=%r probe=%s", panel_sel, probe)
         logger.warning(
             "sender: group-info: drawer opened but no participant rows matched for %r "
             "(panel_selector=%r) — selectors likely need updating",
             group_name, panel_sel,
         )
+        logger.warning("sender: group-info: Participant extraction failed for %r", group_name)
         return None
 
     phone_re = re.compile(r"(\+?\d[\d\s\-]{6,17}\d)")
@@ -1105,6 +1120,7 @@ async def get_group_participants(page: Page, group_name: str) -> Optional[list]:
         "sender: group-info: read %d participant row(s) for %r via panel=%r rows=%r",
         len(participants), group_name, panel_sel, rows,
     )
+    logger.info("sender: group-info: Participants detected: %d for %r", len(participants), group_name)
     # Durable copy (2026-07-21 multi-user investigation) — console logs get
     # rotated out of retrieval range within minutes during busy periods,
     # which made this exact data impossible to inspect after the fact.

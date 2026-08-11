@@ -91,9 +91,17 @@ export default function ProjectDetail() {
     });
 
     useEffect(() => {
+        // P1 fix — see PortalHome.jsx's matching effect for the full
+        // explanation: "/" is outside this SPA's react-router tree, so
+        // navigate("/") never actually left it — it got caught by
+        // PortalApp's own wildcard route and bounced straight back. The
+        // navigate("/portal/projects") calls below are normal same-app
+        // moves and are unaffected — only this cross-boundary case (and
+        // the matching one in the 401 branch further down) need a hard
+        // navigation.
         if (!token) {
             toast.error("Please sign in to access your portal");
-            navigate("/");
+            window.location.href = "/";
             return;
         }
 
@@ -149,7 +157,7 @@ export default function ProjectDetail() {
                     localStorage.removeItem(PORTAL_TOKEN_KEY);
                     localStorage.removeItem("talentgram_portal_email");
                     toast.error("Please sign in again.");
-                    navigate("/");
+                    window.location.href = "/";
                 } else {
                     toast.error("Unable to load this project.");
                     navigate("/portal/projects");

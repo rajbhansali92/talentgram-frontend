@@ -4306,8 +4306,8 @@ function SubmissionPage() {
                                                                         alt=""
                                                                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                                                     />
-                                                                    {m.origin === "project" && (
-                                                                        <ProjectOnlyBadge className="absolute top-1.5 left-1.5 text-white bg-black/60 backdrop-blur-sm" />
+                                                                    {(m.profile_sync_status === "declined" || m.profile_sync_status === "synced") && (
+                                                                        <MediaSyncStatusBadge status={m.profile_sync_status} className="absolute top-1.5 left-1.5 text-white bg-black/60 backdrop-blur-sm" />
                                                                     )}
                                                                     {/* Action overlay — hidden by default, revealed on
                                                                         hover (desktop) or tap (mobile). */}
@@ -4680,21 +4680,33 @@ function Info({ label, value, wide }) {
     );
 }
 
-// Media Library Picker UI (Phase 4 item 2) — the one small, subtle badge
-// used everywhere a media item's `origin` (Phase 4 item 1, additive-only
-// field) is "project". Never shown for `origin === "global"` (or missing,
-// e.g. pre-existing submissions) — absence of the badge is the signal that
-// an item is part of the talent's normal reusable media, per the product
-// vision. `className` lets each call site adapt contrast for its own
-// background (a white card vs. directly over a photo thumbnail) without
-// forking the component.
-function ProjectOnlyBadge({ className = "" }) {
+// P1 fix: this badge used to be gated on a media item's `origin` field
+// ("project" = freshly uploaded here vs. "global" = pulled from the
+// Library) — a "where did this come from" flag set once at upload time
+// and never touched again. That's a different question from "where does
+// this live now", which is exactly what a talent reads this badge as
+// meaning. Because `origin` never changes, choosing "Update my Talent
+// Profile" in the consent dialog left the badge permanently reading
+// "Only in this project" even after the item was successfully synced —
+// the display never reflected the actual persisted consent decision.
+// Driven by `profile_sync_status` instead (the one field
+// apply_media_consent_decision() — routers/submissions.py — actually
+// writes "declined"/"synced" to), so the badge always matches what was
+// really saved: on upload, on resume/refresh (build_talent_submission_view
+// recomputes the same media array either way), and immediately after the
+// talent answers the dialog (submitMediaConsent's response replaces
+// `submission.media` via applySubmissionResponse — no separate refetch
+// needed). Renders nothing while `profile_sync_status` is still "pending"
+// (the dialog hasn't been answered yet) or absent (from-library items,
+// non-reusable categories, or submissions predating this consent system).
+function MediaSyncStatusBadge({ status, className = "" }) {
+    const isSynced = status === "synced";
     return (
         <span
-            data-testid="media-origin-badge-project"
+            data-testid={isSynced ? "media-sync-badge-synced" : "media-sync-badge-declined"}
             className={`inline-flex items-center text-[9px] font-mono font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full whitespace-nowrap ${className}`}
         >
-            Only in this project
+            {isSynced ? "Saved to dashboard" : "Only in this project"}
         </span>
     );
 }
@@ -4801,8 +4813,8 @@ function PremiumPortfolioGroup({
                                         alt=""
                                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                     />
-                                    {m.origin === "project" && (
-                                        <ProjectOnlyBadge className="absolute top-1.5 left-1.5 text-white bg-black/60 backdrop-blur-sm" />
+                                    {(m.profile_sync_status === "declined" || m.profile_sync_status === "synced") && (
+                                        <MediaSyncStatusBadge status={m.profile_sync_status} className="absolute top-1.5 left-1.5 text-white bg-black/60 backdrop-blur-sm" />
                                     )}
                                     {/* Project-Specific Media Override (item 5) — only shown for a
                                         just-uploaded item still awaiting a consent decision. Checking
@@ -5255,8 +5267,8 @@ function PremiumUploadSlot({
                                 </div>
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
-                                {media.origin === "project" && (
-                                    <ProjectOnlyBadge className="text-[#333333] bg-slate-100 border border-[#eaeaea]" />
+                                {(media.profile_sync_status === "declined" || media.profile_sync_status === "synced") && (
+                                    <MediaSyncStatusBadge status={media.profile_sync_status} className="text-[#333333] bg-slate-100 border border-[#eaeaea]" />
                                 )}
                                 <button
                                     type="button"

@@ -107,9 +107,16 @@ export default function PortalProfile() {
     const categoryOptions = ["Acting", "Modeling", "Influencer Campaigns"];
 
     useEffect(() => {
+        // P1 fix — see PortalHome.jsx's matching effect for the full
+        // explanation: "/" is outside this SPA's react-router tree, so
+        // navigate("/") never actually left it — it got caught by
+        // PortalApp's own wildcard route and bounced straight back.
+        // navigate("/portal/home") elsewhere in this file is a normal
+        // same-app move and is unaffected — only this cross-boundary case
+        // needs a hard navigation.
         if (!token) {
             toast.error("Please sign in to access your portal");
-            navigate("/");
+            window.location.href = "/";
             return;
         }
 

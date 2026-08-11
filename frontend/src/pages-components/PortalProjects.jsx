@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
 import { Briefcase, Award, CheckCircle } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
@@ -22,15 +21,19 @@ import { sortByUrgency } from "@/lib/engagementStatus";
  * not built prematurely here.
  */
 export default function PortalProjects() {
-    const navigate = useNavigate();
     const [projects, setProjects] = useState({ ongoing: [], shortlisted: [], completed: [] });
     const [loading, setLoading] = useState(true);
     const token = typeof window !== "undefined" ? localStorage.getItem(PORTAL_TOKEN_KEY) : null;
 
     useEffect(() => {
+        // P1 fix — see PortalHome.jsx's matching effect for the full
+        // explanation: "/" is outside this SPA's react-router tree, so
+        // navigate("/") never actually left it — it got caught by
+        // PortalApp's own wildcard route and bounced straight back,
+        // repeating this effect. Hard navigation is correct here.
         if (!token) {
             toast.error("Please sign in to access your portal");
-            navigate("/");
+            window.location.href = "/";
             return;
         }
 
@@ -48,14 +51,14 @@ export default function PortalProjects() {
                 }
                 localStorage.removeItem(PORTAL_TOKEN_KEY);
                 localStorage.removeItem("talentgram_portal_email");
-                navigate("/");
+                window.location.href = "/";
             } finally {
                 setLoading(false);
             }
         };
 
         fetchProjects();
-    }, [token, navigate]);
+    }, [token]);
 
     if (loading) {
         return (

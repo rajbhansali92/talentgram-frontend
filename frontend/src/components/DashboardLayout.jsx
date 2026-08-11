@@ -1,5 +1,5 @@
 import React from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet } from "react-router-dom";
 import { LogOut } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
@@ -30,16 +30,22 @@ function navLinkClass({ isActive }) {
 }
 
 export default function DashboardLayout() {
-    const navigate = useNavigate();
-
     // Identical semantics to the sign-out previously duplicated in
     // PortalHome.jsx — moved here since it's shell-level chrome, not
     // page-specific business logic.
+    //
+    // P1 fix: "/" is outside this app's react-router <Routes> tree
+    // (PortalApp.jsx only declares /portal/*) — react-router's navigate()
+    // can't leave that tree, so navigate("/") just changed the URL to
+    // something PortalApp's own wildcard route immediately caught and
+    // redirected back from (see PortalHome.jsx's matching fix for the
+    // full explanation). A hard navigation is the correct way to cross
+    // that boundary.
     const handleSignOut = () => {
         localStorage.removeItem(PORTAL_TOKEN_KEY);
         localStorage.removeItem("talentgram_portal_email");
         toast.success("Signed out successfully");
-        navigate("/");
+        window.location.href = "/";
     };
 
     return (

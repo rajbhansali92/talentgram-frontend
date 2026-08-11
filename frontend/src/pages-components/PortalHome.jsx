@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { User, MapPin, Edit3, Briefcase, HeartPulse, Clock, ArrowUpRight, ListChecks, Settings as SettingsIcon } from "lucide-react";
 import Logo from "@/components/Logo";
 import { formatTalentLocation } from "@/lib/sanitize";
@@ -28,16 +28,34 @@ import { sortByUrgency } from "@/lib/engagementStatus";
  * Projects/Settings stubs from Phase 2 item 1 — not real features yet.
  */
 export default function PortalHome() {
-    const navigate = useNavigate();
     const [talent, setTalent] = useState(null);
     const [projects, setProjects] = useState({ ongoing: [], shortlisted: [], completed: [] });
     const [loading, setLoading] = useState(true);
     const token = typeof window !== "undefined" ? localStorage.getItem(PORTAL_TOKEN_KEY) : null;
 
     useEffect(() => {
+        // P1 fix: "/" is the site's real Next.js homepage — a route that
+        // lives entirely outside this component's react-router <Routes>
+        // tree (PortalApp.jsx only declares /portal/*). react-router's
+        // navigate() only ever matches routes within its OWN tree, so
+        // navigate("/") doesn't leave the Portal SPA at all — it changes
+        // the URL to "/", which PortalApp's own catch-all
+        // (<Route path="*" element={<Navigate to="/portal/home" replace/>} />)
+        // immediately matches and redirects right back to /portal/home,
+        // remounting this exact effect and repeating. For a first-time
+        // talent (no portal_token minted yet — see talentAuth.js's
+        // persistPortalToken, which the OTP-verify response only includes
+        // for an ALREADY-existing talent) this fired on literally every
+        // dashboard visit, which is what surfaced as the reported flicker/
+        // repeated-mount/redirect-loop. A hard navigation is the correct
+        // way to leave this router for a real cross-app boundary — same
+        // precedent already used the other direction in
+        // SubmissionPage.jsx's dashboardLinkEl and ApplicationPage.jsx's
+        // apply-success-dashboard-cta (`<a href="/portal/home">`, not
+        // <NavLink>).
         if (!token) {
             toast.error("Please sign in to access your portal");
-            navigate("/");
+            window.location.href = "/";
             return;
         }
 
@@ -60,7 +78,7 @@ export default function PortalHome() {
                 }
                 localStorage.removeItem(PORTAL_TOKEN_KEY);
                 localStorage.removeItem("talentgram_portal_email");
-                navigate("/");
+                window.location.href = "/";
             } finally {
                 setLoading(false);
             }
@@ -68,7 +86,7 @@ export default function PortalHome() {
 
 
         fetchPortalData();
-    }, [token, navigate]);
+    }, [token]);
 
     // Sign-out lives in the shared DashboardLayout shell (see
     // components/DashboardLayout.jsx) — this page no longer renders its own

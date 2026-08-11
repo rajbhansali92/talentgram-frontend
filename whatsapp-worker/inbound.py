@@ -1252,6 +1252,134 @@ async def poll_once(
                 _record_latency(t_total)
 
 
+# TEMPORARY (2026-08-11, "why does the DOM never show new messages"
+# investigation) — a deliberately SEPARATE, read-only verification routine.
+# It does not call _scan_group_for_new_messages, _is_outgoing_msg,
+# _already_processed, or anything else in the inbound-detection/seen-cache/
+# direction-detection path — it only reads live browser/DOM state that
+# nothing else in this file currently surfaces, to answer one question:
+# is the controlled Chromium tab actually receiving live WhatsApp updates,
+# and is it pointed at the right account/chats? Runs on its own slow
+# cadence (LIVE_SESSION_VERIFY_SEC), independent of the 2s poll cycle.
+LIVE_SESSION_VERIFY_SEC = 120.0
+_last_live_verify_at: float = 0.0
+
+_RECONNECT_BANNER_PHRASES = [
+    "Trying to reconnect", "Reconnecting", "Connecting",
+    "Phone not connected", "Computer not connected to the internet",
+    "Server error", "Unable to connect",
+]
+
+
+async def _verify_live_session(session, groups: list[str]) -> None:
+    """Read-only. Logs (does not decide anything):
+      1. Account identity (phone/session id/generation) already known to
+         this process, for correlation against what the operator's phone
+         actually shows.
+      2. Whether the tab reports online, has an active service worker, and
+         whether any WhatsApp Web "reconnecting"/"phone not connected"
+         banner text is present anywhere on the page right now.
+      3. Browser context/page shape — exactly one context, exactly one
+         page, confirming polling isn't somehow attached to a different
+         page than the authenticated one.
+      4. Per configured group, WITHOUT opening the chat (opening it would
+         clear its unread badge, destroying the evidence): whether it's
+         found in the currently-visible chat list, its unread badge (if
+         any), and pin/mute-icon presence if visible from the list row
+         alone. Chat list rows lack a stable exposed "chat id" in the
+         current build (nothing in this codebase already reads one; not
+         invented here either) — logged as unavailable rather than guessed.
+    """
+    page = session.page
+    if page is None:
+        logger.warning("inbound: LIVE-SESSION-VERIFY skipped — no active page")
+        return
+
+    logger.info(
+        "inbound: LIVE-SESSION-VERIFY account phone=%r session_id=%r generation=%d",
+        session.own_phone_number, session.session_id, session.generation,
+    )
+
+    context_pages = 0
+    try:
+        context_pages = len(page.context.pages)
+    except Exception:
+        pass
+    logger.info(
+        "inbound: LIVE-SESSION-VERIFY browser context_page_count=%d "
+        "(expect exactly 1 — polling and the authenticated session must be the same page)",
+        context_pages,
+    )
+
+    try:
+        conn = await page.evaluate("""(phrases) => {
+            return (async () => {
+                const bodyText = document.body.innerText || '';
+                const banners = phrases.filter(p => bodyText.includes(p));
+                let serviceWorkers = [];
+                try {
+                    if (navigator.serviceWorker) {
+                        const regs = await navigator.serviceWorker.getRegistrations();
+                        serviceWorkers = regs.map(r => ({
+                            scope: r.scope, active: !!r.active,
+                            installing: !!r.installing, waiting: !!r.waiting,
+                        }));
+                    }
+                } catch (e) {}
+                return {online: navigator.onLine, title: document.title,
+                        banners_found: banners, service_workers: serviceWorkers};
+            })();
+        }""", _RECONNECT_BANNER_PHRASES)
+        logger.info(
+            "inbound: LIVE-SESSION-VERIFY connectivity online=%s title=%r "
+            "reconnect_banners=%s service_workers=%s",
+            conn.get("online"), conn.get("title"),
+            conn.get("banners_found"), conn.get("service_workers"),
+        )
+    except Exception as exc:
+        logger.warning("inbound: LIVE-SESSION-VERIFY connectivity check failed: %s", exc)
+
+    # Per-group chat-list-row scan — read-only, never opens the chat.
+    for group_name in groups:
+        try:
+            row_info = await page.evaluate("""(name) => {
+                const titleEls = document.querySelectorAll('[data-testid="cell-frame-title"]');
+                for (const el of titleEls) {
+                    const rowText = (el.textContent || '').trim();
+                    if (rowText.toLowerCase() !== name.toLowerCase()) continue;
+                    // Walk up a few levels to the row container to look for
+                    // badge/pin/mute indicators near the title.
+                    let row = el;
+                    for (let i = 0; i < 6 && row && row.parentElement; i++) row = row.parentElement;
+                    const rowHtmlSnippet = row ? row.outerHTML.slice(0, 0) : null; // never dump full HTML here
+                    const unreadEl = row ? row.querySelector('[aria-label*="unread" i]') : null;
+                    const pinnedEl = row ? row.querySelector('[data-icon*="pin" i], [aria-label*="pinned" i]') : null;
+                    const mutedEl = row ? row.querySelector('[data-icon*="mute" i], [aria-label*="muted" i]') : null;
+                    const timeEls = row ? row.querySelectorAll('span') : [];
+                    let lastPreview = null;
+                    for (const s of timeEls) {
+                        const t = (s.textContent || '').trim();
+                        if (t && t !== name && t.length < 60) { lastPreview = t; }
+                    }
+                    return {
+                        found: true,
+                        unread_label: unreadEl ? unreadEl.getAttribute('aria-label') : null,
+                        pinned: !!pinnedEl, muted: !!mutedEl,
+                        last_preview_text: lastPreview,
+                    };
+                }
+                return {found: false};
+            }""", group_name)
+        except Exception as exc:
+            row_info = {"error": str(exc)}
+        logger.info(
+            "inbound: LIVE-SESSION-VERIFY group=%r chat_list_row=%s "
+            "(chat id / internal identifier / archived-state: not exposed by the current "
+            "DOM build via any selector already in this codebase — not guessed here)",
+            group_name, row_info,
+        )
+
+
 async def inbound_listener_loop(session) -> None:
     """Spawned once as an asyncio task from worker.py, alongside the
     existing heartbeat_task, right after session.start(). Runs for the
@@ -1266,7 +1394,7 @@ async def inbound_listener_loop(session) -> None:
     something actually breaks, and never needs a separate retry-with-
     backoff mechanism: the sub-statuses it's built from are already
     refreshed every cycle by the existing poll loop."""
-    global _state_rebuilt_at
+    global _state_rebuilt_at, _last_live_verify_at
     if not config.INBOUND_LISTENER_ENABLED:
         logger.info("inbound: listener disabled via WA_INBOUND_LISTENER_ENABLED — outbound sending unaffected")
         return
@@ -1297,6 +1425,16 @@ async def inbound_listener_loop(session) -> None:
                 if session.is_healthy:
                     await poll_once(session, http, groups_cache, participants_cache)
                     reply_pipeline_status = "ready" if session.page is not None else "not_ready"
+                    # TEMPORARY (2026-08-11) — separate from and does not
+                    # affect poll_once/detection/seen-cache above; own slow
+                    # cadence so it doesn't add per-2s-cycle overhead.
+                    now = time.monotonic()
+                    if now - _last_live_verify_at > LIVE_SESSION_VERIFY_SEC:
+                        _last_live_verify_at = now
+                        try:
+                            await _verify_live_session(session, await groups_cache.get())
+                        except Exception:
+                            logger.exception("inbound: LIVE-SESSION-VERIFY failed — will retry next cadence")
                 else:
                     logger.info("inbound: session unhealthy — skipping this poll cycle")
             except asyncio.CancelledError:

@@ -93,7 +93,7 @@ export function computeRequirementItems({ project, form, submission }) {
     items.push({ id: "ethnicity", label: "Ethnicity", section: "profile", selector: '[data-testid="form-ethnicity-field"]', requirement: fieldTier("ethnicity"), satisfied: !!form.ethnicity?.trim() });
     items.push({ id: "instagram_handle", label: "Instagram Handle", section: "profile", selector: '[data-testid="form-instagram-handle"]', requirement: fieldTier("instagram_handle"), satisfied: !!form.instagram_handle?.trim() });
     items.push({ id: "instagram_followers", label: "Instagram Followers", section: "profile", selector: '[data-testid="form-instagram-followers-field"]', requirement: fieldTier("instagram_followers"), satisfied: !!form.instagram_followers?.trim() });
-    items.push({ id: "bio", label: "Bio", section: "profile", selector: '[data-testid="form-bio-field"]', requirement: fieldTier("bio"), satisfied: !!form.bio?.trim() });
+    items.push({ id: "bio", label: "Bio", section: "skills", selector: '[data-testid="form-bio-field"]', requirement: fieldTier("bio"), satisfied: !!form.bio?.trim() });
     items.push({ id: "competitive_brand", label: "Competitive Brand details", section: "projectQuestions", selector: '[data-testid="form-competitive-brand"]', requirement: fieldTier("competitive_brand"), satisfied: !!form.competitive_brand?.trim() });
 
     {
@@ -186,13 +186,18 @@ export function computeRequirementItems({ project, form, submission }) {
     const linksVis = requirements.work_links_visibility || (minLinks > 0 ? REQUIREMENT_TIERS.REQUIRED : REQUIREMENT_TIERS.OPTIONAL);
     {
         const linksCount = (form.work_links || []).length;
-        items.push({ id: "work_links", label: `Work Links (minimum ${minLinks})`, section: "profile", selector: '[data-testid="form-work-links-field"]', requirement: linksVis, satisfied: linksCount >= minLinks });
+        items.push({ id: "work_links", label: `Work Links (minimum ${minLinks})`, section: "skills", selector: '[data-testid="form-work-links-field"]', requirement: linksVis, satisfied: linksCount >= minLinks });
     }
 
     // 5. Skills & Special Abilities — unlike the fields above, there is no
     // enumerable "all possible skill categories" in config to list as
     // optional; a category only exists as a requirement item at all when the
     // project has explicitly turned it on.
+    //
+    // `bio`, `work_links`, and every `skills_${cat}` item below are tagged
+    // section: "skills" (not "profile") so the submission wizard can render
+    // them as their own step — a presentational grouping only, it changes
+    // nothing about requirement/satisfied computation.
     const skillsReqs = requirements.skills || {};
     const userSkills = form.skills || [];
     Object.keys(skillsReqs).forEach(cat => {
@@ -202,7 +207,7 @@ export function computeRequirementItems({ project, form, submission }) {
             items.push({
                 id: `skills_${cat}`,
                 label: `At least one skill from category "${cat}"`,
-                section: "profile",
+                section: "skills",
                 selector: '[data-testid="form-skills-field"]',
                 requirement: REQUIREMENT_TIERS.REQUIRED,
                 satisfied: hasSkill,

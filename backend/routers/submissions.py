@@ -748,6 +748,22 @@ async def submission_upload(
             if not was_finalized:
                 await remove_synced_media_from_global_talent(sub, pi["id"])
 
+    # Talent Profile Migration, Phase 4 fix: mark_reusable_media_pending()
+    # above may have just flagged this upload profile_sync_status="pending",
+    # but a raw db.submissions.find_one() response never carries the derived
+    # `pending_media_consent` field (only build_talent_submission_view()
+    # computes it — see core.py). Without this, the frontend's consent
+    # dialog never appears right after upload (applySubmissionResponse()
+    # only updates pendingMediaConsent when the key is present), so the
+    # talent had no way to answer "only this project" vs "update my
+    # profile" until some other GET happened to refresh it. Deliberately NOT
+    # routing through the full build_talent_submission_view() here — that
+    # also resolves the canonical talent, rebuilds library_media, and
+    # queries approved feedback, all needless extra work on the hot upload
+    # path for a field derivable from `updated["media"]` alone.
+    updated["pending_media_consent"] = [
+        m for m in (updated.get("media") or []) if m.get("profile_sync_status") == "pending"
+    ]
     return updated
 
 
@@ -983,6 +999,15 @@ async def submission_complete_upload(
             payload={"submission_id": sid, "project_id": sub["project_id"]},
         )
 
+    # Same enrichment fix as submission_upload() above — this direct-upload
+    # completion path can also flag profile_sync_status="pending" via
+    # mark_reusable_media_pending(), and a raw find_one() response never
+    # carries the derived pending_media_consent field the consent dialog
+    # reads from. Same reasoning for not using build_talent_submission_view()
+    # here either — see the comment at its other call site.
+    updated["pending_media_consent"] = [
+        m for m in (updated.get("media") or []) if m.get("profile_sync_status") == "pending"
+    ]
     return updated
 
 

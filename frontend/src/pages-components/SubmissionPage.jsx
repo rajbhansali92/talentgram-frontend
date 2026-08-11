@@ -10,8 +10,14 @@ import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
 import { revealAndJumpToRequirementItem } from "@/lib/scrollHighlight";
 import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS, SECTION_STATUS, OPERATIONAL_STATES } from "@/lib/readinessStatus";
 import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
+import { computeRequirementItems } from "@/lib/requirementEngine";
+import { useSwipeStep } from "@/hooks/useSwipeStep";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
 import LibraryMediaPicker from "@/components/submission/LibraryMediaPicker";
+import WizardProgressBar from "@/components/submission/WizardProgressBar";
+import WizardStepNav from "@/components/submission/WizardStepNav";
+import UpdateProfileDisclosure from "@/components/submission/UpdateProfileDisclosure";
+import { WIZARD_STEPS, TOTAL_STEPS, stepForSection, sectionForStep, readStep, writeStep, clearStep } from "@/lib/wizardSteps";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
@@ -327,6 +333,7 @@ const LS_ATK_KEY = (slug) => `tg_atk_${slug}`;
 // wrapper instead of one field.
 const SECTION_WRAPPER_SELECTOR = {
     profile: '[data-testid="profile-section"]',
+    skills: '[data-testid="skills-section"]',
     projectQuestions: '[data-testid="project-questions-section"]',
     uploads: '[data-testid="uploads-section"]',
 };
@@ -517,9 +524,45 @@ function SubmissionPage() {
     // Collapsible sections state
     const [collapsedSections, setCollapsedSections] = useState({
         profile: false,           // open by default
+        skills: false,             // open by default
         projectQuestions: false,   // open by default
         uploads: false,            // open by default
     });
+
+    // Submission Wizard — current step (1-4, see lib/wizardSteps.js). Admin
+    // Mode never uses the wizard's own localStorage step key (it doesn't use
+    // LS_DRAFT_KEY either — see the admin-start bootstrap effect), so it
+    // always starts at 1 there and lets its own bootstrap logic decide what
+    // to show. For a real talent, initialize from whichever signal is
+    // available at MOUNT time (a resumed submission's persisted step); the
+    // "returning talent, no submission yet" case (OTP/Google prefill) is
+    // decided slightly later, once that prefill response actually arrives,
+    // and is applied via setCurrentStep from those handlers directly.
+    const [currentStep, setCurrentStepState] = useState(() => {
+        if (adminMode) return 1;
+        return readStep(slug) || 1;
+    });
+    // Direction of the last step change, purely for which slide-in
+    // animation to play (lib/index.css's tg-step-slide-in-forward/-back) —
+    // never read for any navigation/validation decision.
+    const [stepDirection, setStepDirection] = useState("forward");
+    const setCurrentStep = useCallback((step) => {
+        setCurrentStepState((prev) => {
+            const resolved = typeof step === "function" ? step(prev) : step;
+            setStepDirection(resolved >= prev ? "forward" : "back");
+            if (!adminMode) writeStep(slug, resolved);
+            return resolved;
+        });
+    }, [adminMode, slug]);
+    // CSS-hide (not unmount) a step that isn't current — mirrors
+    // ProjectEdit.jsx's tab pattern, so PremiumPortfolioGroup's local
+    // collapse state, the Upload Manager, and every field's local state
+    // survive tabbing away and back. `Tailwind`'s `hidden` utility already
+    // excludes the element from the tab order and a11y tree for free.
+    const stepVisibilityClass = (stepId) =>
+        currentStep === stepId
+            ? (stepDirection === "forward" ? "tg-step-slide-in-forward" : "tg-step-slide-in-back")
+            : "hidden";
     const [isGenericPortfolioCollapsed, setIsGenericPortfolioCollapsed] = useState(() => {
         return typeof window !== "undefined" && window.innerWidth < 768;
     });
@@ -987,6 +1030,14 @@ function SubmissionPage() {
         [],
     );
 
+    // Every field-level requirement below comes from the Requirement Engine
+    // (experience.missingRequirements — lib/requirementEngine.js, driven
+    // entirely by project.submission_requirements). No field is ever
+    // hardcoded as required here: what's required is 100% admin/project
+    // configuration, never frontend logic. The only two checks that stay
+    // hardcoded are the email-ownership gate itself (email + emailGateUnlocked)
+    // — that's authentication, not a submission requirement, so it isn't
+    // something the Requirement Engine models.
     const validateForm = () => {
         // Email-first ordering (Phase 1 v37 fix): the email field is the
         // gate that reveals every other field. Validation MUST surface
@@ -999,27 +1050,12 @@ function SubmissionPage() {
         // other validation. The Continue button is already gated on
         // `emailGateUnlocked` in the UI; this is a defense-in-depth.
         if (!emailGateUnlocked) return "Please complete the email step first";
-        if (!form.first_name.trim()) return "First name is required";
-        if (!form.last_name.trim()) return "Last name is required";
-        if (!form.height) return "Height is required";
-        if (!form.location || form.location.length === 0) return "Current location is required";
-        if (!form.availability.status) return "Please confirm your availability";
-        if (
-            form.availability.status === "no" &&
-            !form.availability.note.trim()
-        )
-            return "Please share your alternate availability";
-        // Budget confirmation is only ever rendered when the project has a
-        // budget to show (see the BUDGET decision block below) — requiring
-        // it unconditionally would permanently block submission on projects
-        // with no budget_per_day/talent_budget set, since the talent has no
-        // field to satisfy it with.
-        const budgetShown = Boolean(project?.budget_per_day) || (project?.talent_budget || []).length > 0;
-        if (budgetShown) {
-            if (!form.budget.status) return "Please confirm the budget";
-            if (form.budget.status === "custom" && !form.budget.value.trim())
-                return "Please enter your expected budget";
-        }
+        // Exclude "uploads": this validator runs before the submission
+        // record exists (Step 3 -> 4 transition, or the legacy Enter-key
+        // form submit), so upload-section requirements can never be
+        // satisfiable yet — those are validated separately by finalize().
+        const missing = experience.missingRequirements.filter((item) => item.section !== "uploads");
+        if (missing.length > 0) return `${missing[0].label} is required`;
         return null;
     };
 
@@ -1031,22 +1067,8 @@ function SubmissionPage() {
         // validate against.
         if (!form.email.trim()) return "Email is required";
         if (!emailGateUnlocked) return "Please complete the email step first";
-        if (!form.first_name.trim()) return "First name is required";
-        if (!form.last_name.trim()) return "Last name is required";
-        if (!form.height) return "Height is required";
-        if (!form.location || form.location.length === 0) return "Current location is required";
-        return null;
-    };
-    const validateStep2 = () => {
-        if (!form.availability.status) return "Please confirm your availability";
-        if (form.availability.status === "no" && !form.availability.note.trim())
-            return "Please share your alternate availability";
-        const budgetShown = Boolean(project?.budget_per_day) || (project?.talent_budget || []).length > 0;
-        if (budgetShown) {
-            if (!form.budget.status) return "Please confirm the budget";
-            if (form.budget.status === "custom" && !form.budget.value.trim())
-                return "Please enter your expected budget";
-        }
+        const missing = experience.missingRequirements.filter((item) => item.section === "profile");
+        if (missing.length > 0) return `${missing[0].label} is required`;
         return null;
     };
 
@@ -1222,6 +1244,45 @@ function SubmissionPage() {
         }
     }
 
+    // Returning-talent starting step: a known Talent Profile normally lets
+    // the wizard skip straight to Step 3 (Project Info) — but "known
+    // profile" doesn't mean "satisfies THIS project's requirements". A
+    // project can require a field (e.g. Height) the talent's existing
+    // profile never captured, and Step 3's own Next-button validation only
+    // checks Step 3's own section, so an unconditional jump to 3 would let
+    // the talent sail past a field they need to fill, only to be bounced
+    // back from Step 4's Submit with no idea why. Computes requirements
+    // directly against the incoming prefill data (mirrors populatePrefillData's
+    // own merge-if-empty rule) rather than reading `form`/`experience`,
+    // since both still reflect the pre-prefill render when this runs.
+    const computeReturningTalentStartStep = useCallback((prefillData) => {
+        if (!project || !prefillData) return 3;
+        const mergedForm = {
+            ...form,
+            first_name: form.first_name || prefillData.first_name || "",
+            last_name: form.last_name || prefillData.last_name || "",
+            phone: form.phone || prefillData.phone || "",
+            age: form.age || (prefillData.age != null ? String(prefillData.age) : ""),
+            dob: form.dob || prefillData.dob || "",
+            height: form.height || prefillData.height || "",
+            location: (form.location && form.location.length) ? form.location : (prefillData.location || []),
+            gender: form.gender || prefillData.gender || "",
+            ethnicity: form.ethnicity || prefillData.ethnicity || "",
+            bio: form.bio || prefillData.bio || "",
+            instagram_handle: form.instagram_handle || prefillData.instagram_handle || "",
+            instagram_followers: form.instagram_followers || prefillData.instagram_followers || "",
+            work_links: (form.work_links && form.work_links.length) ? form.work_links : (prefillData.work_links || []),
+            skills: (form.skills && form.skills.length) ? form.skills : (prefillData.skills || []),
+        };
+        const items = computeRequirementItems({ project, form: mergedForm, submission: null });
+        const earlyMissing = items.find((item) =>
+            (item.section === "profile" || item.section === "skills") &&
+            item.requirement === REQUIREMENT_TIERS.REQUIRED &&
+            !item.satisfied
+        );
+        return earlyMissing ? stepForSection(earlyMissing.section) : 3;
+    }, [project, form]);
+
     const tryPrefill = async () => {
         if (saved) return; // submission already started — too late
         const email = (form.email || "").trim().toLowerCase();
@@ -1353,11 +1414,18 @@ function SubmissionPage() {
             const data = await verifyOtp({ email: trimmedEmail, otp: code, slug });
 
             if (data.existing) {
-                if (data.token && data.submission_id) {
+                // Two different "returning" cases need different starting
+                // steps: an in-progress submission for THIS project is a
+                // resume (go back to wherever they left off); a known Talent
+                // Profile with no submission yet for this project is the
+                // wizard's "skip Profile/Skills, start on Project Info" case.
+                const resumingSubmission = !!(data.token && data.submission_id);
+                if (resumingSubmission) {
                     const ref = { id: data.submission_id, token: data.token };
                     localStorage.setItem(`tg_submission_${slug}`, JSON.stringify(ref));
                     localStorage.setItem(`tg_atk_${slug}`, data.token);
                     setSaved(ref);
+                    setCurrentStep(readStep(slug) || 1);
                     toast.success("Welcome back!");
                 } else {
                     toast.success("Welcome back!");
@@ -1366,6 +1434,7 @@ function SubmissionPage() {
                     populatePrefillData(data.talent);
                     setPrefillSuggestion({ data: data.talent });
                     setPrefillTried(true);
+                    if (!resumingSubmission) setCurrentStep(computeReturningTalentStartStep(data.talent));
                 }
             } else {
                 toast.success("Successfully authenticated. Welcome to Talentgram!");
@@ -1417,11 +1486,15 @@ function SubmissionPage() {
                 populatePrefillData(profileData);
                 setPrefillSuggestion({ data: profileData });
                 setPrefillTried(true);
+                // Known Talent Profile (Google recognition), no submission yet
+                // for this project — same "skip to Project Info" rule as the
+                // OTP-verified returning-talent path above.
+                setCurrentStep(computeReturningTalentStartStep(profileData));
             }
             toast.success(`Welcome back, ${gatewayRecognition.name}!`);
             return;
         }
-        
+
         // Trigger pre-fill lookup immediately so the talent's profile details are auto-loaded
         (async () => {
             try {
@@ -1431,6 +1504,7 @@ function SubmissionPage() {
                 if (data && Object.keys(data).length > 0 && data.first_name) {
                     populatePrefillData(data);
                     setPrefillSuggestion({ data });
+                    setCurrentStep(computeReturningTalentStartStep(data));
                 }
             } catch (e) {
                 console.error("Auto prefill lookup failed:", e);
@@ -1980,7 +2054,7 @@ function SubmissionPage() {
             // per-section hardcoding here) and scroll/focus it, retrying as
             // more of the page reveals itself. Shared with the readiness
             // panel's click-to-jump — see lib/scrollHighlight.js.
-            revealAndJumpToRequirementItem(jumpTarget, fieldRefs, ensureRequirementVisible);
+            revealAndJumpToRequirementItem(jumpTarget, fieldRefs, () => ensureRequirementVisible(jumpTarget));
 
             if (experience.readinessSummary.failed.length === 1) {
                 toast.error(`Your ${firstFailed.label} failed to upload. Please retry before submitting.`);
@@ -2049,6 +2123,7 @@ function SubmissionPage() {
             // Once the user finalises, clear the local draft — the
             // canonical state lives on the backend now.
             try { localStorage.removeItem(LS_DRAFT_KEY(slug)); } catch (e) { console.error(e); }
+            clearStep(slug);
             
             if (isResubmission) {
                 toast.success("Your audition has been updated successfully.");
@@ -2086,6 +2161,43 @@ function SubmissionPage() {
         readyLabel: "Submit Audition",
     });
 
+    // Submission Wizard — {stepId: SECTION_STATUS.*} for WizardProgressBar,
+    // derived straight from the Readiness Engine's own per-section rollup
+    // (experience.sectionStatus). No re-derivation of what's required or
+    // satisfied happens here.
+    const wizardStepStatusById = useMemo(() => {
+        const map = {};
+        WIZARD_STEPS.forEach((step) => {
+            const entry = experience.sectionStatus.find((s) => s.section === step.section);
+            if (entry) map[step.id] = entry.status;
+        });
+        return map;
+    }, [experience.sectionStatus]);
+
+    // "Update my Profile" disclosure — always defaults open if any field it
+    // hides is actually required-and-unsatisfied for THIS project (never
+    // silently hide something blocking Next), otherwise follows the
+    // returning-vs-first-time rule: collapsed for a recognized talent
+    // (reduce friction — they've filled this in before), expanded for a
+    // brand-new one (nothing to hide yet).
+    const hasKnownProfile = !!prefillSuggestion;
+    const isFieldRequiredAndMissing = useCallback((fieldId) => {
+        const item = experience.readinessModel.find((i) => i.id === fieldId);
+        return !!item && item.requirement === REQUIREMENT_TIERS.REQUIRED && !item.satisfied;
+    }, [experience.readinessModel]);
+    // Drives the "*" label suffix on fields whose requirement varies by
+    // project config (Age/Height/Location today) — never hardcode a "*"
+    // on a field the Requirement Engine says is optional for this project.
+    const isFieldRequired = useCallback((fieldId) => {
+        const item = experience.readinessModel.find((i) => i.id === fieldId);
+        return !!item && item.requirement === REQUIREMENT_TIERS.REQUIRED;
+    }, [experience.readinessModel]);
+    const identityDisclosureOpen =
+        !hasKnownProfile ||
+        ["gender", "ethnicity", "instagram_handle", "instagram_followers"].some(isFieldRequiredAndMissing);
+    const skillsDisclosureOpen =
+        !hasKnownProfile || ["bio", "work_links"].some(isFieldRequiredAndMissing);
+
     // The page's `ensureVisible` step for every navigation helper below:
     // makes one more attempt at revealing whatever's hidden and reports
     // whether it changed anything. Callers (and `revealAndJumpToRequirementItem`
@@ -2098,19 +2210,33 @@ function SubmissionPage() {
     // step instead, with zero change to any navigation call site
     // (SectionStatusBadge, the readiness panel, the Submit CTA, or
     // finalize-time validation).
-    const ensureRequirementVisible = useCallback(() => {
+    const ensureRequirementVisible = useCallback((item) => {
+        let changed = false;
+        // Wizard step switch — the target's `section` may live on a step
+        // other than `currentStep`; CSS-hidden steps stay mounted (see the
+        // `data-wizard-step` gates below), so switching just flips a class,
+        // no remount, and revealAndJumpToRequirementItem's own retry loop
+        // (lib/scrollHighlight.js) naturally re-resolves the selector once
+        // it's visible — this function doesn't need to wait for it itself.
+        const targetStep = item?.section ? stepForSection(item.section) : null;
+        if (targetStep && targetStep !== currentStep) {
+            setCurrentStep(targetStep);
+            changed = true;
+        }
         const collapsedKeys = Object.keys(collapsedSections).filter((key) => collapsedSections[key]);
-        if (collapsedKeys.length === 0) return false;
-        setCollapsedSections((prev) => {
-            const next = { ...prev };
-            collapsedKeys.forEach((key) => { next[key] = false; });
-            return next;
-        });
-        return true;
-    }, [collapsedSections]);
+        if (collapsedKeys.length > 0) {
+            setCollapsedSections((prev) => {
+                const next = { ...prev };
+                collapsedKeys.forEach((key) => { next[key] = false; });
+                return next;
+            });
+            changed = true;
+        }
+        return changed;
+    }, [collapsedSections, currentStep, setCurrentStep]);
 
     const focusRequirementItem = useCallback((item) => {
-        revealAndJumpToRequirementItem(item, fieldRefs, ensureRequirementVisible);
+        revealAndJumpToRequirementItem(item, fieldRefs, () => ensureRequirementVisible(item));
     }, [ensureRequirementVisible]);
 
     // SectionStatusBadge click handler — a UI shortcut, not another source of
@@ -2140,13 +2266,69 @@ function SubmissionPage() {
             return;
         }
 
+        const sectionTarget = { id: sectionKey, section: sectionKey, selector: SECTION_WRAPPER_SELECTOR[sectionKey] };
         revealAndJumpToRequirementItem(
-            { id: sectionKey, selector: SECTION_WRAPPER_SELECTOR[sectionKey] },
+            sectionTarget,
             fieldRefs,
-            ensureRequirementVisible,
+            () => ensureRequirementVisible(sectionTarget),
             { block: "start", highlight: false },
         );
     }, [experience.checklist, focusRequirementItem, ensureRequirementVisible]);
+
+    // Submission Wizard — Next/Back for Steps 1-3 (Step 4's own Submit button
+    // is unchanged, see handleSubmitCtaClick below). Validates ONLY the
+    // current step's required items (experience.missingRequirements is
+    // already the full Requirement Engine output — this just filters it to
+    // one step's `section`), never anything ahead, per the wizard's own
+    // validation rule. Advancing out of Step 3 additionally has to create
+    // the backend submission record the first time (item 1 of the plan) —
+    // reuses startSubmissionDirect() verbatim, the same function the old
+    // lazy-upload-creation fallback already used.
+    const handleWizardNext = useCallback(async () => {
+        const stepSection = sectionForStep(currentStep);
+        const stepMissing = experience.missingRequirements.filter((item) => item.section === stepSection);
+        if (stepMissing.length > 0) {
+            const stepFailed = experience.readinessSummary.failed.find((item) => item.section === stepSection);
+            focusRequirementItem(stepFailed || stepMissing[0]);
+            toast.error(
+                stepFailed
+                    ? `Your ${stepFailed.label} failed to upload. Please retry before continuing.`
+                    : `Please fill in: ${stepMissing[0].label}${stepMissing.length > 1 ? ` (+${stepMissing.length - 1} more)` : ""}`,
+            );
+            return;
+        }
+
+        if (currentStep === 3) {
+            if (!saved) {
+                if (adminMode) {
+                    toast.error(adminBootstrapping ? "Still starting this submission — please wait a moment and try again." : "Could not start this submission. Please reload and try again.");
+                    return;
+                }
+                const next = await startSubmissionDirect();
+                if (!next) return;
+            } else {
+                await saveForm();
+            }
+        } else {
+            await saveForm();
+        }
+        setCurrentStep((s) => Math.min(TOTAL_STEPS, s + 1));
+    }, [currentStep, experience.missingRequirements, experience.readinessSummary, focusRequirementItem, saved, adminMode, adminBootstrapping, setCurrentStep]);
+
+    const handleWizardBack = useCallback(() => {
+        setCurrentStep((s) => Math.max(1, s - 1));
+    }, [setCurrentStep]);
+
+    // Mobile swipe navigation — swipe-back always allowed (identical to
+    // tapping Back, never needs validation); swipe-forward calls the exact
+    // same handleWizardNext() the Next button uses, so it's gated
+    // identically either way. Disabled on Step 4 forward (no "Next" there,
+    // Submit is a deliberate tap) and before the email gate unlocks.
+    const wizardSwipeHandlers = useSwipeStep({
+        onSwipeBack: () => currentStep > 1 && handleWizardBack(),
+        onSwipeForward: () => currentStep < TOTAL_STEPS && handleWizardNext(),
+        disabled: !emailGateUnlocked,
+    });
 
     // Pure renderer trigger for the Submit button: reads `experience.submitCta`
     // (already-resolved label/disabled/action) and dispatches — it contains
@@ -2503,6 +2685,19 @@ function SubmissionPage() {
                     />
                 </div>
             )}
+            {/* Submission Wizard progress — visible once the email gate has
+                resolved (before that there's nothing to navigate yet). Not
+                sticky in Admin Mode (see WizardProgressBar's own comment) —
+                the AdminModeBanner already owns that position there. */}
+            {emailGateUnlocked && (
+                <WizardProgressBar
+                    steps={WIZARD_STEPS}
+                    currentStep={currentStep}
+                    stepStatusById={wizardStepStatusById}
+                    onStepClick={setCurrentStep}
+                    sticky={!adminMode}
+                />
+            )}
             {/* Ambient luxury background blobs */}
             <div className="absolute inset-0 pointer-events-none opacity-30 blur-3xl">
                 <div className="absolute top-0 -left-40 w-80 h-80 rounded-full bg-[#0c2340]/10 mix-blend-multiply animate-blob" />
@@ -2564,7 +2759,7 @@ function SubmissionPage() {
                 </div>
             </header>
 
-            <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10 pb-28 sm:pb-10">
+            <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10 pb-28 sm:pb-10" {...wizardSwipeHandlers}>
                 {/* Retest context + client feedback (P0‑1) — the same
                     banner/feedback JSX the Hub renders (hoisted above,
                     before the Hub/edit-mode branch split), placed first in
@@ -2891,7 +3086,7 @@ function SubmissionPage() {
                         {emailGateUnlocked && (
                         <>
                         {/* Section 1: Your Profile */}
-                        <div data-testid="profile-section" className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8">
+                        <div data-testid="profile-section" data-wizard-step="1" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(1)}`}>
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Talent Profile</p>
@@ -3041,7 +3236,7 @@ function SubmissionPage() {
 
                                         <div data-testid="form-age-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                                Age {form.dob ? "(auto calculated)" : "*"}
+                                                Age {form.dob ? "(auto calculated)" : isFieldRequired("age") ? "*" : "(optional)"}
                                             </span>
                                             <input
                                                 type="number"
@@ -3061,7 +3256,7 @@ function SubmissionPage() {
                                         <div data-testid="form-height-field">
                                             <div className="flex items-center justify-between gap-3">
                                                 <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                                    Height *
+                                                    Height {isFieldRequired("height") ? "*" : "(optional)"}
                                                 </span>
                                                 {/* Sprint 1 — unit toggle. Stored value is unchanged; only the
                                                     labels switch between feet/inches and centimetres. */}
@@ -3128,7 +3323,7 @@ function SubmissionPage() {
                                         </div>
                                         <div className="md:col-span-2">
                                             <span className="text-[11px] text-[#111111] tracking-[0.08em] font-semibold uppercase font-mono block mb-2">
-                                                Current Location(s) *
+                                                Current Location(s) {isFieldRequired("location") ? "*" : "(optional)"}
                                             </span>
                                             <LocationSelector
                                                 value={form.location || []}
@@ -3143,7 +3338,13 @@ function SubmissionPage() {
                                         </div>
                                     </div>
 
-                                    {/* Phase 2 — unified identity fields */}
+                                    {/* Phase 2 — unified identity fields. Wrapped in the
+                                        wizard's "Update my Profile" disclosure — these are
+                                        the fields not explicitly named in Step 1's core
+                                        list (Name/Age/Height/Phone/Location), so they're
+                                        exactly the "everything else" the disclosure hides
+                                        by default for a recognized returning talent. */}
+                                    <UpdateProfileDisclosure defaultOpen={identityDisclosureOpen}>
                                     <div
                                         className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8"
                                         data-step="1"
@@ -3289,6 +3490,50 @@ function SubmissionPage() {
                                                 </Select>
                                             </div>
                                         </div>
+                                    </div>
+                                    </UpdateProfileDisclosure>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Wizard Step 2: Skills & Attributes — Skills, Bio, and Work
+                            Links relocated here (out of the Step 1 grid above, and out
+                            of their old standalone "Section 3" card below) so they're
+                            all one step's content. Purely a JSX relocation: same
+                            fields, same handlers, same testids — nothing about what
+                            they do or how they validate changed. */}
+                        <div data-testid="skills-section" data-wizard-step="2" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(2)}`}>
+                            <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
+                                <div>
+                                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Talent Profile</p>
+                                    <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05]">Skills & Attributes</h2>
+                                    <p className="text-[13px] text-[#222222] mt-1.5 leading-relaxed">Tell us about your skills, abilities, and professional background.</p>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <SectionStatusBadge section={experience.sectionStatus.find((s) => s.section === "skills")} onClick={focusSection} />
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setCollapsedSections(prev => ({
+                                                ...prev,
+                                                skills: !prev.skills,
+                                            }))
+                                        }
+                                        className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
+                                        title={collapsedSections.skills ? "Expand Skills" : "Collapse Skills"}
+                                    >
+                                        <ChevronDown
+                                            className={`h-4 w-4 transform transition-transform duration-200 ${
+                                                collapsedSections.skills ? "-rotate-90" : ""
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+                            </div>
+
+                            {!collapsedSections.skills && (
+                                <div className="space-y-8 animate-fadeIn">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8">
                                         <div className="md:col-span-2" data-testid="form-skills-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono block mb-2">
                                                 Skills & Special Abilities
@@ -3301,6 +3546,12 @@ function SubmissionPage() {
                                                 }}
                                             />
                                         </div>
+                                    </div>
+                                    {/* Bio + Work Links behind the "Update my Profile"
+                                        disclosure — Skills above stays always visible as
+                                        the step's core content. */}
+                                    <UpdateProfileDisclosure defaultOpen={skillsDisclosureOpen}>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8">
                                         <label className="block md:col-span-2" data-testid="form-bio-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Bio (optional)
@@ -3321,13 +3572,29 @@ function SubmissionPage() {
                                                 placeholder="A short note about you (max 600 chars)"
                                             />
                                         </label>
+                                        {requirements.work_links_visibility !== REQUIREMENT_TIERS.HIDDEN && (
+                                            <div className="md:col-span-2" data-testid="form-work-links-field">
+                                                <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
+                                                    Work Links (optional)
+                                                </span>
+                                                <p className="text-[12px] text-[#666] mt-1 mb-2 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
+                                                <WorkLinksEditor
+                                                    links={form.work_links || []}
+                                                    onChange={(arr) => {
+                                                        setForm({ ...form, work_links: arr });
+                                                        setTimeout(saveForm, 0);
+                                                    }}
+                                                />
+                                            </div>
+                                        )}
                                     </div>
+                                    </UpdateProfileDisclosure>
                                 </div>
                             )}
                         </div>
 
                         {/* Section 2: Project Questions */}
-                        <div data-step="2" data-testid="project-questions-section" className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8">
+                        <div data-step="2" data-wizard-step="3" data-testid="project-questions-section" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(3)}`}>
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Project Questions</p>
@@ -3638,82 +3905,57 @@ function SubmissionPage() {
                             )}
                         </div>
 
-                        {/* Section 3: Work Links & Additional Material */}
-                        {requirements.work_links_visibility !== REQUIREMENT_TIERS.HIDDEN && (
-                            <div data-step="2" className="bg-slate-50/40 rounded-2xl border border-[#eaeaea]/50 p-6">
-                                <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
-                                    <div>
-                                        <h3 className="text-base font-bold text-[#111111] tracking-tight">Work Links</h3>
-                                        <p className="text-[12px] text-[#222222] mt-1 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={() =>
-                                            setCollapsedSections(prev => ({
-                                                ...prev,
-                                                workLinks: !prev.workLinks,
-                                            }))
-                                        }
-                                        className="p-1 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full text-[#333333] transition-all duration-200"
-                                        title={collapsedSections.workLinks ? "Expand Work Links" : "Collapse Work Links"}
-                                    >
-                                        <ChevronDown
-                                            className={`h-4 w-4 transform transition-transform duration-200 ${
-                                                collapsedSections.workLinks ? "-rotate-90" : ""
-                                            }`}
-                                        />
-                                    </button>
-                                </div>
-
-                                {!collapsedSections.workLinks && (
-                                    <div className="space-y-4 animate-fadeIn">
-                                        <div data-testid="form-work-links-field">
-                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                                Work Links (optional)
-                                            </span>
-                                            <WorkLinksEditor
-                                                links={form.work_links || []}
-                                                onChange={(arr) => {
-                                                    setForm({ ...form, work_links: arr });
-                                                    setTimeout(saveForm, 0);
-                                                }}
-                                            />
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
-                        {!saved && (
-                            <button
-                                type="submit"
-                                disabled={starting}
-                                data-testid="start-submission-btn"
-                                className="hidden md:inline-flex w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 hover:-translate-y-[1px] hover:shadow-lg items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
-                            >
-                                {starting && (
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                )}
-                                Save Details & Continue to Uploads
-                            </button>
-                        )}
+                        {/* Work Links moved to the Skills & Attributes step above (item 2
+                            of the wizard redesign) — no longer rendered here.
+                            The old "Save Details & Continue to Uploads" desktop submit
+                            button that used to live here is also gone: WizardStepNav's
+                            Next button on this step now does the same job (explicitly
+                            calling startSubmissionDirect()) for both mobile and desktop,
+                            so there's exactly one Continue action instead of two. */}
                         </>
                         )}
                     </form>
                     </div>
                 </section>
 
+                {/* Wizard Back/Next — visible for Steps 1-3; Step 4 keeps its
+                    own existing Submit footer further down, unchanged. */}
+                {emailGateUnlocked && currentStep < 4 && (
+                    <WizardStepNav
+                        showBack={currentStep > 1}
+                        onBack={handleWizardBack}
+                        onNext={handleWizardNext}
+                        nextDisabled={starting}
+                        nextBusy={currentStep === 3 && starting}
+                        nextLabel={currentStep === 3 ? "Continue to Uploads" : "Next"}
+                    />
+                )}
+
                 {/* SECTION 3 — UPLOADS (gated on email-first gate) */}
                 {emailGateUnlocked && (
                     <section
                         ref={uploadsSectionRef}
-                        className="pt-4"
+                        className={`pt-4 ${stepVisibilityClass(4)}`}
                         data-testid="uploads-section"
                         data-step="3"
+                        data-wizard-step="4"
                     >
                         <div className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
                         <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                             <div>
+                                {/* Step 4 keeps its own Submit footer (unchanged) rather
+                                    than WizardStepNav, but the wizard's own "every step
+                                    supports Back" rule still applies here — a small
+                                    inline Back link, not a full sticky nav bar, since
+                                    Step 4 already has its own sticky Submit CTA below. */}
+                                <button
+                                    type="button"
+                                    onClick={handleWizardBack}
+                                    data-testid="wizard-back-to-step3-btn"
+                                    className="inline-flex items-center gap-1 text-[11px] font-mono text-[#999] hover:text-[#333333] mb-1.5 transition-colors"
+                                >
+                                    <ArrowLeft className="w-3 h-3" /> Back to Project Info
+                                </button>
                                 <h2 className="font-display text-2xl font-bold tracking-tight text-slate-950 leading-[1.05] uppercase">
                                     AUDITION UPLOADS
                                 </h2>

@@ -2275,6 +2275,28 @@ function SubmissionPage() {
         );
     }, [experience.checklist, focusRequirementItem, ensureRequirementVisible]);
 
+    // UX enhancement — after a wizard step actually changes (Next, Back, or
+    // jumping to a completed step via the progress bar), scroll back to the
+    // top so the new step is always seen starting from its own header
+    // (title, instructions, first field) rather than wherever the talent
+    // happened to be scrolled on the step they just left — the exact
+    // "user remains halfway down the page" complaint from mobile testing.
+    // Deliberately NOT used by focusRequirementItem/ensureRequirementVisible
+    // (the readiness panel's click-to-jump, and finalize-time validation) —
+    // that path already scrolls to and highlights the specific missing
+    // field via revealAndJumpToRequirementItem (lib/scrollHighlight.js), and
+    // a blanket top-of-page scroll here would immediately fight it. A plain
+    // window.scrollTo (not a ref+useEffect) is enough: this page has no
+    // dedicated inner scroll container — the same document-level scroll
+    // already used everywhere else in this component — and "top" (y=0)
+    // doesn't depend on the new step's height, so there's nothing to wait
+    // on React to render first.
+    const scrollWizardStepToTop = useCallback(() => {
+        if (typeof window === "undefined") return;
+        const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+        window.scrollTo({ top: 0, behavior: prefersReducedMotion ? "auto" : "smooth" });
+    }, []);
+
     // Submission Wizard — Next/Back for Steps 1-3 (Step 4's own Submit button
     // is unchanged, see handleSubmitCtaClick below). Validates ONLY the
     // current step's required items (experience.missingRequirements is
@@ -2313,11 +2335,22 @@ function SubmissionPage() {
             await saveForm();
         }
         setCurrentStep((s) => Math.min(TOTAL_STEPS, s + 1));
-    }, [currentStep, experience.missingRequirements, experience.readinessSummary, focusRequirementItem, saved, adminMode, adminBootstrapping, setCurrentStep]);
+        scrollWizardStepToTop();
+    }, [currentStep, experience.missingRequirements, experience.readinessSummary, focusRequirementItem, saved, adminMode, adminBootstrapping, setCurrentStep, scrollWizardStepToTop]);
 
     const handleWizardBack = useCallback(() => {
         setCurrentStep((s) => Math.max(1, s - 1));
-    }, [setCurrentStep]);
+        scrollWizardStepToTop();
+    }, [setCurrentStep, scrollWizardStepToTop]);
+
+    // Progress-bar step-chip jump (Next/Back covered above) — only ever
+    // called for an already-completed or optional step (see
+    // WizardProgressBar's own canJumpTo), so no validation gate needed here,
+    // same as clicking Back.
+    const handleWizardStepJump = useCallback((step) => {
+        setCurrentStep(step);
+        scrollWizardStepToTop();
+    }, [setCurrentStep, scrollWizardStepToTop]);
 
     // Mobile swipe navigation — swipe-back always allowed (identical to
     // tapping Back, never needs validation); swipe-forward calls the exact
@@ -2694,7 +2727,7 @@ function SubmissionPage() {
                     steps={WIZARD_STEPS}
                     currentStep={currentStep}
                     stepStatusById={wizardStepStatusById}
-                    onStepClick={setCurrentStep}
+                    onStepClick={handleWizardStepJump}
                     sticky={!adminMode}
                 />
             )}

@@ -311,11 +311,35 @@ CREATE_CONTACT_INTENT = IntentDefinition(
     parse_edits=lambda text, fields: crm_nlu.parse_edits_for_intent(text, fields, role_registry=ROLE_REGISTRY),
 )
 
+# Static Help Command text (see parser.is_help_trigger / dispatcher.py).
+# Deliberately plain and hand-written, not generated from CREATE_CONTACT_INTENT
+# — the whole platform has exactly this one intent today, so a registry
+# would be pure overhead for one bullet. Update this string by hand if a
+# second CRM intent is ever added.
+HELP_TEXT = (
+    "Hi!\n\n"
+    "I'm your Talentgram CRM assistant.\n\n"
+    "Here are the things I can currently help you with:\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "📇 Save a Contact\n\n"
+    "Examples:\n\n"
+    "• Save\n"
+    "Tanu Malhotra\n"
+    "9619015464\n"
+    "Casting Director\n\n"
+    "• Add Raj Mehta, 9876543210, Brand Manager\n\n"
+    "You can also add Company, Email, City, Country, or Instagram on extra lines — "
+    "everything except Name, Phone, and Role is optional.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "That's everything I can currently help you with."
+)
+
 CRM_AGENT = AgentDefinition(
     agent_id="crm-agent",
     name="Talentgram CRM",
     module="marketing",
     intents=[CREATE_CONTACT_INTENT],
+    help_text=HELP_TEXT,
 )
 
 

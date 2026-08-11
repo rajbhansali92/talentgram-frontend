@@ -1810,6 +1810,39 @@ UNAUTHORIZED_SENDER_MESSAGE = (
     "Please contact an admin to be added."
 )
 
+# Static Help Command text (see parser.is_help_trigger / dispatcher.py).
+# Hand-written, not generated — one intent (SEND_REQUIREMENT_INTENT) covers
+# every trigger verb in SEND_TRIGGERS, so listing them all would just be
+# noise; these examples cover the real recipient shapes the resolver
+# actually supports (project/pipeline, named talent, phone number, CRM
+# category, saved list) plus the real interactive-edit commands from
+# _EDIT_REDIRECT_MESSAGE above. Update by hand if a new recipient shape or
+# edit command is added.
+HELP_TEXT = (
+    "Hi!\n\n"
+    "I'm your Talentgram WhatsApp Agent assistant.\n\n"
+    "Here are the things I can currently help you with:\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "📢 Send a Campaign\n\n"
+    "Examples:\n\n"
+    "• Send Diwali Promo to Lakme Campaign\n\n"
+    "• Send Reminder template to Follow Up pipeline of Myntra Campaign\n\n"
+    "• Send Toyota Requirement to Ahana\n\n"
+    "• Send Reminder template to +919876543210\n\n"
+    "• Send Reminder template to Casting Director contacts\n\n"
+    "• Send Reminder template to Selected list\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "✏️ Edit Before Sending\n\n"
+    "Examples:\n\n"
+    "• Exclude Ahana\n\n"
+    "• Exclude 5\n\n"
+    "• Include 7\n\n"
+    "• Change template to Reminder\n\n"
+    "• Preview\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "That's everything I can currently help you with."
+)
+
 CAMPAIGN_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="WhatsApp Campaign Agent",
@@ -1820,6 +1853,7 @@ CAMPAIGN_AGENT = AgentDefinition(
     # per-agent flag that can be turned on later with zero risk to any
     # other agent's code.
     unauthorized_sender_message=UNAUTHORIZED_SENDER_MESSAGE,
+    help_text=HELP_TEXT,
 )
 
 

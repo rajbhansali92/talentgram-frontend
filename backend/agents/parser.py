@@ -86,6 +86,27 @@ def detect_trigger(agent: AgentDefinition, text: str) -> Optional[IntentDefiniti
     return best[1] if best else None
 
 
+# Static Help Command — the fixed, literal trigger set from the spec.
+# Deliberately a WHOLE-MESSAGE exact match (not detect_trigger's
+# prefix-of-first-line match) so an ordinary sentence that happens to start
+# with one of these words ("help me move Sarah to shortlist") never
+# triggers it — only the bare phrase itself does.
+HELP_TRIGGERS = {
+    "help",
+    "commands",
+    "menu",
+    "please help",
+    "show commands",
+    "what can you do",
+}
+
+
+def is_help_trigger(text: str) -> bool:
+    """True if the message is exactly (case-insensitively) one of the
+    fixed help keywords/phrases — nothing else."""
+    return (text or "").strip().lower() in HELP_TRIGGERS
+
+
 def extract_initial_fields(intent: IntentDefinition, text: str) -> Dict[str, str]:
     """Pull as many raw field values as possible out of the message that
     opened this intent, in field order. Handles all three example shapes:

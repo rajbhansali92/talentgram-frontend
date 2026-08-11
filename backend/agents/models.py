@@ -191,6 +191,13 @@ class AgentDefinition:
     # to before this field existed. Does not weaken the allowlist itself
     # in any way — it only changes what an already-rejected sender sees.
     unauthorized_sender_message: Optional[str] = None
+    # Static Help Command — the exact text sent back for a bare "help" /
+    # "menu" / "commands" / "please help" / "show commands" / "what can
+    # you do" message (see parser.is_help_trigger). A plain static string,
+    # not generated from `intents` — deliberately simple, per spec. None
+    # (the default) means this agent has no help reply configured; every
+    # existing agent is unaffected until it sets this.
+    help_text: Optional[str] = None
 
 
 @dataclass

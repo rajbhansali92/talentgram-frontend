@@ -30,6 +30,7 @@ from agents.parser import (
     clean_voice_transcript,
     detect_trigger,
     extract_initial_fields,
+    is_help_trigger,
     next_missing_field,
     parse_confirmation_reply,
     parse_edit_instructions,
@@ -602,6 +603,22 @@ async def handle_inbound_message(
         if conv and conversation.is_expired(conv):
             await conversation.clear_conversation(agent.agent_id, phone)
             conv = None
+
+        # Static Help Command — exact-match only ("help", "menu",
+        # "commands", "please help", "show commands", "what can you do"),
+        # and ONLY when there's no conversation in flight. Every
+        # clarification/disambiguation flow in this codebase (confirming,
+        # disambiguating, and the needs_clarification -> "editing" path
+        # casting-agent's own project/stage/talent clarification uses) is
+        # represented by a non-None `conv`, so this single check is enough
+        # to never interrupt one — the flow's own reply parsing runs
+        # untouched below, exactly as if this feature didn't exist.
+        if conv is None and agent.help_text and is_help_trigger(working_message):
+            await audit.log_turn(
+                agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+                raw_message=raw_message, confirmation_action="help_shown",
+            )
+            return DispatchResult(handled=True, reply=agent.help_text)
 
         # A fresh trigger always restarts, even mid-conversation — UNLESS
         # a confirmation is actively pending ("confirming"/"disambiguating")

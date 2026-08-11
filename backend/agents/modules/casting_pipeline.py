@@ -2987,6 +2987,71 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
     return None
 
 
+# Static Help Command text (see parser.is_help_trigger / dispatcher.py).
+# Hand-written, not generated from QUERY_INTENT/MOVE_INTENT/ADD_INTENT/
+# UNDO_INTENT's trigger lists — those are internal NLU vocabulary (~30
+# query-trigger words alone), not user-facing command syntax. Every example
+# below is a real, tested command shape (see tests/test_talent_search_agent.py
+# and tests/test_casting_agent.py). Update this string by hand alongside any
+# future intent/command change.
+HELP_TEXT = (
+    "Hi!\n\n"
+    "I'm your Talentgram Casting Pipeline assistant.\n\n"
+    "Here are the things I can currently help you with:\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "🔎 Talent Search\n\n"
+    "Examples:\n\n"
+    "• Show female models\n\n"
+    "• Show actors from Mumbai\n\n"
+    "• Show female models above 5'7\"\n\n"
+    "• Show actors between 20 and 25\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "🎯 Refine Results\n\n"
+    "Examples:\n\n"
+    "• Only Mumbai\n\n"
+    "• Above 5'7\"\n\n"
+    "• Age under 22\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "📄 Browse Results\n\n"
+    "Examples:\n\n"
+    "• Show next 20\n\n"
+    "• Previous 20\n\n"
+    "• Show all\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "✅ Selection\n\n"
+    "Examples:\n\n"
+    "• Select 1\n\n"
+    "• Select 1,3,5\n\n"
+    "• Select first 5\n\n"
+    "• Remove 3\n\n"
+    "• Clear selection\n\n"
+    "• Selection\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "📁 Projects\n\n"
+    "Examples:\n\n"
+    "• Add selected to Lakme Campaign\n\n"
+    "• Add 1,3,5 to Myntra Campaign\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "🗂️ Pipeline Overview\n\n"
+    "Examples:\n\n"
+    "• Show ongoing projects\n\n"
+    "• Show Approved\n\n"
+    "• Show Hold for Toyota Glanza\n\n"
+    "• Show again\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "🔀 Move Talent\n\n"
+    "Examples:\n\n"
+    "• Move Sarah to Approved\n\n"
+    "• Move Sarah to Approved in Toyota Glanza\n\n"
+    "• Move 2 and 5 to Hold\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "↩️ Undo\n\n"
+    "Examples:\n\n"
+    "• Undo\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "That's everything I can currently help you with."
+)
+
 CASTING_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="Talentgram Casting Pipeline",
@@ -2998,6 +3063,7 @@ CASTING_AGENT = AgentDefinition(
     # WhatsApp-reply-routable operations. CRM does not set this, so it is
     # completely unaffected.
     supports_concurrent_tasks=True,
+    help_text=HELP_TEXT,
 )
 
 

@@ -35,6 +35,7 @@ same lock; see worker.py's poll_and_process_jobs.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import logging
 import re
@@ -1252,67 +1253,75 @@ async def poll_once(
                 _record_latency(t_total)
 
 
-# TEMPORARY (2026-08-11, "why does the DOM never show new messages"
-# investigation) — a deliberately SEPARATE, read-only verification routine.
-# It does not call _scan_group_for_new_messages, _is_outgoing_msg,
-# _already_processed, or anything else in the inbound-detection/seen-cache/
-# direction-detection path — it only reads live browser/DOM state that
-# nothing else in this file currently surfaces, to answer one question:
-# is the controlled Chromium tab actually receiving live WhatsApp updates,
-# and is it pointed at the right account/chats? Runs on its own slow
-# cadence (LIVE_SESSION_VERIFY_SEC), independent of the 2s poll cycle.
+# TEMPORARY (2026-08-11 Phase 4, "why does the DOM never show new
+# messages" investigation) — a deliberately SEPARATE, read-only diagnostic
+# routine. Does NOT call _scan_group_for_new_messages, _is_outgoing_msg,
+# _already_processed, sender._open_group_chat, or any other inbound-
+# detection/seen-cache/direction-detection/group-routing code in this
+# codebase — every DOM read below is freshly written, independent of all
+# of that. The only "side effect" is clicking a chat-list row directly
+# (bypassing the search box entirely, so it shares no code with
+# sender._open_group_chat) to read its latest message content — the
+# existing poll loop already opens these same chats far more often (every
+# ~2-6s) via the normal search path, so this adds no new class of effect,
+# just an independent second observation on a 120s cadence. Never calls
+# _mark_processed / writes to any cache / touches config — pure inspection.
 LIVE_SESSION_VERIFY_SEC = 120.0
 _last_live_verify_at: float = 0.0
+_PROCESS_START_MONOTONIC = time.monotonic()
+# Previous cycle's per-group snapshot, for the requested "did anything
+# change since last cycle" comparison. Diagnostic-only — distinct from
+# _seen_cache/_INVALID_GROUPS and everything else the real pipeline reads.
+_prev_verify_group_state: Dict[str, dict] = {}
 
 _RECONNECT_BANNER_PHRASES = [
     "Trying to reconnect", "Reconnecting", "Connecting",
     "Phone not connected", "Computer not connected to the internet",
     "Server error", "Unable to connect",
 ]
+_TIMESTAMP_LIKE_RE = re.compile(r"^\d{1,2}:\d{2}\s*(AM|PM|am|pm)?$|^\d{1,2}/\d{1,2}/\d{2,4}$")
 
 
-async def _verify_live_session(session, groups: list[str]) -> None:
-    """Read-only. Logs (does not decide anything):
-      1. Account identity (phone/session id/generation) already known to
-         this process, for correlation against what the operator's phone
-         actually shows.
-      2. Whether the tab reports online, has an active service worker, and
-         whether any WhatsApp Web "reconnecting"/"phone not connected"
-         banner text is present anywhere on the page right now.
-      3. Browser context/page shape — exactly one context, exactly one
-         page, confirming polling isn't somehow attached to a different
-         page than the authenticated one.
-      4. Per configured group, WITHOUT opening the chat (opening it would
-         clear its unread badge, destroying the evidence): whether it's
-         found in the currently-visible chat list, its unread badge (if
-         any), and pin/mute-icon presence if visible from the list row
-         alone. Chat list rows lack a stable exposed "chat id" in the
-         current build (nothing in this codebase already reads one; not
-         invented here either) — logged as unavailable rather than guessed.
-    """
+def _match_kinds(configured: str, candidate: str) -> Tuple[bool, bool, bool, float]:
+    """(exact, case_insensitive_exact, substring, fuzzy_ratio) — pure
+    Python string comparison, no DOM/selector involvement, so this can
+    never be confused with (or accidentally reuse) the real group-matching
+    code in sender.py."""
+    exact = configured == candidate
+    case_match = configured.strip().lower() == candidate.strip().lower()
+    substring = configured.strip().lower() in candidate.strip().lower() or candidate.strip().lower() in configured.strip().lower()
+    ratio = difflib.SequenceMatcher(None, configured.lower(), candidate.lower()).ratio()
+    return exact, case_match, substring, ratio
+
+
+async def _deep_whatsapp_verification(session, groups: list[str]) -> None:
+    """Read-only diagnostic dump — see this file's module docstring header
+    above for the full non-interference guarantee. Builds one big,
+    human-readable block per the requested format rather than scattering
+    many small log lines."""
+    lines: list[str] = ["", "========== WHATSAPP LIVE VERIFICATION =========="]
     page = session.page
     if page is None:
-        logger.warning("inbound: LIVE-SESSION-VERIFY skipped — no active page")
+        lines.append("Page: None — session not currently attached to a browser page.")
+        lines.append("========== END VERIFICATION ==========")
+        logger.warning("\n".join(lines))
         return
 
-    logger.info(
-        "inbound: LIVE-SESSION-VERIFY account phone=%r session_id=%r generation=%d",
-        session.own_phone_number, session.session_id, session.generation,
-    )
+    now_mono = time.monotonic()
 
-    context_pages = 0
-    try:
-        context_pages = len(page.context.pages)
-    except Exception:
-        pass
-    logger.info(
-        "inbound: LIVE-SESSION-VERIFY browser context_page_count=%d "
-        "(expect exactly 1 — polling and the authenticated session must be the same page)",
-        context_pages,
-    )
+    # --- 1. Account information --------------------------------------
+    phone = session.own_phone_number or "Unknown"
+    display_name = "Unknown"  # never derived anywhere in this codebase; see session.py's own-phone docstring for why
+    lines.append("-- Account --")
+    lines.append(f"Session ID: {session.session_id}")
+    lines.append(f"Generation: {session.generation}")
+    lines.append(f"Phone: {phone}")
+    lines.append(f"Display Name: {display_name}")
 
+    # --- 7/8. Browser connection + page freshness (one evaluate call) --
+    page_state: dict = {}
     try:
-        conn = await page.evaluate("""(phrases) => {
+        page_state = await page.evaluate("""(phrases) => {
             return (async () => {
                 const bodyText = document.body.innerText || '';
                 const banners = phrases.filter(p => bodyText.includes(p));
@@ -1326,58 +1335,213 @@ async def _verify_live_session(session, groups: list[str]) -> None:
                         }));
                     }
                 } catch (e) {}
-                return {online: navigator.onLine, title: document.title,
-                        banners_found: banners, service_workers: serviceWorkers};
+                let memory = null;
+                try {
+                    if (performance.memory) {
+                        memory = {
+                            used_js_heap_mb: Math.round(performance.memory.usedJSHeapSize / 1048576),
+                            total_js_heap_mb: Math.round(performance.memory.totalJSHeapSize / 1048576),
+                        };
+                    }
+                } catch (e) {}
+                return {
+                    url: location.href, title: document.title,
+                    visibility_state: document.visibilityState, has_focus: document.hasFocus(),
+                    online: navigator.onLine, banners_found: banners,
+                    service_workers: serviceWorkers, memory: memory,
+                };
             })();
         }""", _RECONNECT_BANNER_PHRASES)
-        logger.info(
-            "inbound: LIVE-SESSION-VERIFY connectivity online=%s title=%r "
-            "reconnect_banners=%s service_workers=%s",
-            conn.get("online"), conn.get("title"),
-            conn.get("banners_found"), conn.get("service_workers"),
-        )
     except Exception as exc:
-        logger.warning("inbound: LIVE-SESSION-VERIFY connectivity check failed: %s", exc)
+        page_state = {"error": str(exc)}
 
-    # Per-group chat-list-row scan — read-only, never opens the chat.
-    for group_name in groups:
-        try:
-            row_info = await page.evaluate("""(name) => {
-                const titleEls = document.querySelectorAll('[data-testid="cell-frame-title"]');
-                for (const el of titleEls) {
-                    const rowText = (el.textContent || '').trim();
-                    if (rowText.toLowerCase() !== name.toLowerCase()) continue;
-                    // Walk up a few levels to the row container to look for
-                    // badge/pin/mute indicators near the title.
-                    let row = el;
-                    for (let i = 0; i < 6 && row && row.parentElement; i++) row = row.parentElement;
-                    const rowHtmlSnippet = row ? row.outerHTML.slice(0, 0) : null; // never dump full HTML here
-                    const unreadEl = row ? row.querySelector('[aria-label*="unread" i]') : null;
-                    const pinnedEl = row ? row.querySelector('[data-icon*="pin" i], [aria-label*="pinned" i]') : null;
-                    const mutedEl = row ? row.querySelector('[data-icon*="mute" i], [aria-label*="muted" i]') : null;
-                    const timeEls = row ? row.querySelectorAll('span') : [];
-                    let lastPreview = null;
-                    for (const s of timeEls) {
-                        const t = (s.textContent || '').trim();
-                        if (t && t !== name && t.length < 60) { lastPreview = t; }
-                    }
-                    return {
-                        found: true,
-                        unread_label: unreadEl ? unreadEl.getAttribute('aria-label') : null,
-                        pinned: !!pinnedEl, muted: !!mutedEl,
-                        last_preview_text: lastPreview,
-                    };
+    context_pages = 0
+    try:
+        context_pages = len(page.context.pages)
+    except Exception:
+        pass
+
+    lines.append("")
+    lines.append("-- Browser Connection --")
+    lines.append(f"navigator.onLine: {page_state.get('online')}")
+    lines.append(f"document.visibilityState: {page_state.get('visibility_state')}")
+    lines.append(f"Service worker(s): {page_state.get('service_workers')}")
+    lines.append(f"WebSocket status: not directly observable from outside the page's own JS "
+                 f"(WhatsApp Web doesn't expose one on `window`); using service worker "
+                 f"active-state + absence of reconnect banners as the closest proxies")
+    lines.append(f"Page title: {page_state.get('title')!r}")
+    lines.append(f"Loading/connection/offline banners found: {page_state.get('banners_found')}")
+
+    lines.append("")
+    lines.append("-- Page Freshness --")
+    lines.append(f"Current URL: {page_state.get('url')}")
+    lines.append(f"Page title: {page_state.get('title')!r}")
+    lines.append(f"Context count: 1 (this process launches exactly one BrowserContext — see session.py)")
+    lines.append(f"Tab count (pages in context): {context_pages} (expect exactly 1)")
+    lines.append(f"Focused tab (document.hasFocus()): {page_state.get('has_focus')}")
+    lines.append(f"Memory usage: {page_state.get('memory') or 'unavailable (performance.memory not exposed)'}")
+    lines.append(f"Browser process uptime: {now_mono - _PROCESS_START_MONOTONIC:.0f}s")
+    lines.append(f"Session (since last auth) uptime: {now_mono - _state_rebuilt_at:.0f}s")
+
+    # --- 9. Worker configuration --------------------------------------
+    lines.append("")
+    lines.append("-- Worker Configuration --")
+    lines.append(f"Configured groups: {groups}")
+    lines.append(f"Configured backend URL: {config.AGENTS_BACKEND_URL}")
+    lines.append(f"Polling interval: {config.INBOUND_POLL_SEC}s")
+    lines.append(f"Current generation: {session.generation}")
+    lines.append(f"Current session ID: {session.session_id}")
+    lines.append(f"Current browser context pages: {context_pages}")
+
+    # --- 2. First 20 visible chats -------------------------------------
+    try:
+        rows = await page.evaluate("""() => {
+            const out = [];
+            const titleEls = document.querySelectorAll('[data-testid="cell-frame-title"]');
+            const n = Math.min(20, titleEls.length);
+            for (let i = 0; i < n; i++) {
+                const el = titleEls[i];
+                const title = el.textContent || '';
+                let row = el;
+                for (let j = 0; j < 6 && row && row.parentElement; j++) row = row.parentElement;
+                const unreadEl = row ? row.querySelector('[aria-label*="unread" i]') : null;
+                const pinnedEl = row ? row.querySelector('[data-icon*="pin" i], [aria-label*="pinned" i]') : null;
+                const mutedEl = row ? row.querySelector('[data-icon*="mute" i], [aria-label*="muted" i]') : null;
+                const spans = row ? row.querySelectorAll('span') : [];
+                let lastTs = null;
+                for (const s of spans) {
+                    const t = (s.textContent || '').trim();
+                    if (t) lastTs = lastTs === null ? t : lastTs;
                 }
-                return {found: false};
-            }""", group_name)
+                out.push({
+                    index: i, title: title,
+                    unread_label: unreadEl ? unreadEl.getAttribute('aria-label') : null,
+                    pinned: !!pinnedEl, muted: !!mutedEl,
+                    last_visible_text: lastTs,
+                });
+            }
+            return out;
+        }""")
+    except Exception as exc:
+        rows = []
+        lines.append(f"\n-- Visible Chats -- (FAILED: {exc})")
+
+    lines.append("")
+    lines.append(f"-- First {len(rows)} Visible Chats --")
+    for r in rows:
+        title = r.get("title") or ""
+        codepoints = " ".join(f"{ord(c):02x}" for c in title)
+        lines.append(f"Chat #{r['index'] + 1}")
+        lines.append(f"  Title: {title!r}")
+        lines.append(f"  Length: {len(title)}")
+        lines.append(f"  Codepoints: {codepoints}")
+        lines.append(f"  Unread: {r.get('unread_label') or 'None'}")
+        lines.append(f"  Pinned: {r.get('pinned')}")
+        lines.append(f"  Muted: {r.get('muted')}")
+        # Anything rendered in the main list is, by WhatsApp Web's own
+        # definition, NOT in the Archived folder — that's the only basis
+        # for this field; the Archived folder itself is never opened here.
+        lines.append(f"  Archived: False (present in main list)")
+        lines.append(f"  Last visible timestamp/text: {r.get('last_visible_text')!r}")
+
+    # --- 3. Compare against configured groups --------------------------
+    lines.append("")
+    lines.append("-- Configured-Group Matching --")
+    found_index_by_group: Dict[str, Optional[int]] = {}
+    for group_name in groups:
+        best = None  # (ratio, row)
+        exact_any = case_any = substring_any = False
+        for r in rows:
+            title = r.get("title") or ""
+            exact, case_match, substring, ratio = _match_kinds(group_name, title)
+            exact_any = exact_any or exact
+            case_any = case_any or case_match
+            substring_any = substring_any or substring
+            if best is None or ratio > best[0]:
+                best = (ratio, r)
+        lines.append(f"Configured: {group_name!r}")
+        lines.append(f"  Exact Match: {'YES' if exact_any else 'NO'}")
+        lines.append(f"  Case Match: {'YES' if case_any else 'NO'}")
+        lines.append(f"  Substring Match: {'YES' if substring_any else 'NO'}")
+        if best and best[0] > 0.5:
+            lines.append(f"  Fuzzy Match: YES")
+            lines.append(f"  Matched Chat: {best[1].get('title')!r}")
+            lines.append(f"  Similarity: {best[0] * 100:.0f}%")
+            found_index_by_group[group_name] = best[1]["index"]
+        else:
+            lines.append(f"  Fuzzy Match: NO")
+            lines.append(f"  Matched Chat: None")
+            lines.append(f"  Similarity: {(best[0] * 100 if best else 0):.0f}%")
+            found_index_by_group[group_name] = None
+        # --- 4. Chat position ---
+        idx = found_index_by_group[group_name]
+        lines.append(f"  Visible index: {'#' + str(idx + 1) if idx is not None else 'Not visible'}")
+
+    # --- 5. Latest message per configured group (inspect only) --------
+    lines.append("")
+    lines.append("-- Latest Message Per Configured Group (inspect only, never processed) --")
+    current_group_state: Dict[str, dict] = {}
+    for group_name in groups:
+        idx = found_index_by_group.get(group_name)
+        if idx is None:
+            lines.append(f"Group: {group_name!r} -> Not visible, cannot inspect latest message.")
+            current_group_state[group_name] = {"visible": False}
+            continue
+        msg_info: dict = {}
+        try:
+            # Independent open: click the visible row directly. Does NOT
+            # go through sender._open_group_chat / the search box — a
+            # completely separate code path, sharing no group-routing logic.
+            await page.locator('[data-testid="cell-frame-title"]').nth(idx).click(timeout=5000)
+            await asyncio.sleep(0.6)
+            msg_info = await page.evaluate("""() => {
+                const nodes = document.querySelectorAll('[data-testid^="conv-msg-"]');
+                if (!nodes.length) return null;
+                const el = nodes[nodes.length - 1];
+                const testid = el.getAttribute('data-testid');
+                const pp = el.querySelector('[data-pre-plain-text]');
+                const prePlain = pp ? pp.getAttribute('data-pre-plain-text') : null;
+                const text = (el.textContent || '').trim().slice(0, 200);
+                return {message_id: testid, pre_plain_text: prePlain, text_preview: text};
+            }""") or {}
         except Exception as exc:
-            row_info = {"error": str(exc)}
-        logger.info(
-            "inbound: LIVE-SESSION-VERIFY group=%r chat_list_row=%s "
-            "(chat id / internal identifier / archived-state: not exposed by the current "
-            "DOM build via any selector already in this codebase — not guessed here)",
-            group_name, row_info,
-        )
+            msg_info = {"error": str(exc)}
+        pre_plain = msg_info.get("pre_plain_text")
+        m = _PRE_PLAIN_NAME_RE.match(pre_plain) if pre_plain else None
+        sender_name = m.group(1).strip() if m else None
+        lines.append(f"Group: {group_name!r}")
+        lines.append(f"  Latest message id: {msg_info.get('message_id')}")
+        lines.append(f"  Latest timestamp/sender-line (raw): {pre_plain!r}")
+        lines.append(f"  Latest sender (parsed): {sender_name}")
+        lines.append(f"  Latest text preview: {msg_info.get('text_preview')!r}")
+        row = rows[idx] if idx < len(rows) else {}
+        lines.append(f"  Latest unread state (from list row before opening): {row.get('unread_label') or 'None'}")
+        lines.append(f"  Latest DOM node id: {msg_info.get('message_id')}")
+        current_group_state[group_name] = {
+            "visible": True, "message_id": msg_info.get("message_id"),
+            "pre_plain_text": pre_plain, "unread_label": row.get("unread_label"),
+        }
+
+    # --- 6. Change vs previous cycle -----------------------------------
+    lines.append("")
+    lines.append("-- Change Since Previous Cycle --")
+    for group_name in groups:
+        prev = _prev_verify_group_state.get(group_name) or {}
+        cur = current_group_state.get(group_name) or {}
+        new_msg = bool(cur.get("message_id")) and cur.get("message_id") != prev.get("message_id")
+        dom_changed = cur != prev
+        unread_changed = cur.get("unread_label") != prev.get("unread_label")
+        ts_changed = cur.get("pre_plain_text") != prev.get("pre_plain_text")
+        lines.append(f"Group: {group_name!r}")
+        lines.append(f"  New message detected: {'YES' if new_msg else 'NO'}")
+        lines.append(f"  DOM changed: {'YES' if dom_changed else 'NO'}")
+        lines.append(f"  Unread changed: {'YES' if unread_changed else 'NO'}")
+        lines.append(f"  Timestamp changed: {'YES' if ts_changed else 'NO'}")
+    _prev_verify_group_state.clear()
+    _prev_verify_group_state.update(current_group_state)
+
+    lines.append("========== END VERIFICATION ==========")
+    logger.info("\n".join(lines))
 
 
 async def inbound_listener_loop(session) -> None:
@@ -1432,7 +1596,7 @@ async def inbound_listener_loop(session) -> None:
                     if now - _last_live_verify_at > LIVE_SESSION_VERIFY_SEC:
                         _last_live_verify_at = now
                         try:
-                            await _verify_live_session(session, await groups_cache.get())
+                            await _deep_whatsapp_verification(session, await groups_cache.get())
                         except Exception:
                             logger.exception("inbound: LIVE-SESSION-VERIFY failed — will retry next cadence")
                 else:

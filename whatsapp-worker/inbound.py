@@ -1393,6 +1393,40 @@ async def _deep_whatsapp_verification(session, groups: list[str]) -> None:
     lines.append(f"Current session ID: {session.session_id}")
     lines.append(f"Current browser context pages: {context_pages}")
 
+    # --- Search-box active-filter check (added after cycles 1-3 showed
+    # only ONE chat ever visible, consistently, across 4.5+ minutes of a
+    # settled session — the sidebar may be FILTERED by leftover text in
+    # the chat-list search box from the real poll loop's own group search,
+    # not because other chats don't exist. Independent selector list, not
+    # imported from sender.py, per "do not reuse group routing". ---------
+    search_box_value = None
+    try:
+        search_box_value = await page.evaluate("""() => {
+            const candidates = [
+                '#side input[data-tab="3"]',
+                '#side div[contenteditable="true"][data-tab="3"]',
+                '[data-testid="chat-list-search"] input',
+                '[data-testid="chat-list-search"]',
+            ];
+            for (const sel of candidates) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    const v = el.value !== undefined ? el.value : (el.textContent || '');
+                    if (v) return {selector: sel, value: v};
+                }
+            }
+            return {selector: null, value: null};
+        }""")
+    except Exception as exc:
+        search_box_value = {"error": str(exc)}
+    lines.append("")
+    lines.append("-- Chat-List Search Box (active-filter check) --")
+    lines.append(f"Current value: {search_box_value}")
+    lines.append("(a non-empty value here means the visible chat list below is FILTERED to "
+                 "matches of this text, not the full chat list — this does not belong to this "
+                 "diagnostic; it can only have been left behind by the real poll loop's own "
+                 "group search, which this routine does not call or clear)")
+
     # --- 2. First 20 visible chats -------------------------------------
     try:
         rows = await page.evaluate("""() => {

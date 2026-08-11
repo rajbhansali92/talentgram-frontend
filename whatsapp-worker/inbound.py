@@ -40,6 +40,7 @@ import hashlib
 import logging
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Tuple
 
@@ -563,6 +564,45 @@ async def _scan_group_for_new_messages(
             group_name, newest_id, newest_pre_plain,
         )
 
+    # TEMPORARY (2026-08-11 Phase 5) — Stage 1: raw DOM snapshot, every
+    # poll, of the last 5 bubbles exactly as rendered. Read-only, no
+    # interpretation — dumped as-is for correlation against every later
+    # stage. Independent of and does not affect the scan loop below.
+    if n > 0:
+        try:
+            bubbles = await page.evaluate("""([sel, start]) => {
+                const els = document.querySelectorAll(sel);
+                const out = [];
+                for (let i = start; i < els.length; i++) {
+                    const el = els[i];
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    const pp = el.querySelector('[data-pre-plain-text]');
+                    out.push({
+                        index: i,
+                        dom_node_id: el.id || null,
+                        data_testid: el.getAttribute('data-testid'),
+                        data_id: el.getAttribute('data-id'),
+                        aria_label: el.getAttribute('aria-label'),
+                        class_list: el.className || null,
+                        pre_plain_text: pp ? pp.getAttribute('data-pre-plain-text') : null,
+                        text: (el.textContent || '').trim().slice(0, 200),
+                        has_tail_out: !!el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]'),
+                        has_tail_in: !!el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]'),
+                        has_aria_you: !!el.querySelector('span[aria-label="You:"]'),
+                        rect: {left: Math.round(rect.left), top: Math.round(rect.top),
+                               right: Math.round(rect.right), bottom: Math.round(rect.bottom)},
+                        visible: rect.width > 0 && rect.height > 0,
+                        display: style.display, opacity: style.opacity,
+                    });
+                }
+                return out;
+            }""", [full_sel, max(0, n - 5)])
+        except Exception as exc:
+            bubbles = [{"error": str(exc)}]
+        for b in bubbles:
+            logger.info("inbound: RAW BUBBLE group=%r %s", group_name, b)
+
     # Only the tail — new messages always arrive at the bottom, and this
     # keeps the scan cheap regardless of how long the chat history is.
     start = max(0, n - 15)
@@ -592,7 +632,24 @@ async def _scan_group_for_new_messages(
             snippet = (await loc.nth(i).inner_text()).strip()[:80]
         except Exception:
             snippet = "<unreadable>"
-        diag_context = {"group": group_name, "message_id": message_id, "text": snippet}
+
+        # TEMPORARY (2026-08-11 Phase 5) — Stage 9: one correlation id per
+        # scan candidate, carried through every subsequent log for this
+        # message (direction/seen-cache/gate/dispatch/reply), so a single
+        # trace_id can be grepped end-to-end. Nothing reads/writes trace_id
+        # outside logging — no decision anywhere is based on it.
+        trace_id = uuid.uuid4().hex[:8]
+        diag_context = {"group": group_name, "message_id": message_id, "text": snippet, "trace_id": trace_id}
+
+        # Stage 2 — this candidate is under consideration (it fell within
+        # the tail-15 scan window, per the existing `start`/`n` bounds
+        # computed above — unchanged selection logic, just logged now).
+        logger.info(
+            "inbound: SCAN CANDIDATE trace_id=%s group=%r message_id=%r text=%r "
+            "reason_selected=%r",
+            trace_id, group_name, message_id, snippet,
+            f"tail-window index {i} of {n} (start={start})",
+        )
 
         direction = await sender._is_outgoing_msg(page, full_sel, i, diag_context=diag_context)
         if direction is True:
@@ -600,6 +657,7 @@ async def _scan_group_for_new_messages(
             # re-evaluate it, and never dispatch it. Full classification
             # detail (reason/geometry diag) is in sender.py's DIRECTION
             # DETECTION log immediately above this one.
+            logger.info("inbound: TRACE trace_id=%s last_stage=DIRECTION_OUTGOING (dropped)", trace_id)
             if message_id:
                 await _mark_processed(message_id)
             continue
@@ -610,6 +668,7 @@ async def _scan_group_for_new_messages(
                 "text=%r diag=%s — skipping (fail closed, not guessing)",
                 group_name, i, testid, snippet, diag,
             )
+            logger.info("inbound: TRACE trace_id=%s last_stage=DIRECTION_UNKNOWN (dropped)", trace_id)
             if message_id:
                 await _mark_processed(message_id)
             continue
@@ -638,17 +697,27 @@ async def _scan_group_for_new_messages(
         if not message_id:
             message_id = _fallback_message_id(group_name, text, pre_plain)
 
-        # TEMPORARY (2026-08-11 inbound-detection investigation): the
-        # seen-cache decision was previously silent either way — "NEW" and
-        # "ALREADY SEEN" now both log, per-message-id, so a false-positive
-        # ALREADY_SEEN (e.g. a dedup-collection false match) is visible
-        # instead of just looking identical to "nothing new happened".
+        # Stage 4 — seen-cache lookup. Peeked BEFORE calling the real
+        # (unmodified) _already_processed, purely to report which layer
+        # would answer — never changes what _already_processed itself does.
+        in_memory_hit = message_id in _seen_cache
         already_seen = await _already_processed(message_id)
+        mongo_hit = already_seen and not in_memory_hit
         logger.info(
-            "inbound: SEEN-CACHE group=%r message_id=%r decision=%s",
-            group_name, message_id, "ALREADY_SEEN" if already_seen else "NEW",
+            "inbound: SEEN-CACHE trace_id=%s group=%r message_id=%r | "
+            "In-memory=%s Mongo=%s TTL=%s | Decision=%s",
+            trace_id, group_name, message_id, in_memory_hit, mongo_hit,
+            f"enforced by Mongo TTL index ({config.INBOUND_DEDUP_TTL_SEC}s), not independently queryable here",
+            "ALREADY_SEEN" if already_seen else "NEW",
+        )
+        # Stage 5 — the actual gate, immediately before the branch it guards.
+        logger.info(
+            "inbound: NEW MESSAGE GATE trace_id=%s | %s | reason=%s",
+            trace_id, "BLOCKED" if already_seen else "ALLOWED",
+            "seen-cache hit" if already_seen else "not previously seen",
         )
         if already_seen:
+            logger.info("inbound: TRACE trace_id=%s last_stage=SEEN_CACHE_BLOCKED (dropped)", trace_id)
             continue
 
         media_type = None
@@ -669,9 +738,10 @@ async def _scan_group_for_new_messages(
                 # trace" gap in this loop.
                 logger.info(
                     "inbound: message DROPPED (textless, not a voice note) "
-                    "group=%r index=%d testid=%r pre_plain_text=%r",
-                    group_name, i, testid, pre_plain,
+                    "trace_id=%s group=%r index=%d testid=%r pre_plain_text=%r",
+                    trace_id, group_name, i, testid, pre_plain,
                 )
+                logger.info("inbound: TRACE trace_id=%s last_stage=TEXTLESS_DROPPED (dropped)", trace_id)
                 await _mark_processed(message_id)
                 continue
 
@@ -715,6 +785,7 @@ async def _scan_group_for_new_messages(
             "raw_pre_plain_text": pre_plain,
             "media_type": media_type,
             "reply_context": reply_context,
+            "trace_id": trace_id,  # TEMPORARY (2026-08-11 Phase 5) — carried into poll_once's dispatch/reply stages
         })
 
     message_extraction_sec = time.monotonic() - t_extraction_start
@@ -726,7 +797,8 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
                          sender_is_group_member: Optional[bool] = None,
                          media_type: Optional[str] = None,
                          replied_to_message_id: Optional[str] = None,
-                         replied_quoted_text: Optional[str] = None) -> Optional[dict]:
+                         replied_quoted_text: Optional[str] = None,
+                         trace_id: Optional[str] = None) -> Optional[dict]:
     t0 = time.monotonic()
     try:
         resp = await http.post(
@@ -752,9 +824,20 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
             "inbound: dispatched group=%r sender=%r message_id=%r handled=%s latency_ms=%d",
             group_name, sender_phone, message_id, body.get("handled"), latency_ms,
         )
+        logger.info(
+            "inbound: DISPATCH RESULT trace_id=%s status=OK latency_ms=%d "
+            "response_size_bytes=%d error=None",
+            trace_id, latency_ms, len(resp.content or b""),
+        )
         await _update_worker_status(dispatcher_status="ready")
         return body
-    except Exception:
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        logger.info(
+            "inbound: DISPATCH RESULT trace_id=%s status=FAILED latency_ms=%d "
+            "response_size_bytes=None error=%r",
+            trace_id, latency_ms, str(exc),
+        )
         logger.exception(
             "inbound: dispatch to backend FAILED group=%r sender=%r message_id=%r "
             "(message left unprocessed; will retry only if it re-appears unseen — "
@@ -1134,6 +1217,7 @@ async def poll_once(
             # of end-to-end latency is visible without guessing.
 
             for msg in new_messages:
+                trace_id = msg.get("trace_id")
                 phone = msg["sender_phone"]
                 if not phone:
                     logger.warning(
@@ -1146,6 +1230,7 @@ async def poll_once(
                         msg["sender_is_group_member"], msg["text"][:80],
                         msg["raw_pre_plain_text"],
                     )
+                    logger.info("inbound: TRACE trace_id=%s last_stage=NO_PHONE_RESOLVED (dropped)", trace_id)
                     try:
                         await get_db().whatsapp_dispatch_failures.insert_one({
                             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1164,16 +1249,18 @@ async def poll_once(
 
                 t_detected = time.monotonic()
                 logger.info(
-                    "inbound: new message group=%r sender_name=%r sender_phone=%r "
+                    "inbound: new message trace_id=%s group=%r sender_name=%r sender_phone=%r "
                     "sender_is_group_member=%r message_id=%r text=%r",
-                    group_name, msg["sender_name"], phone, msg["sender_is_group_member"],
+                    trace_id, group_name, msg["sender_name"], phone, msg["sender_is_group_member"],
                     msg["message_id"], msg["text"][:120],
                 )
                 await _update_worker_status(last_incoming_at=_now().isoformat())
-                # TEMPORARY (2026-08-11): explicit stage marker, per the
-                # requested "Inbound detected -> Dispatch started -> Backend
-                # response -> Reply queued -> Reply sent" trace.
-                logger.info("inbound: DISPATCH STARTED message_id=%r", msg["message_id"])
+                # Stage 6 — before backend POST.
+                logger.info(
+                    "inbound: DISPATCH START trace_id=%s message_id=%r text=%r group=%r timestamp=%r",
+                    trace_id, msg["message_id"], msg["text"][:120], group_name,
+                    datetime.now(timezone.utc).isoformat(),
+                )
 
                 reply_context = msg.get("reply_context") or {}
                 backend_task = asyncio.create_task(_post_inbound(
@@ -1187,6 +1274,7 @@ async def poll_once(
                     media_type=msg.get("media_type"),
                     replied_to_message_id=reply_context.get("quotedMessageId"),
                     replied_quoted_text=reply_context.get("quotedText"),
+                    trace_id=trace_id,
                 ))
                 done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
                 ack_sent_sec = None
@@ -1204,6 +1292,7 @@ async def poll_once(
                     # Backend call failed — do NOT mark as processed, so a
                     # transient outage gets a chance to be retried on the
                     # next poll (the message is still "new" in the DOM).
+                    logger.info("inbound: TRACE trace_id=%s last_stage=DISPATCH_FAILED (will retry)", trace_id)
                     continue
 
                 await _mark_processed(msg["message_id"])
@@ -1214,20 +1303,26 @@ async def poll_once(
                 reply_elapsed = 0.0
                 send_timing: Dict[str, float] = {}
                 if reply:
-                    # TEMPORARY (2026-08-11): explicit stage marker, per the
-                    # requested INBOUND DETECTED -> DISPATCH START -> BACKEND
-                    # RESPONSE -> REPLY GENERATED -> REPLY SENT trace.
+                    # Stage 7 — reply generated.
                     logger.info(
-                        "inbound: REPLY GENERATED message_id=%r reply_text=%r",
-                        msg["message_id"], reply[:120],
+                        "inbound: REPLY GENERATED trace_id=%s message_id=%r characters=%d preview=%r",
+                        trace_id, msg["message_id"], len(reply), reply[:120],
                     )
                     reply_elapsed, send_timing, sent_message_id = await _send_reply(page, group_name, reply)
                     if sent_message_id:
                         await _update_worker_status(last_reply_at=_now().isoformat())
                         logger.info(
-                            "inbound: REPLY SENT message_id=%r sent_message_id=%r",
-                            msg["message_id"], sent_message_id,
+                            "inbound: REPLY SENT trace_id=%s message_id=%r sent_message_id=%r "
+                            "reply_sent=True failure=None",
+                            trace_id, msg["message_id"], sent_message_id,
                         )
+                        logger.info("inbound: TRACE trace_id=%s last_stage=REPLY_SENT (complete)", trace_id)
+                    else:
+                        logger.info(
+                            "inbound: REPLY SEND FAILED trace_id=%s message_id=%r reply_sent=False "
+                            "failure=%r", trace_id, msg["message_id"], "send_whatsapp_message returned no sent_message_id",
+                        )
+                        logger.info("inbound: TRACE trace_id=%s last_stage=REPLY_SEND_FAILED", trace_id)
                     # Concurrent Task Engine (2026-08-05) — operation_id is only
                     # set when `reply` is a task's confirmation/clarification
                     # card; report the WhatsApp message id it actually got so a
@@ -1237,6 +1332,11 @@ async def poll_once(
                             http, agent_id="casting-agent",
                             operation_id=operation_id, message_id=sent_message_id,
                         ))
+                else:
+                    logger.info(
+                        "inbound: TRACE trace_id=%s last_stage=DISPATCHED_NO_REPLY "
+                        "(backend handled it but returned no reply text — complete)", trace_id,
+                    )
                 t_total = time.monotonic() - t_detected
                 logger.info(
                     "inbound: TIMING message_id=%r dom_detection_sec=%.2f "

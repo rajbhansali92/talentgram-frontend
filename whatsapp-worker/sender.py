@@ -551,30 +551,10 @@ async def _is_outgoing_msg(
             const els = document.querySelectorAll(sel);
             if (idx >= els.length) return null;
             const el = els[idx];
-            if (el.querySelector('span[aria-label="You:"]')) return {dir: true, reason: 'aria_you'};
-            if (el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]')) return {dir: true, reason: 'tail_out'};
-            if (el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]')) return {dir: false, reason: 'tail_in'};
-            let node = el;
-            for (let i = 0; i < 6 && node && node !== document; i++) {
-                const cls = typeof node.className === 'string' ? node.className : '';
-                if (cls.includes('message-out')) return {dir: true, reason: 'class_message_out'};
-                if (cls.includes('message-in')) return {dir: false, reason: 'class_message_in'};
-                const did = node.getAttribute ? node.getAttribute('data-id') : null;
-                if (did) {
-                    if (did.startsWith('true_')) return {dir: true, reason: 'data_id_true'};
-                    if (did.startsWith('false_')) return {dir: false, reason: 'data_id_false'};
-                }
-                node = node.parentElement;
-            }
-            const checks = el.querySelectorAll(
-                '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
-                + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
-            );
-            if (checks.length > 0) return {dir: true, reason: 'checkmark'};
-            // Geometry fallback — no tail/class/checkmark marker resolved
-            // anything (typically the 2nd+ bubble of a consecutive run).
-            // Walk up for the nearest wide ("row-like") ancestor and see
-            // which half of it the bubble's center falls into.
+
+            // Geometry, computed once, reused both by the untouched decision
+            // logic below AND the independent signal survey — identical
+            // values either way, just read twice for two purposes.
             let row = el;
             let steps = 0;
             for (let i = 0; i < 8 && row && row !== document.body; i++) {
@@ -582,24 +562,84 @@ async def _is_outgoing_msg(
                 row = row.parentElement;
                 steps = i + 1;
             }
+            let geometryDir = null, geometryDiag = null;
             if (row && row.offsetWidth > 400) {
                 const rowRect = row.getBoundingClientRect();
                 const elRect = el.getBoundingClientRect();
                 const rowCenter = (rowRect.left + rowRect.right) / 2;
                 const elCenter = (elRect.left + elRect.right) / 2;
-                const decision = elCenter > rowCenter;
-                return {
-                    dir: decision, reason: 'geometry',
-                    diag: {
-                        row_is_body: row === document.body, walk_steps: steps,
-                        el_bounds: {left: Math.round(elRect.left), right: Math.round(elRect.right)},
-                        row_bounds: {left: Math.round(rowRect.left), right: Math.round(rowRect.right)},
-                        el_center: Math.round(elCenter), row_center: Math.round(rowCenter),
-                        comparison: `el_center(${Math.round(elCenter)}) > row_center(${Math.round(rowCenter)}) = ${decision}`,
-                    },
+                geometryDir = elCenter > rowCenter;
+                geometryDiag = {
+                    row_is_body: row === document.body, walk_steps: steps,
+                    el_bounds: {left: Math.round(elRect.left), right: Math.round(elRect.right)},
+                    row_bounds: {left: Math.round(rowRect.left), right: Math.round(rowRect.right)},
+                    el_center: Math.round(elCenter), row_center: Math.round(rowCenter),
+                    comparison: `el_center(${Math.round(elCenter)}) > row_center(${Math.round(rowCenter)}) = ${geometryDir}`,
                 };
             }
-            return {dir: null, reason: 'no_signal'};
+
+            // TEMPORARY (2026-08-11 Phase 5) — independent signal survey.
+            // Checks EVERY signal unconditionally, never short-circuits,
+            // purely so each one can be logged on its own — completely
+            // separate from (and never read by) the decision logic below.
+            const signals = {
+                tail: el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]') ? 'Outgoing'
+                      : el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]') ? 'Incoming' : 'Unknown',
+                aria: el.querySelector('span[aria-label="You:"]') ? 'Outgoing' : 'Unknown',
+                checkmark: el.querySelectorAll(
+                    '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
+                    + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
+                ).length > 0 ? 'Outgoing' : 'Unknown',
+                class: 'Unknown', data_id: 'Unknown',
+                geometry: geometryDir === null ? 'Unknown' : (geometryDir ? 'Outgoing' : 'Incoming'),
+            };
+            {
+                let node = el;
+                for (let i = 0; i < 6 && node && node !== document; i++) {
+                    const cls = typeof node.className === 'string' ? node.className : '';
+                    if (signals.class === 'Unknown') {
+                        if (cls.includes('message-out')) signals.class = 'Outgoing';
+                        else if (cls.includes('message-in')) signals.class = 'Incoming';
+                    }
+                    if (signals.data_id === 'Unknown') {
+                        const did = node.getAttribute ? node.getAttribute('data-id') : null;
+                        if (did) {
+                            if (did.startsWith('true_')) signals.data_id = 'Outgoing';
+                            else if (did.startsWith('false_')) signals.data_id = 'Incoming';
+                        }
+                    }
+                    node = node.parentElement;
+                }
+            }
+
+            // Decision logic — VERBATIM from before this survey was added
+            // (same early-return priority order, same values); the survey
+            // above never influences this, so the final answer this
+            // function returns is byte-for-byte unchanged.
+            if (el.querySelector('span[aria-label="You:"]')) return {dir: true, reason: 'aria_you', signals};
+            if (el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]')) return {dir: true, reason: 'tail_out', signals};
+            if (el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]')) return {dir: false, reason: 'tail_in', signals};
+            let node2 = el;
+            for (let i = 0; i < 6 && node2 && node2 !== document; i++) {
+                const cls = typeof node2.className === 'string' ? node2.className : '';
+                if (cls.includes('message-out')) return {dir: true, reason: 'class_message_out', signals};
+                if (cls.includes('message-in')) return {dir: false, reason: 'class_message_in', signals};
+                const did = node2.getAttribute ? node2.getAttribute('data-id') : null;
+                if (did) {
+                    if (did.startsWith('true_')) return {dir: true, reason: 'data_id_true', signals};
+                    if (did.startsWith('false_')) return {dir: false, reason: 'data_id_false', signals};
+                }
+                node2 = node2.parentElement;
+            }
+            const checks = el.querySelectorAll(
+                '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
+                + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
+            );
+            if (checks.length > 0) return {dir: true, reason: 'checkmark', signals};
+            if (row && row.offsetWidth > 400) {
+                return {dir: geometryDir, reason: 'geometry', diag: geometryDiag, signals};
+            }
+            return {dir: null, reason: 'no_signal', signals};
         }""", [css_selector, index])
     except Exception as exc:
         logger.info("sender: direction check error: %s", exc)
@@ -620,9 +660,14 @@ async def _is_outgoing_msg(
     dir_value = result.get("dir")
     result_label = "Incoming" if dir_value is False else "Outgoing" if dir_value is True else "Unknown"
     ctx = diag_context or {}
+    signals = result.get("signals") or {}
     logger.info(
-        "sender: DIRECTION DETECTION group=%r message_id=%r text=%r result=%s reason=%s diag=%s",
-        ctx.get("group"), ctx.get("message_id"), ctx.get("text"),
+        "sender: DIRECTION DETECTION trace_id=%s group=%r message_id=%r text=%r | "
+        "TAIL=%s ARIA=%s CHECKMARK=%s CLASS=%s DATA-ID=%s GEOMETRY=%s | "
+        "FINAL=%s reason=%s diag=%s",
+        ctx.get("trace_id"), ctx.get("group"), ctx.get("message_id"), ctx.get("text"),
+        signals.get("tail"), signals.get("aria"), signals.get("checkmark"),
+        signals.get("class"), signals.get("data_id"), signals.get("geometry"),
         result_label, result.get("reason"), result.get("diag"),
     )
     return dir_value

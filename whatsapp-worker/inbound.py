@@ -538,6 +538,29 @@ async def _scan_group_for_new_messages(
         return [], time.monotonic() - t_dom_start, 0.0
     dom_detection_sec = time.monotonic() - t_dom_start
     logger.info("inbound: DIAG scan group=%r scope=%r n=%d", group_name, scope, n)
+    # TEMPORARY (2026-08-11 inbound-detection investigation): per-cycle
+    # newest-message marker — a real message physically arriving should
+    # move this id every time the count (n, above) also moves; if n
+    # increases but this id never changes, the count itself is stale.
+    if n > 0:
+        try:
+            newest_id = await loc.nth(n - 1).get_attribute("data-testid")
+        except Exception:
+            newest_id = "<unreadable>"
+        # Reuses the existing _extract_message_info parser (unmodified) —
+        # no new selector/parsing logic, just an extra diagnostic call.
+        # data-pre-plain-text carries WhatsApp Web's own bracketed
+        # timestamp ("[10:30 AM, 21/07/2026] Name: "), the closest existing
+        # signal to "latest timestamp" without inventing a new one.
+        try:
+            newest_info = await _extract_message_info(page, full_sel, n - 1)
+            newest_pre_plain = newest_info.get("prePlainText")
+        except Exception:
+            newest_pre_plain = "<unreadable>"
+        logger.info(
+            "inbound: DIAG newest message group=%r newest_message_id=%r newest_pre_plain_text=%r",
+            group_name, newest_id, newest_pre_plain,
+        )
 
     # Only the tail — new messages always arrive at the bottom, and this
     # keeps the scan cheap regardless of how long the chat history is.
@@ -557,28 +580,29 @@ async def _scan_group_for_new_messages(
             continue
         message_id = testid or None
 
-        direction = await sender._is_outgoing_msg(page, full_sel, i)
+        # TEMPORARY (2026-08-11 inbound-detection investigation): one snippet
+        # fetch, reused for whichever branch below needs it (was previously
+        # fetched separately/inconsistently per-branch, or not at all).
+        # `diag_context` only enriches sender.py's DIRECTION DETECTION log —
+        # it is not read by any decision logic in _is_outgoing_msg, and the
+        # other existing caller (_find_outgoing_with_text) doesn't pass it,
+        # so this is purely additive.
+        try:
+            snippet = (await loc.nth(i).inner_text()).strip()[:80]
+        except Exception:
+            snippet = "<unreadable>"
+        diag_context = {"group": group_name, "message_id": message_id, "text": snippet}
+
+        direction = await sender._is_outgoing_msg(page, full_sel, i, diag_context=diag_context)
         if direction is True:
             # Ours — mark seen (if we have a stable id) so we never
-            # re-evaluate it, and never dispatch it. Previously silent;
-            # logged at DEBUG (not INFO — this fires on every one of the
-            # worker's own sent messages too, so INFO would be noisy) now
-            # that this class of bug (an account-dependent signal silently
-            # misclassifying a real incoming message as "ours") has real
-            # production history — see _is_outgoing_msg's docstring for why
-            # this tier is now geometry-based, not identity-based.
-            logger.debug(
-                "inbound: message classified OUTGOING (skipped) group=%r index=%d testid=%r",
-                group_name, i, testid,
-            )
+            # re-evaluate it, and never dispatch it. Full classification
+            # detail (reason/geometry diag) is in sender.py's DIRECTION
+            # DETECTION log immediately above this one.
             if message_id:
                 await _mark_processed(message_id)
             continue
         if direction is None:
-            try:
-                snippet = (await loc.nth(i).inner_text()).strip()[:80]
-            except Exception:
-                snippet = "<unreadable>"
             diag = await _direction_diag(page, full_sel, i)
             logger.warning(
                 "inbound: direction undeterminable for group=%r index=%d testid=%r "
@@ -613,7 +637,17 @@ async def _scan_group_for_new_messages(
         if not message_id:
             message_id = _fallback_message_id(group_name, text, pre_plain)
 
-        if await _already_processed(message_id):
+        # TEMPORARY (2026-08-11 inbound-detection investigation): the
+        # seen-cache decision was previously silent either way — "NEW" and
+        # "ALREADY SEEN" now both log, per-message-id, so a false-positive
+        # ALREADY_SEEN (e.g. a dedup-collection false match) is visible
+        # instead of just looking identical to "nothing new happened".
+        already_seen = await _already_processed(message_id)
+        logger.info(
+            "inbound: SEEN-CACHE group=%r message_id=%r decision=%s",
+            group_name, message_id, "ALREADY_SEEN" if already_seen else "NEW",
+        )
+        if already_seen:
             continue
 
         media_type = None
@@ -627,6 +661,16 @@ async def _scan_group_for_new_messages(
                 # keeps the old silent-drop behaviour, unchanged.
                 media_type = "voice_note"
             else:
+                # TEMPORARY (2026-08-11): this drop was completely silent —
+                # no log at any level. A non-text, non-voice-note bubble
+                # (reaction, system message, unrecognized media) is dropped
+                # here; logging it closes the last "vanishes with zero
+                # trace" gap in this loop.
+                logger.info(
+                    "inbound: message DROPPED (textless, not a voice note) "
+                    "group=%r index=%d testid=%r pre_plain_text=%r",
+                    group_name, i, testid, pre_plain,
+                )
                 await _mark_processed(message_id)
                 continue
 
@@ -1019,6 +1063,16 @@ async def poll_once(
     groups = await groups_cache.get()
     if not groups:
         return
+    # TEMPORARY (2026-08-11 inbound-detection investigation): per-cycle
+    # summary — "number of chats found" per the requested instrumentation,
+    # adapted to this architecture (configured-group polling, not a
+    # chat-list-unread scan). session.generation/session_id included so a
+    # log pull can be correlated against a specific authenticated session
+    # without cross-referencing the diagnostics doc separately.
+    logger.info(
+        "inbound: POLL CYCLE configured_groups=%d groups=%s generation=%d session_id=%s",
+        len(groups), groups, session.generation, session.session_id,
+    )
 
     for group_name in groups:
         if group_name in _INVALID_GROUPS:
@@ -1115,6 +1169,10 @@ async def poll_once(
                     msg["message_id"], msg["text"][:120],
                 )
                 await _update_worker_status(last_incoming_at=_now().isoformat())
+                # TEMPORARY (2026-08-11): explicit stage marker, per the
+                # requested "Inbound detected -> Dispatch started -> Backend
+                # response -> Reply queued -> Reply sent" trace.
+                logger.info("inbound: DISPATCH STARTED message_id=%r", msg["message_id"])
 
                 reply_context = msg.get("reply_context") or {}
                 backend_task = asyncio.create_task(_post_inbound(
@@ -1155,9 +1213,20 @@ async def poll_once(
                 reply_elapsed = 0.0
                 send_timing: Dict[str, float] = {}
                 if reply:
+                    # TEMPORARY (2026-08-11): explicit stage marker, per the
+                    # requested INBOUND DETECTED -> DISPATCH START -> BACKEND
+                    # RESPONSE -> REPLY GENERATED -> REPLY SENT trace.
+                    logger.info(
+                        "inbound: REPLY GENERATED message_id=%r reply_text=%r",
+                        msg["message_id"], reply[:120],
+                    )
                     reply_elapsed, send_timing, sent_message_id = await _send_reply(page, group_name, reply)
                     if sent_message_id:
                         await _update_worker_status(last_reply_at=_now().isoformat())
+                        logger.info(
+                            "inbound: REPLY SENT message_id=%r sent_message_id=%r",
+                            msg["message_id"], sent_message_id,
+                        )
                     # Concurrent Task Engine (2026-08-05) — operation_id is only
                     # set when `reply` is a task's confirmation/clarification
                     # card; report the WhatsApp message id it actually got so a

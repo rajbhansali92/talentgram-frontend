@@ -513,7 +513,9 @@ async def _msg_timestamp(page: Page, full_selector: str) -> str:
         return ""
 
 
-async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optional[bool]:
+async def _is_outgoing_msg(
+    page: Page, css_selector: str, index: int, diag_context: Optional[dict] = None
+) -> Optional[bool]:
     """Best-effort directional check on a matched message element.
     Returns True (outgoing), False (incoming), or None (can't determine).
     Uses multiple heuristics and walks up to 6 ancestors. None means the DOM
@@ -549,18 +551,18 @@ async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optiona
             const els = document.querySelectorAll(sel);
             if (idx >= els.length) return null;
             const el = els[idx];
-            if (el.querySelector('span[aria-label="You:"]')) return {dir: true};
-            if (el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]')) return {dir: true};
-            if (el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]')) return {dir: false};
+            if (el.querySelector('span[aria-label="You:"]')) return {dir: true, reason: 'aria_you'};
+            if (el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]')) return {dir: true, reason: 'tail_out'};
+            if (el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]')) return {dir: false, reason: 'tail_in'};
             let node = el;
             for (let i = 0; i < 6 && node && node !== document; i++) {
                 const cls = typeof node.className === 'string' ? node.className : '';
-                if (cls.includes('message-out')) return {dir: true};
-                if (cls.includes('message-in')) return {dir: false};
+                if (cls.includes('message-out')) return {dir: true, reason: 'class_message_out'};
+                if (cls.includes('message-in')) return {dir: false, reason: 'class_message_in'};
                 const did = node.getAttribute ? node.getAttribute('data-id') : null;
                 if (did) {
-                    if (did.startsWith('true_')) return {dir: true};
-                    if (did.startsWith('false_')) return {dir: false};
+                    if (did.startsWith('true_')) return {dir: true, reason: 'data_id_true'};
+                    if (did.startsWith('false_')) return {dir: false, reason: 'data_id_false'};
                 }
                 node = node.parentElement;
             }
@@ -568,24 +570,36 @@ async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optiona
                 '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
                 + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
             );
-            if (checks.length > 0) return {dir: true};
+            if (checks.length > 0) return {dir: true, reason: 'checkmark'};
             // Geometry fallback — no tail/class/checkmark marker resolved
             // anything (typically the 2nd+ bubble of a consecutive run).
             // Walk up for the nearest wide ("row-like") ancestor and see
             // which half of it the bubble's center falls into.
             let row = el;
+            let steps = 0;
             for (let i = 0; i < 8 && row && row !== document.body; i++) {
                 if (row.offsetWidth && row.offsetWidth > 400) break;
                 row = row.parentElement;
+                steps = i + 1;
             }
             if (row && row.offsetWidth > 400) {
                 const rowRect = row.getBoundingClientRect();
                 const elRect = el.getBoundingClientRect();
                 const rowCenter = (rowRect.left + rowRect.right) / 2;
                 const elCenter = (elRect.left + elRect.right) / 2;
-                return {dir: elCenter > rowCenter};
+                const decision = elCenter > rowCenter;
+                return {
+                    dir: decision, reason: 'geometry',
+                    diag: {
+                        row_is_body: row === document.body, walk_steps: steps,
+                        el_bounds: {left: Math.round(elRect.left), right: Math.round(elRect.right)},
+                        row_bounds: {left: Math.round(rowRect.left), right: Math.round(rowRect.right)},
+                        el_center: Math.round(elCenter), row_center: Math.round(rowCenter),
+                        comparison: `el_center(${Math.round(elCenter)}) > row_center(${Math.round(rowCenter)}) = ${decision}`,
+                    },
+                };
             }
-            return {dir: null};
+            return {dir: null, reason: 'no_signal'};
         }""", [css_selector, index])
     except Exception as exc:
         logger.info("sender: direction check error: %s", exc)
@@ -593,7 +607,25 @@ async def _is_outgoing_msg(page: Page, css_selector: str, index: int) -> Optiona
 
     if result is None:
         return None
-    return result.get("dir")
+    # TEMPORARY diagnostic logging (2026-08-11 inbound-detection investigation)
+    # — logs which specific signal decided direction, and for the geometry
+    # fallback, the actual measured values (element/container bounds, computed
+    # centers, final comparison) so a misclassification's exact cause is
+    # visible without guessing. `diag_context` is caller-supplied, optional,
+    # purely for log enrichment (group/message_id/text) — this function's own
+    # decision logic and return value are completely unaffected by it either
+    # way, and the other existing caller (_find_outgoing_with_text) doesn't
+    # pass it, so its behavior is byte-for-byte unchanged. Remove this log
+    # (or drop to DEBUG) once the investigation concludes.
+    dir_value = result.get("dir")
+    result_label = "Incoming" if dir_value is False else "Outgoing" if dir_value is True else "Unknown"
+    ctx = diag_context or {}
+    logger.info(
+        "sender: DIRECTION DETECTION group=%r message_id=%r text=%r result=%s reason=%s diag=%s",
+        ctx.get("group"), ctx.get("message_id"), ctx.get("text"),
+        result_label, result.get("reason"), result.get("diag"),
+    )
+    return dir_value
 
 
 async def _snapshot_msg_baselines(page: Page) -> dict:

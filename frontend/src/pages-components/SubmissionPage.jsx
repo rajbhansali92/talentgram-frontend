@@ -2397,6 +2397,24 @@ function SubmissionPage() {
         () => (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("focus") : null),
         [],
     );
+    // P1 — audition-material CTA moved up next to the title (was buried
+    // below Additional Details); this derives the "Script / Reference
+    // Video / Audio Brief" helper text from whichever categories the
+    // backend actually returned, instead of hardcoding a label set.
+    const hasAuditionMaterial = !!project && (
+        (Array.isArray(project.materials) && project.materials.length > 0) ||
+        (Array.isArray(project.video_links) && project.video_links.length > 0)
+    );
+    const auditionMaterialSummary = useMemo(() => {
+        if (!project) return "";
+        const materials = Array.isArray(project.materials) ? project.materials : [];
+        const hasVideoLinks = Array.isArray(project.video_links) && project.video_links.length > 0;
+        const labels = [];
+        if (materials.some((m) => m.category === "script")) labels.push("Script");
+        if (materials.some((m) => m.category === "video_file") || hasVideoLinks) labels.push("Reference Video");
+        if (materials.some((m) => m.category === "audio")) labels.push("Audio Brief");
+        return labels.join(" / ");
+    }, [project]);
     // `loading` only reflects the project fetch — the JWT/ATK resume effects
     // above set `submission` on their own, unrelated timeline, so there's a
     // real window where `loading` is already false but `submission` hasn't
@@ -2811,21 +2829,39 @@ function SubmissionPage() {
                 {/* SECTION 1 — Project Info */}
                 <section className="mb-8 bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-4">Audition Brief</p>
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-8 border-b border-slate-100 pb-4">
-                        <div className="flex flex-col gap-1">
-                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">PROJECT</p>
-                            <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-tight text-[#111111] leading-[1.05]">
-                                Talentgram × {project.brand_name}
-                            </h1>
+                    <div className="mb-8 border-b border-slate-100 pb-4">
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                            <div className="flex flex-col gap-1">
+                                <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">PROJECT</p>
+                                <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-tight text-[#111111] leading-[1.05]">
+                                    Talentgram × {project.brand_name}
+                                </h1>
+                            </div>
+                            {/* P2 — only claim a draft exists once we actually
+                                know who's looking (email/Google gate passed).
+                                Showing this before identity is confirmed implied
+                                a draft already existed for a stranger. */}
+                            {emailGateUnlocked && (
+                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/60 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                    <span>Draft Auto-Saved</span>
+                                </div>
+                            )}
                         </div>
-                        {/* P2 — only claim a draft exists once we actually
-                            know who's looking (email/Google gate passed).
-                            Showing this before identity is confirmed implied
-                            a draft already existed for a stranger. */}
-                        {emailGateUnlocked && (
-                            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/60 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                <span>Draft Auto-Saved</span>
+                        {hasAuditionMaterial && (
+                            <div className="mt-4">
+                                <button
+                                    onClick={() => setShowMaterial(true)}
+                                    data-testid="view-audition-material-btn"
+                                    className="inline-flex items-center gap-2 px-5 py-2.5 border border-[#0c2340] hover:border-[#0c2340] hover:bg-[#0c2340]/[0.08] active:scale-[0.98] rounded-full text-[13px] text-[#0c2340] font-semibold transition-all hover:shadow-md hover:-translate-y-[1px] bg-[#0c2340]/[0.04]"
+                                >
+                                    <FolderOpen className="w-4 h-4 text-[#0c2340]" /> View Audition Material
+                                </button>
+                                {auditionMaterialSummary && (
+                                    <p className="mt-2 ml-1 text-[11px] text-[#666666] tracking-wide">
+                                        {auditionMaterialSummary}
+                                    </p>
+                                )}
                             </div>
                         )}
                     </div>
@@ -2855,16 +2891,6 @@ function SubmissionPage() {
                                 {project.additional_details}
                             </p>
                         </div>
-                    )}
-                    {((Array.isArray(project.materials) && project.materials.length > 0) ||
-                        (Array.isArray(project.video_links) && project.video_links.length > 0)) && (
-                        <button
-                            onClick={() => setShowMaterial(true)}
-                            data-testid="view-audition-material-btn"
-                            className="inline-flex items-center gap-2 px-5 py-2.5 mt-6 border border-[#0c2340] hover:border-[#0c2340] hover:bg-[#0c2340]/[0.08] active:scale-[0.98] rounded-full text-[13px] text-[#0c2340] font-semibold transition-all hover:shadow-md hover:-translate-y-[1px] bg-[#0c2340]/[0.04]"
-                        >
-                            <FolderOpen className="w-4 h-4 text-[#0c2340]" /> View Audition Material
-                        </button>
                     )}
                 </section>
 

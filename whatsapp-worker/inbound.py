@@ -35,13 +35,11 @@ same lock; see worker.py's poll_and_process_jobs.
 from __future__ import annotations
 
 import asyncio
-import difflib
 import hashlib
 import logging
 import re
 import time
-import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
 import httpx
@@ -357,45 +355,6 @@ async def _is_voice_note_msg(page, full_selector: str, index: int) -> bool:
         return False
 
 
-async def _direction_diag(page, css_selector: str, index: int) -> dict:
-    """Diagnostic-only mirror of sender._is_outgoing_msg's ancestor walk — logs
-    what it actually saw (classNames + data-id at each level, checkmark count)
-    instead of collapsing straight to True/False/None, so a live 'undeterminable'
-    verdict is debuggable without guessing."""
-    try:
-        return await page.evaluate("""([sel, idx]) => {
-            const els = document.querySelectorAll(sel);
-            if (idx >= els.length) return {error: 'index out of range'};
-            const el = els[idx];
-            const chain = [];
-            let node = el;
-            for (let i = 0; i < 6 && node && node !== document; i++) {
-                chain.push({
-                    tag: node.tagName || null,
-                    className: typeof node.className === 'string' ? node.className : null,
-                    dataId: node.getAttribute ? node.getAttribute('data-id') : null,
-                });
-                node = node.parentElement;
-            }
-            const checks = el.querySelectorAll(
-                '[data-icon="msg-check"], [data-icon="msg-dblcheck"],'
-                + '[data-testid="msg-check"], [data-testid="msg-dblcheck"]'
-            );
-            const main = document.querySelector('#main');
-            const elRect = el.getBoundingClientRect();
-            const mainRect = main ? main.getBoundingClientRect() : null;
-            return {
-                chain: chain,
-                checkCount: checks.length,
-                outerHtml: el.outerHTML.slice(0, 2500),
-                elRect: {left: elRect.left, right: elRect.right, width: elRect.width},
-                mainRect: mainRect ? {left: mainRect.left, right: mainRect.right, width: mainRect.width} : null,
-            };
-        }""", [css_selector, index])
-    except Exception as exc:
-        return {"error": str(exc)}
-
-
 async def _extract_reply_context(page, full_selector: str, index: int) -> Optional[dict]:
     """Concurrent Task Engine Step 2B — structured extraction of a WhatsApp
     reply's "quoted message" context, replacing Step 2A's discovery-only
@@ -539,69 +498,6 @@ async def _scan_group_for_new_messages(
         logger.exception("inbound: message count failed for group=%r", group_name)
         return [], time.monotonic() - t_dom_start, 0.0
     dom_detection_sec = time.monotonic() - t_dom_start
-    logger.info("inbound: DIAG scan group=%r scope=%r n=%d", group_name, scope, n)
-    # TEMPORARY (2026-08-11 inbound-detection investigation): per-cycle
-    # newest-message marker — a real message physically arriving should
-    # move this id every time the count (n, above) also moves; if n
-    # increases but this id never changes, the count itself is stale.
-    if n > 0:
-        try:
-            newest_id = await loc.nth(n - 1).get_attribute("data-testid")
-        except Exception:
-            newest_id = "<unreadable>"
-        # Reuses the existing _extract_message_info parser (unmodified) —
-        # no new selector/parsing logic, just an extra diagnostic call.
-        # data-pre-plain-text carries WhatsApp Web's own bracketed
-        # timestamp ("[10:30 AM, 21/07/2026] Name: "), the closest existing
-        # signal to "latest timestamp" without inventing a new one.
-        try:
-            newest_info = await _extract_message_info(page, full_sel, n - 1)
-            newest_pre_plain = newest_info.get("prePlainText")
-        except Exception:
-            newest_pre_plain = "<unreadable>"
-        logger.info(
-            "inbound: DIAG newest message group=%r newest_message_id=%r newest_pre_plain_text=%r",
-            group_name, newest_id, newest_pre_plain,
-        )
-
-    # TEMPORARY (2026-08-11 Phase 5) — Stage 1: raw DOM snapshot, every
-    # poll, of the last 5 bubbles exactly as rendered. Read-only, no
-    # interpretation — dumped as-is for correlation against every later
-    # stage. Independent of and does not affect the scan loop below.
-    if n > 0:
-        try:
-            bubbles = await page.evaluate("""([sel, start]) => {
-                const els = document.querySelectorAll(sel);
-                const out = [];
-                for (let i = start; i < els.length; i++) {
-                    const el = els[i];
-                    const rect = el.getBoundingClientRect();
-                    const style = window.getComputedStyle(el);
-                    const pp = el.querySelector('[data-pre-plain-text]');
-                    out.push({
-                        index: i,
-                        dom_node_id: el.id || null,
-                        data_testid: el.getAttribute('data-testid'),
-                        data_id: el.getAttribute('data-id'),
-                        aria_label: el.getAttribute('aria-label'),
-                        class_list: el.className || null,
-                        pre_plain_text: pp ? pp.getAttribute('data-pre-plain-text') : null,
-                        text: (el.textContent || '').trim().slice(0, 200),
-                        has_tail_out: !!el.querySelector('[data-icon="tail-out"], [data-testid="tail-out"]'),
-                        has_tail_in: !!el.querySelector('[data-icon="tail-in"], [data-testid="tail-in"]'),
-                        has_aria_you: !!el.querySelector('span[aria-label="You:"]'),
-                        rect: {left: Math.round(rect.left), top: Math.round(rect.top),
-                               right: Math.round(rect.right), bottom: Math.round(rect.bottom)},
-                        visible: rect.width > 0 && rect.height > 0,
-                        display: style.display, opacity: style.opacity,
-                    });
-                }
-                return out;
-            }""", [full_sel, max(0, n - 5)])
-        except Exception as exc:
-            bubbles = [{"error": str(exc)}]
-        for b in bubbles:
-            logger.info("inbound: RAW BUBBLE group=%r %s", group_name, b)
 
     # Only the tail — new messages always arrive at the bottom, and this
     # keeps the scan cheap regardless of how long the chat history is.
@@ -621,54 +517,24 @@ async def _scan_group_for_new_messages(
             continue
         message_id = testid or None
 
-        # TEMPORARY (2026-08-11 inbound-detection investigation): one snippet
-        # fetch, reused for whichever branch below needs it (was previously
-        # fetched separately/inconsistently per-branch, or not at all).
-        # `diag_context` only enriches sender.py's DIRECTION DETECTION log —
-        # it is not read by any decision logic in _is_outgoing_msg, and the
-        # other existing caller (_find_outgoing_with_text) doesn't pass it,
-        # so this is purely additive.
         try:
             snippet = (await loc.nth(i).inner_text()).strip()[:80]
         except Exception:
             snippet = "<unreadable>"
 
-        # TEMPORARY (2026-08-11 Phase 5) — Stage 9: one correlation id per
-        # scan candidate, carried through every subsequent log for this
-        # message (direction/seen-cache/gate/dispatch/reply), so a single
-        # trace_id can be grepped end-to-end. Nothing reads/writes trace_id
-        # outside logging — no decision anywhere is based on it.
-        trace_id = uuid.uuid4().hex[:8]
-        diag_context = {"group": group_name, "message_id": message_id, "text": snippet, "trace_id": trace_id}
-
-        # Stage 2 — this candidate is under consideration (it fell within
-        # the tail-15 scan window, per the existing `start`/`n` bounds
-        # computed above — unchanged selection logic, just logged now).
-        logger.info(
-            "inbound: SCAN CANDIDATE trace_id=%s group=%r message_id=%r text=%r "
-            "reason_selected=%r",
-            trace_id, group_name, message_id, snippet,
-            f"tail-window index {i} of {n} (start={start})",
-        )
-
-        direction = await sender._is_outgoing_msg(page, full_sel, i, diag_context=diag_context)
+        direction = await sender._is_outgoing_msg(page, full_sel, i)
         if direction is True:
             # Ours — mark seen (if we have a stable id) so we never
-            # re-evaluate it, and never dispatch it. Full classification
-            # detail (reason/geometry diag) is in sender.py's DIRECTION
-            # DETECTION log immediately above this one.
-            logger.info("inbound: TRACE trace_id=%s last_stage=DIRECTION_OUTGOING (dropped)", trace_id)
+            # re-evaluate it, and never dispatch it.
             if message_id:
                 await _mark_processed(message_id)
             continue
         if direction is None:
-            diag = await _direction_diag(page, full_sel, i)
             logger.warning(
                 "inbound: direction undeterminable for group=%r index=%d testid=%r "
-                "text=%r diag=%s — skipping (fail closed, not guessing)",
-                group_name, i, testid, snippet, diag,
+                "text=%r — skipping (fail closed, not guessing)",
+                group_name, i, testid, snippet,
             )
-            logger.info("inbound: TRACE trace_id=%s last_stage=DIRECTION_UNKNOWN (dropped)", trace_id)
             if message_id:
                 await _mark_processed(message_id)
             continue
@@ -697,27 +563,8 @@ async def _scan_group_for_new_messages(
         if not message_id:
             message_id = _fallback_message_id(group_name, text, pre_plain)
 
-        # Stage 4 — seen-cache lookup. Peeked BEFORE calling the real
-        # (unmodified) _already_processed, purely to report which layer
-        # would answer — never changes what _already_processed itself does.
-        in_memory_hit = message_id in _seen_cache
         already_seen = await _already_processed(message_id)
-        mongo_hit = already_seen and not in_memory_hit
-        logger.info(
-            "inbound: SEEN-CACHE trace_id=%s group=%r message_id=%r | "
-            "In-memory=%s Mongo=%s TTL=%s | Decision=%s",
-            trace_id, group_name, message_id, in_memory_hit, mongo_hit,
-            f"enforced by Mongo TTL index ({config.INBOUND_DEDUP_TTL_SEC}s), not independently queryable here",
-            "ALREADY_SEEN" if already_seen else "NEW",
-        )
-        # Stage 5 — the actual gate, immediately before the branch it guards.
-        logger.info(
-            "inbound: NEW MESSAGE GATE trace_id=%s | %s | reason=%s",
-            trace_id, "BLOCKED" if already_seen else "ALLOWED",
-            "seen-cache hit" if already_seen else "not previously seen",
-        )
         if already_seen:
-            logger.info("inbound: TRACE trace_id=%s last_stage=SEEN_CACHE_BLOCKED (dropped)", trace_id)
             continue
 
         media_type = None
@@ -731,17 +578,13 @@ async def _scan_group_for_new_messages(
                 # keeps the old silent-drop behaviour, unchanged.
                 media_type = "voice_note"
             else:
-                # TEMPORARY (2026-08-11): this drop was completely silent —
-                # no log at any level. A non-text, non-voice-note bubble
-                # (reaction, system message, unrecognized media) is dropped
-                # here; logging it closes the last "vanishes with zero
-                # trace" gap in this loop.
+                # A non-text, non-voice-note bubble (reaction, system
+                # message, unrecognized media) is dropped here.
                 logger.info(
-                    "inbound: message DROPPED (textless, not a voice note) "
-                    "trace_id=%s group=%r index=%d testid=%r pre_plain_text=%r",
-                    trace_id, group_name, i, testid, pre_plain,
+                    "inbound: message dropped (textless, not a voice note) "
+                    "group=%r index=%d testid=%r",
+                    group_name, i, testid,
                 )
-                logger.info("inbound: TRACE trace_id=%s last_stage=TEXTLESS_DROPPED (dropped)", trace_id)
                 await _mark_processed(message_id)
                 continue
 
@@ -785,7 +628,6 @@ async def _scan_group_for_new_messages(
             "raw_pre_plain_text": pre_plain,
             "media_type": media_type,
             "reply_context": reply_context,
-            "trace_id": trace_id,  # TEMPORARY (2026-08-11 Phase 5) — carried into poll_once's dispatch/reply stages
         })
 
     message_extraction_sec = time.monotonic() - t_extraction_start
@@ -797,8 +639,7 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
                          sender_is_group_member: Optional[bool] = None,
                          media_type: Optional[str] = None,
                          replied_to_message_id: Optional[str] = None,
-                         replied_quoted_text: Optional[str] = None,
-                         trace_id: Optional[str] = None) -> Optional[dict]:
+                         replied_quoted_text: Optional[str] = None) -> Optional[dict]:
     t0 = time.monotonic()
     try:
         resp = await http.post(
@@ -824,20 +665,9 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
             "inbound: dispatched group=%r sender=%r message_id=%r handled=%s latency_ms=%d",
             group_name, sender_phone, message_id, body.get("handled"), latency_ms,
         )
-        logger.info(
-            "inbound: DISPATCH RESULT trace_id=%s status=OK latency_ms=%d "
-            "response_size_bytes=%d error=None",
-            trace_id, latency_ms, len(resp.content or b""),
-        )
         await _update_worker_status(dispatcher_status="ready")
         return body
-    except Exception as exc:
-        latency_ms = int((time.monotonic() - t0) * 1000)
-        logger.info(
-            "inbound: DISPATCH RESULT trace_id=%s status=FAILED latency_ms=%d "
-            "response_size_bytes=None error=%r",
-            trace_id, latency_ms, str(exc),
-        )
+    except Exception:
         logger.exception(
             "inbound: dispatch to backend FAILED group=%r sender=%r message_id=%r "
             "(message left unprocessed; will retry only if it re-appears unseen — "
@@ -1147,16 +977,6 @@ async def poll_once(
     groups = await groups_cache.get()
     if not groups:
         return
-    # TEMPORARY (2026-08-11 inbound-detection investigation): per-cycle
-    # summary — "number of chats found" per the requested instrumentation,
-    # adapted to this architecture (configured-group polling, not a
-    # chat-list-unread scan). session.generation/session_id included so a
-    # log pull can be correlated against a specific authenticated session
-    # without cross-referencing the diagnostics doc separately.
-    logger.info(
-        "inbound: POLL CYCLE configured_groups=%d groups=%s generation=%d session_id=%s",
-        len(groups), groups, session.generation, session.session_id,
-    )
 
     for group_name in groups:
         if group_name in _INVALID_GROUPS:
@@ -1217,7 +1037,6 @@ async def poll_once(
             # of end-to-end latency is visible without guessing.
 
             for msg in new_messages:
-                trace_id = msg.get("trace_id")
                 phone = msg["sender_phone"]
                 if not phone:
                     logger.warning(
@@ -1230,7 +1049,6 @@ async def poll_once(
                         msg["sender_is_group_member"], msg["text"][:80],
                         msg["raw_pre_plain_text"],
                     )
-                    logger.info("inbound: TRACE trace_id=%s last_stage=NO_PHONE_RESOLVED (dropped)", trace_id)
                     try:
                         await get_db().whatsapp_dispatch_failures.insert_one({
                             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1248,18 +1066,10 @@ async def poll_once(
                     continue
 
                 t_detected = time.monotonic()
-                logger.info(
-                    "inbound: new message trace_id=%s group=%r sender_name=%r sender_phone=%r "
-                    "sender_is_group_member=%r message_id=%r text=%r",
-                    trace_id, group_name, msg["sender_name"], phone, msg["sender_is_group_member"],
-                    msg["message_id"], msg["text"][:120],
-                )
                 await _update_worker_status(last_incoming_at=_now().isoformat())
-                # Stage 6 — before backend POST.
                 logger.info(
-                    "inbound: DISPATCH START trace_id=%s message_id=%r text=%r group=%r timestamp=%r",
-                    trace_id, msg["message_id"], msg["text"][:120], group_name,
-                    datetime.now(timezone.utc).isoformat(),
+                    "inbound: dispatch started group=%r sender=%r message_id=%r",
+                    group_name, phone, msg["message_id"],
                 )
 
                 reply_context = msg.get("reply_context") or {}
@@ -1274,7 +1084,6 @@ async def poll_once(
                     media_type=msg.get("media_type"),
                     replied_to_message_id=reply_context.get("quotedMessageId"),
                     replied_quoted_text=reply_context.get("quotedText"),
-                    trace_id=trace_id,
                 ))
                 done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
                 ack_sent_sec = None
@@ -1292,7 +1101,6 @@ async def poll_once(
                     # Backend call failed — do NOT mark as processed, so a
                     # transient outage gets a chance to be retried on the
                     # next poll (the message is still "new" in the DOM).
-                    logger.info("inbound: TRACE trace_id=%s last_stage=DISPATCH_FAILED (will retry)", trace_id)
                     continue
 
                 await _mark_processed(msg["message_id"])
@@ -1303,26 +1111,18 @@ async def poll_once(
                 reply_elapsed = 0.0
                 send_timing: Dict[str, float] = {}
                 if reply:
-                    # Stage 7 — reply generated.
-                    logger.info(
-                        "inbound: REPLY GENERATED trace_id=%s message_id=%r characters=%d preview=%r",
-                        trace_id, msg["message_id"], len(reply), reply[:120],
-                    )
                     reply_elapsed, send_timing, sent_message_id = await _send_reply(page, group_name, reply)
                     if sent_message_id:
                         await _update_worker_status(last_reply_at=_now().isoformat())
                         logger.info(
-                            "inbound: REPLY SENT trace_id=%s message_id=%r sent_message_id=%r "
-                            "reply_sent=True failure=None",
-                            trace_id, msg["message_id"], sent_message_id,
+                            "inbound: reply sent group=%r message_id=%r sent_message_id=%r",
+                            group_name, msg["message_id"], sent_message_id,
                         )
-                        logger.info("inbound: TRACE trace_id=%s last_stage=REPLY_SENT (complete)", trace_id)
                     else:
-                        logger.info(
-                            "inbound: REPLY SEND FAILED trace_id=%s message_id=%r reply_sent=False "
-                            "failure=%r", trace_id, msg["message_id"], "send_whatsapp_message returned no sent_message_id",
+                        logger.warning(
+                            "inbound: reply send failed group=%r message_id=%r",
+                            group_name, msg["message_id"],
                         )
-                        logger.info("inbound: TRACE trace_id=%s last_stage=REPLY_SEND_FAILED", trace_id)
                     # Concurrent Task Engine (2026-08-05) — operation_id is only
                     # set when `reply` is a task's confirmation/clarification
                     # card; report the WhatsApp message id it actually got so a
@@ -1332,11 +1132,6 @@ async def poll_once(
                             http, agent_id="casting-agent",
                             operation_id=operation_id, message_id=sent_message_id,
                         ))
-                else:
-                    logger.info(
-                        "inbound: TRACE trace_id=%s last_stage=DISPATCHED_NO_REPLY "
-                        "(backend handled it but returned no reply text — complete)", trace_id,
-                    )
                 t_total = time.monotonic() - t_detected
                 logger.info(
                     "inbound: TIMING message_id=%r dom_detection_sec=%.2f "
@@ -1353,331 +1148,6 @@ async def poll_once(
                 _record_latency(t_total)
 
 
-# TEMPORARY (2026-08-11 Phase 4, "why does the DOM never show new
-# messages" investigation) — a deliberately SEPARATE, read-only diagnostic
-# routine. Does NOT call _scan_group_for_new_messages, _is_outgoing_msg,
-# _already_processed, sender._open_group_chat, or any other inbound-
-# detection/seen-cache/direction-detection/group-routing code in this
-# codebase — every DOM read below is freshly written, independent of all
-# of that. The only "side effect" is clicking a chat-list row directly
-# (bypassing the search box entirely, so it shares no code with
-# sender._open_group_chat) to read its latest message content — the
-# existing poll loop already opens these same chats far more often (every
-# ~2-6s) via the normal search path, so this adds no new class of effect,
-# just an independent second observation on a 120s cadence. Never calls
-# _mark_processed / writes to any cache / touches config — pure inspection.
-LIVE_SESSION_VERIFY_SEC = 120.0
-_last_live_verify_at: float = 0.0
-_PROCESS_START_MONOTONIC = time.monotonic()
-# Previous cycle's per-group snapshot, for the requested "did anything
-# change since last cycle" comparison. Diagnostic-only — distinct from
-# _seen_cache/_INVALID_GROUPS and everything else the real pipeline reads.
-_prev_verify_group_state: Dict[str, dict] = {}
-
-_RECONNECT_BANNER_PHRASES = [
-    "Trying to reconnect", "Reconnecting", "Connecting",
-    "Phone not connected", "Computer not connected to the internet",
-    "Server error", "Unable to connect",
-]
-_TIMESTAMP_LIKE_RE = re.compile(r"^\d{1,2}:\d{2}\s*(AM|PM|am|pm)?$|^\d{1,2}/\d{1,2}/\d{2,4}$")
-
-
-def _match_kinds(configured: str, candidate: str) -> Tuple[bool, bool, bool, float]:
-    """(exact, case_insensitive_exact, substring, fuzzy_ratio) — pure
-    Python string comparison, no DOM/selector involvement, so this can
-    never be confused with (or accidentally reuse) the real group-matching
-    code in sender.py."""
-    exact = configured == candidate
-    case_match = configured.strip().lower() == candidate.strip().lower()
-    substring = configured.strip().lower() in candidate.strip().lower() or candidate.strip().lower() in configured.strip().lower()
-    ratio = difflib.SequenceMatcher(None, configured.lower(), candidate.lower()).ratio()
-    return exact, case_match, substring, ratio
-
-
-async def _deep_whatsapp_verification(session, groups: list[str]) -> None:
-    """Read-only diagnostic dump — see this file's module docstring header
-    above for the full non-interference guarantee. Builds one big,
-    human-readable block per the requested format rather than scattering
-    many small log lines."""
-    lines: list[str] = ["", "========== WHATSAPP LIVE VERIFICATION =========="]
-    page = session.page
-    if page is None:
-        lines.append("Page: None — session not currently attached to a browser page.")
-        lines.append("========== END VERIFICATION ==========")
-        logger.warning("\n".join(lines))
-        return
-
-    now_mono = time.monotonic()
-
-    # --- 1. Account information --------------------------------------
-    phone = session.own_phone_number or "Unknown"
-    display_name = "Unknown"  # never derived anywhere in this codebase; see session.py's own-phone docstring for why
-    lines.append("-- Account --")
-    lines.append(f"Session ID: {session.session_id}")
-    lines.append(f"Generation: {session.generation}")
-    lines.append(f"Phone: {phone}")
-    lines.append(f"Display Name: {display_name}")
-
-    # --- 7/8. Browser connection + page freshness (one evaluate call) --
-    page_state: dict = {}
-    try:
-        page_state = await page.evaluate("""(phrases) => {
-            return (async () => {
-                const bodyText = document.body.innerText || '';
-                const banners = phrases.filter(p => bodyText.includes(p));
-                let serviceWorkers = [];
-                try {
-                    if (navigator.serviceWorker) {
-                        const regs = await navigator.serviceWorker.getRegistrations();
-                        serviceWorkers = regs.map(r => ({
-                            scope: r.scope, active: !!r.active,
-                            installing: !!r.installing, waiting: !!r.waiting,
-                        }));
-                    }
-                } catch (e) {}
-                let memory = null;
-                try {
-                    if (performance.memory) {
-                        memory = {
-                            used_js_heap_mb: Math.round(performance.memory.usedJSHeapSize / 1048576),
-                            total_js_heap_mb: Math.round(performance.memory.totalJSHeapSize / 1048576),
-                        };
-                    }
-                } catch (e) {}
-                return {
-                    url: location.href, title: document.title,
-                    visibility_state: document.visibilityState, has_focus: document.hasFocus(),
-                    online: navigator.onLine, banners_found: banners,
-                    service_workers: serviceWorkers, memory: memory,
-                };
-            })();
-        }""", _RECONNECT_BANNER_PHRASES)
-    except Exception as exc:
-        page_state = {"error": str(exc)}
-
-    context_pages = 0
-    try:
-        context_pages = len(page.context.pages)
-    except Exception:
-        pass
-
-    lines.append("")
-    lines.append("-- Browser Connection --")
-    lines.append(f"navigator.onLine: {page_state.get('online')}")
-    lines.append(f"document.visibilityState: {page_state.get('visibility_state')}")
-    lines.append(f"Service worker(s): {page_state.get('service_workers')}")
-    lines.append(f"WebSocket status: not directly observable from outside the page's own JS "
-                 f"(WhatsApp Web doesn't expose one on `window`); using service worker "
-                 f"active-state + absence of reconnect banners as the closest proxies")
-    lines.append(f"Page title: {page_state.get('title')!r}")
-    lines.append(f"Loading/connection/offline banners found: {page_state.get('banners_found')}")
-
-    lines.append("")
-    lines.append("-- Page Freshness --")
-    lines.append(f"Current URL: {page_state.get('url')}")
-    lines.append(f"Page title: {page_state.get('title')!r}")
-    lines.append(f"Context count: 1 (this process launches exactly one BrowserContext — see session.py)")
-    lines.append(f"Tab count (pages in context): {context_pages} (expect exactly 1)")
-    lines.append(f"Focused tab (document.hasFocus()): {page_state.get('has_focus')}")
-    lines.append(f"Memory usage: {page_state.get('memory') or 'unavailable (performance.memory not exposed)'}")
-    lines.append(f"Browser process uptime: {now_mono - _PROCESS_START_MONOTONIC:.0f}s")
-    lines.append(f"Session (since last auth) uptime: {now_mono - _state_rebuilt_at:.0f}s")
-
-    # --- 9. Worker configuration --------------------------------------
-    lines.append("")
-    lines.append("-- Worker Configuration --")
-    lines.append(f"Configured groups: {groups}")
-    lines.append(f"Configured backend URL: {config.AGENTS_BACKEND_URL}")
-    lines.append(f"Polling interval: {config.INBOUND_POLL_SEC}s")
-    lines.append(f"Current generation: {session.generation}")
-    lines.append(f"Current session ID: {session.session_id}")
-    lines.append(f"Current browser context pages: {context_pages}")
-
-    # --- Search-box active-filter check (added after cycles 1-3 showed
-    # only ONE chat ever visible, consistently, across 4.5+ minutes of a
-    # settled session — the sidebar may be FILTERED by leftover text in
-    # the chat-list search box from the real poll loop's own group search,
-    # not because other chats don't exist. Independent selector list, not
-    # imported from sender.py, per "do not reuse group routing". ---------
-    search_box_value = None
-    try:
-        search_box_value = await page.evaluate("""() => {
-            const candidates = [
-                '#side input[data-tab="3"]',
-                '#side div[contenteditable="true"][data-tab="3"]',
-                '[data-testid="chat-list-search"] input',
-                '[data-testid="chat-list-search"]',
-            ];
-            for (const sel of candidates) {
-                const el = document.querySelector(sel);
-                if (el) {
-                    const v = el.value !== undefined ? el.value : (el.textContent || '');
-                    if (v) return {selector: sel, value: v};
-                }
-            }
-            return {selector: null, value: null};
-        }""")
-    except Exception as exc:
-        search_box_value = {"error": str(exc)}
-    lines.append("")
-    lines.append("-- Chat-List Search Box (active-filter check) --")
-    lines.append(f"Current value: {search_box_value}")
-    lines.append("(a non-empty value here means the visible chat list below is FILTERED to "
-                 "matches of this text, not the full chat list — this does not belong to this "
-                 "diagnostic; it can only have been left behind by the real poll loop's own "
-                 "group search, which this routine does not call or clear)")
-
-    # --- 2. First 20 visible chats -------------------------------------
-    try:
-        rows = await page.evaluate("""() => {
-            const out = [];
-            const titleEls = document.querySelectorAll('[data-testid="cell-frame-title"]');
-            const n = Math.min(20, titleEls.length);
-            for (let i = 0; i < n; i++) {
-                const el = titleEls[i];
-                const title = el.textContent || '';
-                let row = el;
-                for (let j = 0; j < 6 && row && row.parentElement; j++) row = row.parentElement;
-                const unreadEl = row ? row.querySelector('[aria-label*="unread" i]') : null;
-                const pinnedEl = row ? row.querySelector('[data-icon*="pin" i], [aria-label*="pinned" i]') : null;
-                const mutedEl = row ? row.querySelector('[data-icon*="mute" i], [aria-label*="muted" i]') : null;
-                const spans = row ? row.querySelectorAll('span') : [];
-                let lastTs = null;
-                for (const s of spans) {
-                    const t = (s.textContent || '').trim();
-                    if (t) lastTs = lastTs === null ? t : lastTs;
-                }
-                out.push({
-                    index: i, title: title,
-                    unread_label: unreadEl ? unreadEl.getAttribute('aria-label') : null,
-                    pinned: !!pinnedEl, muted: !!mutedEl,
-                    last_visible_text: lastTs,
-                });
-            }
-            return out;
-        }""")
-    except Exception as exc:
-        rows = []
-        lines.append(f"\n-- Visible Chats -- (FAILED: {exc})")
-
-    lines.append("")
-    lines.append(f"-- First {len(rows)} Visible Chats --")
-    for r in rows:
-        title = r.get("title") or ""
-        codepoints = " ".join(f"{ord(c):02x}" for c in title)
-        lines.append(f"Chat #{r['index'] + 1}")
-        lines.append(f"  Title: {title!r}")
-        lines.append(f"  Length: {len(title)}")
-        lines.append(f"  Codepoints: {codepoints}")
-        lines.append(f"  Unread: {r.get('unread_label') or 'None'}")
-        lines.append(f"  Pinned: {r.get('pinned')}")
-        lines.append(f"  Muted: {r.get('muted')}")
-        # Anything rendered in the main list is, by WhatsApp Web's own
-        # definition, NOT in the Archived folder — that's the only basis
-        # for this field; the Archived folder itself is never opened here.
-        lines.append(f"  Archived: False (present in main list)")
-        lines.append(f"  Last visible timestamp/text: {r.get('last_visible_text')!r}")
-
-    # --- 3. Compare against configured groups --------------------------
-    lines.append("")
-    lines.append("-- Configured-Group Matching --")
-    found_index_by_group: Dict[str, Optional[int]] = {}
-    for group_name in groups:
-        best = None  # (ratio, row)
-        exact_any = case_any = substring_any = False
-        for r in rows:
-            title = r.get("title") or ""
-            exact, case_match, substring, ratio = _match_kinds(group_name, title)
-            exact_any = exact_any or exact
-            case_any = case_any or case_match
-            substring_any = substring_any or substring
-            if best is None or ratio > best[0]:
-                best = (ratio, r)
-        lines.append(f"Configured: {group_name!r}")
-        lines.append(f"  Exact Match: {'YES' if exact_any else 'NO'}")
-        lines.append(f"  Case Match: {'YES' if case_any else 'NO'}")
-        lines.append(f"  Substring Match: {'YES' if substring_any else 'NO'}")
-        if best and best[0] > 0.5:
-            lines.append(f"  Fuzzy Match: YES")
-            lines.append(f"  Matched Chat: {best[1].get('title')!r}")
-            lines.append(f"  Similarity: {best[0] * 100:.0f}%")
-            found_index_by_group[group_name] = best[1]["index"]
-        else:
-            lines.append(f"  Fuzzy Match: NO")
-            lines.append(f"  Matched Chat: None")
-            lines.append(f"  Similarity: {(best[0] * 100 if best else 0):.0f}%")
-            found_index_by_group[group_name] = None
-        # --- 4. Chat position ---
-        idx = found_index_by_group[group_name]
-        lines.append(f"  Visible index: {'#' + str(idx + 1) if idx is not None else 'Not visible'}")
-
-    # --- 5. Latest message per configured group (inspect only) --------
-    lines.append("")
-    lines.append("-- Latest Message Per Configured Group (inspect only, never processed) --")
-    current_group_state: Dict[str, dict] = {}
-    for group_name in groups:
-        idx = found_index_by_group.get(group_name)
-        if idx is None:
-            lines.append(f"Group: {group_name!r} -> Not visible, cannot inspect latest message.")
-            current_group_state[group_name] = {"visible": False}
-            continue
-        msg_info: dict = {}
-        try:
-            # Independent open: click the visible row directly. Does NOT
-            # go through sender._open_group_chat / the search box — a
-            # completely separate code path, sharing no group-routing logic.
-            await page.locator('[data-testid="cell-frame-title"]').nth(idx).click(timeout=5000)
-            await asyncio.sleep(0.6)
-            msg_info = await page.evaluate("""() => {
-                const nodes = document.querySelectorAll('[data-testid^="conv-msg-"]');
-                if (!nodes.length) return null;
-                const el = nodes[nodes.length - 1];
-                const testid = el.getAttribute('data-testid');
-                const pp = el.querySelector('[data-pre-plain-text]');
-                const prePlain = pp ? pp.getAttribute('data-pre-plain-text') : null;
-                const text = (el.textContent || '').trim().slice(0, 200);
-                return {message_id: testid, pre_plain_text: prePlain, text_preview: text};
-            }""") or {}
-        except Exception as exc:
-            msg_info = {"error": str(exc)}
-        pre_plain = msg_info.get("pre_plain_text")
-        m = _PRE_PLAIN_NAME_RE.match(pre_plain) if pre_plain else None
-        sender_name = m.group(1).strip() if m else None
-        lines.append(f"Group: {group_name!r}")
-        lines.append(f"  Latest message id: {msg_info.get('message_id')}")
-        lines.append(f"  Latest timestamp/sender-line (raw): {pre_plain!r}")
-        lines.append(f"  Latest sender (parsed): {sender_name}")
-        lines.append(f"  Latest text preview: {msg_info.get('text_preview')!r}")
-        row = rows[idx] if idx < len(rows) else {}
-        lines.append(f"  Latest unread state (from list row before opening): {row.get('unread_label') or 'None'}")
-        lines.append(f"  Latest DOM node id: {msg_info.get('message_id')}")
-        current_group_state[group_name] = {
-            "visible": True, "message_id": msg_info.get("message_id"),
-            "pre_plain_text": pre_plain, "unread_label": row.get("unread_label"),
-        }
-
-    # --- 6. Change vs previous cycle -----------------------------------
-    lines.append("")
-    lines.append("-- Change Since Previous Cycle --")
-    for group_name in groups:
-        prev = _prev_verify_group_state.get(group_name) or {}
-        cur = current_group_state.get(group_name) or {}
-        new_msg = bool(cur.get("message_id")) and cur.get("message_id") != prev.get("message_id")
-        dom_changed = cur != prev
-        unread_changed = cur.get("unread_label") != prev.get("unread_label")
-        ts_changed = cur.get("pre_plain_text") != prev.get("pre_plain_text")
-        lines.append(f"Group: {group_name!r}")
-        lines.append(f"  New message detected: {'YES' if new_msg else 'NO'}")
-        lines.append(f"  DOM changed: {'YES' if dom_changed else 'NO'}")
-        lines.append(f"  Unread changed: {'YES' if unread_changed else 'NO'}")
-        lines.append(f"  Timestamp changed: {'YES' if ts_changed else 'NO'}")
-    _prev_verify_group_state.clear()
-    _prev_verify_group_state.update(current_group_state)
-
-    lines.append("========== END VERIFICATION ==========")
-    logger.info("\n".join(lines))
-
-
 async def inbound_listener_loop(session) -> None:
     """Spawned once as an asyncio task from worker.py, alongside the
     existing heartbeat_task, right after session.start(). Runs for the
@@ -1692,7 +1162,7 @@ async def inbound_listener_loop(session) -> None:
     something actually breaks, and never needs a separate retry-with-
     backoff mechanism: the sub-statuses it's built from are already
     refreshed every cycle by the existing poll loop."""
-    global _state_rebuilt_at, _last_live_verify_at
+    global _state_rebuilt_at
     if not config.INBOUND_LISTENER_ENABLED:
         logger.info("inbound: listener disabled via WA_INBOUND_LISTENER_ENABLED — outbound sending unaffected")
         return
@@ -1723,16 +1193,6 @@ async def inbound_listener_loop(session) -> None:
                 if session.is_healthy:
                     await poll_once(session, http, groups_cache, participants_cache)
                     reply_pipeline_status = "ready" if session.page is not None else "not_ready"
-                    # TEMPORARY (2026-08-11) — separate from and does not
-                    # affect poll_once/detection/seen-cache above; own slow
-                    # cadence so it doesn't add per-2s-cycle overhead.
-                    now = time.monotonic()
-                    if now - _last_live_verify_at > LIVE_SESSION_VERIFY_SEC:
-                        _last_live_verify_at = now
-                        try:
-                            await _deep_whatsapp_verification(session, await groups_cache.get())
-                        except Exception:
-                            logger.exception("inbound: LIVE-SESSION-VERIFY failed — will retry next cadence")
                 else:
                     logger.info("inbound: session unhealthy — skipping this poll cycle")
             except asyncio.CancelledError:

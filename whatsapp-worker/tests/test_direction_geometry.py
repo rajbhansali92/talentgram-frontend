@@ -75,41 +75,14 @@ async def test_evaluate_exception_returns_none_not_raises():
 async def test_signature_no_longer_accepts_self_display_name():
     """The whole point of this fix: nothing can pass account identity into
     this function any more, even by accident — the parameter is gone, not
-    just unused. `diag_context` (2026-08-11, temporary investigation
-    logging) is an unrelated, optional, log-only addition — explicitly not
-    account identity, and defaults to None so every existing call site is
-    unaffected."""
+    just unused."""
     sig = inspect.signature(sender._is_outgoing_msg)
     assert "self_display_name" not in sig.parameters
-    assert list(sig.parameters) == ["page", "css_selector", "index", "diag_context"]
-    assert sig.parameters["diag_context"].default is None
+    assert list(sig.parameters) == ["page", "css_selector", "index"]
 
     page = FakePage({"dir": True})
     with pytest.raises(TypeError):
         await sender._is_outgoing_msg(page, "sel", 0, self_display_name="anything")
-
-
-async def test_diag_context_is_purely_decorative(caplog):
-    """2026-08-11 temporary investigation logging: diag_context enriches the
-    log line only — the same page result must produce the same return value
-    whether or not it's supplied, and its presence/absence/content must
-    never change `dir`."""
-    for ctx in (None, {}, {"group": "G", "message_id": "m1", "text": "help"}):
-        page = FakePage({"dir": False, "reason": "tail_in"})
-        result = await sender._is_outgoing_msg(page, "sel", 0, diag_context=ctx)
-        assert result is False
-
-
-async def test_diag_context_appears_in_log_when_provided(caplog):
-    import logging
-    caplog.set_level(logging.INFO, logger="sender")
-    page = FakePage({"dir": True, "reason": "checkmark"})
-    await sender._is_outgoing_msg(
-        page, "sel", 0, diag_context={"group": "Talentgram CRM", "message_id": "conv-msg-1", "text": "help"}
-    )
-    assert "DIRECTION DETECTION" in caplog.text
-    assert "Talentgram CRM" in caplog.text
-    assert "Outgoing" in caplog.text
 
 
 async def test_source_contains_no_account_identity_comparison():

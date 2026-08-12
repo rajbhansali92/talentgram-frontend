@@ -69,7 +69,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
@@ -358,24 +358,76 @@ def _strip_leading_trigger_preserve_newlines(text: str, triggers: List[str]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Send Mode detection (2026-08-11) — decides, from CONTENT (never trigger
-# phrase — see the module docstring's addendum on why a new competing
-# intent can't reliably distinguish these), whether a "send"-triggered
-# message is a stored requirement/template (existing, unchanged grammar),
-# a literal custom message, or an Instagram-profile request. Checked once,
-# right after the trigger verb is stripped, before any of the three
-# existing extraction tiers run.
+# Send Mode detection (2026-08-11, hardened 2026-08-12) — decides whether a
+# "send"-triggered message is a stored requirement/template (existing,
+# unchanged grammar), a literal custom message, or an Instagram-profile
+# request. Checked once, right after the trigger verb is stripped, before
+# any of the three existing extraction tiers run.
+#
+# A NEW competing intent (its own trigger list) still can't reliably win
+# here — see the module docstring's addendum: the distinguishing signal
+# for "instagram"/quoted-text can appear ANYWHERE in the message, not as a
+# fixed prefix, and both would collide with the existing broad SEND_VERBS
+# list either way. What CAN and does get an explicit trigger-phrase check,
+# inside this same content-based dispatch, is the single most common
+# custom-message phrasing ("send custom message ...") — see
+# _CUSTOM_MESSAGE_PHRASE_RE below — so that phrasing's mode is never left
+# solely to quote-detection succeeding.
 # ---------------------------------------------------------------------------
 _INSTAGRAM_KEYWORD_RE = re.compile(r"\binsta(?:gram)?\b", re.IGNORECASE)
-# Straight double quotes and the curly variant iOS/Android autocorrect
-# commonly substitutes for them — both treated identically.
-_QUOTE_RE = re.compile(r'"([^"]*)"|“([^”]*)”', re.DOTALL)
+_INSTAGRAM_KEYWORD_RE = re.compile(r"\binsta(?:gram)?\b", re.IGNORECASE)
+# (2026-08-12, production incident) "send custom message" must win over
+# template detection OUTRIGHT, not just via quote-sniffing — a real
+# production message reached this trigger phrase and, for whatever
+# specific reason in that live conversation, never got picked up as
+# custom_message mode, silently falling through to template matching
+# instead ("I couldn't find a template matching 'custom message...'"). An
+# explicit phrase check removes any dependency on quote detection working
+# perfectly for this specific, most-common phrasing — if the command
+# BEGINS with "custom message" (after the verb), it IS custom_message
+# mode, full stop; the quote/colon parsing below only decides what the
+# body and recipient are, not whether this is custom_message mode at all.
+_CUSTOM_MESSAGE_PHRASE_RE = re.compile(r"^\s*custom\s+message\b", re.IGNORECASE)
+# Every quote character variant treated interchangeably as an opening OR
+# closing delimiter — straight ASCII, and the curly left/right variants
+# iOS/Android autocorrect commonly substitutes. Deliberately NOT a
+# regex capture group (see _find_quote_span below) — a character-class
+# based "nearest pair" match (the previous implementation) cannot survive
+# a quote character embedded INSIDE the message body itself (explicitly
+# required: "quotes inside the body"), since [^"]* stops at the FIRST
+# embedded quote and truncates the payload.
+_QUOTE_CHARS = "\"“”"
+_QUOTE_CHAR_RE = re.compile("[" + re.escape(_QUOTE_CHARS) + "]")
+
+
+def _find_quote_span(remainder: str) -> Optional["tuple[int, int, int, int]"]:
+    """FIRST-to-LAST quote-character span in the whole message — everything
+    between them is treated as one opaque payload, never tokenized or
+    inspected, regardless of how many quote characters appear INSIDE it
+    (bullets, nested quotes, inch marks, etc. all pass through untouched).
+    Only the outermost pair marks where the payload starts/ends; "Only
+    after the closing quote should recipient parsing begin" is exactly
+    what this gives the caller — everything after the LAST quote char (or
+    before the first, for the quote-after-recipient phrasing) is fair game
+    for recipient parsing, nothing in between ever is.
+
+    Returns (open_start, open_end, close_start, close_end), or None if
+    fewer than two quote characters are present at all."""
+    matches = list(_QUOTE_CHAR_RE.finditer(remainder))
+    if len(matches) < 2:
+        return None
+    first, last = matches[0], matches[-1]
+    if last.start() <= first.end():
+        return None
+    return first.start(), first.end(), last.start(), last.end()
 
 
 def _detect_send_mode(remainder: str) -> str:
     if _INSTAGRAM_KEYWORD_RE.search(remainder):
         return "instagram"
-    if _QUOTE_RE.search(remainder):
+    if _CUSTOM_MESSAGE_PHRASE_RE.match(remainder):
+        return "custom_message"
+    if _find_quote_span(remainder):
         return "custom_message"
     first_nl = remainder.find("\n")
     first_line = remainder[:first_nl] if first_nl != -1 else remainder
@@ -386,21 +438,23 @@ def _detect_send_mode(remainder: str) -> str:
 
 def _extract_custom_message_fields(remainder: str) -> Dict[str, str]:
     """Custom Message mode — the quoted/colon-delimited span is the EXACT
-    text to send, verbatim (internal whitespace/newlines/emoji/URLs/
-    unicode untouched; only the shared FieldSpec.validate layer trims
-    outer whitespace later, same as every other field on this intent)."""
+    text to send, verbatim (internal whitespace/newlines/blank lines/
+    emoji/URLs/bullets/commas/embedded quotes/unicode untouched; only the
+    shared FieldSpec.validate layer trims OUTER whitespace later, same as
+    every other field on this intent)."""
     out: Dict[str, str] = {}
-    q_m = _QUOTE_RE.search(remainder)
-    if q_m:
-        out["source_query"] = q_m.group(1) if q_m.group(1) is not None else q_m.group(2)
+    span = _find_quote_span(remainder)
+    if span:
+        open_start, open_end, close_start, close_end = span
+        out["source_query"] = remainder[open_end:close_start]
         # The recipient connector is searched OUTSIDE the quoted span only
         # — a "to"/"with" appearing INSIDE the message body itself (e.g.
         # "...call me tomorrow with your portfolio") must never be misread
         # as the recipient clause. The quote can come before OR after the
         # recipient list ("send custom message \"...\" to Riya" vs. "send
         # this to\nRiya\n\n\"text\""), so both sides are tried.
-        after = remainder[q_m.end():]
-        before = remainder[:q_m.start()]
+        after = remainder[close_end:]
+        before = remainder[:open_start]
         r_m = _TO_OR_WITH_RE.search(after) or _TO_OR_WITH_RE.search(before)
         if r_m:
             recipient_part = r_m.group(1).strip(" .!?\n")
@@ -935,6 +989,129 @@ async def _resume_pending_multi_subject(collected: dict, ctx: ExecContext) -> di
     return new_collected
 
 
+# ---------------------------------------------------------------------------
+# Shared Talent Resolver (2026-08-12) — the ONE talent-name lookup path on
+# this intent. Used by BOTH _resolve_recipient's Tier 3 ("who receives
+# this") and _resolve_instagram_target ("whose Instagram to send") — a
+# name resolves identically in either context: same tiered exact/
+# normalized/token/fuzzy matching (nlu.parse_talent_selector +
+# nlu.resolve_against_candidates), same typo/partial-name tolerance, same
+# post-match safety gate (_fuzzy_match_is_safe), same multi-name splitting
+# and per-fragment disambiguation (_resolve_multi_recipient_names), same
+# shared disambiguation engine for "which one did you mean?". Instagram
+# Profile Send does NOT implement its own lookup anywhere — this function
+# is that reuse, not a parallel approximation of it.
+# ---------------------------------------------------------------------------
+@dataclass
+class _TalentNamesResolution:
+    ok: bool
+    talent_ids: List[str] = field(default_factory=list)
+    talent_labels: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+    ambiguous: Optional[AmbiguousEntity] = None
+    # True only for "genuinely no match at all — not even a weak fuzzy
+    # suggestion" on a SINGLE name. The one outcome _resolve_recipient
+    # treats as non-terminal (falls through to try the text as a CRM
+    # category or saved list instead — a lone word/phrase could
+    # legitimately be either). Every other failure is terminal for every
+    # caller, including a 2+-name list (never a project/CRM/saved-list
+    # name) and a safety-gate rejection (a real match too risky to trust).
+    not_found: bool = False
+
+
+async def _resolve_talent_names(
+    q: str, *,
+    single_ambiguous_field_key: str,
+    multi_pick_field_key: str,
+    multi_fragments_key: str,
+    multi_index_key: str,
+) -> _TalentNamesResolution:
+    """Resolves `q` — one name, or 2+ comma/newline/"and"/"&"-separated
+    names — against the SAME global talent pool ADD_INTENT/every other
+    talent lookup on this platform searches. `single_ambiguous_field_key`
+    is which `collected` key the shared disambiguation engine overwrites
+    once a single ambiguous name is picked (callers name their own field
+    here — "recipient_query" for _resolve_recipient, "source_query" for
+    Instagram's subject); the three `multi_*` keys are the private
+    pending-state markers a caller's OWN resume function uses for the
+    2+-name ambiguity round trip (see _resume_pending_multi_recipient /
+    _resume_pending_multi_subject — mirrors of each other, one per caller,
+    since the shared engine writes into whichever field_key it's given)."""
+    selector = nlu.parse_talent_selector(q)
+    if not (selector.ok and not selector.everyone and not selector.ordinals):
+        return _TalentNamesResolution(ok=False, not_found=True)
+
+    # Multi Manual Recipients (2026-08-09) — 2+ separated names is
+    # unambiguously a LIST (never a single project/CRM/saved-list name,
+    # which never legitimately contains a separator like this). A single
+    # name — the overwhelmingly common case — falls through below.
+    fragments = _split_recipient_names(q)
+    if len(fragments) >= 2:
+        multi = await _resolve_multi_recipient_names(fragments)
+        if multi.not_found or multi.unsafe:
+            problems = list(multi.not_found) + [frag for frag, _label in multi.unsafe]
+            return _TalentNamesResolution(ok=False, error=f"Couldn't find:\n\n{chr(10).join(problems)}")
+        if multi.ambiguous:
+            frag, amb_candidates, idx = multi.ambiguous
+            return _TalentNamesResolution(
+                ok=False,
+                ambiguous=AmbiguousEntity(
+                    entity_type="talent", field_key=multi_pick_field_key,
+                    candidates=[disambiguation.Candidate(id=c.id, label=c.label) for c in amb_candidates],
+                    extra_collected={
+                        multi_fragments_key: json.dumps(fragments),
+                        multi_index_key: str(idx),
+                    },
+                ),
+            )
+        if not multi.resolved:
+            # Unreachable in practice — _resolve_multi_recipient_names
+            # places every fragment into resolved/not_found/unsafe/
+            # ambiguous, and fragments is non-empty here, so at least one
+            # of the checks above already returned. Kept as a defensive
+            # terminal error, never a silent pass-through.
+            return _TalentNamesResolution(ok=False, error=f'I couldn\'t figure out who "{q}" refers to.')
+        return _TalentNamesResolution(
+            ok=True,
+            talent_ids=[tid for tid, _label in multi.resolved],
+            talent_labels=[label for _tid, label in multi.resolved],
+        )
+
+    candidates = await _fetch_all_talent_candidates()
+    resolved = nlu.resolve_against_candidates(selector, candidates)
+    if resolved.ok and resolved.talent_ids:
+        # Safety gate (see _fuzzy_match_is_safe docstring) — every
+        # resolved label must genuinely contain what the user typed, not
+        # just share one word (e.g. a surname) with it.
+        safety_fragments = nlu.split_multi_names(q)
+        unsafe = [
+            label for label in resolved.talent_labels
+            if not any(_fuzzy_match_is_safe(frag, label) for frag in safety_fragments)
+        ]
+        if unsafe:
+            return _TalentNamesResolution(
+                ok=False,
+                error=(
+                    f'"{q}" matched "{", ".join(unsafe)}" but that name doesn\'t look like '
+                    f"a real match — please use the exact full name to avoid sending to the "
+                    f"wrong person."
+                ),
+            )
+        return _TalentNamesResolution(ok=True, talent_ids=resolved.talent_ids, talent_labels=resolved.talent_labels)
+    if resolved.ambiguous_candidates:
+        return _TalentNamesResolution(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="talent", field_key=single_ambiguous_field_key,
+                candidates=[
+                    disambiguation.Candidate(id=c.id, label=c.label)
+                    for c in resolved.ambiguous_candidates
+                ],
+            ),
+        )
+    return _TalentNamesResolution(ok=False, not_found=True)
+
+
 async def _resolve_recipient(recipient_query: str, stage_query: str) -> _RecipientTarget:
     normalized_stage, stage_error = await _resolve_pipeline_stage(stage_query)
     if stage_error:
@@ -1027,108 +1204,39 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
 
     # Tier 3: one or more named talents — global pool (same candidate set
     # ADD_INTENT already searches; a talent being messaged directly needn't
-    # be in any particular project's pipeline).
-    selector = nlu.parse_talent_selector(q)
-    if selector.ok and not selector.everyone and not selector.ordinals:
-        # Multi Manual Recipients (2026-08-09) — 2+ comma/newline/"and"/"&"
-        # separated names is unambiguously a manual recipient LIST (never a
-        # project/CRM/saved-list name, which never legitimately contains a
-        # separator like this), so it's handled entirely here rather than
-        # falling through to nlu.parse_talent_selector's own (ambiguity-
-        # losing, see the section above) multi-name grammar. A single name
-        # — the overwhelmingly common case — falls through to the existing,
-        # byte-for-byte-unchanged single-name resolution below.
-        fragments = _split_recipient_names(q)
-        if len(fragments) >= 2:
-            multi = await _resolve_multi_recipient_names(fragments)
-            if multi.not_found or multi.unsafe:
-                problems = list(multi.not_found) + [frag for frag, _label in multi.unsafe]
-                joined = "\n".join(problems)
-                return _RecipientTarget(ok=False, error=f"Couldn't find:\n\n{joined}")
-            if multi.ambiguous:
-                frag, amb_candidates, idx = multi.ambiguous
-                return _RecipientTarget(
-                    ok=False,
-                    ambiguous=AmbiguousEntity(
-                        entity_type="talent", field_key=_PENDING_MULTI_RECIPIENT_PICK_KEY,
-                        candidates=[disambiguation.Candidate(id=c.id, label=c.label) for c in amb_candidates],
-                        extra_collected={
-                            _PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY: json.dumps(fragments),
-                            _PENDING_MULTI_RECIPIENT_INDEX_KEY: str(idx),
-                        },
-                    ),
-                )
-            if not multi.resolved:
-                return _RecipientTarget(ok=False, error="Who should this go to?")
-            contacts, no_contact_info = await _build_manual_contacts(multi.resolved)
-            if not contacts:
-                return _RecipientTarget(
-                    ok=False,
-                    error=f'{" and ".join(no_contact_info)} — no phone number or WhatsApp group on file.',
-                )
-            labels = [label for _tid, label in multi.resolved]
+    # be in any particular project's pipeline). Delegates entirely to the
+    # ONE shared talent-name resolver (_resolve_talent_names) — the exact
+    # same fuzzy-matching/safety-gate/disambiguation behavior Instagram
+    # Profile Send's subject resolution also goes through, so the same
+    # name resolves identically in both places.
+    talents = await _resolve_talent_names(
+        q,
+        single_ambiguous_field_key="recipient_query",
+        multi_pick_field_key=_PENDING_MULTI_RECIPIENT_PICK_KEY,
+        multi_fragments_key=_PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY,
+        multi_index_key=_PENDING_MULTI_RECIPIENT_INDEX_KEY,
+    )
+    if talents.ambiguous:
+        return _RecipientTarget(ok=False, ambiguous=talents.ambiguous)
+    if talents.ok:
+        contacts, no_contact_info = await _build_manual_contacts(
+            list(zip(talents.talent_ids, talents.talent_labels))
+        )
+        if contacts:
             return _RecipientTarget(
                 ok=True, source_type="MANUAL",
                 source_params=SourceParams(contacts=contacts),
-                display_label=", ".join(labels),
+                display_label=", ".join(talents.talent_labels),
             )
-
-        candidates = await _fetch_all_talent_candidates()
-        resolved = nlu.resolve_against_candidates(selector, candidates)
-        if resolved.ok and resolved.talent_ids:
-            # Safety gate (see _fuzzy_match_is_safe docstring) — every
-            # resolved label must genuinely contain what the user typed,
-            # not just share one word (e.g. a surname) with it.
-            fragments = nlu.split_multi_names(q)
-            unsafe = [
-                label for label in resolved.talent_labels
-                if not any(_fuzzy_match_is_safe(frag, label) for frag in fragments)
-            ]
-            if unsafe:
-                return _RecipientTarget(
-                    ok=False,
-                    error=(
-                        f'"{q}" matched "{", ".join(unsafe)}" but that name doesn\'t look like '
-                        f"a real match — please use the exact full name to avoid sending to the "
-                        f"wrong person."
-                    ),
-                )
-            docs = await db.talents.find(
-                {"id": {"$in": resolved.talent_ids}},
-                {"_id": 0, "id": 1, "name": 1, "phone": 1, "whatsapp_group_name": 1},
-            ).to_list(len(resolved.talent_ids))
-            tmap = {d["id"]: d for d in docs}
-            contacts: List[ManualContact] = []
-            for tid in resolved.talent_ids:
-                d = tmap.get(tid)
-                if not d:
-                    continue
-                group_name = (d.get("whatsapp_group_name") or "").strip()
-                phone = (d.get("phone") or "").strip()
-                if not group_name and not phone:
-                    continue
-                contacts.append(ManualContact(name=d.get("name") or "", phone=phone, whatsapp_group_name=group_name))
-            if contacts:
-                return _RecipientTarget(
-                    ok=True, source_type="MANUAL",
-                    source_params=SourceParams(contacts=contacts),
-                    display_label=", ".join(resolved.talent_labels),
-                )
-            return _RecipientTarget(
-                ok=False,
-                error=f'{" and ".join(resolved.talent_labels)} — no phone number or WhatsApp group on file.',
-            )
-        if resolved.ambiguous_candidates:
-            return _RecipientTarget(
-                ok=False,
-                ambiguous=AmbiguousEntity(
-                    entity_type="talent", field_key="recipient_query",
-                    candidates=[
-                        disambiguation.Candidate(id=c.id, label=c.label)
-                        for c in resolved.ambiguous_candidates
-                    ],
-                ),
-            )
+        return _RecipientTarget(
+            ok=False,
+            error=f'{" and ".join(no_contact_info)} — no phone number or WhatsApp group on file.',
+        )
+    if talents.error:
+        return _RecipientTarget(ok=False, error=talents.error)
+    # talents.not_found (selector itself invalid, or a single name with
+    # genuinely no match) — falls through to try q as a CRM category or
+    # saved list next, unchanged fallthrough behavior.
 
     # Tier 4: a CRM contact-type category ("send ... to Brand Managers") —
     # bounded to REAL, known contact_type values (not a loose free-text CRM
@@ -1348,40 +1456,37 @@ def _format_instagram_send_body(resolved: List[Tuple[str, str]], tmap: Dict[str,
 async def _resolve_instagram_target(collected: Dict[str, str]) -> _SendTarget:
     """Instagram Profile Send mode — source_query holds the subject
     talent name/list (whose Instagram, see _extract_instagram_fields).
-    Resolved via _resolve_multi_recipient_names (the SAME multi-name +
-    per-fragment-disambiguation machinery Multi Manual Recipients already
-    uses for recipients, reused here for "who" a profile belongs to
-    instead of "who" receives a message). No recipient named ->
+    Resolved via the SAME shared _resolve_talent_names function
+    _resolve_recipient's Tier 3 uses — not a separate lookup: a single
+    subject name goes through the exact single-name tier (exact/
+    normalized/token/fuzzy matching + safety gate), a multi-name list
+    through the exact same per-fragment multi-name + disambiguation path
+    Multi Manual Recipients uses for recipients. No recipient named ->
     reply_in_chat=True (answer inline, never calls _resolve_recipient or
     create_batch at all)."""
     subject_query = (collected.get("source_query") or "").strip()
     if not subject_query:
         return _SendTarget(ok=False, error="Whose Instagram profile should I send?")
 
-    fragments = _split_recipient_names(subject_query) or [subject_query]
-    multi = await _resolve_multi_recipient_names(fragments)
-    if multi.not_found or multi.unsafe:
-        problems = list(multi.not_found) + [frag for frag, _label in multi.unsafe]
-        return _SendTarget(ok=False, error=f"Couldn't find:\n\n{chr(10).join(problems)}")
-    if multi.ambiguous:
-        frag, amb_candidates, idx = multi.ambiguous
-        return _SendTarget(
-            ok=False,
-            ambiguous=AmbiguousEntity(
-                entity_type="talent", field_key=_PENDING_MULTI_SUBJECT_PICK_KEY,
-                candidates=[disambiguation.Candidate(id=c.id, label=c.label) for c in amb_candidates],
-                extra_collected={
-                    _PENDING_MULTI_SUBJECT_FRAGMENTS_KEY: json.dumps(fragments),
-                    _PENDING_MULTI_SUBJECT_INDEX_KEY: str(idx),
-                },
-            ),
-        )
-    if not multi.resolved:
-        return _SendTarget(ok=False, error="Whose Instagram profile should I send?")
+    talents = await _resolve_talent_names(
+        subject_query,
+        single_ambiguous_field_key="source_query",
+        multi_pick_field_key=_PENDING_MULTI_SUBJECT_PICK_KEY,
+        multi_fragments_key=_PENDING_MULTI_SUBJECT_FRAGMENTS_KEY,
+        multi_index_key=_PENDING_MULTI_SUBJECT_INDEX_KEY,
+    )
+    if talents.ambiguous:
+        return _SendTarget(ok=False, ambiguous=talents.ambiguous)
+    if not talents.ok:
+        # Unlike _resolve_recipient's Tier 3, Instagram has no CRM/saved-
+        # list fallback — a subject is always a talent name, so any
+        # non-ambiguous failure (including not_found) is terminal here.
+        return _SendTarget(ok=False, error=talents.error or f"Couldn't find:\n\n{subject_query}")
 
-    tmap = await _talent_instagram_by_id([tid for tid, _label in multi.resolved])
-    message_text = _format_instagram_send_body(multi.resolved, tmap)
-    subject_label = ", ".join(label for _tid, label in multi.resolved)
+    resolved_pairs = list(zip(talents.talent_ids, talents.talent_labels))
+    tmap = await _talent_instagram_by_id(talents.talent_ids)
+    message_text = _format_instagram_send_body(resolved_pairs, tmap)
+    subject_label = ", ".join(talents.talent_labels)
 
     recipient_query = (collected.get("recipient_query") or "").strip()
     if not recipient_query or recipient_query == _REPLY_IN_CHAT_SENTINEL:

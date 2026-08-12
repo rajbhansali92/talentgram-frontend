@@ -3184,20 +3184,21 @@ async def test_custom_message_multiline_emoji_url_delivered_verbatim():
         await _restore_config(original)
 
 
-async def test_custom_message_no_quotes_falls_through_to_requirement_mode():
-    """Regression guard for the slug="custom" template exclusion — a
-    malformed "send custom message to X" (no quotes, no colon-body) falls
-    through to requirement mode (Tier 3: source_query="custom message",
-    recipient_query=name). With the seeded "Custom Message" template
-    excluded from _fetch_templates(), this must NOT silently fuzzy-match
-    it and send the literal unsubstituted string "{{message}}" — it must
-    end in a clear "couldn't find a template" error instead, and never
-    reach an approvable "Sent." state."""
+async def test_custom_message_no_quotes_stays_in_custom_message_mode():
+    """(2026-08-12, hardened) "send custom message" must win custom_message
+    mode OUTRIGHT — even with no quotes/colon-body to extract a payload
+    from — never silently fall through to template matching (the original
+    landmine: it would have fuzzy-matched the seeded "Custom Message"
+    template and sent the literal unsubstituted string "{{message}}").
+    Instead it asks what the message should say, stays open, and the next
+    turn's plain-text answer is treated as the literal body — never as a
+    template/project name."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
     name = f"Riya{uuid.uuid4().hex[:6]}"
     t1 = await _seed_talent(name, phone="917000230001")
+    batch_id = None
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
@@ -3206,14 +3207,47 @@ async def test_custom_message_no_quotes_falls_through_to_requirement_mode():
         )
         assert r.handled, r.reply
         assert "{{message}}" not in r.reply
-        assert "couldn't find a template" in r.reply.lower()
-        assert "Reply" not in r.reply and "1 Approve" not in r.reply
+        assert "couldn't find a template" not in r.reply.lower()
 
-        # The attempt ends cleanly (genuinely-unresolvable source clears
-        # the conversation) rather than leaving anything open to approve.
         conv = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": phone})
-        assert conv is None
+        assert conv is not None, "conversation must stay open, waiting for the message body"
+        assert conv["collected"].get("send_mode") == "custom_message"
+
+        # No quote/colon-body means no payload could be extracted from
+        # turn 1 at all (nothing to protect as "opaque" — there's no
+        # message yet), so the recipient named in turn 1 isn't carried
+        # forward either; both missing fields get asked in turn, same as
+        # any other intent's generic missing-field flow. What matters for
+        # this regression guard is that neither ever becomes a template
+        # lookup or a literal "{{message}}" send.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Testing spelling.",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert "{{message}}" not in r2.reply
+        assert "couldn't find a template" not in r2.reply.lower()
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=name,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r3.handled, r3.reply
+        assert "MESSAGE" in r3.reply
+        assert "Testing spelling." in r3.reply
+
+        r4 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r4.reply
+        batch_id = r4.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        assert jobs[0]["message_body"] == "Testing spelling."
     finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
         await _cleanup(phone, talent_ids=[t1])
         await _restore_config(original)
 
@@ -3446,3 +3480,343 @@ async def test_instagram_subject_ambiguous_disambiguates_and_resumes():
             await _cleanup_batch(batch_id)
         await _cleanup(phone, talent_ids=[t_sharma, t_verma, t_raj])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Regression suite (2026-08-12) — two production incidents surfaced after
+# deploying Custom Message / Instagram Profile Send:
+#
+#   1. A real multiline Custom Message ("PRE-LOCKING TRIALS...") fell
+#      through to template matching instead of being recognized as a
+#      custom message.
+#   2. "Send instagram profile of Pankuri Gidwani to Heena Talentgram"
+#      failed to resolve a talent that every other command resolves fine,
+#      because Instagram had its own resolution call instead of reusing
+#      _resolve_recipient's shared talent tier.
+#
+# These tests cover the EXACT required checklist for both regressions.
+# ---------------------------------------------------------------------------
+
+# --- Custom Message: parser priority + opaque-payload parsing -------------
+
+def test_custom_message_multiline_with_blank_lines_never_falls_to_template():
+    """The exact shape of the production incident: "Send custom message"
+    on its own line, a blank line, then a multi-paragraph quoted payload
+    with blank lines BETWEEN paragraphs, then the recipient list. Must be
+    recognized as custom_message mode, never requirement mode."""
+    text = (
+        "Send custom message\n\n"
+        "\"PRE-LOCKING TRIALS - RMKV\n\n"
+        "Dates - 12th and 13th August\n\n"
+        "Timing - 10 AM to 6 PM\n\n"
+        "Venue - Mumbai Studio\n\n"
+        "If available let us know...\"\n\n"
+        "to Vaishnavi, Vijayanand and Tanya"
+    )
+    fields = wca.extract_send_requirement_fields(text)
+    assert fields["send_mode"] == "custom_message"
+    assert fields["source_query"] == (
+        "PRE-LOCKING TRIALS - RMKV\n\n"
+        "Dates - 12th and 13th August\n\n"
+        "Timing - 10 AM to 6 PM\n\n"
+        "Venue - Mumbai Studio\n\n"
+        "If available let us know..."
+    )
+    assert fields["recipient_query"] == "Vaishnavi, Vijayanand and Tanya"
+
+
+async def test_custom_message_production_repro_end_to_end_never_hits_template():
+    """End-to-end version of the exact production repro — confirms the
+    agent never says "I couldn't find a template matching..." and instead
+    builds a normal Custom Message confirmation card."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    v1 = f"Vaishnavi{uuid.uuid4().hex[:6]}"
+    v2 = f"Vijayanand{uuid.uuid4().hex[:6]}"
+    v3 = f"Tanya{uuid.uuid4().hex[:6]}"
+    tids = [
+        await _seed_talent(v1, phone="917000310001"),
+        await _seed_talent(v2, phone="917000310002"),
+        await _seed_talent(v3, phone="917000310003"),
+    ]
+    try:
+        text = (
+            "Send custom message\n\n"
+            "\"PRE-LOCKING TRIALS - RMKV\n\n"
+            "Dates - ...\n\n"
+            "Timing - ...\n\n"
+            "...\n\n"
+            "If available let us know...\"\n\n"
+            f"to {v1}, {v2} and {v3}"
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "couldn't find a template" not in r.reply.lower()
+        assert "MESSAGE" in r.reply
+        assert "PRE-LOCKING TRIALS" in r.reply
+        assert "3 Phone Numbers" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=tids)
+        await _restore_config(original)
+
+
+def test_custom_message_punctuation_and_commas_preserved():
+    text = 'Send custom message "Hi! Please confirm: yes, no, or maybe? Thanks — team." to Riya'
+    fields = wca.extract_send_requirement_fields(text)
+    assert fields["send_mode"] == "custom_message"
+    assert fields["source_query"] == "Hi! Please confirm: yes, no, or maybe? Thanks — team."
+    assert fields["recipient_query"] == "Riya"
+
+
+def test_custom_message_quotes_inside_body_preserved_exactly():
+    """Explicit requirement: 'quotes inside the body'. The payload is
+    everything between the FIRST and LAST quote character in the message
+    — embedded quotes are opaque content, never a parsing boundary."""
+    text = 'Send custom message "She said "hello" to everyone, then left." to Riya'
+    fields = wca.extract_send_requirement_fields(text)
+    assert fields["send_mode"] == "custom_message"
+    assert fields["source_query"] == 'She said "hello" to everyone, then left.'
+    assert fields["recipient_query"] == "Riya"
+
+
+def test_custom_message_bullets_and_arbitrary_length_preserved():
+    body = (
+        "Checklist:\n"
+        "• Bring ID\n"
+        "• Bring portfolio\n"
+        "• Arrive 30 min early\n\n"
+        + ("Additional notes line. " * 50)
+    ).strip()
+    text = f'Send custom message "{body}" to Riya'
+    fields = wca.extract_send_requirement_fields(text)
+    assert fields["send_mode"] == "custom_message"
+    assert fields["source_query"] == body
+
+
+async def test_custom_message_never_falls_through_to_template_matching_end_to_end():
+    """Regression guard, general form: ANY well-formed "send custom
+    message ..." command must never produce a template-matching error,
+    for a variety of realistic message shapes."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    name = f"Riya{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(name, phone="917000320001")
+    cases = [
+        f'Send custom message "Simple one-liner." to {name}',
+        f'Send custom message "Line one.\n\nLine two.\n\nLine three." to {name}',
+        f'Send custom message "Quotes \"inside\" the body." to {name}',
+        f"Message {name}:\nColon-delimited body here.",
+    ]
+    try:
+        for text in cases:
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text=text,
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled, text
+            assert "couldn't find a template" not in r.reply.lower(), text
+            assert "{{message}}" not in r.reply, text
+            # Cancel/clear before the next case so each starts fresh.
+            await handle_inbound_message(
+                group_name=group, sender_phone=phone, text="3",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+    finally:
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+# --- Instagram: shared talent resolver -------------------------------------
+
+async def test_instagram_partial_name_resolves():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    full_name = f"Pankuri{uuid.uuid4().hex[:6]} Gidwani"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(full_name, phone="917000330001", instagram_handle="pankuri.g")
+    t2 = await _seed_talent(raj, phone="917000330002")
+    try:
+        first_word = full_name.split()[0]
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send instagram profile of {first_word} to {raj}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert full_name in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_instagram_fuzzy_typo_resolves():
+    """"Pankri"/"Pankuree"/"Pankury" -> Pankuri, same tolerance every
+    other command gets from the shared fuzzy matcher."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    base = f"Pankuri{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(base, phone="917000340001", instagram_handle="pankuri.g")
+    t2 = await _seed_talent(raj, phone="917000340002")
+    try:
+        typo = base[:-1]  # drop the last character — a minor typo
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send insta of {typo} to {raj}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert base in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_instagram_multiple_recipients():
+    """"multiple recipients" — sending the SAME subject's Instagram to
+    more than one person."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    pankuri = f"Pankuri{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    aman = f"Aman{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(pankuri, phone="917000350001", instagram_handle="pankuri.g")
+    t2 = await _seed_talent(raj, phone="917000350002")
+    t3 = await _seed_talent(aman, phone="917000350003")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send instagram profile of {pankuri} to {raj} and {aman}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "2 Phone Numbers" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 2
+        for j in jobs:
+            assert "https://instagram.com/pankuri.g" in j["message_body"]
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1, t2, t3])
+        await _restore_config(original)
+
+
+async def test_instagram_recipient_typo_resolves():
+    """A typo in the RECIPIENT (not the subject) must resolve through the
+    same shared resolver too."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    pankuri = f"Pankuri{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(pankuri, phone="917000360001", instagram_handle="pankuri.g")
+    t2 = await _seed_talent(raj, phone="917000360002")
+    try:
+        recipient_typo = raj[:-1]
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send instagram profile of {pankuri} to {recipient_typo}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert raj in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_instagram_subject_resolution_matches_recipient_resolution_exactly():
+    """Direct parity proof: the SAME name resolves to the SAME talent id
+    whether it's used as a recipient (the campaign-sender path) or an
+    Instagram subject — because both call the one shared
+    _resolve_talent_names function, not two separate lookups. Checked
+    twice: once on a clean exact-name match (both must succeed identically
+    — this is the literal shape of the production regression), and once
+    on a typo close enough to fuzzy-match but too different to pass the
+    post-match safety gate (both must reject it IDENTICALLY too — parity
+    holds for failure modes, not just successes)."""
+    full_name = f"Pankuri{uuid.uuid4().hex[:6]} Gidwani"
+    t1 = await _seed_talent(full_name, phone="917000370001", instagram_handle="pankuri.g")
+
+    async def _resolve_both(q: str) -> "tuple[wca._TalentNamesResolution, wca._TalentNamesResolution]":
+        as_recipient = await wca._resolve_talent_names(
+            q, single_ambiguous_field_key="recipient_query",
+            multi_pick_field_key=wca._PENDING_MULTI_RECIPIENT_PICK_KEY,
+            multi_fragments_key=wca._PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY,
+            multi_index_key=wca._PENDING_MULTI_RECIPIENT_INDEX_KEY,
+        )
+        as_subject = await wca._resolve_talent_names(
+            q, single_ambiguous_field_key="source_query",
+            multi_pick_field_key=wca._PENDING_MULTI_SUBJECT_PICK_KEY,
+            multi_fragments_key=wca._PENDING_MULTI_SUBJECT_FRAGMENTS_KEY,
+            multi_index_key=wca._PENDING_MULTI_SUBJECT_INDEX_KEY,
+        )
+        return as_recipient, as_subject
+
+    try:
+        as_recipient, as_subject = await _resolve_both(full_name)
+        assert as_recipient.ok and as_subject.ok
+        assert as_recipient.talent_ids == as_subject.talent_ids == [t1]
+        assert as_recipient.talent_labels == as_subject.talent_labels == [full_name]
+
+        typo = full_name.replace("Gidwani", "Gidwni")  # dropped a letter
+        as_recipient2, as_subject2 = await _resolve_both(typo)
+        assert as_recipient2.ok is False and as_subject2.ok is False
+        assert as_recipient2.error == as_subject2.error
+    finally:
+        await db.talents.delete_one({"id": t1})
+
+
+async def test_instagram_and_campaign_sender_agree_on_the_production_repro_name():
+    """The literal talent name from the production incident report,
+    confirming Instagram resolution now matches what a normal recipient
+    send already resolves for the identical name."""
+    t1 = await _seed_talent("Pankuri Gidwani " + uuid.uuid4().hex[:6], phone="917000380001")
+    name = (await db.talents.find_one({"id": t1}, {"_id": 0, "name": 1}))["name"]
+    try:
+        recipient_target = await wca._resolve_recipient(name, "")
+        assert recipient_target.ok, recipient_target.error
+
+        instagram_collected = {"source_query": name}
+        instagram_target = await wca._resolve_instagram_target(instagram_collected)
+        # No recipient named -> reply_in_chat — still proves resolution
+        # itself succeeded (the ambiguous/not-found paths never reached
+        # this far).
+        assert instagram_target.ok, instagram_target.error
+        assert name in instagram_target.subject_label
+    finally:
+        await db.talents.delete_one({"id": t1})

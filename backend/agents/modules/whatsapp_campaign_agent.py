@@ -90,7 +90,11 @@ from agents.models import (
 from agents.registry import register_agent
 from agents import conversation, disambiguation, name_match
 from agents.modules import casting_pipeline_nlu as nlu
-from agents.modules.casting_pipeline import _fetch_ongoing_projects, _fetch_all_talent_candidates
+from agents.modules.casting_pipeline import (
+    _fetch_ongoing_projects,
+    _fetch_all_talent_candidates,
+    _format_instagram_link,
+)
 
 AGENT_ID = "whatsapp-campaign-agent"
 
@@ -174,9 +178,27 @@ def resolve_template_by_name(name_query: str, templates: List[Dict[str, str]]) -
 
 
 async def _fetch_templates() -> List[Dict[str, str]]:
+    # Excludes the seeded slug="custom" template (name "Custom Message",
+    # body_text="{{message}}") — that template is reachable ONLY via the
+    # dedicated _fetch_custom_template() helper (Custom Message/Instagram
+    # send modes), never by ordinary fuzzy template-name matching. Without
+    # this exclusion, a malformed "send custom message to X" (no quotes,
+    # falls through to requirement mode) could fuzzy-match this template's
+    # name and silently send the literal unsubstituted string "{{message}}".
     return await db.whatsapp_templates.find(
-        {}, {"_id": 0, "id": 1, "name": 1, "slug": 1}
+        {"slug": {"$ne": "custom"}}, {"_id": 0, "id": 1, "name": 1, "slug": 1}
     ).sort("created_at", 1).to_list(200)
+
+
+async def _fetch_custom_template() -> Optional[Dict[str, str]]:
+    """The seeded built-in template with slug="custom" and
+    body_text="{{message}}" (routers/whatsapp.py) — the render target for
+    both Custom Message and Instagram Profile sends. Both modes populate
+    the {{message}} placeholder via BatchIn.variable_data (see
+    _build_batch_in), never a new template or send path."""
+    return await db.whatsapp_templates.find_one(
+        {"slug": "custom"}, {"_id": 0, "id": 1, "name": 1, "slug": 1}
+    )
 
 
 async def _fetch_contact_lists() -> List[Dict[str, str]]:
@@ -306,6 +328,16 @@ def _split_stage_and_project(recipient_text: str) -> Optional["tuple[str, str]"]
 # treating it as a literal project name.
 _ALL_PROJECTS_SENTINEL = "__ANY_ONGOING_PROJECT__"
 
+# Instagram Profile Send (recipient omitted) — "share Pankuri's instagram"
+# names no one to send to, meaning "answer inline, in this chat" rather
+# than "send to someone else". recipient_query can't be left empty (same
+# reasoning as _ALL_PROJECTS_SENTINEL above — an empty value would trigger
+# the generic "Who should this go to?" question instead of ever reaching
+# build_confirmation). _resolve_instagram_target recognizes this sentinel
+# and short-circuits to a direct reply — never passed to _resolve_recipient,
+# which stays completely unaware of it.
+_REPLY_IN_CHAT_SENTINEL = "__REPLY_IN_SAME_CHAT__"
+
 
 def _strip_leading_trigger_preserve_newlines(text: str, triggers: List[str]) -> str:
     """nlu._strip_leading_trigger collapses ALL whitespace in the whole
@@ -325,8 +357,129 @@ def _strip_leading_trigger_preserve_newlines(text: str, triggers: List[str]) -> 
     return stripped[len(trig):].lstrip(" :\n\t")
 
 
+# ---------------------------------------------------------------------------
+# Send Mode detection (2026-08-11) — decides, from CONTENT (never trigger
+# phrase — see the module docstring's addendum on why a new competing
+# intent can't reliably distinguish these), whether a "send"-triggered
+# message is a stored requirement/template (existing, unchanged grammar),
+# a literal custom message, or an Instagram-profile request. Checked once,
+# right after the trigger verb is stripped, before any of the three
+# existing extraction tiers run.
+# ---------------------------------------------------------------------------
+_INSTAGRAM_KEYWORD_RE = re.compile(r"\binsta(?:gram)?\b", re.IGNORECASE)
+# Straight double quotes and the curly variant iOS/Android autocorrect
+# commonly substitutes for them — both treated identically.
+_QUOTE_RE = re.compile(r'"([^"]*)"|“([^”]*)”', re.DOTALL)
+
+
+def _detect_send_mode(remainder: str) -> str:
+    if _INSTAGRAM_KEYWORD_RE.search(remainder):
+        return "instagram"
+    if _QUOTE_RE.search(remainder):
+        return "custom_message"
+    first_nl = remainder.find("\n")
+    first_line = remainder[:first_nl] if first_nl != -1 else remainder
+    if first_line.rstrip().endswith(":"):
+        return "custom_message"
+    return "requirement"
+
+
+def _extract_custom_message_fields(remainder: str) -> Dict[str, str]:
+    """Custom Message mode — the quoted/colon-delimited span is the EXACT
+    text to send, verbatim (internal whitespace/newlines/emoji/URLs/
+    unicode untouched; only the shared FieldSpec.validate layer trims
+    outer whitespace later, same as every other field on this intent)."""
+    out: Dict[str, str] = {}
+    q_m = _QUOTE_RE.search(remainder)
+    if q_m:
+        out["source_query"] = q_m.group(1) if q_m.group(1) is not None else q_m.group(2)
+        # The recipient connector is searched OUTSIDE the quoted span only
+        # — a "to"/"with" appearing INSIDE the message body itself (e.g.
+        # "...call me tomorrow with your portfolio") must never be misread
+        # as the recipient clause. The quote can come before OR after the
+        # recipient list ("send custom message \"...\" to Riya" vs. "send
+        # this to\nRiya\n\n\"text\""), so both sides are tried.
+        after = remainder[q_m.end():]
+        before = remainder[:q_m.start()]
+        r_m = _TO_OR_WITH_RE.search(after) or _TO_OR_WITH_RE.search(before)
+        if r_m:
+            recipient_part = r_m.group(1).strip(" .!?\n")
+            if recipient_part:
+                out["recipient_query"] = recipient_part
+        return out
+
+    # Colon-body shape: "message Raj and Karan:\n<verbatim rest>".
+    first_nl = remainder.find("\n")
+    first_line = remainder[:first_nl] if first_nl != -1 else remainder
+    stripped_first = first_line.rstrip()
+    if stripped_first.endswith(":"):
+        colon_idx = len(stripped_first) - 1
+        recipient_part = first_line[:colon_idx].strip()
+        if recipient_part:
+            out["recipient_query"] = recipient_part
+        out["source_query"] = remainder[colon_idx + 1:]
+    return out
+
+
+# "X's instagram" / "X's insta" — possessive subject reference.
+_INSTA_POSSESSIVE_RE = re.compile(r"^(.*?)[\'’]s\s+insta(?:gram)?\b.*$", re.IGNORECASE | re.DOTALL)
+# "instagram profile(s)/link(s) of|for X" — explicit connector shape.
+_INSTA_OF_RE = re.compile(
+    r"\binsta(?:gram)?\b\s*(?:profiles?|links?)?\s*(?:of|for)\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_INSTA_FILLER_RE = re.compile(r"\b(?:insta(?:gram)?|profiles?|links?)\b", re.IGNORECASE)
+_LEADING_OF_FOR_RE = re.compile(r"^\s*(?:of|for)\s+", re.IGNORECASE)
+
+
+def _extract_instagram_fields(remainder: str) -> Dict[str, str]:
+    """Instagram Profile Send mode. `source_query` carries the subject
+    talent name/list (whose Instagram), reusing the SAME field slot
+    requirement-mode uses for "what to send" — `_resolve_instagram_target`
+    is the only place that interprets it differently. `recipient_query`
+    is empty/absent only when no "to X" clause was found at all, in which
+    case it's set to _REPLY_IN_CHAT_SENTINEL so the required-field check
+    never blocks asking a question that doesn't apply."""
+    out: Dict[str, str] = {}
+    r_m = _TO_OR_WITH_RE.search(remainder)
+    if r_m:
+        head = remainder[:r_m.start()].strip()
+        recipient_part = r_m.group(1).strip(" .!?")
+        if recipient_part:
+            out["recipient_query"] = recipient_part
+    else:
+        head = remainder.strip()
+
+    poss_m = _INSTA_POSSESSIVE_RE.match(head)
+    if poss_m:
+        subject = poss_m.group(1).strip()
+    else:
+        of_m = _INSTA_OF_RE.search(head)
+        if of_m:
+            subject = of_m.group(1).strip(" .!?")
+        else:
+            subject = _LEADING_OF_FOR_RE.sub("", _INSTA_FILLER_RE.sub("", head).strip()).strip()
+    if subject:
+        out["source_query"] = subject
+
+    if "recipient_query" not in out:
+        out["recipient_query"] = _REPLY_IN_CHAT_SENTINEL
+    return out
+
+
 def extract_send_requirement_fields(text: str) -> Dict[str, str]:
     remainder = _strip_leading_trigger_preserve_newlines(text or "", SEND_TRIGGERS)
+
+    send_mode = _detect_send_mode(remainder)
+    if send_mode == "instagram":
+        out = _extract_instagram_fields(remainder)
+        out["send_mode"] = "instagram"
+        return out
+    if send_mode == "custom_message":
+        out = _extract_custom_message_fields(remainder)
+        out["send_mode"] = "custom_message"
+        return out
+
     out: Dict[str, str] = {}
 
     # Tier 1: legacy explicit-template grammar.
@@ -405,6 +558,16 @@ STAGE_QUERY_FIELD = FieldSpec(
     question="Which pipeline stage?",
     validate=_validate_query_text, aliases=["stage", "pipeline"],
     required=False,
+)
+# Private metadata, never asked about (question="") and never blocks
+# confirmation (required=False) — a real FieldSpec purely so dispatcher.py
+# carries send_mode forward in `collected` across every turn (bare extra
+# keys returned by extract_fields that don't match a declared FieldSpec.key
+# are silently dropped — see dispatcher.py's collected-building loop).
+# Absent/empty means "requirement" (the original, only, mode).
+SEND_MODE_FIELD = FieldSpec(
+    key="send_mode", label="Mode", question="",
+    validate=_validate_query_text, required=False,
 )
 
 
@@ -730,6 +893,48 @@ async def _resume_pending_multi_recipient(collected: dict, ctx: ExecContext) -> 
     return new_collected
 
 
+# Instagram Profile Send's subject-name mirror of the three keys above.
+# _resume_pending_multi_recipient always rewrites `recipient_query` — reusing
+# it as-is for an ambiguous SUBJECT name (whose Instagram, not who receives
+# it) would corrupt the recipient field, so this is a small, near-identical
+# duplication targeting `source_query` instead — same shared disambiguation
+# engine, same nlu.resolve_against_candidates/_fuzzy_match_is_safe, only the
+# destination key differs.
+_PENDING_MULTI_SUBJECT_PICK_KEY = "_pending_multi_subject_pick"
+_PENDING_MULTI_SUBJECT_FRAGMENTS_KEY = "_pending_multi_subject_fragments"
+_PENDING_MULTI_SUBJECT_INDEX_KEY = "_pending_multi_subject_index"
+
+
+async def _resume_pending_multi_subject(collected: dict, ctx: ExecContext) -> dict:
+    """Mirror of _resume_pending_multi_recipient, for Instagram Profile
+    Send's "whose profile" list — writes the resolved fragment list back
+    into source_query instead of recipient_query. A no-op when no
+    multi-subject disambiguation is pending."""
+    picked_label = collected.get(_PENDING_MULTI_SUBJECT_PICK_KEY)
+    fragments_json = collected.get(_PENDING_MULTI_SUBJECT_FRAGMENTS_KEY)
+    index_raw = collected.get(_PENDING_MULTI_SUBJECT_INDEX_KEY)
+    if not picked_label or fragments_json is None or index_raw is None:
+        return collected
+    try:
+        fragments = json.loads(fragments_json)
+        index = int(index_raw)
+    except (TypeError, ValueError):
+        fragments = None
+        index = -1
+    new_collected = dict(collected)
+    for key in (
+        _PENDING_MULTI_SUBJECT_PICK_KEY,
+        _PENDING_MULTI_SUBJECT_FRAGMENTS_KEY,
+        _PENDING_MULTI_SUBJECT_INDEX_KEY,
+    ):
+        new_collected.pop(key, None)
+    if isinstance(fragments, list) and 0 <= index < len(fragments):
+        fragments[index] = picked_label
+        new_collected["source_query"] = ", ".join(fragments)
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    return new_collected
+
+
 async def _resolve_recipient(recipient_query: str, stage_query: str) -> _RecipientTarget:
     normalized_stage, stage_error = await _resolve_pipeline_stage(stage_query)
     if stage_error:
@@ -1014,9 +1219,35 @@ class _SendTarget:
     ambiguous: Optional[AmbiguousEntity] = None
     project_label: Optional[str] = None
     pipeline_stage_label: Optional[str] = None
+    # Custom Message / Instagram Profile modes only — the verbatim text to
+    # render via the custom template's {{message}} placeholder (see
+    # _build_batch_in). None for requirement mode (unaffected).
+    literal_message: Optional[str] = None
+    # Instagram Profile mode only, no recipient named ("share Pankuri's
+    # instagram") — answer inline in this same chat instead of sending via
+    # create_batch to someone else. literal_message carries the rendered
+    # reply text in this case.
+    reply_in_chat: bool = False
+    # Instagram Profile mode only — display label for "whose profile(s)",
+    # shown on the confirmation card in place of a template name.
+    subject_label: str = ""
 
 
 async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
+    """Dispatches on collected["send_mode"] (absent/empty -> "requirement",
+    the original and only mode before this). Every branch returns the same
+    _SendTarget shape, so the confirmation-card builder, the executor, and
+    _current_recipient_candidates (Preview/Summary/Exclude/Include/
+    pagination) all keep working unchanged regardless of mode."""
+    send_mode = collected.get("send_mode") or "requirement"
+    if send_mode == "custom_message":
+        return await _resolve_custom_message_target(collected)
+    if send_mode == "instagram":
+        return await _resolve_instagram_target(collected)
+    return await _resolve_requirement_target(collected)
+
+
+async def _resolve_requirement_target(collected: Dict[str, str]) -> _SendTarget:
     source_query = (collected.get("source_query") or "").strip()
     recipient_query = (collected.get("recipient_query") or "").strip()
     stage_query = (collected.get("stage_query") or "").strip()
@@ -1049,6 +1280,129 @@ async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
         ok=True, source_type=recipient.source_type, source_params=recipient.source_params,
         recipient_label=recipient.display_label, template=tmpl_match.template,
         project_label=recipient.project_label, pipeline_stage_label=recipient.pipeline_stage_label,
+    )
+
+
+async def _resolve_custom_message_target(collected: Dict[str, str]) -> _SendTarget:
+    """Custom Message mode — source_query holds the exact quoted/colon-body
+    text (see _extract_custom_message_fields); recipient resolution reuses
+    _resolve_recipient completely unmodified (phone/project/talent(s)/CRM/
+    saved-list, same disambiguation/safety-gate machinery as every other
+    send)."""
+    message_text = collected.get("source_query") or ""
+    if not message_text:
+        return _SendTarget(ok=False, error="What should the message say?")
+
+    custom_template = await _fetch_custom_template()
+    if not custom_template:
+        return _SendTarget(
+            ok=False,
+            error="The built-in custom-message template is missing — please contact an admin.",
+        )
+
+    recipient_query = (collected.get("recipient_query") or "").strip()
+    recipient = await _resolve_recipient(recipient_query, "")
+    if not recipient.ok:
+        if recipient.ambiguous:
+            return _SendTarget(ok=False, ambiguous=recipient.ambiguous)
+        return _SendTarget(ok=False, error=recipient.error)
+
+    return _SendTarget(
+        ok=True, source_type=recipient.source_type, source_params=recipient.source_params,
+        recipient_label=recipient.display_label, template=custom_template,
+        literal_message=message_text,
+        project_label=recipient.project_label, pipeline_stage_label=recipient.pipeline_stage_label,
+    )
+
+
+async def _talent_instagram_by_id(ids: List[str]) -> Dict[str, dict]:
+    """Mirrors _talent_names_by_id below, but also projects
+    instagram_handle — _fetch_all_talent_candidates only carries id+name,
+    which every OTHER resolution path needs and this one additionally
+    needs the stored handle for."""
+    ids = [i for i in dict.fromkeys(ids) if i]
+    if not ids:
+        return {}
+    docs = await db.talents.find(
+        {"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "instagram_handle": 1},
+    ).to_list(len(ids))
+    return {d["id"]: d for d in docs}
+
+
+def _format_instagram_send_body(resolved: List[Tuple[str, str]], tmap: Dict[str, dict]) -> str:
+    """Numbered "1.\\nName\\nURL" (or "...\\nInstagram profile not
+    available." when missing) — shared by both the recipient-send and
+    reply-in-chat paths so the exact same text renders either way."""
+    lines: List[str] = []
+    for i, (tid, label) in enumerate(resolved, start=1):
+        handle = (tmap.get(tid) or {}).get("instagram_handle")
+        url = _format_instagram_link(handle)
+        if i > 1:
+            lines.append("")
+        lines.append(f"{i}.")
+        lines.append(label)
+        lines.append(url if url else "Instagram profile not available.")
+    return "\n".join(lines)
+
+
+async def _resolve_instagram_target(collected: Dict[str, str]) -> _SendTarget:
+    """Instagram Profile Send mode — source_query holds the subject
+    talent name/list (whose Instagram, see _extract_instagram_fields).
+    Resolved via _resolve_multi_recipient_names (the SAME multi-name +
+    per-fragment-disambiguation machinery Multi Manual Recipients already
+    uses for recipients, reused here for "who" a profile belongs to
+    instead of "who" receives a message). No recipient named ->
+    reply_in_chat=True (answer inline, never calls _resolve_recipient or
+    create_batch at all)."""
+    subject_query = (collected.get("source_query") or "").strip()
+    if not subject_query:
+        return _SendTarget(ok=False, error="Whose Instagram profile should I send?")
+
+    fragments = _split_recipient_names(subject_query) or [subject_query]
+    multi = await _resolve_multi_recipient_names(fragments)
+    if multi.not_found or multi.unsafe:
+        problems = list(multi.not_found) + [frag for frag, _label in multi.unsafe]
+        return _SendTarget(ok=False, error=f"Couldn't find:\n\n{chr(10).join(problems)}")
+    if multi.ambiguous:
+        frag, amb_candidates, idx = multi.ambiguous
+        return _SendTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="talent", field_key=_PENDING_MULTI_SUBJECT_PICK_KEY,
+                candidates=[disambiguation.Candidate(id=c.id, label=c.label) for c in amb_candidates],
+                extra_collected={
+                    _PENDING_MULTI_SUBJECT_FRAGMENTS_KEY: json.dumps(fragments),
+                    _PENDING_MULTI_SUBJECT_INDEX_KEY: str(idx),
+                },
+            ),
+        )
+    if not multi.resolved:
+        return _SendTarget(ok=False, error="Whose Instagram profile should I send?")
+
+    tmap = await _talent_instagram_by_id([tid for tid, _label in multi.resolved])
+    message_text = _format_instagram_send_body(multi.resolved, tmap)
+    subject_label = ", ".join(label for _tid, label in multi.resolved)
+
+    recipient_query = (collected.get("recipient_query") or "").strip()
+    if not recipient_query or recipient_query == _REPLY_IN_CHAT_SENTINEL:
+        return _SendTarget(ok=True, reply_in_chat=True, literal_message=message_text, subject_label=subject_label)
+
+    custom_template = await _fetch_custom_template()
+    if not custom_template:
+        return _SendTarget(
+            ok=False,
+            error="The built-in custom-message template is missing — please contact an admin.",
+        )
+    recipient = await _resolve_recipient(recipient_query, "")
+    if not recipient.ok:
+        if recipient.ambiguous:
+            return _SendTarget(ok=False, ambiguous=recipient.ambiguous)
+        return _SendTarget(ok=False, error=recipient.error)
+
+    return _SendTarget(
+        ok=True, source_type=recipient.source_type, source_params=recipient.source_params,
+        recipient_label=recipient.display_label, template=custom_template,
+        literal_message=message_text, subject_label=subject_label,
     )
 
 
@@ -1176,11 +1530,21 @@ async def _build_batch_in(target: "_SendTarget", collected: dict, *, is_dry_run:
     payload — threads excluded_ids into the EXISTING
     BatchIn.excluded_recipient_ids / resolve_recipients_engine exclusion
     support (routers/whatsapp.py, unmodified) so Interactive Campaign
-    Editing needs zero new filtering logic of its own."""
+    Editing needs zero new filtering logic of its own.
+
+    target.literal_message (Custom Message / Instagram Profile modes only)
+    is threaded through as variable_data["message"] — the SAME
+    BatchIn.variable_data field the web app's campaign UI already uses for
+    manually-injected variables, rendered by the existing, unmodified
+    _render_message via the seeded custom template's {{message}}
+    placeholder. Requirement mode never sets literal_message, so this is
+    variable_data={} exactly as before — unaffected."""
+    variable_data = {"message": target.literal_message} if target.literal_message is not None else {}
     return BatchIn(
         source_type=target.source_type, source_params=target.source_params,
         excluded_recipient_ids=list(collected.get("excluded_ids") or []),
         template_id=target.template["id"], is_dry_run=is_dry_run,
+        variable_data=variable_data,
     )
 
 
@@ -1236,7 +1600,16 @@ async def _resume_pending_recipient_edit(collected: dict, ctx: ExecContext) -> d
 async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext) -> str:
     collected = await _resume_pending_recipient_edit(collected, ctx)
     collected = await _resume_pending_multi_recipient(collected, ctx)
+    collected = await _resume_pending_multi_subject(collected, ctx)
     target = await _resolve_send_target(collected)
+    if target.ok and target.reply_in_chat:
+        # Instagram Profile Send, no recipient named ("share Pankuri's
+        # instagram") — nothing is being sent to anyone else, so this
+        # answers inline instead of opening a confirmation card. Mirrors
+        # the unresolvable-error short-circuit right below (clear + return
+        # text directly), just for a successful, not a failed, outcome.
+        await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+        return target.literal_message or ""
     if not target.ok:
         if target.ambiguous:
             start_collected = collected
@@ -1273,6 +1646,25 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
     skipped = preview["skipped"]
     template_label = target.template.get("name") or target.template.get("slug") or ""
 
+    # Two card layouts exist below (the richer explicit-pipeline-stage
+    # summary, and the generic one) — each already used a DIFFERENT label
+    # for this same value even before Custom Message/Instagram existed
+    # ("Template" vs. "MESSAGE SOURCE"), so both need their own mode-aware
+    # label, not one shared between them.
+    send_mode = collected.get("send_mode") or "requirement"
+    if send_mode == "custom_message":
+        action_label = "Send Custom Message"
+        pipeline_header_label = header_label = "MESSAGE"
+        header_value = _truncate(target.literal_message or "")
+    elif send_mode == "instagram":
+        action_label = "Send Instagram Profile(s)"
+        pipeline_header_label = header_label = "INSTAGRAM PROFILE(S)"
+        header_value = target.subject_label
+    else:
+        action_label = "Send Requirement"
+        pipeline_header_label, header_label = "Template", "MESSAGE SOURCE"
+        header_value = template_label
+
     excluded_ids = collected.get("excluded_ids") or []
     included_ids = collected.get("included_ids") or []
     name_map = await _talent_names_by_id(list(excluded_ids) + list(included_ids))
@@ -1293,7 +1685,7 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
         # list too (previously just a bare count here).
         destination = _delivery_summary(jobs)
         lines = [
-            "Template", template_label, "",
+            pipeline_header_label, header_value, "",
             "Recipient Type", "Pipeline", "",
             "Project", target.project_label or "", "",
             "Stage", target.pipeline_stage_label, "",
@@ -1313,10 +1705,10 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
 
     lines = [
         "ACTION",
-        "Send Requirement",
+        action_label,
         "",
-        "MESSAGE SOURCE",
-        template_label,
+        header_label,
+        header_value,
         "",
         f"RECIPIENTS ({total_active})",
         "",
@@ -1334,6 +1726,16 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
 
 async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     target = await _resolve_send_target(collected)
+    if target.ok and target.reply_in_chat:
+        # Defensive only — _build_send_requirement_confirmation already
+        # short-circuits a reply_in_chat target before any "Approve" reply
+        # is possible, so this executor should never actually be reached
+        # for one. Fail clearly rather than calling create_batch with
+        # nothing to send.
+        return ExecResult(
+            ok=False, error="send_requirement_reply_in_chat_no_batch",
+            message="Nothing to send — that was already answered inline.",
+        )
     if not target.ok:
         if target.ambiguous:
             # (2026-08-09, production-readiness audit) Re-resolving fresh
@@ -1786,6 +2188,21 @@ async def _handle_campaign_confirming_edit(text: str, collected: dict, ctx: Exec
 
     tmpl_m = _CHANGE_TEMPLATE_RE.match(norm)
     if tmpl_m:
+        if collected.get("send_mode") in ("custom_message", "instagram"):
+            # Changing the template doesn't apply to a literal custom
+            # message or an Instagram-link send (both always use the one
+            # seeded custom template) — without this gate, a stray "use
+            # Reminder" could silently swap in a real template while
+            # send_mode still points variable_data["message"] at the
+            # literal text, corrupting the send.
+            logger.info(
+                "campaign_confirming_edit_detected phone=%s command=change_template_blocked send_mode=%s",
+                ctx.sender_phone, collected.get("send_mode"),
+            )
+            return (
+                "Changing the template doesn't apply to a custom message or "
+                "Instagram send — cancel and resend to change what's being sent."
+            )
         logger.info("campaign_confirming_edit_detected phone=%s command=change_template", ctx.sender_phone)
         return await _apply_template_change(tmpl_m.group(1).strip(" .!?"), collected, ctx)
 
@@ -1797,7 +2214,7 @@ async def _handle_campaign_confirming_edit(text: str, collected: dict, ctx: Exec
 SEND_REQUIREMENT_INTENT = IntentDefinition(
     intent_id="whatsapp_campaign.send_requirement",
     triggers=SEND_TRIGGERS,
-    fields=[SOURCE_QUERY_FIELD, RECIPIENT_QUERY_FIELD, STAGE_QUERY_FIELD],
+    fields=[SOURCE_QUERY_FIELD, RECIPIENT_QUERY_FIELD, STAGE_QUERY_FIELD, SEND_MODE_FIELD],
     executor=_send_requirement_executor,
     extract_fields=extract_send_requirement_fields,
     build_confirmation=_build_send_requirement_confirmation,
@@ -1831,6 +2248,17 @@ HELP_TEXT = (
     "• Send Reminder template to +919876543210\n\n"
     "• Send Reminder template to Casting Director contacts\n\n"
     "• Send Reminder template to Selected list\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "💬 Send a Custom Message\n\n"
+    "Examples:\n\n"
+    "• Send custom message \"Hi, your profile has been shortlisted.\" to Riya\n\n"
+    "• Message Raj and Karan:\n"
+    "Tomorrow's call time is 9 AM.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "📸 Send an Instagram Profile\n\n"
+    "Examples:\n\n"
+    "• Send instagram profile of Riya to Raj\n\n"
+    "• Share Pankuri's instagram\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "✏️ Edit Before Sending\n\n"
     "Examples:\n\n"

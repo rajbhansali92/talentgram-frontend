@@ -81,13 +81,31 @@ async def _seed_project(brand_name: str) -> str:
     return pid
 
 
-async def _seed_talent(name: str, phone: str = "", group_name: str = "") -> str:
+async def _seed_talent(name: str, phone: str = "", group_name: str = "", instagram_handle: str = "") -> str:
     tid = f"test-wca-tal-{uuid.uuid4().hex[:8]}"
     await db.talents.insert_one({
         "id": tid, "name": name, "phone": phone or None,
         "whatsapp_group_name": group_name, "tags": [], "notes": "",
+        "instagram_handle": instagram_handle or None,
     })
     return tid
+
+
+async def _get_custom_template_id() -> str:
+    """The seeded slug="custom" template (routers/whatsapp.py) — the send
+    target for Custom Message / Instagram Profile modes. Test-owned
+    templates are cleaned up via _cleanup(template_ids=...); this one is
+    NOT test-owned (shared, seeded at startup), so tests using it must
+    clean up their own batch/jobs by captured batch_id instead — see
+    _cleanup_batch below."""
+    tpl = await db.whatsapp_templates.find_one({"slug": "custom"}, {"_id": 0, "id": 1})
+    assert tpl is not None, "seeded slug=\"custom\" template missing from local dev DB"
+    return tpl["id"]
+
+
+async def _cleanup_batch(batch_id: str) -> None:
+    await db.whatsapp_batches.delete_one({"id": batch_id})
+    await db.whatsapp_jobs.delete_many({"batch_id": batch_id})
 
 
 async def _seed_pipeline_row(project_id: str, talent_id: str, stage: str) -> None:
@@ -2902,3 +2920,529 @@ async def test_approve_and_cancel_unaffected_by_bare_edit_fix():
         assert "Cancelled" in r.reply
     finally:
         await _teardown_big_editing_campaign(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Send Custom Message + Send Instagram Profile (2026-08-12) — two new
+# native "send" modes layered onto the SAME SEND_REQUIREMENT_INTENT (no new
+# trigger phrases, no new intent, no new send path — see send_mode
+# dispatch in whatsapp_campaign_agent.py). Pure extraction first (no DB),
+# then full end-to-end via handle_inbound_message.
+# ---------------------------------------------------------------------------
+
+def test_detect_send_mode():
+    assert wca._detect_send_mode('instagram profile of Riya to Raj') == "instagram"
+    assert wca._detect_send_mode("insta link of Pankuri to Aman") == "instagram"
+    assert wca._detect_send_mode("Pankuri's instagram") == "instagram"
+    assert wca._detect_send_mode('custom message "Hi there" to Riya') == "custom_message"
+    assert wca._detect_send_mode('this to\nRiya\n\n"text"') == "custom_message"
+    assert wca._detect_send_mode("Raj and Karan:\nTomorrow's call time is 9 AM.") == "custom_message"
+    assert wca._detect_send_mode("Toyota requirement to Ahana") == "requirement"
+    assert wca._detect_send_mode("campaign to Toyota Glanza using Diwali Template") == "requirement"
+
+
+def test_extract_custom_message_fields_quote_before_recipient():
+    remainder = wca._strip_leading_trigger_preserve_newlines(
+        'send custom message "Hi, your profile has been shortlisted." to Riya', wca.SEND_TRIGGERS,
+    )
+    fields = wca._extract_custom_message_fields(remainder)
+    assert fields["source_query"] == "Hi, your profile has been shortlisted."
+    assert fields["recipient_query"] == "Riya"
+
+
+def test_extract_custom_message_fields_simple_quote_to_recipient():
+    remainder = wca._strip_leading_trigger_preserve_newlines(
+        'send "Please upload your fresh introduction video." to Riya', wca.SEND_TRIGGERS,
+    )
+    fields = wca._extract_custom_message_fields(remainder)
+    assert fields["source_query"] == "Please upload your fresh introduction video."
+    assert fields["recipient_query"] == "Riya"
+
+
+def test_extract_custom_message_fields_quote_after_recipient_list():
+    text = 'send this to\nRiya\nKaran\nAditi\n\n"text"'
+    remainder = wca._strip_leading_trigger_preserve_newlines(text, wca.SEND_TRIGGERS)
+    fields = wca._extract_custom_message_fields(remainder)
+    assert fields["source_query"] == "text"
+    assert fields["recipient_query"] == "Riya\nKaran\nAditi"
+
+
+def test_extract_custom_message_fields_colon_body():
+    text = "message Raj and Karan:\nTomorrow's call time is 9 AM."
+    remainder = wca._strip_leading_trigger_preserve_newlines(text, wca.SEND_TRIGGERS)
+    fields = wca._extract_custom_message_fields(remainder)
+    assert fields["recipient_query"] == "Raj and Karan"
+    # Leading newline right after the colon is outer whitespace, trimmed
+    # later by _validate_query_text (see the module's documented
+    # limitation) — content itself is exact.
+    assert fields["source_query"].strip() == "Tomorrow's call time is 9 AM."
+
+
+def test_extract_custom_message_fields_preserves_multiline_emoji_url_unicode():
+    """Internal formatting (newlines, emoji, punctuation, URLs, unicode)
+    must survive extraction byte-for-byte — only the shared FieldSpec.
+    validate layer trims OUTER whitespace, later, not this function."""
+    body = "Line one 🎉\nLine two — visit https://talentgramagency.com/apply?ref=1\nनमस्ते, thanks!"
+    text = f'send custom message "{body}" to Riya'
+    remainder = wca._strip_leading_trigger_preserve_newlines(text, wca.SEND_TRIGGERS)
+    fields = wca._extract_custom_message_fields(remainder)
+    assert fields["source_query"] == body
+
+
+def test_extract_custom_message_fields_recipient_never_reads_inside_quote():
+    """A "to"/"with" occurring INSIDE the quoted message body itself must
+    never be misread as the recipient connector."""
+    text = 'send custom message "call me tomorrow with your portfolio" to Riya'
+    remainder = wca._strip_leading_trigger_preserve_newlines(text, wca.SEND_TRIGGERS)
+    fields = wca._extract_custom_message_fields(remainder)
+    assert fields["source_query"] == "call me tomorrow with your portfolio"
+    assert fields["recipient_query"] == "Riya"
+
+
+def test_extract_instagram_fields_of_connector():
+    remainder = wca._strip_leading_trigger_preserve_newlines(
+        "send instagram profile of Riya to Raj", wca.SEND_TRIGGERS,
+    )
+    fields = wca._extract_instagram_fields(remainder)
+    assert fields["source_query"] == "Riya"
+    assert fields["recipient_query"] == "Raj"
+
+
+def test_extract_instagram_fields_insta_link_of_connector():
+    remainder = wca._strip_leading_trigger_preserve_newlines(
+        "send insta link of Pankuri to Aman", wca.SEND_TRIGGERS,
+    )
+    fields = wca._extract_instagram_fields(remainder)
+    assert fields["source_query"] == "Pankuri"
+    assert fields["recipient_query"] == "Aman"
+
+
+def test_extract_instagram_fields_possessive_no_recipient():
+    remainder = wca._strip_leading_trigger_preserve_newlines(
+        "share Pankuri's instagram", wca.SEND_TRIGGERS,
+    )
+    fields = wca._extract_instagram_fields(remainder)
+    assert fields["source_query"] == "Pankuri"
+    assert fields["recipient_query"] == wca._REPLY_IN_CHAT_SENTINEL
+
+
+def test_extract_instagram_fields_multi_subject_newline_list():
+    text = "send instagram links of\nPankuri\nAditi\nKaran\nto Raj"
+    remainder = wca._strip_leading_trigger_preserve_newlines(text, wca.SEND_TRIGGERS)
+    fields = wca._extract_instagram_fields(remainder)
+    assert fields["source_query"] == "Pankuri\nAditi\nKaran"
+    assert fields["recipient_query"] == "Raj"
+
+
+def test_extract_instagram_fields_bare_subject_fallback():
+    remainder = wca._strip_leading_trigger_preserve_newlines(
+        "send instagram Riya to Raj", wca.SEND_TRIGGERS,
+    )
+    fields = wca._extract_instagram_fields(remainder)
+    assert fields["source_query"] == "Riya"
+    assert fields["recipient_query"] == "Raj"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end — Send Custom Message
+# ---------------------------------------------------------------------------
+
+async def test_custom_message_single_talent_sends_exact_text():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    name = f"Riya{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(name, phone="917000200001")
+    batch_id = None
+    try:
+        body = "Hi, your profile has been shortlisted."
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f'Send custom message "{body}" to {name}',
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "MESSAGE" in r.reply
+        assert body in r.reply
+        assert name in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply, r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        assert jobs[0]["message_body"] == body
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_custom_message_multiple_talents():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    names = [f"Riya{uuid.uuid4().hex[:6]}", f"Karan{uuid.uuid4().hex[:6]}", f"Aditi{uuid.uuid4().hex[:6]}"]
+    tids = [await _seed_talent(n, phone=f"91700020{1000 + i}") for i, n in enumerate(names)]
+    batch_id = None
+    try:
+        text = "send this to\n{}\n{}\n{}\n\n\"Tomorrow's audition starts at 11 AM.\"".format(*names)
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "3 Phone Numbers" in r.reply
+        for n in names:
+            assert n in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 3
+        for j in jobs:
+            assert j["message_body"] == "Tomorrow's audition starts at 11 AM."
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=tids)
+        await _restore_config(original)
+
+
+async def test_custom_message_colon_body_end_to_end():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    karan = f"Karan{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(raj, phone="917000210001")
+    t2 = await _seed_talent(karan, phone="917000210002")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"message {raj} and {karan}:\nTomorrow's call time is 9 AM.",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "2 Phone Numbers" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 2
+        for j in jobs:
+            assert j["message_body"] == "Tomorrow's call time is 9 AM."
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_custom_message_multiline_emoji_url_delivered_verbatim():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    name = f"Riya{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(name, phone="917000220001")
+    batch_id = None
+    try:
+        body = "Line one 🎉\nLine two — visit https://talentgramagency.com/apply?ref=1\nनमस्ते, thanks!"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f'Send custom message "{body}" to {name}',
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        assert jobs[0]["message_body"] == body
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_custom_message_no_quotes_falls_through_to_requirement_mode():
+    """Regression guard for the slug="custom" template exclusion — a
+    malformed "send custom message to X" (no quotes, no colon-body) falls
+    through to requirement mode (Tier 3: source_query="custom message",
+    recipient_query=name). With the seeded "Custom Message" template
+    excluded from _fetch_templates(), this must NOT silently fuzzy-match
+    it and send the literal unsubstituted string "{{message}}" — it must
+    end in a clear "couldn't find a template" error instead, and never
+    reach an approvable "Sent." state."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    name = f"Riya{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(name, phone="917000230001")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send custom message to {name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "{{message}}" not in r.reply
+        assert "couldn't find a template" in r.reply.lower()
+        assert "Reply" not in r.reply and "1 Approve" not in r.reply
+
+        # The attempt ends cleanly (genuinely-unresolvable source clears
+        # the conversation) rather than leaving anything open to approve.
+        conv = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": phone})
+        assert conv is None
+    finally:
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_fetch_templates_excludes_custom_slug():
+    templates = await wca._fetch_templates()
+    assert all(t.get("slug") != "custom" for t in templates)
+
+
+async def test_change_template_blocked_in_custom_message_mode():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    name = f"Riya{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(name, phone="917000240001")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f'Send custom message "Hello there" to {name}',
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="use Reminder",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert "doesn't apply" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end — Send Instagram Profile
+# ---------------------------------------------------------------------------
+
+async def test_instagram_profile_found_sends_clickable_link():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    pankuri = f"Pankuri{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(pankuri, phone="917000250001", instagram_handle="pankuri.official")
+    t2 = await _seed_talent(raj, phone="917000250002")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram profile of {pankuri} to {raj}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "INSTAGRAM PROFILE" in r.reply
+        assert pankuri in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        body = jobs[0]["message_body"]
+        assert "https://instagram.com/pankuri.official" in body
+        assert pankuri in body
+        assert "not available" not in body
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_instagram_profile_missing_shows_not_available():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    pankuri = f"Pankuri{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(pankuri, phone="917000260001")  # no instagram_handle
+    t2 = await _seed_talent(raj, phone="917000260002")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send insta link of {pankuri} to {raj}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        body = jobs[0]["message_body"]
+        assert "Instagram profile not available." in body
+        assert "https://instagram.com" not in body
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_instagram_profile_multiple_subjects_numbered():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    pankuri = f"Pankuri{uuid.uuid4().hex[:6]}"
+    aditi = f"Aditi{uuid.uuid4().hex[:6]}"
+    karan = f"Karan{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(pankuri, phone="917000270001", instagram_handle="pankuri.style")
+    t2 = await _seed_talent(aditi, phone="917000270002")  # missing handle
+    t3 = await _seed_talent(karan, phone="917000270003", instagram_handle="@karan_official")
+    t4 = await _seed_talent(raj, phone="917000270004")
+    batch_id = None
+    try:
+        text = f"send instagram links of\n{pankuri}\n{aditi}\n{karan}\nto {raj}"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        # One RECIPIENT (Raj) receiving all 3 subjects' profiles in a
+        # single message — subject count and recipient count are distinct.
+        assert "1 Phone Number" in r.reply
+        assert pankuri in r.reply and aditi in r.reply and karan in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        body = jobs[0]["message_body"]
+        assert "1." in body and "2." in body and "3." in body
+        assert "https://instagram.com/pankuri.style" in body
+        assert "https://instagram.com/karan_official" in body
+        assert "Instagram profile not available." in body
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1, t2, t3, t4])
+        await _restore_config(original)
+
+
+async def test_instagram_profile_no_recipient_replies_inline_no_batch():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    pankuri = f"Pankuri{uuid.uuid4().hex[:6]}"
+    t1 = await _seed_talent(pankuri, phone="917000280001", instagram_handle="pankuri.official")
+    before_count = await db.whatsapp_batches.count_documents({})
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share {pankuri}'s instagram",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "https://instagram.com/pankuri.official" in r.reply
+        assert pankuri in r.reply
+        # No confirmation card, no Approve/Cancel footer, no batch created —
+        # this was answered inline, not sent to a third party.
+        assert "Reply" not in r.reply or "Approve" not in r.reply
+        after_count = await db.whatsapp_batches.count_documents({})
+        assert after_count == before_count
+
+        # The conversation must not be left open expecting an "Approve".
+        conv = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": phone})
+        assert conv is None
+    finally:
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_instagram_subject_ambiguous_disambiguates_and_resumes():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    rahul = f"Rahul{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
+    t_sharma = await _seed_talent(f"{rahul} Sharma", phone="917000290001", instagram_handle="rahul.sharma")
+    t_verma = await _seed_talent(f"{rahul} Verma", phone="917000290002", instagram_handle="rahul.verma")
+    t_raj = await _seed_talent(raj, phone="917000290003")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram profile of {rahul} to {raj}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "I found multiple talents." in r.reply
+        assert f"{rahul} Sharma" in r.reply and f"{rahul} Verma" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert f"{rahul} Sharma" in r2.reply
+        assert "INSTAGRAM PROFILE" in r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r3.reply
+        batch_id = r3.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        assert "https://instagram.com/rahul.sharma" in jobs[0]["message_body"]
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t_sharma, t_verma, t_raj])
+        await _restore_config(original)

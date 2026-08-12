@@ -8,7 +8,6 @@ from pydantic import BaseModel
 import time
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, BackgroundTasks
 from pydantic import BaseModel, Field
-from pymongo.errors import DuplicateKeyError
 import cloudinary
 from core import (
     APP_NAME,
@@ -2195,35 +2194,25 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             include_skills=True,
             include_updated_at=True,
         )
-        try:
-            await db.talents.insert_one(new_talent)
-            await update_talent_cover_cache(new_talent["id"])
-            new_talent.pop("_id", None)
-            talent_doc = new_talent
-        except DuplicateKeyError:
+        from core import insert_talent_or_recover
+        talent_doc, recovered = await insert_talent_or_recover(
+            new_talent, email=email, context=f"submission_finalize sid={sid}",
+        )
+        if recovered and talent_doc:
             # Race: another submission for the same email finalised in
-            # parallel. Re-fetch the winner and link to it.
-            talent_doc = await db.talents.find_one(
-                {"$or": [
-                    {"normalized_email": email},
-                    {"email": email},
-                    {"source.talent_email": email},
-                ]},
-                {"_id": 0},
+            # parallel — merge into the winner, same as before.
+            from core import merge_talent_profile
+            form_to_merge = dict(form)
+            form_to_merge["email"] = email
+            form_to_merge["normalized_email"] = email
+            if "phone" not in form_to_merge or not form_to_merge["phone"]:
+                form_to_merge["phone"] = sub.get("talent_phone")
+            form_to_merge.pop("location", None)
+            await merge_talent_profile(
+                talent_doc, form_to_merge, "project_submission",
+                snapshot_at=sub.get("talent_profile_snapshot_at"),
             )
-            if talent_doc:
-                from core import merge_talent_profile
-                form_to_merge = dict(form)
-                form_to_merge["email"] = email
-                form_to_merge["normalized_email"] = email
-                if "phone" not in form_to_merge or not form_to_merge["phone"]:
-                    form_to_merge["phone"] = sub.get("talent_phone")
-                form_to_merge.pop("location", None)
-                await merge_talent_profile(
-                    talent_doc, form_to_merge, "project_submission",
-                    snapshot_at=sub.get("talent_profile_snapshot_at"),
-                )
-                await update_talent_cover_cache(talent_doc["id"])
+            await update_talent_cover_cache(talent_doc["id"])
     if talent_doc:
         patch["talent_id"] = talent_doc["id"]
 
@@ -2867,20 +2856,10 @@ async def set_decision(
                 include_skills=False,
                 include_updated_at=False,
             )
-            try:
-                await db.talents.insert_one(new_talent)
-                await update_talent_cover_cache(new_talent["id"])
-                talent_doc = new_talent
-            except DuplicateKeyError:
-                # Race: another finalized in parallel. Re-fetch
-                talent_doc = await db.talents.find_one(
-                    {"$or": [
-                        {"normalized_email": email},
-                        {"email": email},
-                        {"source.talent_email": email},
-                    ]},
-                    {"_id": 0},
-                )
+            from core import insert_talent_or_recover
+            talent_doc, _recovered = await insert_talent_or_recover(
+                new_talent, email=email, context=f"set_decision sid={sid} pid={pid}",
+            )
         if talent_doc:
             resolved_talent_id = talent_doc["id"]
             # Save resolved talent_id back to the submission document

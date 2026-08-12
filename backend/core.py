@@ -1498,6 +1498,41 @@ def _slugify(title: str) -> str:
     return (safe or "link") + "-" + uuid.uuid4().hex[:12]
 
 
+async def _log_admin_phone_duplicates() -> None:
+    """Read-only diagnostic: finds and logs every phone number shared by
+    2+ admin-created (`source.type == "admin"`) talents -- the exact
+    records that block creation of `talents_phone_unique_admin_scope`.
+    Never modifies, merges, or deletes anything; purely surfaces what an
+    operator needs to see to resolve the conflict manually."""
+    pipeline = [
+        {"$match": {"source.type": "admin", "phone": {"$type": "string"}}},
+        {"$group": {
+            "_id": "$phone",
+            "count": {"$sum": 1},
+            "talents": {"$push": {"id": "$id", "name": "$name"}},
+        }},
+        {"$match": {"count": {"$gt": 1}}},
+    ]
+    try:
+        found_any = False
+        async for group in db.talents.aggregate(pipeline):
+            found_any = True
+            logger.error(
+                "PHONE UNIQUENESS MIGRATION CONFLICT: phone=%r is shared by "
+                "%d admin-created talents (none modified): %s",
+                group["_id"], group["count"], group["talents"],
+            )
+        if not found_any:
+            logger.error(
+                "PHONE UNIQUENESS MIGRATION CONFLICT: index creation failed "
+                "but no admin-vs-admin phone duplicates were found by this "
+                "diagnostic query -- investigate the underlying error "
+                "directly (e.g. a permissions issue, not a data conflict)."
+            )
+    except Exception as e:
+        logger.error(f"Failed to enumerate admin phone duplicates for diagnostics: {e}")
+
+
 async def seed_admin() -> None:
     """Idempotently seed the root admin into `db.users`.
 
@@ -1549,6 +1584,109 @@ async def seed_admin() -> None:
         )
     except Exception as e:
         logger.warning(f"talents normalized_email unique index: {e}")
+
+    # Talents: `phone` uniqueness is SCOPED to the admin-created population
+    # (source.type == "admin"), not global. The standalone
+    # migrations/data_hub_indexes.py script previously made this a
+    # collection-wide unique index -- a legitimate data-quality guard for
+    # the Data Hub CSV-import path (preventing an admin from accidentally
+    # importing the same person twice), but a global constraint like that
+    # cannot distinguish an ACCIDENTAL duplicate (two admin-created records
+    # for different people that collide by mistake -- still exactly what
+    # this index should keep blocking) from an INTENTIONAL one (a legacy
+    # admin-created talent and its own later, authenticated Project
+    # Submission counterpart for the SAME real person, which the migration
+    # strategy explicitly requires to coexist). Scoping the constraint via
+    # partialFilterExpression to `source.type: "admin"` keeps it fully
+    # enforced within the population it actually protects, while a
+    # submission-created talent (`source.type == "audition_submission"`,
+    # see build_minimal_talent_from_form) is never subject to it -- the
+    # insert simply succeeds, no recovery/workaround needed. Every talent
+    # is guaranteed to carry a standardised `source.type` by this point
+    # (migrations/phase0_dedup.py's standardise_source() backfilled it on
+    # every pre-existing record; every creation path sets it going
+    # forward), so this scoping is reliable across the whole collection,
+    # not just new documents.
+    #
+    # `email`/`normalized_email` above remain the ONLY globally-unique
+    # identity fields -- the actual authenticated identity is untouched by
+    # this change.
+    #
+    # This runs on every boot (idempotent), so environments where the old,
+    # unscoped unique index already exists self-heal regardless of
+    # whether/when that standalone script was run.
+    #
+    # FAIL-SAFE ORDERING (2026-08-15): the old unscoped unique `phone_1`
+    # index is NEVER dropped until the new scoped index has been CONFIRMED
+    # created. A collection-wide unique index, by construction, can only
+    # ever be a strict superset guarantee of the scoped one -- if `phone_1`
+    # is currently valid (i.e. every phone value really is unique
+    # collection-wide), the scoped index below is trivially safe to create
+    # (a subset of an already-unique population is unique too), so
+    # create-then-drop can NEVER regress protection on a healthy database.
+    # The only way creating the scoped index can fail is genuine duplicate
+    # phone data *within the admin population specifically* on a database
+    # that never had `phone_1` (or any) protection to begin with -- and in
+    # that failure case, this code deliberately does NOT touch `phone_1`
+    # at all (nothing to drop if it never existed; if it somehow does
+    # exist, it is left fully intact as a safety net). There is therefore
+    # no reachable boot sequence where uniqueness protection is removed
+    # and not replaced -- protection can only stay the same or strengthen,
+    # never disappear.
+    scoped_phone_index_ready = False
+    try:
+        await db.talents.create_index(
+            "phone",
+            unique=True,
+            name="talents_phone_unique_admin_scope",
+            partialFilterExpression={
+                "phone": {"$type": "string"},
+                "source.type": "admin",
+            },
+        )
+        scoped_phone_index_ready = True
+    except Exception as e:
+        logger.error(
+            "PHONE UNIQUENESS MIGRATION INCOMPLETE: could not create "
+            "talents_phone_unique_admin_scope — pre-existing duplicate "
+            "phone data among admin-created talents is blocking it. NO "
+            "existing talent record has been modified. Any pre-existing "
+            "legacy unscoped unique index (phone_1) is being left in "
+            "place untouched as a safety net, so duplicate-phone "
+            "protection is never simply removed. Resolve the conflicting "
+            "records below, then restart to complete the migration. "
+            "error=%s", e,
+        )
+        await _log_admin_phone_duplicates()
+
+    if scoped_phone_index_ready:
+        # Only now, with the replacement confirmed active, is it safe to
+        # remove the old, now-redundant collection-wide index.
+        try:
+            await db.talents.drop_index("phone_1")
+            logger.info("Dropped superseded collection-wide unique talents.phone_1 index")
+        except Exception as e:
+            logger.debug(f"talents legacy unique phone_1 drop skipped: {e}")
+    else:
+        try:
+            legacy_idx = await db.talents.index_information()
+        except Exception:
+            legacy_idx = {}
+        if "phone_1" in legacy_idx:
+            logger.warning(
+                "talents.phone_1 (collection-wide unique) retained as a "
+                "stronger-than-required but SAFE fallback until the "
+                "admin-population duplicates above are resolved -- this "
+                "blocks legacy/authenticated coexistence for now, but "
+                "duplicate-phone protection itself is never lost."
+            )
+        else:
+            logger.warning(
+                "No phone uniqueness protection is currently enforced for "
+                "admin-created talents in this environment (none existed "
+                "before this boot either) -- resolve the duplicates above "
+                "to enable it."
+            )
 
     # P0 production indexes — 6 collections.
     # Each is idempotent; create_index is a no-op if already present.
@@ -1629,6 +1767,27 @@ async def seed_admin() -> None:
         ("submissions", [("media.stream_uid", 1)], {"sparse": True, "name": "submissions_media_stream_uid"}),
         ("applications", [("media.public_id", 1)], {"sparse": True, "name": "applications_media_public_id"}),
         ("applications", [("media.stream_uid", 1)], {"sparse": True, "name": "applications_media_stream_uid"}),
+        # Migration-aware coexistence (2026-08-14): talent_migration_candidates
+        # models the legacy<->authenticated talent relationship as its own
+        # collection (one-to-many: a single authenticated talent could in
+        # principle match more than one legacy record) instead of a field on
+        # the Talent document, so the Talent schema stays clean and this can
+        # grow into a Migration Review Center's data source later. Every
+        # lookup a future review UI needs -- "candidates for this legacy
+        # talent", "candidates for this authenticated talent", "all pending
+        # candidates" -- gets its own index. The compound (legacy_talent_id,
+        # authenticated_talent_id) index is UNIQUE: it prevents duplicate
+        # rows for the exact same pair (e.g. a retry re-detecting the same
+        # relationship) while still allowing one legacy talent to have
+        # MULTIPLE distinct authenticated candidates (Legacy A -> A1, Legacy
+        # A -> A2 are different compound keys) -- its leading field also
+        # covers plain "candidates for this legacy talent" lookups, so no
+        # separate single-field legacy_talent_id index is needed.
+        ("talent_migration_candidates", [("legacy_talent_id", 1), ("authenticated_talent_id", 1)],
+         {"unique": True, "name": "tmc_legacy_authenticated_unique"}),
+        ("talent_migration_candidates", [("authenticated_talent_id", 1)], {"name": "tmc_authenticated_talent_id"}),
+        ("talent_migration_candidates", [("review_status", 1), ("created_at", -1)], {"name": "tmc_review_status_created_at"}),
+        ("talents", [("originating_submission_id", 1)], {"sparse": True, "name": "talents_originating_submission_id"}),
     ]
     for coll, keys, opts in p0_indexes:
         try:
@@ -3406,6 +3565,14 @@ def build_minimal_talent_from_form(
         "talent_email": email or None,
         "reference_id": reference_id,
     }
+    # Both call sites of this function (submissions.py finalize()/
+    # set_decision()) pass the originating submission's `id` as
+    # `reference_id`. Also exposed here as its own, explicitly-named
+    # top-level field -- distinct from the more generic `source.reference_id`
+    # -- so an admin (or a future Migration Review Center) can navigate
+    # straight from a talent back to its originating submission without
+    # having to know that convention.
+    new_talent["originating_submission_id"] = reference_id
     new_talent["media"] = []  # keep global media separate (spec: media must NOT merge)
     new_talent["cover_media_id"] = None
     new_talent["status"] = "SUBMITTED"
@@ -3414,6 +3581,214 @@ def build_minimal_talent_from_form(
         new_talent["updated_at"] = _now()
     new_talent["created_by"] = created_by
     return new_talent
+
+
+async def insert_talent_or_recover(
+    new_talent: dict, *, email: Optional[str], context: str,
+) -> "Tuple[Optional[dict], bool]":
+    """Shared insert-with-duplicate-recovery for the two "auto-create a
+    Talent from an audition submission" call sites (submissions.py
+    `finalize()` and `set_decision()`'s fallback) — previously two
+    independently hand-rolled `try/except DuplicateKeyError` blocks with
+    identical (and identically incomplete) recovery logic.
+
+    On a uniqueness collision at insert, the ONLY recovery attempted is the
+    same canonical email lookup every other entry point uses
+    (`resolve_canonical_talent`) — this never merges into or links to a
+    record found any other way, and never decides on the caller's behalf
+    whether to merge into a recovered record (the two call sites already
+    differ on this — `finalize()` merges the incoming form into a recovered
+    record, `set_decision()`'s fallback does not — that existing difference
+    is preserved via the `recovered` return value, not collapsed here). An
+    admin-created legacy profile and an authenticated submission-created
+    profile are intentionally allowed to coexist (see
+    `docs/ADR_CANONICAL_PROFILE_OWNERSHIP.md`); silently joining them
+    because of an incidental collision on some other field (e.g. a shared
+    phone number) would violate that policy, not fix it.
+
+    2026-08-13: if the collision is NOT resolvable by email, this logs the
+    failure clearly instead of the previous silent no-op (`talent_doc`
+    simply stayed `None`, both callers' `if talent_doc:` guard skipped, so
+    `submissions.talent_id` was never set even though `status`/`decision`
+    were written unconditionally regardless — a submission is fully
+    "submitted"/"approved" and renders correctly everywhere that doesn't
+    touch `db.talents`, yet never appeared in Global Talent).
+
+    2026-08-14 — migration-aware coexistence redesign: the actual root
+    cause of that collision was that `talents.phone` carried a
+    COLLECTION-WIDE unique index, treating an editable profile field as a
+    global identity field. The fix keeps that constraint (removing it
+    outright would have thrown away real accidental-duplicate protection
+    for the Data Hub admin/CSV-import path) but SCOPES it, via a partial
+    filter, to `source.type == "admin"` only (`seed_admin()`'s startup
+    index setup, self-healing on every boot). A submission-created talent
+    (`source.type == "audition_submission"`) is structurally never subject
+    to that constraint, so this insert now succeeds cleanly for the
+    coexistence case without needing to catch anything — the
+    non-email-collision branch below remains only as a defensive backstop
+    for a genuinely unexpected constraint, not the primary mechanism.
+    `email`/`normalized_email` remain the only globally-unique fields —
+    the real authenticated identity is untouched.
+
+    2026-08-14 (revised) — the relationship is NOT stored on the Talent
+    document at all. It's modeled as its own row in
+    `db.talent_migration_candidates` (see `_record_migration_candidate`),
+    referencing both talent ids, so the Talent schema stays clean, a
+    single authenticated talent can in principle carry more than one
+    candidate relationship, and this collection can become the data
+    source for a future Migration Review Center. The legacy document
+    itself is never read for writing and never touched by any of this.
+
+    Returns `(talent_doc, recovered)` — `recovered=True` means the returned
+    doc is a PRE-EXISTING record found via the email-based collision
+    recovery (not the just-inserted `new_talent`); `(None, False)` means
+    creation failed and could not be resolved — callers must keep treating
+    that exactly as before (talent_id stays unset; nothing else about the
+    submission's own write path changes)."""
+    # Detection runs OUTSIDE the insert's try/except on purpose, but is its
+    # own try/except: a migration-candidate LOOKUP failure (e.g. a transient
+    # Mongo error on this read) must degrade to "no candidate found," never
+    # abort the talent creation that follows — the actual insert below must
+    # always be attempted regardless of how this lookup goes.
+    try:
+        candidate = await _find_migration_candidate(new_talent)
+    except Exception as e:
+        logger.error(
+            "insert_talent_or_recover: migration-candidate lookup failed, "
+            "proceeding without one — context=%s error=%s", context, e,
+        )
+        candidate = None
+    try:
+        await db.talents.insert_one(new_talent)
+        await update_talent_cover_cache(new_talent["id"])
+        new_talent.pop("_id", None)
+    except DuplicateKeyError as exc:
+        talent_doc = await resolve_canonical_talent(email=email)
+        if talent_doc:
+            return talent_doc, True
+        logger.error(
+            "insert_talent_or_recover: talent creation failed on a uniqueness "
+            "collision that is NOT resolvable by email — context=%s email=%r "
+            "phone=%r reference_id=%r error=%s",
+            context, email, new_talent.get("phone"), new_talent.get("source", {}).get("reference_id"), exc,
+        )
+        return None, False
+
+    # The talent insert has ALREADY succeeded by this point. Recording the
+    # candidate relationship is deliberately OUTSIDE the try/except above
+    # (and wrapped in its own, separate try/except here, on top of
+    # `_record_migration_candidate`'s own internal one) so that under no
+    # circumstance — not a lookup failure, not a write failure, not a bug
+    # in that function itself — can migration-candidate bookkeeping ever
+    # turn a successful talent creation into a failed one or lose the
+    # talent that was already durably written.
+    if candidate:
+        try:
+            await _record_migration_candidate(new_talent["id"], candidate)
+        except Exception as e:
+            logger.error(
+                "insert_talent_or_recover: migration-candidate recording failed "
+                "AFTER a successful talent insert — context=%s talent_id=%s "
+                "legacy_talent_id=%s error=%s",
+                context, new_talent["id"], candidate.get("legacy_talent_id"), e,
+            )
+    return new_talent, False
+
+
+# Deliberately conservative, documented confidence scheme for exact-match-only
+# detection (never fuzzy). Phone is weighted slightly above Instagram handle
+# as the stronger uniqueness signal in practice; matching on both is treated
+# as effectively certain. A future Migration Review Center can refine this
+# without touching the detection logic itself.
+_MIGRATION_CONFIDENCE_BOTH = 0.95
+_MIGRATION_CONFIDENCE_PHONE_ONLY = 0.85
+_MIGRATION_CONFIDENCE_INSTAGRAM_ONLY = 0.75
+
+
+async def _find_migration_candidate(new_talent: dict) -> Optional[dict]:
+    """Look for an existing admin-created (`source.type == "admin"`) talent
+    that plausibly represents the SAME real person as `new_talent` (a
+    freshly authenticated, submission-created talent about to be
+    inserted) — an exact match on `phone` or `instagram_handle` only,
+    deliberately no fuzzy name matching, to avoid ever recording a
+    speculative/low-confidence relationship. Read-only: never mutates the
+    candidate, never merges, never deletes. Returns a small dict describing
+    the match (not yet the stored document shape — see
+    `_record_migration_candidate`), or `None`.
+    """
+    phone = new_talent.get("phone")
+    insta = new_talent.get("instagram_handle")
+    or_clauses = []
+    if phone:
+        or_clauses.append({"phone": phone})
+    if insta:
+        or_clauses.append({"instagram_handle": insta})
+    if not or_clauses:
+        return None
+
+    candidate = await db.talents.find_one(
+        {"source.type": "admin", "$or": or_clauses},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "instagram_handle": 1},
+    )
+    if not candidate:
+        return None
+
+    matched_on = []
+    if phone and candidate.get("phone") == phone:
+        matched_on.append("phone")
+    if insta and candidate.get("instagram_handle") == insta:
+        matched_on.append("instagram_handle")
+
+    return {"legacy_talent_id": candidate["id"], "matched_on": matched_on}
+
+
+async def _record_migration_candidate(authenticated_talent_id: str, match: dict) -> None:
+    """Inserts one `talent_migration_candidates` document recording that
+    `authenticated_talent_id` (the talent just created) plausibly relates
+    to `match["legacy_talent_id"]`. Never merges, never links the two
+    Talent documents themselves, never writes to either Talent document —
+    purely an admin-reviewable audit row, `review_status="pending"` until
+    a future Migration Review Center (or a direct DB action) changes it.
+    Failures here are logged, never raised — a bookkeeping row must never
+    block the actual talent creation this is attached to."""
+    matched_on = match["matched_on"]
+    if set(matched_on) == {"phone", "instagram_handle"}:
+        confidence = _MIGRATION_CONFIDENCE_BOTH
+    elif "phone" in matched_on:
+        confidence = _MIGRATION_CONFIDENCE_PHONE_ONLY
+    else:
+        confidence = _MIGRATION_CONFIDENCE_INSTAGRAM_ONLY
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "legacy_talent_id": match["legacy_talent_id"],
+        "authenticated_talent_id": authenticated_talent_id,
+        "matched_fields": matched_on,
+        "confidence_score": confidence,
+        "review_status": "pending",
+        "created_at": _now(),
+        "updated_at": _now(),
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "reviewer_notes": None,
+    }
+    try:
+        await db.talent_migration_candidates.insert_one(doc)
+    except DuplicateKeyError:
+        # A candidate row for this exact (legacy, authenticated) pair
+        # already exists (tmc_legacy_authenticated_unique) -- benign and
+        # idempotent, not a failure: the relationship is already recorded,
+        # there's nothing more to do.
+        logger.debug(
+            "_record_migration_candidate: candidate already recorded for "
+            "legacy=%s authenticated=%s", match["legacy_talent_id"], authenticated_talent_id,
+        )
+    except Exception as e:
+        logger.error(
+            "_record_migration_candidate: failed to record candidate "
+            "legacy=%s authenticated=%s matched_on=%s error=%s",
+            match["legacy_talent_id"], authenticated_talent_id, matched_on, e,
+        )
 
 
 # Phase 1 — Canonical Profile Monotonicity: sentinel distinct from `None` so

@@ -20,16 +20,32 @@ async def run_migrations():
     logger.info("Starting Data Hub production database index migrations...")
     
     # 1. talents collection indexes
-    # Partial unique index for phone: only enforce uniqueness if it exists and is a string
+    # `phone` uniqueness is scoped to admin-created talents only
+    # (source.type == "admin") -- kept here for consistency with core.py's
+    # own startup index setup (core.py, seed_admin(), which is the
+    # authoritative, always-applied version of this same index and will
+    # self-heal it on every boot regardless of whether this standalone
+    # script ever runs). A collection-wide unique constraint would block
+    # the intentional coexistence of a legacy admin-created talent and its
+    # later, authenticated Project Submission counterpart for the SAME
+    # real person -- scoping to the admin population keeps real
+    # accidental-duplicate protection for CSV imports (see also
+    # check_duplicates(), services/import_duplicates.py, which reviews
+    # collisions with the admin at import time) without blocking that
+    # migration path.
     try:
         await db.talents.create_index(
             [("phone", ASCENDING)],
             unique=True,
-            partialFilterExpression={"phone": {"$type": "string"}}
+            name="talents_phone_unique_admin_scope",
+            partialFilterExpression={
+                "phone": {"$type": "string"},
+                "source.type": "admin",
+            },
         )
-        logger.info("Created partial unique index on talents.phone")
+        logger.info("Created admin-scoped partial unique index on talents.phone")
     except Exception as e:
-        logger.warning(f"Could not create unique index on talents.phone (perhaps duplicate data already exists): {e}")
+        logger.warning(f"Could not create admin-scoped unique index on talents.phone (perhaps duplicate data already exists within the admin population): {e}")
 
     # Partial unique index for email
     try:

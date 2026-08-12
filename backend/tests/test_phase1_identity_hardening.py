@@ -605,6 +605,8 @@ import core as _core
 from core import db as _real_db, normalize_email as _normalize_email
 from core import build_minimal_talent_from_form as _build_minimal_talent_from_form
 from core import insert_talent_or_recover as _insert_talent_or_recover
+from core import SubmissionDecisionIn as _SubmissionDecisionIn
+from routers.submissions import set_decision as _set_decision
 
 _IDTAG = "TEST_IDHARDEN_"
 
@@ -1334,4 +1336,259 @@ async def test_source_consistency_across_both_creation_call_sites() -> None:
         assert doc["source"]["type"] == "audition_submission"
         assert doc["source"]["reference_id"] == expected_ref
         assert doc["originating_submission_id"] == expected_ref
+
+
+# --------------------------------------------------------------------------
+# set_decision() retry fix (2026-08-16): a submission can be left
+# "approved" with no talent_id if the talent-creation fallback failed at
+# approval time (the historical phone-uniqueness collision fixed above).
+# The old idempotency guard (`if sub.get("decision") == payload.decision:
+# return`) blocked ANY retry of that fallback forever, even after the
+# underlying cause was fixed. The new guard only short-circuits when the
+# submission is ALREADY linked (`and sub.get("talent_id")`), so re-running
+# the exact same decision on an unlinked submission now retries the exact
+# same, unmodified talent-resolution/creation path. These tests call
+# set_decision() directly (bypassing the HTTP/auth layer, same pattern as
+# `_insert_talent_or_recover` above) against real MongoDB.
+# --------------------------------------------------------------------------
+
+_SDTAG = "TEST_SETDEC_"
+_SD_ADMIN = {"email": "admin@talentgram.co", "role": "admin", "id": "admin-test"}
+
+
+async def _sd_cleanup() -> None:
+    await _real_db.talents.delete_many({"id": {"$regex": f"^{_SDTAG}"}})
+    # build_minimal_talent_from_form() always mints its own fresh, UNTAGGED
+    # UUID for auto-created talents -- they're never caught by the id-prefix
+    # filter above. Every one of them carries originating_submission_id set
+    # to the (tagged) submission id that created it, so clean up by that too.
+    await _real_db.talents.delete_many({"originating_submission_id": {"$regex": f"^{_SDTAG}"}})
+    await _real_db.submissions.delete_many({"id": {"$regex": f"^{_SDTAG}"}})
+    await _real_db.projects.delete_many({"id": {"$regex": f"^{_SDTAG}"}})
+
+
+async def _sd_make_project() -> str:
+    pid = f"{_SDTAG}proj-{_uuid.uuid4().hex[:8]}"
+    await _real_db.projects.insert_one({
+        "id": pid, "brand_name": "Set Decision Test Brand", "status": "ongoing",
+        "slug": f"{_SDTAG}slug-{_uuid.uuid4().hex[:8]}",
+    })
+    return pid
+
+
+def _sd_submission(pid: str, *, email: str, phone: str, decision: str, talent_id=None) -> dict:
+    return {
+        "id": f"{_SDTAG}sub-{_uuid.uuid4().hex[:8]}", "project_id": pid,
+        "talent_name": "Set Decision Test Person", "talent_email": email,
+        "talent_phone": phone, "status": "draft", "decision": decision,
+        "submitted_at": None, "form_data": {"first_name": "Set", "last_name": "Decision"},
+        "decided_at": "2026-08-10T08:23:48+00:00",
+        **({"talent_id": talent_id} if talent_id else {}),
+    }
+
+
+async def test_reapproval_with_existing_talent_is_idempotent() -> None:
+    """Case B: decision unchanged AND talent_id already present -> the
+    guard must still fire immediately, a true no-op. No second talent, no
+    change to the existing one."""
+    await _sd_cleanup()
+    try:
+        pid = await _sd_make_project()
+        talent = {
+            "id": f"{_SDTAG}talent-{_uuid.uuid4().hex[:8]}", "name": "Already Linked",
+            "email": "already.linked@example.com", "normalized_email": "already.linked@example.com",
+            "phone": "9199991001", "media": [], "status": "SUBMITTED",
+            "source": {"type": "audition_submission", "talent_email": "already.linked@example.com", "reference_id": "x"},
+        }
+        await _real_db.talents.insert_one(talent)
+        sub = _sd_submission(pid, email="already.linked@example.com", phone="9199991001", decision="approved", talent_id=talent["id"])
+        await _real_db.submissions.insert_one(sub)
+
+        result = await _set_decision(pid, sub["id"], _SubmissionDecisionIn(decision="approved"), _SD_ADMIN)
+        assert result == {"ok": True}
+
+        talent_after = await _real_db.talents.find_one({"id": talent["id"]}, {"_id": 0})
+        talent_before_compare = {k: v for k, v in talent.items() if k != "_id"}
+        assert talent_after == talent_before_compare, "existing talent must be completely unchanged"
+        assert await _real_db.talents.count_documents({"email": "already.linked@example.com"}) == 1
+    finally:
+        await _sd_cleanup()
+
+
+async def test_reapproval_with_missing_talent_id_retries_creation() -> None:
+    """Case C: decision unchanged, talent_id absent, no talent exists by
+    email -> the fallback must now run, create the talent, and link it."""
+    await _sd_cleanup()
+    try:
+        pid = await _sd_make_project()
+        legacy = {
+            "id": f"{_SDTAG}legacy-{_uuid.uuid4().hex[:8]}", "name": "Retry Creation Legacy",
+            "phone": "9199991002", "media": [], "status": "SUBMITTED",
+            "source": {"type": "admin", "talent_email": None, "reference_id": None},
+        }
+        await _real_db.talents.insert_one(legacy)
+        sub = _sd_submission(pid, email="retry.creation@example.com", phone="9199991002", decision="approved")
+        await _real_db.submissions.insert_one(sub)
+
+        result = await _set_decision(pid, sub["id"], _SubmissionDecisionIn(decision="approved"), _SD_ADMIN)
+        assert result == {"ok": True}
+
+        fresh = await _real_db.submissions.find_one({"id": sub["id"]}, {"_id": 0})
+        assert fresh.get("talent_id"), "talent_id must now be populated"
+
+        authenticated = await _real_db.talents.find_one({"email": "retry.creation@example.com"}, {"_id": 0})
+        assert authenticated is not None
+        assert authenticated["id"] == fresh["talent_id"]
+        assert authenticated["source"]["type"] == "audition_submission"
+        assert authenticated["originating_submission_id"] == sub["id"]
+
+        legacy_after = await _real_db.talents.find_one({"id": legacy["id"]}, {"_id": 0})
+        legacy_before_compare = {k: v for k, v in legacy.items() if k != "_id"}
+        assert legacy_after == legacy_before_compare, "legacy record must be untouched"
+
+        # build_minimal_talent_from_form() mints its own untagged UUID for
+        # the authenticated talent, so match both records by their known
+        # ids directly rather than an id-prefix filter.
+        count = await _real_db.talents.count_documents(
+            {"phone": "9199991002", "id": {"$in": [legacy["id"], authenticated["id"]]}}
+        )
+        assert count == 2, "legacy and newly-created authenticated talent must coexist"
+    finally:
+        await _sd_cleanup()
+
+
+async def test_reapproval_with_missing_talent_id_recovers_existing_email() -> None:
+    """Case D: decision unchanged, talent_id absent, but a talent with
+    that email ALREADY exists -> must recover/link it, never create a
+    duplicate."""
+    await _sd_cleanup()
+    try:
+        pid = await _sd_make_project()
+        existing = {
+            "id": f"{_SDTAG}existing-{_uuid.uuid4().hex[:8]}", "name": "Recover Existing",
+            "email": "recover.existing@example.com", "normalized_email": "recover.existing@example.com",
+            "phone": "9199991003", "media": [], "status": "SUBMITTED",
+            "source": {"type": "audition_submission", "talent_email": "recover.existing@example.com", "reference_id": "some-other-sub"},
+        }
+        await _real_db.talents.insert_one(existing)
+        sub = _sd_submission(pid, email="recover.existing@example.com", phone="9199991003", decision="approved")
+        await _real_db.submissions.insert_one(sub)
+
+        result = await _set_decision(pid, sub["id"], _SubmissionDecisionIn(decision="approved"), _SD_ADMIN)
+        assert result == {"ok": True}
+
+        fresh = await _real_db.submissions.find_one({"id": sub["id"]}, {"_id": 0})
+        assert fresh.get("talent_id") == existing["id"], "must link to the EXISTING talent, not create a new one"
+        assert await _real_db.talents.count_documents({"email": "recover.existing@example.com"}) == 1
+    finally:
+        await _sd_cleanup()
+
+
+async def test_reapproval_does_not_duplicate_existing_link() -> None:
+    """Repeated approval after a successful repair must remain idempotent
+    -- calling set_decision(approved) a THIRD time (decision unchanged,
+    talent_id now present from the retry) must not create another talent
+    or re-run the fallback."""
+    await _sd_cleanup()
+    try:
+        pid = await _sd_make_project()
+        legacy = {
+            "id": f"{_SDTAG}legacy-{_uuid.uuid4().hex[:8]}", "name": "No Redupe Legacy",
+            "phone": "9199991004", "media": [], "status": "SUBMITTED",
+            "source": {"type": "admin", "talent_email": None, "reference_id": None},
+        }
+        await _real_db.talents.insert_one(legacy)
+        sub = _sd_submission(pid, email="no.redupe@example.com", phone="9199991004", decision="approved")
+        await _real_db.submissions.insert_one(sub)
+
+        await _set_decision(pid, sub["id"], _SubmissionDecisionIn(decision="approved"), _SD_ADMIN)
+        first_talent_id = (await _real_db.submissions.find_one({"id": sub["id"]}, {"_id": 0})).get("talent_id")
+        assert first_talent_id
+
+        # Third call: decision unchanged, talent_id now present -> true no-op.
+        result3 = await _set_decision(pid, sub["id"], _SubmissionDecisionIn(decision="approved"), _SD_ADMIN)
+        assert result3 == {"ok": True}
+        final = await _real_db.submissions.find_one({"id": sub["id"]}, {"_id": 0})
+        assert final.get("talent_id") == first_talent_id
+        assert await _real_db.talents.count_documents({"email": "no.redupe@example.com"}) == 1
+    finally:
+        await _sd_cleanup()
+
+
+async def test_reapproval_failure_does_not_report_false_success_state() -> None:
+    """Case F: talent creation fails for an unexpected reason during a
+    retry -- talent_id must remain absent (accurately reflecting reality,
+    not a fabricated link), no talent is created, and the failure is
+    logged clearly (not silently absorbed)."""
+    await _sd_cleanup()
+    try:
+        pid = await _sd_make_project()
+        sub = _sd_submission(pid, email="unexpected.failure@example.com", phone="9199991005", decision="approved")
+        await _real_db.submissions.insert_one(sub)
+
+        with patch("core.insert_talent_or_recover", return_value=(None, False)):
+            result = await _set_decision(pid, sub["id"], _SubmissionDecisionIn(decision="approved"), _SD_ADMIN)
+
+        # The endpoint's existing response contract is unchanged by this
+        # fix (not touched, per the explicit no-API-change requirement) --
+        # {"ok": True} still comes back, exactly as it already did on the
+        # very first, pre-fix failed attempt. What matters is that the
+        # DATA correctly reflects the failure, not a fabricated success.
+        assert result == {"ok": True}
+        fresh = await _real_db.submissions.find_one({"id": sub["id"]}, {"_id": 0})
+        assert fresh.get("talent_id") is None, "must not fabricate a talent_id on failure"
+        assert await _real_db.talents.find_one({"email": "unexpected.failure@example.com"}) is None
+    finally:
+        await _sd_cleanup()
+
+
+async def test_reapproval_reproduces_and_fixes_the_historical_ahana_angela_state() -> None:
+    """Direct reproduction of the exact real-world state discovered in
+    production for Ahana Pocha and Angela Kumar: decision="approved",
+    talent_id absent, legacy admin record shares the submission's phone,
+    legacy record has no email and no `source` field at all (the
+    documented ~93.5%-of-production gap). Confirms the retry succeeds
+    despite the legacy record having no `source` field -- source-field
+    absence was proven irrelevant to insertion, only to migration-candidate
+    detection."""
+    await _sd_cleanup()
+    try:
+        pid = await _sd_make_project()
+        legacy = {
+            "id": f"{_SDTAG}legacy-{_uuid.uuid4().hex[:8]}", "name": "Historical Repro Person",
+            "phone": "9199991006", "media": [], "status": "SUBMITTED",
+            # Deliberately NO "source" key at all -- matches the real
+            # production shape found for both Ahana's and Angela's legacy
+            # records.
+        }
+        await _real_db.talents.insert_one(legacy)
+        sub = _sd_submission(pid, email="historical.repro@example.com", phone="9199991006", decision="approved")
+        # decision already "approved" with no talent_id, exactly as found
+        # in production for both real cases.
+        assert sub["decision"] == "approved" and "talent_id" not in sub
+        await _real_db.submissions.insert_one(sub)
+
+        result = await _set_decision(pid, sub["id"], _SubmissionDecisionIn(decision="approved"), _SD_ADMIN)
+        assert result == {"ok": True}
+
+        fresh = await _real_db.submissions.find_one({"id": sub["id"]}, {"_id": 0})
+        assert fresh.get("talent_id"), "the historical stuck state must now resolve"
+        assert fresh["decision"] == "approved"
+
+        authenticated = await _real_db.talents.find_one({"id": fresh["talent_id"]}, {"_id": 0})
+        assert authenticated is not None
+        assert authenticated["email"] == "historical.repro@example.com"
+        assert authenticated["source"]["type"] == "audition_submission"
+        assert authenticated["originating_submission_id"] == sub["id"]
+
+        legacy_after = await _real_db.talents.find_one({"id": legacy["id"]}, {"_id": 0})
+        legacy_before_compare = {k: v for k, v in legacy.items() if k != "_id"}
+        assert legacy_after == legacy_before_compare, "legacy record (source-less, exactly like the real cases) must remain untouched"
+
+        count = await _real_db.talents.count_documents(
+            {"phone": "9199991006", "id": {"$in": [legacy["id"], authenticated["id"]]}}
+        )
+        assert count == 2, "legacy and authenticated must coexist, matching the intended migration model"
+    finally:
+        await _sd_cleanup()
 

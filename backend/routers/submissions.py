@@ -2824,7 +2824,16 @@ async def set_decision(
     if not sub:
         raise HTTPException(404, "Submission not found")
 
-    if sub.get("decision") == payload.decision:
+    # 2026-08-16: an unchanged decision is only a true no-op when the
+    # submission is already linked to a talent. A submission can be
+    # "approved" with no talent_id if the talent-creation fallback below
+    # failed at the time (e.g. the historical, now-fixed phone-uniqueness
+    # collision) -- re-approving the SAME decision must still retry that
+    # fallback in that case, not silently short-circuit forever. This does
+    # NOT change behavior for a submission whose talent_id is already
+    # present (still an unconditional no-op below, same as before), nor
+    # for an actual decision change (first condition alone already false).
+    if sub.get("decision") == payload.decision and sub.get("talent_id"):
         return {"ok": True}
 
     # Resolve talent_id if it is missing/null (fallback matching/creation logic)
@@ -2872,6 +2881,20 @@ async def set_decision(
             await ensure_pipeline_from_finalized_submission(
                 project_id=pid,
                 talent_id=resolved_talent_id,
+            )
+        else:
+            # Talent resolution/creation still did not succeed (see
+            # insert_talent_or_recover's own log line above for the exact
+            # cause) -- the decision write below still proceeds (matching
+            # existing behavior), but this must be loudly visible rather
+            # than indistinguishable from a normal successful approval,
+            # especially now that this branch can be reached on a RETRY
+            # of an already-set decision, not just the first attempt.
+            logger.error(
+                "set_decision: submission %s (project %s) decision=%s but "
+                "talent resolution/creation still failed -- no talent_id "
+                "linked, no talent created.",
+                sid, pid, payload.decision,
             )
 
     email = (sub.get("talent_email") or "").lower().strip()

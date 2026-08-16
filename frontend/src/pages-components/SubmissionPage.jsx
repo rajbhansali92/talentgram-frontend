@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
-import { api as axios, adminApi, IMAGE_URL } from "@/lib/api";
+import { api as axios, adminApi, portalApi, PORTAL_TOKEN_KEY, IMAGE_URL } from "@/lib/api";
 import { sendOtp, verifyOtp, buildGoogleAuthUrl, persistPortalToken } from "@/lib/talentAuth";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
@@ -11,13 +11,14 @@ import { revealAndJumpToRequirementItem } from "@/lib/scrollHighlight";
 import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS, SECTION_STATUS, OPERATIONAL_STATES } from "@/lib/readinessStatus";
 import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
 import { computeRequirementItems } from "@/lib/requirementEngine";
+import { buildRecognizedIdentity, shouldAttemptSilentRecognition, classifyPortalLookupResult } from "@/lib/returningTalent";
 import { useSwipeStep } from "@/hooks/useSwipeStep";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
 import LibraryMediaPicker from "@/components/submission/LibraryMediaPicker";
 import WizardProgressBar from "@/components/submission/WizardProgressBar";
 import WizardStepNav from "@/components/submission/WizardStepNav";
 import UpdateProfileDisclosure from "@/components/submission/UpdateProfileDisclosure";
-import { WIZARD_STEPS, TOTAL_STEPS, stepForSection, sectionForStep, readStep, writeStep, clearStep } from "@/lib/wizardSteps";
+import { WIZARD_STEPS, TOTAL_STEPS, stepForSection, sectionForStep, readStep, writeStep, clearStep, wizardStepsForDisplay } from "@/lib/wizardSteps";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
@@ -495,6 +496,12 @@ function SubmissionPage() {
     // made mid-draft.
     const [libraryMedia, setLibraryMedia] = useState([]);
     const [libraryBusyId, setLibraryBusyId] = useState(null);
+    // Returning-talent Media step: whether the "My Saved Media" picker is
+    // expanded. Starts expanded (matches prior behavior) and collapses to a
+    // compact "Change" summary once auto-reuse has run — see the
+    // auto-reuse effect near selectAllLibraryMedia below.
+    const [showLibraryPicker, setShowLibraryPicker] = useState(true);
+    const autoReuseAttemptedRef = useRef(false);
     const [dismissedRemovedWarnings, setDismissedRemovedWarnings] = useState(() => new Set());
     // Talent Profile Migration, Phase 4 — every reusable-category item
     // (intro_video/image/indian/western) the talent has JUST uploaded but
@@ -610,6 +617,35 @@ function SubmissionPage() {
     const [otpValue, setOtpValue] = useState("");
     const [otpLoading, setOtpLoading] = useState(false);
     const [otpResending, setOtpResending] = useState(false);
+
+    // "UPLOAD TEST" silent recognition (returning-talent flow) — distinct
+    // from `gatewayRecognition` above, which stays tied to the email-typed
+    // Step A fallback UI. `recognizedIdentity` holds the profile returned by
+    // an authenticated `GET /public/prefill` call (real bearer-token proof,
+    // not a self-reported email), consumed later by the Identity
+    // Confirmation card. `recognizing` only drives the CTA's own busy state.
+    const [recognizing, setRecognizing] = useState(false);
+    const [recognizedIdentity, setRecognizedIdentity] = useState(null);
+
+    // Phase 2 (new-talent flow) — whether THIS session has actual proof of
+    // email ownership (real OTP verify, Google OAuth, or a valid portal
+    // token). A genuinely new/unrecognized talent is unlocked WITHOUT this
+    // (see handleInlineLookup's not-found branch) so they can fill out the
+    // whole submission with zero auth friction; `emailVerified` is what
+    // gates the final "Almost Done" step before they can actually submit.
+    // Recognized-by-token and email-typed-then-OTP-verified talents are
+    // already true by the time they'd reach that gate, so they never see it.
+    const [emailVerified, setEmailVerified] = useState(false);
+
+    // Phase 3 (progress-indicator fix) — whether THIS session was recognized
+    // as an EXISTING talent (as opposed to unlocked via the confirmed-new,
+    // zero-friction path). Purely a display concern: it decides which step
+    // chips WizardProgressBar shows, never anything about validation,
+    // navigation, or the underlying draft/finalize lifecycle. Defaults to
+    // false (new-talent, all 4 steps shown) — only flipped to true by an
+    // actual existing-talent recognition (token-silent, OTP-verified-
+    // existing, or Google-existing), never guessed at.
+    const [isReturningTalent, setIsReturningTalent] = useState(false);
 
 
     const introRef = useRef();
@@ -767,11 +803,13 @@ function SubmissionPage() {
             setForm((f) => ({ ...f, email: f.email || googleEmail }));
             setPrefillEmail(googleEmail);
             setEmailGateUnlocked(true);
+            setEmailVerified(true);
 
             if (profileDataStr) {
                 // Existing Google-authenticated talent — auth is proven, so
                 // fetch the full profile (the portal token is attached
                 // automatically) and populate media/video.
+                setIsReturningTalent(true);
                 (async () => {
                     try {
                         const { data } = await axios.get(
@@ -1038,24 +1076,21 @@ function SubmissionPage() {
     // hardcoded are the email-ownership gate itself (email + emailGateUnlocked)
     // — that's authentication, not a submission requirement, so it isn't
     // something the Requirement Engine models.
-    const validateForm = () => {
-        // Email-first ordering (Phase 1 v37 fix): the email field is the
-        // gate that reveals every other field. Validation MUST surface
-        // an email error before any other "required" message — otherwise
-        // a returning user who hasn't filled email yet sees a confusing
-        // "First name is required" toast.
+    //
+    // Phase 2 (new-talent flow) — the ONLY thing required to create the
+    // submission draft or start an upload is a confirmed email. Profile/
+    // Skills now come AFTER Project Questions/Media in the wizard order
+    // (see wizardSteps.js), so gating draft-creation on validateStep1()/
+    // validateForm() (which check profile-section fields) would
+    // incorrectly block a new talent from uploading media before they've
+    // even reached the Profile step — the exact "select file -> upload
+    // immediately" promise this whole flow exists for. The backend's own
+    // start_submission only requires name+email (name may be blank), so
+    // this mirrors that, not the older fuller check those two still do
+    // (correctly) for the Profile step's own Next-button validation.
+    const canCreateDraft = () => {
         if (!form.email.trim()) return "Email is required";
-        // Email-first gate guard: if the rest of the form isn't unlocked
-        // yet (no prefill decision made), we deliberately skip every
-        // other validation. The Continue button is already gated on
-        // `emailGateUnlocked` in the UI; this is a defense-in-depth.
         if (!emailGateUnlocked) return "Please complete the email step first";
-        // Exclude "uploads": this validator runs before the submission
-        // record exists (Step 3 -> 4 transition, or the legacy Enter-key
-        // form submit), so upload-section requirements can never be
-        // satisfiable yet — those are validated separately by finalize().
-        const missing = experience.missingRequirements.filter((item) => item.section !== "uploads");
-        if (missing.length > 0) return `${missing[0].label} is required`;
         return null;
     };
 
@@ -1102,7 +1137,7 @@ function SubmissionPage() {
     }, [saveStatus]);
     // Convenience wrapper that returns a boolean (vs the form-handler version).
     async function startSubmissionDirect() {
-        const err = validateForm();
+        const err = canCreateDraft();
         if (err) {
             toast.error(err);
             return null;
@@ -1255,10 +1290,21 @@ function SubmissionPage() {
     // directly against the incoming prefill data (mirrors populatePrefillData's
     // own merge-if-empty rule) rather than reading `form`/`experience`,
     // since both still reflect the pre-prefill render when this runs.
-    const computeReturningTalentStartStep = useCallback((prefillData) => {
+    const computeReturningTalentStartStep = useCallback((prefillData, emailOverride) => {
         if (!project || !prefillData) return 3;
         const mergedForm = {
             ...form,
+            // `email` is deliberately NOT part of the prefill response (the
+            // caller already knows it — that's how it looked the talent up)
+            // and `form.email` is still the pre-update value here regardless
+            // (setForm's update hasn't committed yet when callers compute
+            // this synchronously right after calling it) — without this,
+            // any project that requires email always evaluates it as
+            // missing and bounces a fully-known returning talent back to
+            // Step 1, defeating the entire "skip to Project Questions"
+            // point of this function. Callers pass the email they already
+            // resolved (from the prefill lookup, OTP verify, etc.).
+            email: emailOverride || form.email || prefillData.email || "",
             first_name: form.first_name || prefillData.first_name || "",
             last_name: form.last_name || prefillData.last_name || "",
             phone: form.phone || prefillData.phone || "",
@@ -1280,8 +1326,78 @@ function SubmissionPage() {
             item.requirement === REQUIREMENT_TIERS.REQUIRED &&
             !item.satisfied
         );
-        return earlyMissing ? stepForSection(earlyMissing.section) : 3;
+        return earlyMissing ? stepForSection(earlyMissing.section) : stepForSection("projectQuestions");
     }, [project, form]);
+
+    // "UPLOAD TEST" — the dominant CTA on Project Info. For a returning
+    // talent recognized by this browser's portal session token, this
+    // silently recognizes them (a live, authenticated `GET /portal/profile`
+    // call — real bearer-token proof, not a stale/unauthenticated flag) and
+    // jumps straight to Project Questions, skipping Basic Profile/Skills.
+    //
+    // Deliberately differs from the pre-8cfb1b5 bug this guards against
+    // (see "Issue 1" comment on `emailGateUnlocked`'s initializer above):
+    // that bug auto-unlocked the gate on mere page load from a leftover,
+    // unauthenticated localStorage flag, with no user action and no visible
+    // UI, silently sending an OTP behind the scenes. This only runs from an
+    // explicit click, verifies a real session server-side before trusting
+    // it, and never sends an OTP for the token-backed path (the token IS
+    // the proof) — so the "stuck with a hidden pending OTP" failure mode
+    // this fixed cannot recur here. If the token is missing or invalid, this
+    // falls through to the existing Step A OTP/Google UI unchanged.
+    const scrollToTalentDetails = () => {
+        document.querySelector('[data-testid="talent-details-section"]')?.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+
+    const handleUploadTestClick = useCallback(async () => {
+        const token = typeof window !== "undefined" ? localStorage.getItem(PORTAL_TOKEN_KEY) : null;
+        // talentgram_portal_email is always written/cleared alongside the
+        // portal token itself (see handleVerifyOtp / the portalApi 401
+        // interceptor in lib/api.js) — the two are kept in sync as a pair.
+        const email = typeof window !== "undefined" ? localStorage.getItem("talentgram_portal_email") : null;
+        if (!shouldAttemptSilentRecognition({ adminMode, emailGateUnlocked, token, email })) {
+            // Admin Mode's gate is already unlocked (see emailGateUnlocked's
+            // initializer); everything else just falls through to the
+            // existing Step A UI below.
+            scrollToTalentDetails();
+            return;
+        }
+        setRecognizing(true);
+        try {
+            // /public/prefill (not /portal/profile) deliberately — it's the
+            // one canonical prefill builder this page's populatePrefillData/
+            // computeReturningTalentStartStep already expect (first_name/
+            // last_name split, plus prefill_media for the Media step's
+            // auto-reuse) and it accepts the same bearer portal token via
+            // verify_email_ownership, so recognition still requires zero OTP.
+            const { data } = await portalApi.get(`/public/prefill?email=${encodeURIComponent(email)}`);
+            if (!data || !data.first_name) {
+                // Token valid but no matching/complete profile — nothing to
+                // silently recognize; fall through to Step A.
+                scrollToTalentDetails();
+                return;
+            }
+            populatePrefillData(data);
+            setPrefillSuggestion({ data });
+            setPrefillTried(true);
+            setRecognizedIdentity(buildRecognizedIdentity(data));
+            setEmailGateUnlocked(true);
+            setEmailVerified(true);
+            setIsReturningTalent(true);
+            setForm((f) => ({ ...f, email: f.email || email }));
+            setPrefillEmail(email);
+            setCurrentStep(computeReturningTalentStartStep(data, email));
+            toast.success(`Welcome back, ${data.first_name}!`);
+        } catch (error) {
+            // 401 → the portalApi interceptor already cleared the stale
+            // token; any other failure just means recognition didn't work.
+            // Either way, fall through to the existing Step A UI.
+            console.error("Silent recognition failed:", error);
+            scrollToTalentDetails();
+        } finally {
+            setRecognizing(false);
+        }
+    }, [adminMode, emailGateUnlocked, computeReturningTalentStartStep]);
 
     const tryPrefill = async () => {
         if (saved) return; // submission already started — too late
@@ -1370,6 +1486,8 @@ function SubmissionPage() {
         setEmailGateUnlocked(false);
         setGatewayRecognition(null);
         setGatewayEmail("");
+        setRecognizedIdentity(null);
+        setIsReturningTalent(false);
         toast.info("Please enter your email to proceed.");
     };
 
@@ -1388,6 +1506,42 @@ function SubmissionPage() {
 
         setGatewayLoading(true);
         try {
+            // Pre-auth recognition first — if we already know this talent,
+            // show the "Is this you?" card (Step B) instead of jumping
+            // straight into OTP. Only the minimal non-sensitive fields
+            // (name/email/image_url) come back from this unauthenticated
+            // endpoint; OTP is still required afterward (handleInlineContinue)
+            // before anything is unlocked.
+            if (!gatewayRecognition) {
+                try {
+                    const { data } = await axios.post("/portal/lookup", { email: trimmedEmail });
+                    const classification = classifyPortalLookupResult(data);
+                    if (classification === "known") {
+                        setGatewayRecognition({ ...data.talent, email: trimmedEmail });
+                        return;
+                    }
+                    if (classification === "new") {
+                        // Confirmed brand-new talent (not a lookup failure —
+                        // the backend positively found no record). Nothing
+                        // to prove ownership of yet, so unlock immediately
+                        // with NO OTP friction — matches the new-talent
+                        // flow's "authenticate near the end, not the start"
+                        // requirement. Real proof of email ownership is
+                        // deferred to the Almost-Done step (emailVerified),
+                        // not required here.
+                        setForm((f) => ({ ...f, email: trimmedEmail }));
+                        setPrefillEmail(trimmedEmail);
+                        setEmailGateUnlocked(true);
+                        setCurrentStep(stepForSection("projectQuestions"));
+                        return;
+                    }
+                    // "unknown" (ambiguous/malformed response) — fall
+                    // through to OTP, same as an outright lookup failure.
+                } catch (lookupErr) {
+                    console.error("Portal lookup failed:", lookupErr);
+                    // Don't block OTP send on a lookup failure — fall through.
+                }
+            }
             await sendOtp(trimmedEmail);
             setOtpSent(true);
             toast.success("Verification code sent!");
@@ -1399,7 +1553,11 @@ function SubmissionPage() {
         }
     };
 
-    const handleVerifyOtp = async (e) => {
+    // `onSuccess` is an optional extra callback fired after a successful
+    // verify (state already committed) — used by the Almost-Done card
+    // (Task 12) to immediately continue into finalize() once identity is
+    // confirmed, without duplicating this whole function.
+    const handleVerifyOtp = async (e, { onSuccess } = {}) => {
         if (e) e.preventDefault();
         if (otpLoading) return;
         const code = otpValue.trim();
@@ -1434,7 +1592,8 @@ function SubmissionPage() {
                     populatePrefillData(data.talent);
                     setPrefillSuggestion({ data: data.talent });
                     setPrefillTried(true);
-                    if (!resumingSubmission) setCurrentStep(computeReturningTalentStartStep(data.talent));
+                    setIsReturningTalent(true);
+                    if (!resumingSubmission) setCurrentStep(computeReturningTalentStartStep(data.talent, trimmedEmail));
                 }
             } else {
                 toast.success("Successfully authenticated. Welcome to Talentgram!");
@@ -1446,7 +1605,9 @@ function SubmissionPage() {
             setForm((f) => ({ ...f, email: trimmedEmail }));
             setPrefillEmail(trimmedEmail);
             setEmailGateUnlocked(true);
+            setEmailVerified(true);
             setOtpSent(false);
+            onSuccess?.();
         } catch (error) {
             console.error("OTP verify error:", error);
             toast.error(error?.response?.data?.detail || "Invalid or expired verification code.");
@@ -1470,48 +1631,54 @@ function SubmissionPage() {
         }
     };
 
-    const handleInlineContinue = () => {
-        if (!gatewayRecognition || !gatewayRecognition.email) return;
-        
-        const formatted = gatewayRecognition.email.trim().toLowerCase();
-        localStorage.setItem("talentgram_portal_email", formatted);
-        setForm((f) => ({ ...f, email: formatted }));
-        setPrefillEmail(formatted);
-        setEmailGateUnlocked(true);
-        
-        if (gatewayRecognition.isGoogle) {
-            const profileDataStr = localStorage.getItem("talentgram_google_profile_data");
-            if (profileDataStr) {
-                const profileData = JSON.parse(profileDataStr);
-                populatePrefillData(profileData);
-                setPrefillSuggestion({ data: profileData });
-                setPrefillTried(true);
-                // Known Talent Profile (Google recognition), no submission yet
-                // for this project — same "skip to Project Info" rule as the
-                // OTP-verified returning-talent path above.
-                setCurrentStep(computeReturningTalentStartStep(profileData));
-            }
-            toast.success(`Welcome back, ${gatewayRecognition.name}!`);
-            return;
+    // ALMOST DONE — new-talent end-of-flow authentication. The email was
+    // already collected with zero friction back at "UPLOAD TEST"
+    // (handleInlineLookup's not-found branch); this just proves ownership
+    // of that SAME email via the existing OTP machinery, right before
+    // submit. Reuses gatewayEmail/otpSent/handleVerifyOtp/handleResendOtp
+    // verbatim — this is the identical verification flow Step A/B already
+    // use, just triggered from a different position in the page.
+    const handleAlmostDoneSendCode = useCallback(async () => {
+        const email = (form.email || "").trim().toLowerCase();
+        if (!email) return;
+        setGatewayEmail(email);
+        setGatewayLoading(true);
+        try {
+            await sendOtp(email);
+            setOtpSent(true);
+            toast.success("Verification code sent!");
+        } catch (error) {
+            console.error("OTP send error:", error);
+            toast.error(error?.response?.data?.detail || "Failed to send verification code. Please try again.");
+        } finally {
+            setGatewayLoading(false);
         }
+    }, [form.email]);
+    // handleAlmostDoneVerify is defined further down, right after
+    // handleSubmitCtaClick (which it calls on success) — see there.
 
-        // Trigger pre-fill lookup immediately so the talent's profile details are auto-loaded
-        (async () => {
-            try {
-                const { data } = await axios.get(
-                    `/public/prefill?email=${encodeURIComponent(formatted)}`,
-                );
-                if (data && Object.keys(data).length > 0 && data.first_name) {
-                    populatePrefillData(data);
-                    setPrefillSuggestion({ data });
-                    setCurrentStep(computeReturningTalentStartStep(data));
-                }
-            } catch (e) {
-                console.error("Auto prefill lookup failed:", e);
-            }
-        })();
-        
-        toast.success(`Welcome back, ${gatewayRecognition.name}!`);
+    // Step B's "Yes, that's me" — a self-reported email/name match from the
+    // unauthenticated /portal/lookup call is NOT proof of ownership, so this
+    // must still require OTP before anything unlocks. (Previously this
+    // unlocked the form directly on a bare match with no verification at
+    // all — that would have been an authentication bypass, which is almost
+    // certainly why this card was never wired up live.) Real prefill/step
+    // computation happens in handleVerifyOtp once the code is confirmed.
+    const handleInlineContinue = async () => {
+        if (!gatewayRecognition || !gatewayRecognition.email) return;
+        const formatted = gatewayRecognition.email.trim().toLowerCase();
+        setGatewayEmail(formatted);
+        setGatewayLoading(true);
+        try {
+            await sendOtp(formatted);
+            setOtpSent(true);
+            toast.success("Verification code sent!");
+        } catch (error) {
+            console.error("OTP send error:", error);
+            toast.error(error?.response?.data?.detail || "Failed to send verification code. Please try again.");
+        } finally {
+            setGatewayLoading(false);
+        }
     };
 
     const handleInlineCancel = () => {
@@ -1530,7 +1697,7 @@ function SubmissionPage() {
 
     const startSubmission = async (e) => {
         e.preventDefault();
-        const err = validateForm();
+        const err = canCreateDraft();
         if (err) {
             toast.error(err);
             return;
@@ -1628,10 +1795,9 @@ function SubmissionPage() {
                         toast.error(adminBootstrapping ? "Still starting this submission — please wait a moment and try again." : "Could not start this submission. Please reload and try again.");
                         return null;
                     }
-                    const err = validateStep1();
+                    const err = canCreateDraft();
                     if (err) {
-                        toast.error("Please complete the required Profile fields first before uploading files.");
-                        setCollapsedSections((prev) => ({ ...prev, profile: false }));
+                        toast.error(err);
                         return null;
                     }
                     const next = await startSubmissionDirect();
@@ -1905,10 +2071,9 @@ function SubmissionPage() {
                 toast.error(adminBootstrapping ? "Still starting this submission — please wait a moment and try again." : "Could not start this submission. Please reload and try again.");
                 return;
             }
-            const err = validateStep1();
+            const err = canCreateDraft();
             if (err) {
-                toast.error("Please complete the required Profile fields first.");
-                setCollapsedSections((prev) => ({ ...prev, profile: false }));
+                toast.error(err);
                 return;
             }
             currentSaved = await startSubmissionDirect();
@@ -1956,6 +2121,32 @@ function SubmissionPage() {
             await toggleLibraryMedia(item, false);
         }
     };
+
+    // Returning-talent Media step: reuse existing photos/intro by default
+    // instead of waiting for a manual "Select All" tap. Runs once (guarded
+    // by autoReuseAttemptedRef) the first time the talent reaches the
+    // Uploads step with unclaimed Library items, then collapses the picker
+    // to a compact summary — "Change Photos"/"Change Intro" (rendered at the
+    // call site) re-expand it. Admin Mode is excluded: the admin is
+    // uploading/curating media on the talent's behalf and should see the
+    // full picker, not have it auto-select-then-hide itself.
+    useEffect(() => {
+        if (adminMode) return;
+        if (sectionForStep(currentStep) !== "uploads") return;
+        if (autoReuseAttemptedRef.current) return;
+        if (libraryMedia.length === 0) return;
+        autoReuseAttemptedRef.current = true;
+        if (selectedLibrarySourceIds.size > 0) {
+            // Already has selections (e.g., a resumed draft) — nothing to
+            // auto-run, just start collapsed like a completed auto-reuse.
+            setShowLibraryPicker(false);
+            return;
+        }
+        (async () => {
+            await selectAllLibraryMedia();
+            setShowLibraryPicker(false);
+        })();
+    }, [adminMode, currentStep, libraryMedia.length, selectedLibrarySourceIds.size, selectAllLibraryMedia]);
 
     const dismissRemovedWarning = (mid) => {
         // "Keep for this submission" — the item is already in
@@ -2174,6 +2365,17 @@ function SubmissionPage() {
         return map;
     }, [experience.sectionStatus]);
 
+    // Phase 3 (progress-indicator fix) — WHICH step chips WizardProgressBar
+    // shows; see wizardStepsForDisplay's own doc comment. WIZARD_STEPS'
+    // fixed 4-entry technical numbering is unchanged — currentStep/
+    // navigation/validation all still use it exactly as before.
+    // WizardProgressBar itself needs no changes — it already renders
+    // `steps.length` dynamically, not a hardcoded 4.
+    const wizardDisplaySteps = useMemo(
+        () => wizardStepsForDisplay({ isReturningTalent, currentStep }),
+        [isReturningTalent, currentStep],
+    );
+
     // "Update my Profile" disclosure — always defaults open if any field it
     // hides is actually required-and-unsatisfied for THIS project (never
     // silently hide something blocking Next), otherwise follows the
@@ -2302,10 +2504,12 @@ function SubmissionPage() {
     // current step's required items (experience.missingRequirements is
     // already the full Requirement Engine output — this just filters it to
     // one step's `section`), never anything ahead, per the wizard's own
-    // validation rule. Advancing out of Step 3 additionally has to create
-    // the backend submission record the first time (item 1 of the plan) —
-    // reuses startSubmissionDirect() verbatim, the same function the old
-    // lazy-upload-creation fallback already used.
+    // validation rule. Advancing out of Project Questions (whichever numeric
+    // step that is post-reorder — see wizardSteps.js) additionally has to
+    // create the backend submission record the first time (item 1 of the
+    // Phase 1 plan) — reuses startSubmissionDirect() verbatim, since Media
+    // (the very next step) needs `saved.id`/`saved.token` to attach uploads
+    // to.
     const handleWizardNext = useCallback(async () => {
         const stepSection = sectionForStep(currentStep);
         const stepMissing = experience.missingRequirements.filter((item) => item.section === stepSection);
@@ -2320,7 +2524,7 @@ function SubmissionPage() {
             return;
         }
 
-        if (currentStep === 3) {
+        if (stepSection === "projectQuestions") {
             if (!saved) {
                 if (adminMode) {
                     toast.error(adminBootstrapping ? "Still starting this submission — please wait a moment and try again." : "Could not start this submission. Please reload and try again.");
@@ -2376,6 +2580,16 @@ function SubmissionPage() {
             return;
         }
         finalize();
+    };
+
+    // ALMOST DONE (continued from handleAlmostDoneSendCode above) —
+    // verifying here means "confirm identity AND submit" in one motion, per
+    // the spec's "Almost Done" copy. handleVerifyOtp's onSuccess hook fires
+    // handleSubmitCtaClick() once emailVerified is committed; safe to call
+    // unconditionally since this card only ever renders when
+    // experience.readinessSummary.ready is already true.
+    const handleAlmostDoneVerify = (e) => {
+        handleVerifyOtp(e, { onSuccess: () => handleSubmitCtaClick() });
     };
 
     const MAX_TAKES = 5;
@@ -2742,7 +2956,7 @@ function SubmissionPage() {
                 the AdminModeBanner already owns that position there. */}
             {emailGateUnlocked && (
                 <WizardProgressBar
-                    steps={WIZARD_STEPS}
+                    steps={wizardDisplaySteps}
                     currentStep={currentStep}
                     stepStatusById={wizardStepStatusById}
                     onStepClick={handleWizardStepJump}
@@ -2890,6 +3104,30 @@ function SubmissionPage() {
                             <p className="text-[13px] leading-relaxed text-[#222222] whitespace-pre-line">
                                 {project.additional_details}
                             </p>
+                        </div>
+                    )}
+                    {/* Dominant CTA — clicking silently recognizes a returning
+                        talent via their portal session (no OTP, no retyped
+                        profile) and jumps straight to Project Questions; a
+                        new/unrecognized talent is scrolled to the existing
+                        email/OTP entry below. See handleUploadTestClick. */}
+                    {!emailGateUnlocked && (
+                        <div className="mt-8 pt-6 border-t border-slate-100">
+                            <button
+                                type="button"
+                                onClick={handleUploadTestClick}
+                                disabled={recognizing}
+                                data-testid="upload-test-cta"
+                                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-4 rounded-full bg-slate-950 text-white text-[15px] font-semibold tracking-wide shadow-[0_4px_20px_rgba(15,23,42,0.15)] hover:bg-[#0c2340] active:scale-[0.98] transition-all duration-200 disabled:opacity-60 min-h-[52px]"
+                            >
+                                {recognizing ? (
+                                    <>
+                                        <Loader2 className="w-4 h-4 animate-spin" /> Recognizing you…
+                                    </>
+                                ) : (
+                                    <>UPLOAD TEST</>
+                                )}
+                            </button>
                         </div>
                     )}
                 </section>
@@ -3094,10 +3332,19 @@ function SubmissionPage() {
                                             <button
                                                 type="button"
                                                 onClick={handleInlineContinue}
-                                                className="w-full bg-slate-900 text-white px-4 py-2.5 rounded-xl text-xs font-semibold hover:bg-slate-850 active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 h-[40px]"
+                                                disabled={gatewayLoading}
+                                                className="w-full bg-slate-900 text-white px-4 py-2.5 rounded-xl text-xs font-semibold hover:bg-slate-850 active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 h-[40px] disabled:opacity-60"
                                             >
-                                                Continue to Audition
+                                                {gatewayLoading ? "Sending code…" : "Yes, that's me"}
                                                 <ChevronRight className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={handleInlineCancel}
+                                                disabled={gatewayLoading}
+                                                className="w-full text-[#333333] text-xs font-medium py-1.5 hover:text-[#111111] transition-colors"
+                                            >
+                                                Not you? Use another email
                                             </button>
                                         </div>
                                     </div>
@@ -3145,7 +3392,7 @@ function SubmissionPage() {
                         {emailGateUnlocked && (
                         <>
                         {/* Section 1: Your Profile */}
-                        <div data-testid="profile-section" data-wizard-step="1" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(1)}`}>
+                        <div data-testid="profile-section" data-wizard-step="3" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(3)}`}>
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Talent Profile</p>
@@ -3380,21 +3627,6 @@ function SubmissionPage() {
                                                 Enter your actual height without footwear.
                                             </span>
                                         </div>
-                                        <div className="md:col-span-2">
-                                            <span className="text-[11px] text-[#111111] tracking-[0.08em] font-semibold uppercase font-mono block mb-2">
-                                                Current Location(s) {isFieldRequired("location") ? "*" : "(optional)"}
-                                            </span>
-                                            <LocationSelector
-                                                value={form.location || []}
-                                                onChange={(arr) => {
-                                                    setForm({ ...form, location: arr });
-                                                    if (validationErrors.location) setValidationErrors((e) => ({ ...e, location: undefined }));
-                                                    setTimeout(saveForm, 0);
-                                                }}
-                                                testid="form-location"
-                                                error={validationErrors.location}
-                                            />
-                                        </div>
                                     </div>
 
                                     {/* Phase 2 — unified identity fields. Wrapped in the
@@ -3561,7 +3793,7 @@ function SubmissionPage() {
                             all one step's content. Purely a JSX relocation: same
                             fields, same handlers, same testids — nothing about what
                             they do or how they validate changed. */}
-                        <div data-testid="skills-section" data-wizard-step="2" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(2)}`}>
+                        <div data-testid="skills-section" data-wizard-step="4" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(4)}`}>
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Talent Profile</p>
@@ -3653,7 +3885,7 @@ function SubmissionPage() {
                         </div>
 
                         {/* Section 2: Project Questions */}
-                        <div data-step="2" data-wizard-step="3" data-testid="project-questions-section" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(3)}`}>
+                        <div data-step="2" data-wizard-step="1" data-testid="project-questions-section" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(1)}`}>
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Project Questions</p>
@@ -3684,6 +3916,27 @@ function SubmissionPage() {
 
                             {!collapsedSections.projectQuestions && (
                                 <div className="space-y-8 animate-fadeIn">
+                                    {/* CURRENT LOCATION — project-specific answer only; never
+                                        written back to the talent's global profile location. */}
+                                    <div
+                                        data-testid="location-question-block"
+                                        className="mb-6"
+                                    >
+                                        <span className="text-[11px] text-[#111111] tracking-[0.08em] font-semibold uppercase font-mono block mb-2">
+                                            Current Location(s) {isFieldRequired("location") ? "*" : "(optional)"}
+                                        </span>
+                                        <LocationSelector
+                                            value={form.location || []}
+                                            onChange={(arr) => {
+                                                setForm({ ...form, location: arr });
+                                                if (validationErrors.location) setValidationErrors((e) => ({ ...e, location: undefined }));
+                                                setTimeout(saveForm, 0);
+                                            }}
+                                            testid="form-location"
+                                            error={validationErrors.location}
+                                        />
+                                    </div>
+
                                     {/* AVAILABILITY — decision block */}
                                     <div
                                         data-testid="availability-block"
@@ -3985,8 +4238,8 @@ function SubmissionPage() {
                         onBack={handleWizardBack}
                         onNext={handleWizardNext}
                         nextDisabled={starting}
-                        nextBusy={currentStep === 3 && starting}
-                        nextLabel={currentStep === 3 ? "Continue to Uploads" : "Next"}
+                        nextBusy={sectionForStep(currentStep) === "projectQuestions" && starting}
+                        nextLabel={sectionForStep(currentStep) === "projectQuestions" ? "Continue to Uploads" : "Next"}
                     />
                 )}
 
@@ -3994,10 +4247,10 @@ function SubmissionPage() {
                 {emailGateUnlocked && (
                     <section
                         ref={uploadsSectionRef}
-                        className={`pt-4 ${stepVisibilityClass(4)}`}
+                        className={`pt-4 ${stepVisibilityClass(2)}`}
                         data-testid="uploads-section"
                         data-step="3"
-                        data-wizard-step="4"
+                        data-wizard-step="2"
                     >
                         <div className="bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)]">
                         <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
@@ -4044,82 +4297,9 @@ function SubmissionPage() {
                         {!collapsedSections.uploads && (
                             <div className="animate-fadeIn">
 
-                                <LibraryMediaPicker
-                                    categories={LIBRARY_CATEGORIES}
-                                    libraryByCategory={libraryByCategory}
-                                    removedByCategory={removedByCategory}
-                                    dismissedRemovedWarnings={dismissedRemovedWarnings}
-                                    selectedLibrarySourceIds={selectedLibrarySourceIds}
-                                    libraryBusyId={libraryBusyId}
-                                    toggleLibraryMedia={toggleLibraryMedia}
-                                    dismissRemovedWarning={dismissRemovedWarning}
-                                    removeMedia={removeMedia}
-                                    selectAllLibraryMedia={selectAllLibraryMedia}
-                                    hasAnyLibraryMedia={libraryMedia.length > 0}
-                                />
-
-                                {/* Automatic Media Categorization (item 3) — Admin Mode only.
-                                    A generic bulk-add zone, separate from every per-category
-                                    zone below (which keep working unchanged for a direct
-                                    single-category drop). Dropping a batch here runs the
-                                    heuristic suggestion + review modal; per-category zones
-                                    skip straight to upload as before. */}
-                                {adminMode && (
-                                    <div
-                                        className={`mb-6 rounded-2xl border-2 border-dashed p-6 text-center transition-colors ${
-                                            isBulkDragOver ? "border-[#0c2340]/50 bg-[#0c2340]/5" : "border-slate-300 bg-slate-50/40"
-                                        }`}
-                                        data-testid="bulk-categorize-dropzone"
-                                        onDragOver={(e) => { e.preventDefault(); setIsBulkDragOver(true); }}
-                                        onDragLeave={() => setIsBulkDragOver(false)}
-                                        onDrop={handleBulkCategorizeDrop}
-                                    >
-                                        <p className="text-sm font-semibold text-slate-800">
-                                            {categorizingBatch ? "Analyzing files…" : "Drop a batch here — we'll suggest categories"}
-                                        </p>
-                                        <p className="text-xs text-slate-500 mt-1">
-                                            Select or drop 2+ images (or a whole folder) and review the suggested categorization before anything uploads.
-                                        </p>
-                                        <input
-                                            ref={bulkCategorizeInputRef}
-                                            type="file"
-                                            accept="image/*"
-                                            multiple
-                                            className="hidden"
-                                            onChange={(e) => {
-                                                if (e.target.files?.length) runBulkCategorization(Array.from(e.target.files));
-                                                e.target.value = "";
-                                            }}
-                                        />
-                                        <button
-                                            type="button"
-                                            onClick={() => bulkCategorizeInputRef.current?.click()}
-                                            className="mt-3 text-xs font-medium px-3 py-1.5 rounded-full border border-slate-300 bg-white hover:bg-slate-50"
-                                        >
-                                            Select Files
-                                        </button>
-                                    </div>
-                                )}
-
-                                {requirements.intro_video !== REQUIREMENT_TIERS.HIDDEN && (
-                                    <PremiumUploadSlot
-                                        title="Introduction Video"
-                                        note="Upload your recent professional introduction video (no contact info)."
-                                        icon={Video}
-                                        accept="video/*"
-                                        inputRef={introRef}
-                                        onPick={(f) => triggerUpload(f[0], "intro_video")}
-                                        uploadState={activeUploads["intro_video"]}
-                                        media={intro}
-                                        onRemove={(m) => removeMedia(m.id)}
-                                        testid="upload-intro"
-                                        cameraCapture="user"
-                                        failed={Boolean(retryQueue["intro_video"]?.failed)}
-                                        onRetry={() => retryUpload("intro_video")}
-                                        hint="Recommended duration: 20–60 seconds."
-                                    />
-                                )}
-
+                                {/* AUDITION / TEST UPLOAD — the one genuinely new action
+                                    for a returning talent, so it renders first, above the
+                                    reused-photos/intro summary below. */}
                                 {requirements.audition_takes_visibility !== REQUIREMENT_TIERS.HIDDEN && (
                                     <div className="mb-10" data-testid="takes-section">
                                         <div className="flex items-center justify-between mb-4">
@@ -4203,6 +4383,108 @@ function SubmissionPage() {
                                         )}
                                     </div>
                                 )}
+
+                                {libraryMedia.length > 0 && !showLibraryPicker && selectedLibrarySourceIds.size > 0 ? (
+                                    <div
+                                        className="mb-6 flex items-center justify-between gap-3 bg-emerald-50/60 border border-emerald-100 rounded-2xl p-4"
+                                        data-testid="library-media-reused-summary"
+                                    >
+                                        <div className="flex items-center gap-2 text-emerald-700 text-[13px] font-medium">
+                                            <Check className="w-4 h-4 shrink-0" />
+                                            Using your saved photos &amp; intro ({selectedLibrarySourceIds.size})
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowLibraryPicker(true)}
+                                            data-testid="change-saved-media-btn"
+                                            className="shrink-0 text-xs font-medium px-3 py-1.5 rounded-full border border-emerald-200 bg-white hover:bg-emerald-50 transition-colors"
+                                        >
+                                            Change Photos / Intro
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <LibraryMediaPicker
+                                        categories={LIBRARY_CATEGORIES}
+                                        libraryByCategory={libraryByCategory}
+                                        removedByCategory={removedByCategory}
+                                        dismissedRemovedWarnings={dismissedRemovedWarnings}
+                                        selectedLibrarySourceIds={selectedLibrarySourceIds}
+                                        libraryBusyId={libraryBusyId}
+                                        toggleLibraryMedia={toggleLibraryMedia}
+                                        dismissRemovedWarning={dismissRemovedWarning}
+                                        removeMedia={removeMedia}
+                                        selectAllLibraryMedia={selectAllLibraryMedia}
+                                        hasAnyLibraryMedia={libraryMedia.length > 0}
+                                    />
+                                )}
+
+                                {/* Automatic Media Categorization (item 3) — Admin Mode only.
+                                    A generic bulk-add zone, separate from every per-category
+                                    zone below (which keep working unchanged for a direct
+                                    single-category drop). Dropping a batch here runs the
+                                    heuristic suggestion + review modal; per-category zones
+                                    skip straight to upload as before. */}
+                                {adminMode && (
+                                    <div
+                                        className={`mb-6 rounded-2xl border-2 border-dashed p-6 text-center transition-colors ${
+                                            isBulkDragOver ? "border-[#0c2340]/50 bg-[#0c2340]/5" : "border-slate-300 bg-slate-50/40"
+                                        }`}
+                                        data-testid="bulk-categorize-dropzone"
+                                        onDragOver={(e) => { e.preventDefault(); setIsBulkDragOver(true); }}
+                                        onDragLeave={() => setIsBulkDragOver(false)}
+                                        onDrop={handleBulkCategorizeDrop}
+                                    >
+                                        <p className="text-sm font-semibold text-slate-800">
+                                            {categorizingBatch ? "Analyzing files…" : "Drop a batch here — we'll suggest categories"}
+                                        </p>
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            Select or drop 2+ images (or a whole folder) and review the suggested categorization before anything uploads.
+                                        </p>
+                                        <input
+                                            ref={bulkCategorizeInputRef}
+                                            type="file"
+                                            accept="image/*"
+                                            multiple
+                                            className="hidden"
+                                            onChange={(e) => {
+                                                if (e.target.files?.length) runBulkCategorization(Array.from(e.target.files));
+                                                e.target.value = "";
+                                            }}
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => bulkCategorizeInputRef.current?.click()}
+                                            className="mt-3 text-xs font-medium px-3 py-1.5 rounded-full border border-slate-300 bg-white hover:bg-slate-50"
+                                        >
+                                            Select Files
+                                        </button>
+                                    </div>
+                                )}
+
+                                {requirements.intro_video !== REQUIREMENT_TIERS.HIDDEN && (
+                                    <PremiumUploadSlot
+                                        title="Introduction Video"
+                                        note="Upload your recent professional introduction video (no contact info)."
+                                        icon={Video}
+                                        accept="video/*"
+                                        inputRef={introRef}
+                                        onPick={(f) => triggerUpload(f[0], "intro_video")}
+                                        uploadState={activeUploads["intro_video"]}
+                                        media={intro}
+                                        onRemove={(m) => removeMedia(m.id)}
+                                        testid="upload-intro"
+                                        cameraCapture="user"
+                                        failed={Boolean(retryQueue["intro_video"]?.failed)}
+                                        onRetry={() => retryUpload("intro_video")}
+                                        hint="Recommended duration: 20–60 seconds."
+                                    />
+                                )}
+
+                                {/* NOTE: this block was relocated to render first — see
+                                    the copy right after `animate-fadeIn` opens above — so
+                                    the one genuinely new action for a returning talent
+                                    (upload a new audition/test) is the first thing they
+                                    see, ahead of the reused-photos/intro summary. */}
 
                                 {showImagesSection && (
                                     <div className="mb-8" data-testid="images-upload-section">
@@ -4522,6 +4804,98 @@ function SubmissionPage() {
                             </div>
                         )}
 
+                        </div>
+                    </section>
+                )}
+
+                {/* READY-TO-SUBMIT FOOTER — deliberately OUTSIDE every
+                    step's stepVisibilityClass-gated wrapper (unlike Phase
+                    1, where this lived inside the uploads section, back
+                    when uploads was always the talent's last step). Now
+                    that uploads is step 2 of 4 for a new talent (Personal
+                    Info/Skills follow it), gating this on step position
+                    would hide it exactly when a new talent needs it —
+                    after Skills, not after Uploads. Gating on
+                    `experience.readinessSummary.ready` instead means it
+                    appears wherever/whenever the talent actually becomes
+                    ready, regardless of which step they're currently
+                    viewing — after Uploads for a returning talent (profile/
+                    skills already known), after Skills for a new talent.
+                    IDENTITY CONFIRMATION (recognizedIdentity — the
+                    token-backed silent-recognition path) and ALMOST DONE
+                    (emailVerified — the new-talent end-of-flow auth gate)
+                    are mutually exclusive alternatives rendered here; the
+                    plain finalize-submission-btn footer is the fallback
+                    when neither applies (project questions/skills already
+                    completed OTP earlier, e.g. the email-typed "Is this
+                    you?" path). */}
+                {emailGateUnlocked && experience.readinessSummary.ready && submission?.status !== "submitted" && (
+                    <div className="pt-4">
+                        {recognizedIdentity && (
+                            <div
+                                className="mb-6 flex flex-col gap-5 border border-slate-100 rounded-2xl p-5 bg-slate-50/50"
+                                data-testid="identity-confirmation-card"
+                            >
+                                <div className="flex items-center gap-4">
+                                    <div className="w-14 h-14 rounded-full bg-slate-200 flex items-center justify-center border border-[#d4d4d4] shrink-0">
+                                        <User className="w-6 h-6 text-[#333333]" />
+                                    </div>
+                                    <div className="text-left">
+                                        <h4 className="font-semibold text-sm text-[#111111]">Is this you?</h4>
+                                        <p className="text-xs text-[#333333] font-medium mt-1">
+                                            {recognizedIdentity.name}
+                                            {(() => {
+                                                const locs = Array.isArray(recognizedIdentity.location)
+                                                    ? recognizedIdentity.location
+                                                    : (recognizedIdentity.location ? [{ city: recognizedIdentity.location }] : []);
+                                                const bits = [];
+                                                if (locs.length > 0) bits.push(locs.map((l) => l?.city || l).join(", "));
+                                                if (recognizedIdentity.height) bits.push(recognizedIdentity.height);
+                                                return bits.length > 0 ? ` · ${bits.join(" · ")}` : "";
+                                            })()}
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="flex flex-col items-stretch gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={handleSubmitCtaClick}
+                                        disabled={experience.submitCta.disabled || finalizing}
+                                        data-testid="identity-confirm-submit-btn"
+                                        className="w-full bg-slate-900 text-white px-4 py-3 rounded-full text-[13px] font-semibold hover:bg-slate-800 active:scale-[0.98] disabled:opacity-40 transition-all duration-150 inline-flex items-center justify-center gap-2 min-h-[48px]"
+                                    >
+                                        {finalizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                                        Yes, submit
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleUseAnotherEmail}
+                                        data-testid="identity-not-you-btn"
+                                        className="w-full text-[#333333] text-xs font-medium py-1.5 hover:text-[#111111] transition-colors"
+                                    >
+                                        Not you? Sign in
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {!recognizedIdentity && !emailVerified && !adminMode && (
+                            <AlmostDoneAuthCard
+                                email={form.email}
+                                gatewayLoading={gatewayLoading}
+                                otpSent={otpSent}
+                                otpValue={otpValue}
+                                setOtpValue={setOtpValue}
+                                otpLoading={otpLoading}
+                                otpResending={otpResending}
+                                onSendCode={handleAlmostDoneSendCode}
+                                onVerify={handleAlmostDoneVerify}
+                                onResend={handleResendOtp}
+                                onGoogle={handleGoogleLogin}
+                            />
+                        )}
+
+                        {(recognizedIdentity || emailVerified || adminMode) && (
                         <div ref={stickyFooterRef} data-sticky-footer className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
                             <p className="text-[12px] text-[#333333] text-center mb-3 max-w-md mx-auto leading-relaxed" data-testid="submission-accuracy-warning">
                                 Please ensure your details, portfolio and videos are accurate and up to date. Casting decisions are based on the information submitted here.
@@ -4577,8 +4951,8 @@ function SubmissionPage() {
                                 </p>
                             )}
                         </div>
-                        </div>
-                    </section>
+                        )}
+                    </div>
                 )}
             </div>
 
@@ -5757,6 +6131,112 @@ function PremiumAddTakeSlot({ number, required, onPick, inputRef }) {
                     setLabel("");
                 }}
             />
+        </div>
+    );
+}
+
+// ALMOST DONE — new-talent end-of-flow authentication card. Renders only
+// once the submission is otherwise fully ready (see the READY-TO-SUBMIT
+// FOOTER block in SubmissionPage). The email is already known (collected
+// with zero friction at "UPLOAD TEST" — handleInlineLookup's not-found
+// branch); this just proves ownership of it via the exact same OTP UI
+// pattern Step A/B already use, right before the talent's first submit.
+function AlmostDoneAuthCard({
+    email,
+    gatewayLoading,
+    otpSent,
+    otpValue,
+    setOtpValue,
+    otpLoading,
+    otpResending,
+    onSendCode,
+    onVerify,
+    onResend,
+    onGoogle,
+}) {
+    return (
+        <div
+            className="mb-6 flex flex-col gap-4 border border-slate-100 rounded-2xl p-5 bg-slate-50/50 text-left"
+            data-testid="almost-done-auth-card"
+        >
+            <div>
+                <h4 className="font-display text-lg font-bold text-slate-900">Almost Done</h4>
+                <p className="text-xs text-[#333333] mt-1">
+                    Confirm your identity to save your profile and submit your application.
+                </p>
+            </div>
+
+            {otpSent ? (
+                <div className="flex flex-col gap-3">
+                    <label className="text-xs font-semibold text-[#111111] uppercase tracking-wider">
+                        Enter Verification Code
+                    </label>
+                    <p className="text-xs text-[#333333]">
+                        We've sent a code to {email}
+                    </p>
+                    <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={6}
+                        value={otpValue}
+                        onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ""))}
+                        placeholder="6-digit code"
+                        style={{ fontSize: "16px" }}
+                        className="w-full px-4 py-3 bg-white border border-[#eaeaea] rounded-xl text-[#111111] placeholder:text-[#333333] focus:border-slate-500 focus:outline-none transition duration-150 h-[48px] text-center tracking-[0.3em] font-mono"
+                        data-testid="almost-done-otp-input"
+                    />
+                    <button
+                        type="button"
+                        onClick={onVerify}
+                        disabled={otpLoading}
+                        data-testid="almost-done-verify-btn"
+                        className="w-full bg-slate-900 text-white px-4 py-3 rounded-full text-[13px] font-semibold hover:bg-slate-800 active:scale-[0.98] disabled:opacity-40 transition-all duration-150 inline-flex items-center justify-center gap-2 min-h-[48px]"
+                    >
+                        {otpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                        {otpLoading ? "Verifying…" : "Verify & Submit"}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={onResend}
+                        disabled={otpResending}
+                        data-testid="almost-done-resend-btn"
+                        className="w-full text-[#333333] text-xs font-medium py-1 hover:text-[#111111] transition-colors disabled:opacity-40"
+                    >
+                        {otpResending ? "Resending…" : "Resend code"}
+                    </button>
+                </div>
+            ) : (
+                <div className="flex flex-col gap-3">
+                    <button
+                        type="button"
+                        onClick={onGoogle}
+                        className="w-full bg-white border border-[#eaeaea] hover:bg-slate-50 text-[#111111] py-3 px-4 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-2.5 transition duration-150 shadow-sm active:scale-[0.98]"
+                        data-testid="almost-done-google-btn"
+                    >
+                        <svg className="w-4 h-4" viewBox="0 0 24 24">
+                            <path fill="#EA4335" d="M12 5.04c1.78 0 3.38.61 4.64 1.8l3.46-3.46C17.99 1.19 15.21 0 12 0 7.31 0 3.28 2.69 1.34 6.61l4.08 3.16C6.4 7.02 9.01 5.04 12 5.04z" />
+                            <path fill="#4285F4" d="M23.49 12.27c0-.81-.07-1.59-.2-2.36H12v4.51h6.46c-.29 1.48-1.14 2.73-2.4 3.58l3.73 2.89c2.18-2.01 3.7-4.97 3.7-8.62z" />
+                            <path fill="#FBBC05" d="M5.42 14.78c-.24-.72-.38-1.49-.38-2.28s.14-1.56.38-2.28L1.34 7.06C.48 8.79 0 10.74 0 12.8s.48 4.01 1.34 5.74l4.08-3.76z" />
+                            <path fill="#34A853" d="M12 24c3.24 0 5.97-1.07 7.96-2.91l-3.73-2.89c-1.04.7-2.36 1.11-4.23 1.11-3.01 0-5.6-1.98-6.51-4.73L1.34 17.68C3.28 21.6 7.31 24 12 24z" />
+                        </svg>
+                        Continue with Google
+                    </button>
+                    <div className="flex items-center my-0.5">
+                        <div className="flex-grow border-t border-[#eaeaea]"></div>
+                        <span className="mx-4 text-[10px] text-[#888888] font-mono uppercase tracking-wider">or</span>
+                        <div className="flex-grow border-t border-[#eaeaea]"></div>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onSendCode}
+                        disabled={gatewayLoading}
+                        data-testid="almost-done-send-code-btn"
+                        className="w-full bg-slate-900 text-white px-4 py-3 rounded-full text-[13px] font-semibold hover:bg-slate-800 active:scale-[0.98] disabled:opacity-40 transition-all duration-150 inline-flex items-center justify-center gap-2 min-h-[48px]"
+                    >
+                        {gatewayLoading ? "Sending code…" : `Send code to ${email}`}
+                    </button>
+                </div>
+            )}
         </div>
     );
 }

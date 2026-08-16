@@ -1315,8 +1315,18 @@ async def _promote_application_to_talent(
         # talent_profile_snapshot_at — same fail-safe semantics, same reason:
         # form_to_merge is this application's own possibly-stale snapshot,
         # regardless of whether a talent or an admin triggered this call.
+        #
+        # Exception: an existing talent's application-specific location
+        # answer must remain separate from their global Talent Profile
+        # location — same rule /submit's finalize already enforces (see
+        # submissions.py's form_to_merge.pop("location", None)). Only a
+        # brand-new talent (the insert_one path below, via
+        # _application_to_talent) may have its initial location seed the
+        # global profile.
+        merge_fields = dict(form_to_merge)
+        merge_fields.pop("location", None)
         await merge_talent_profile(
-            talent_doc, form_to_merge, source,
+            talent_doc, merge_fields, source,
             snapshot_at=app_doc.get("talent_profile_updated_at"),
         )
         for m in app_doc.get("media", []) or []:

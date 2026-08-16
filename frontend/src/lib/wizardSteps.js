@@ -9,11 +9,19 @@
 //   - WizardProgressBar (renders the step list + progress)
 //   - WizardStepNav (Back/Next, gates Next on the current step's `section`)
 //   - SubmissionPage.jsx's step-visibility gates and `ensureRequirementVisible`
+// Phase 2 (new-talent flow) — reordered so Project Questions and Media come
+// FIRST for everyone, with Basic Profile/Skills last. This lets a new
+// talent start submitting immediately (Questions -> Media) before any
+// personal-info typing, and lets a returning talent's silent recognition
+// still land on step 1 (Project Questions) exactly like before the
+// reorder — `stepForSection`/`sectionForStep` below are the only things
+// any caller should depend on, never a raw numeric literal, so this
+// reorder needed no changes outside this file's own step ids.
 export const WIZARD_STEPS = Object.freeze([
-    { id: 1, key: "profile", label: "Basic Profile", section: "profile" },
-    { id: 2, key: "skills", label: "Skills & Attributes", section: "skills" },
-    { id: 3, key: "projectQuestions", label: "Project Info", section: "projectQuestions" },
-    { id: 4, key: "uploads", label: "Media Upload", section: "uploads" },
+    { id: 1, key: "projectQuestions", label: "Project Info", section: "projectQuestions" },
+    { id: 2, key: "uploads", label: "Media Upload", section: "uploads" },
+    { id: 3, key: "profile", label: "Basic Profile", section: "profile" },
+    { id: 4, key: "skills", label: "Skills & Attributes", section: "skills" },
 ]);
 
 export const TOTAL_STEPS = WIZARD_STEPS.length;
@@ -26,6 +34,24 @@ export function stepForSection(section) {
 export function sectionForStep(stepId) {
     const step = WIZARD_STEPS.find((s) => s.id === stepId);
     return step ? step.section : null;
+}
+
+// Phase 3 (progress-indicator fix) — WHICH step chips WizardProgressBar
+// should display, as distinct from WIZARD_STEPS' own fixed technical
+// numbering (which currentStep/navigation/validation keep using
+// unchanged). A returning talent's actual journey never includes Basic
+// Profile/Skills — Identity Confirmation follows Media directly — so a bar
+// reading "Step 1 of 4" when only 2 steps will ever be shown is stale/
+// misleading. Kept dynamic rather than a one-time snapshot: if a returning
+// talent DOES get routed into Profile/Skills because something for this
+// specific project is genuinely missing there, `step.id <= currentStep`
+// keeps that chip visible the moment it's actually reached, so the bar
+// never hides the step the talent is currently standing on.
+export function wizardStepsForDisplay({ steps = WIZARD_STEPS, isReturningTalent, currentStep }) {
+    if (!isReturningTalent) return steps;
+    return steps.filter(
+        (step) => step.id <= currentStep || (step.section !== "profile" && step.section !== "skills"),
+    );
 }
 
 // Persisted current-step position — a NEW, separate localStorage key from

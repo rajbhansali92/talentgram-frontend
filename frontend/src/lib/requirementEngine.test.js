@@ -147,6 +147,12 @@ describe("computeRequirementItems — requirement tiers", () => {
         const items = computeRequirementItems({ project, form: baseForm(), submission: null });
         expect(findItem(items, "work_links").requirement).toBe(REQUIREMENT_TIERS.OPTIONAL);
     });
+
+    it("classifies location as a project question, not a profile field, under strict config", () => {
+        const project = strictProject({ fields: { location: "required" } });
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null });
+        expect(findItem(items, "location").section).toBe("projectQuestions");
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -198,6 +204,12 @@ describe("computeRequirementItems — project configuration variations", () => {
         const ids = items.map((i) => i.id);
         expect(ids).toEqual(expect.arrayContaining(["first_name", "last_name", "height", "location", "availability", "budget"]));
         expect(items.every((i) => i.requirement === REQUIREMENT_TIERS.REQUIRED)).toBe(true);
+    });
+
+    it("classifies location as a project question, not a profile field, in the legacy fallback", () => {
+        const project = { custom_questions: [] };
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null });
+        expect(items.find((i) => i.id === "location").section).toBe("projectQuestions");
     });
 
     it("returns an empty item list when submission_requirements exists but strictness isn't 'strict'", () => {

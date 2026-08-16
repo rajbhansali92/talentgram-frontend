@@ -10,6 +10,7 @@ from core import (
     update_talent_cover_cache,
     normalize_instagram_handle,
     current_portal_talent,
+    resolve_canonical_talent,
     TalentIn,
     build_talent_submission_view,
     delete_talent_media_item,
@@ -74,7 +75,11 @@ async def portal_lookup(payload: PortalLookupIn):
     here — that requires an authenticated portal session.
     """
     email = payload.email.strip().lower()
-    talent = await db.talents.find_one({"email": email}, {"_id": 0})
+    # Uses the canonical resolver (matches on normalized_email/email/
+    # source.talent_email) rather than a bare email match, so this
+    # recognition check doesn't miss talents matchable only by one of the
+    # other identifiers — same rule every other lookup in the codebase uses.
+    talent = await resolve_canonical_talent(email=email)
     if not talent:
         return {"exists": False}
 

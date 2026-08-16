@@ -44,7 +44,7 @@ export function computeRequirementItems({ project, form, submission }) {
         items.push({ id: "first_name", label: "First name", section: "profile", selector: '[data-testid="form-first-name"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: !!form.first_name?.trim() });
         items.push({ id: "last_name", label: "Last name", section: "profile", selector: '[data-testid="form-last-name"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: !!form.last_name?.trim() });
         items.push({ id: "height", label: "Height", section: "profile", selector: '[data-testid="form-height-field"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: !!form.height?.trim() });
-        items.push({ id: "location", label: "Current location", section: "profile", selector: '[data-testid="form-location"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: !!(form.location && form.location.length > 0) });
+        items.push({ id: "location", label: "Current location", section: "projectQuestions", selector: '[data-testid="form-location"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: !!(form.location && form.location.length > 0) });
 
         const avail = form.availability || {};
         const status = (avail.status || "").trim();
@@ -88,7 +88,7 @@ export function computeRequirementItems({ project, form, submission }) {
     items.push({ id: "dob", label: "Date of Birth", section: "profile", selector: '[data-testid="form-dob"]', requirement: fieldTier("dob"), satisfied: !!form.dob?.trim() });
     items.push({ id: "age", label: "Age", section: "profile", selector: '[data-testid="form-age-field"]', requirement: fieldTier("age"), satisfied: !(form.age === undefined || form.age === null || String(form.age).trim() === "") });
     items.push({ id: "height", label: "Height", section: "profile", selector: '[data-testid="form-height-field"]', requirement: fieldTier("height"), satisfied: !!form.height?.trim() });
-    items.push({ id: "location", label: "Current location", section: "profile", selector: '[data-testid="form-location"]', requirement: fieldTier("location"), satisfied: !!(form.location && form.location.length > 0) });
+    items.push({ id: "location", label: "Current location", section: "projectQuestions", selector: '[data-testid="form-location"]', requirement: fieldTier("location"), satisfied: !!(form.location && form.location.length > 0) });
     items.push({ id: "gender", label: "Gender", section: "profile", selector: '[data-testid="form-gender-field"]', requirement: fieldTier("gender"), satisfied: !!form.gender?.trim() });
     items.push({ id: "ethnicity", label: "Ethnicity", section: "profile", selector: '[data-testid="form-ethnicity-field"]', requirement: fieldTier("ethnicity"), satisfied: !!form.ethnicity?.trim() });
     items.push({ id: "instagram_handle", label: "Instagram Handle", section: "profile", selector: '[data-testid="form-instagram-handle"]', requirement: fieldTier("instagram_handle"), satisfied: !!form.instagram_handle?.trim() });

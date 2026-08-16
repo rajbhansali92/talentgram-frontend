@@ -12,6 +12,7 @@ import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS, SECTION_STATUS
 import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
 import { computeRequirementItems } from "@/lib/requirementEngine";
 import { buildRecognizedIdentity, shouldAttemptSilentRecognition, classifyPortalLookupResult, tokenAuthenticatesEmail } from "@/lib/returningTalent";
+import { splitPendingConsentByKnownDestination, groupByDestinationDecision } from "@/lib/mediaDestination";
 import { useSwipeStep } from "@/hooks/useSwipeStep";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
 import LibraryMediaPicker from "@/components/submission/LibraryMediaPicker";
@@ -518,18 +519,22 @@ function SubmissionPage() {
     const [mediaConsentSubmitting, setMediaConsentSubmitting] = useState(false);
     // Default selection is "only this project" per spec — nothing auto-updates.
     const [mediaConsentChoice, setMediaConsentChoice] = useState("only_this_project");
-    // UX-polish fix — the "For this project" / "Save to my Media Library"
-    // destination question now has to be asked BEFORE the talent picks a
-    // file, not after upload (see the auto-resolve effect near
-    // submitMediaConsent below, which uses this to answer the pending-
-    // consent question the instant it appears — before the old post-upload
-    // dialog ever gets a chance to render). Keyed by the two independent
-    // decisions a talent can make in one sitting: `intro_video` and
-    // `images` (one choice covers whichever image sub-category — generic/
-    // Indian/Western — they upload into, matching the single on-screen
-    // toggle). "project" is the default for both, same as the old dialog's
-    // default choice, so untouched uploads behave exactly as before.
-    const [mediaDestination, setMediaDestination] = useState({ intro_video: "project", images: "project" });
+    // UX-polish fix — the "My Media Library" / "This Project" destination
+    // question now has to be asked BEFORE the talent picks a file, not
+    // after upload (see the auto-resolve effect near submitMediaConsent
+    // below, which uses this to answer the pending-consent question the
+    // instant it appears — before the old post-upload dialog ever gets a
+    // chance to render; see lib/mediaDestination.js's
+    // `splitPendingConsentByKnownDestination`, used both by that effect
+    // and by the dialog's own render condition below, for how that race
+    // is actually closed, not just usually-won). Keyed by the two independent decisions a talent can
+    // make in one sitting: `intro_video` and `images` (one choice covers
+    // whichever image sub-category — generic/Indian/Western — they upload
+    // into, matching the single on-screen toggle). "library" is the
+    // default for both — a talent's reusable Media Library/Dashboard is
+    // the expected home for new uploads; "project" only applies once
+    // explicitly chosen.
+    const [mediaDestination, setMediaDestination] = useState({ intro_video: "library", images: "library" });
     // Sprint 1 — autosave indicator. "idle" | "saving" | "saved". Driven by the
     // debounced draft-persistence effect below so it reflects real save activity.
     const [saveStatus, setSaveStatus] = useState("idle");
@@ -674,6 +679,23 @@ function SubmissionPage() {
     // immediately with no extra click needed). Flipped true only by an
     // explicit "UPLOAD TEST" click, via `revealAndScrollToTalentDetails`.
     const [talentDetailsRevealed, setTalentDetailsRevealed] = useState(false);
+
+    // UX-polish fix — the final submission CTA (Identity Confirmation /
+    // Almost Done / plain finalize button) must appear ONLY on the actual
+    // final page, never stacked underneath whatever step the talent
+    // happens to be viewing the instant `experience.readinessSummary.ready`
+    // flips true. Previously that footer rendered unconditionally once
+    // ready — for a returning talent that meant it could appear directly
+    // under Media (their second-to-last page) the moment the last required
+    // upload finished, and for a new talent, under Skills, with no
+    // deliberate "go to the final page" action in between. This is a real
+    // reveal gate (same pattern as `talentDetailsRevealed` above), not a
+    // CSS hide: the footer's content doesn't render at all until this is
+    // true. Flipped true only by the explicit "Continue" button rendered
+    // in its place while false. Admin Mode bypasses it (see the ternary at
+    // the footer itself) — an admin submitting on a talent's behalf has no
+    // "second-last page" concept to protect.
+    const [finalStepReached, setFinalStepReached] = useState(false);
 
     const introRef = useRef();
     const take1Ref = useRef();
@@ -1538,6 +1560,7 @@ function SubmissionPage() {
         setGatewayEmail("");
         setRecognizedIdentity(null);
         setIsReturningTalent(false);
+        setFinalStepReached(false);
         toast.info("Please enter your email to proceed.");
     };
 
@@ -1989,8 +2012,20 @@ function SubmissionPage() {
         ethnic: ["Ethnic Look Image", "Ethnic Look Images"],
         additional_portfolio: ["Additional Portfolio Image", "Additional Portfolio Images"],
     };
+    // UX-polish fix — the legacy consent dialog below must only ever speak
+    // for items whose destination genuinely isn't known yet (e.g. a draft
+    // resumed from before this feature shipped, or an admin-uploaded item
+    // handed back to the talent) — never for a normal new upload, since
+    // those already have a pre-chosen destination the effect above
+    // resolves silently. This is the single source of truth both the
+    // summary text and the dialog's own render condition read from, so
+    // they can never disagree about what's actually still awaiting a
+    // choice.
+    const { awaitingChoice: pendingConsentAwaitingChoice } = splitPendingConsentByKnownDestination(
+        pendingMediaConsent, mediaDestination,
+    );
     const pendingConsentSummary = Object.entries(
-        pendingMediaConsent.reduce((acc, m) => {
+        pendingConsentAwaitingChoice.reduce((acc, m) => {
             acc[m.category] = (acc[m.category] || 0) + 1;
             return acc;
         }, {}),
@@ -2262,24 +2297,25 @@ function SubmissionPage() {
     // UX-polish fix — talent-facing uploads now answer their own pending-
     // consent question the instant it appears server-side, using whatever
     // destination the talent already picked BEFORE selecting the file (see
-    // `mediaDestination`'s declaration above). This is what keeps the old
-    // "how would you like to use this?" dialog from ever rendering for a
-    // normal upload made through the new pre-choice flow — by the time
-    // React would paint it, the item is no longer pending. Admin Mode is
+    // `mediaDestination`'s declaration above). Root-cause fix (not a visual
+    // hide): the OLD "how would you like to use this?" dialog below is now
+    // ALSO gated on the same `splitPendingConsentByKnownDestination` split
+    // (lib/mediaDestination.js) — it never renders at all for a pending
+    // item whose category already has a known destination, so there's no
+    // longer a race between this effect firing and that dialog's own
+    // render condition on the same tick (previously both were gated on the
+    // raw, undifferentiated `pendingMediaConsent`, so the dialog could
+    // flash into view for the round-trip duration of this effect's own
+    // resolve call — near-instant locally, but very real over a mobile
+    // network, which is exactly what manual testing caught). Admin Mode is
     // untouched (it already resolves consent through its own per-item
     // checkbox, never this dialog).
     useEffect(() => {
         if (adminMode) return;
         if (pendingMediaConsent.length === 0) return;
-        const destinationForCategory = (category) =>
-            category === "intro_video" ? mediaDestination.intro_video : mediaDestination.images;
-        const toResolve = pendingMediaConsent.filter((m) => destinationForCategory(m.category));
+        const { known: toResolve } = splitPendingConsentByKnownDestination(pendingMediaConsent, mediaDestination);
         if (toResolve.length === 0) return;
-        const byDecision = toResolve.reduce((acc, m) => {
-            const decision = destinationForCategory(m.category) === "library" ? "update_profile" : "only_this_project";
-            (acc[decision] = acc[decision] || []).push(m.id);
-            return acc;
-        }, {});
+        const byDecision = groupByDestinationDecision(toResolve, mediaDestination);
         Object.entries(byDecision).forEach(([decision, ids]) => submitMediaConsent(decision, ids));
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [adminMode, pendingMediaConsent, mediaDestination]);
@@ -4958,25 +4994,34 @@ function SubmissionPage() {
                 {/* READY-TO-SUBMIT FOOTER — deliberately OUTSIDE every
                     step's stepVisibilityClass-gated wrapper (unlike Phase
                     1, where this lived inside the uploads section, back
-                    when uploads was always the talent's last step). Now
-                    that uploads is step 2 of 4 for a new talent (Personal
-                    Info/Skills follow it), gating this on step position
-                    would hide it exactly when a new talent needs it —
-                    after Skills, not after Uploads. Gating on
-                    `experience.readinessSummary.ready` instead means it
-                    appears wherever/whenever the talent actually becomes
-                    ready, regardless of which step they're currently
-                    viewing — after Uploads for a returning talent (profile/
-                    skills already known), after Skills for a new talent.
-                    IDENTITY CONFIRMATION (recognizedIdentity — the
-                    token-backed silent-recognition path) and ALMOST DONE
-                    (emailVerified — the new-talent end-of-flow auth gate)
-                    are mutually exclusive alternatives rendered here; the
-                    plain finalize-submission-btn footer is the fallback
-                    when neither applies (project questions/skills already
-                    completed OTP earlier, e.g. the email-typed "Is this
-                    you?" path). */}
+                    when uploads was always the talent's last step). Gating
+                    on step position alone would hide it exactly when a new
+                    talent needs it (after Skills, not after Uploads) or a
+                    returning talent needs it (after Uploads, no Profile/
+                    Skills at all) — `experience.readinessSummary.ready`
+                    is what actually decides WHETHER it CAN show. But
+                    manual-testing found `ready` alone isn't enough: it can
+                    flip true while the talent is still visually on an
+                    earlier page (e.g. the moment the last required upload
+                    finishes, while Media is still on screen), stacking the
+                    submit CTA directly underneath a page the user hasn't
+                    finished looking at yet. `finalStepReached` (see its
+                    declaration above) is the second, independent gate that
+                    fixes this — it only flips true from an explicit
+                    "Continue" click (rendered in this same spot while
+                    false), so the talent always sees one deliberate action
+                    ("Continue") on whatever their actual last page is,
+                    THEN a real final page with the submit CTA — never both
+                    at once. IDENTITY CONFIRMATION (recognizedIdentity —
+                    the token-backed silent-recognition path) and ALMOST
+                    DONE (emailVerified — the new-talent end-of-flow auth
+                    gate) are mutually exclusive alternatives rendered on
+                    that final page; the plain finalize-submission-btn
+                    footer is the fallback when neither applies (project
+                    questions/skills already completed OTP earlier, e.g.
+                    the email-typed "Is this you?" path). */}
                 {emailGateUnlocked && experience.readinessSummary.ready && submission?.status !== "submitted" && (
+                    (finalStepReached || adminMode) ? (
                     <div className="pt-4">
                         {recognizedIdentity && (
                             <div
@@ -5100,6 +5145,19 @@ function SubmissionPage() {
                         </div>
                         )}
                     </div>
+                    ) : (
+                    <div className="pt-4" data-testid="continue-to-final-step">
+                        <button
+                            type="button"
+                            onClick={() => setFinalStepReached(true)}
+                            data-testid="continue-to-final-step-btn"
+                            className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
+                        >
+                            Continue
+                            <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
+                    </div>
+                    )
                 )}
             </div>
 
@@ -5159,8 +5217,17 @@ function SubmissionPage() {
                 project", so simply confirming never auto-updates anything).
                 They can still navigate away and resume later — resuming
                 re-shows this exact dialog (pendingMediaConsent comes fresh
-                from the server on every load), it is never lost. */}
-            {pendingMediaConsent.length > 0 && !adminMode && (
+                from the server on every load), it is never lost.
+                UX-polish fix — gated on `pendingConsentAwaitingChoice`, NOT
+                the raw `pendingMediaConsent`: a normal upload always has a
+                pre-chosen destination by this point (see `mediaDestination`
+                and the auto-resolve effect above), so this dialog now only
+                has something to ask about for the genuine edge cases where
+                no destination is known (a draft resumed from before this
+                feature existed, or similar) — it can no longer flash into
+                view mid-upload racing against that effect's own resolve
+                call. */}
+            {pendingConsentAwaitingChoice.length > 0 && !adminMode && (
                 <div
                     className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
                     data-testid="media-consent-dialog"
@@ -5296,7 +5363,8 @@ function MediaSyncStatusBadge({ status, className = "" }) {
 // (see `mediaDestination` and its auto-resolve effect in SubmissionPage).
 // Rendered above the Introduction Video slot and above the Images block;
 // never shown for Audition Takes, which are never reusable outside a
-// project by design.
+// project by design. "My Media Library" renders first — it's the default
+// destination, and the visual order should match that.
 function MediaDestinationToggle({ value, onChange, testidPrefix }) {
     return (
         <div className="flex flex-wrap items-center gap-2.5 mb-4" data-testid={`${testidPrefix}-destination-toggle`}>
@@ -5304,18 +5372,6 @@ function MediaDestinationToggle({ value, onChange, testidPrefix }) {
                 What&apos;s this for?
             </span>
             <div className="flex gap-2">
-                <button
-                    type="button"
-                    onClick={() => onChange("project")}
-                    data-testid={`${testidPrefix}-destination-project-btn`}
-                    className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-all duration-200 ${
-                        value === "project"
-                            ? "bg-[#0c2340] text-white border-[#0c2340]"
-                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
-                    }`}
-                >
-                    This Project
-                </button>
                 <button
                     type="button"
                     onClick={() => onChange("library")}
@@ -5327,6 +5383,18 @@ function MediaDestinationToggle({ value, onChange, testidPrefix }) {
                     }`}
                 >
                     My Media Library
+                </button>
+                <button
+                    type="button"
+                    onClick={() => onChange("project")}
+                    data-testid={`${testidPrefix}-destination-project-btn`}
+                    className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-all duration-200 ${
+                        value === "project"
+                            ? "bg-[#0c2340] text-white border-[#0c2340]"
+                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
+                    }`}
+                >
+                    This Project
                 </button>
             </div>
         </div>

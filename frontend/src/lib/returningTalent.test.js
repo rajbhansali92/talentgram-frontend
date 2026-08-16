@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildRecognizedIdentity, shouldAttemptSilentRecognition, classifyPortalLookupResult } from "./returningTalent";
+import { buildRecognizedIdentity, shouldAttemptSilentRecognition, classifyPortalLookupResult, tokenAuthenticatesEmail } from "./returningTalent";
 
 describe("buildRecognizedIdentity", () => {
     it("returns null when there is no prefill data", () => {
@@ -58,6 +58,25 @@ describe("shouldAttemptSilentRecognition", () => {
 
     it("is true only when not admin, gate is locked, and both token and email are present", () => {
         expect(shouldAttemptSilentRecognition({ adminMode: false, emailGateUnlocked: false, token: "t", email: "e@x.com" })).toBe(true);
+    });
+});
+
+describe("tokenAuthenticatesEmail (UX-polish fix — trusted-session Step A typed-email lookup)", () => {
+    it("passes when there is no candidate email to check (e.g. the UPLOAD TEST CTA, which has none)", () => {
+        expect(tokenAuthenticatesEmail({ tokenEmail: "raj@x.com", candidateEmail: null })).toBe(true);
+        expect(tokenAuthenticatesEmail({ tokenEmail: "raj@x.com", candidateEmail: "" })).toBe(true);
+    });
+
+    it("passes when there is no stored token email to conflict with", () => {
+        expect(tokenAuthenticatesEmail({ tokenEmail: null, candidateEmail: "raj@x.com" })).toBe(true);
+    });
+
+    it("passes when the candidate email matches the token's own email, case- and whitespace-insensitively", () => {
+        expect(tokenAuthenticatesEmail({ tokenEmail: "Raj@X.com", candidateEmail: " raj@x.com " })).toBe(true);
+    });
+
+    it("fails when the candidate email belongs to a different account than the stored token — never let a token vouch for someone else's address", () => {
+        expect(tokenAuthenticatesEmail({ tokenEmail: "raj@x.com", candidateEmail: "someone-else@x.com" })).toBe(false);
     });
 });
 

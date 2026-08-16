@@ -32,6 +32,24 @@ export function shouldAttemptSilentRecognition({ adminMode, emailGateUnlocked, t
     return !!token && !!email;
 }
 
+// UX-polish fix — a portal token only ever proves ownership of the ONE
+// email it was minted for. Before letting it vouch for a candidate email
+// (e.g. one the talent just typed into Step A's "Continue with Email"
+// field, matching an existing talent), the two must agree — otherwise a
+// token left over from a different account on a shared/previous device
+// could silently authenticate an unrelated address. This is a client-side
+// UX guard, not the real security boundary — /public/prefill's own
+// verify_email_ownership check (server-side, against the token's embedded
+// email claim) is what actually enforces this; this just avoids a wasted
+// round-trip and an unnecessary "wrong person" recognition attempt.
+// No candidateEmail (the "UPLOAD TEST" CTA has none to compare against —
+// it just uses whatever email the token itself is paired with) or no
+// stored tokenEmail (nothing to conflict with) both pass through.
+export function tokenAuthenticatesEmail({ tokenEmail, candidateEmail }) {
+    if (!candidateEmail || !tokenEmail) return true;
+    return candidateEmail.trim().toLowerCase() === tokenEmail.trim().toLowerCase();
+}
+
 // Phase 2 (new-talent flow) — classifies a `POST /portal/lookup` response
 // into exactly what handleInlineLookup needs to decide: is this a KNOWN
 // talent (show "Is this you?", OTP still required), a CONFIRMED new one

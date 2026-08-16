@@ -11,7 +11,7 @@ import { revealAndJumpToRequirementItem } from "@/lib/scrollHighlight";
 import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS, SECTION_STATUS, OPERATIONAL_STATES } from "@/lib/readinessStatus";
 import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
 import { computeRequirementItems } from "@/lib/requirementEngine";
-import { buildRecognizedIdentity, shouldAttemptSilentRecognition, classifyPortalLookupResult } from "@/lib/returningTalent";
+import { buildRecognizedIdentity, shouldAttemptSilentRecognition, classifyPortalLookupResult, tokenAuthenticatesEmail } from "@/lib/returningTalent";
 import { useSwipeStep } from "@/hooks/useSwipeStep";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
 import LibraryMediaPicker from "@/components/submission/LibraryMediaPicker";
@@ -518,6 +518,18 @@ function SubmissionPage() {
     const [mediaConsentSubmitting, setMediaConsentSubmitting] = useState(false);
     // Default selection is "only this project" per spec — nothing auto-updates.
     const [mediaConsentChoice, setMediaConsentChoice] = useState("only_this_project");
+    // UX-polish fix — the "For this project" / "Save to my Media Library"
+    // destination question now has to be asked BEFORE the talent picks a
+    // file, not after upload (see the auto-resolve effect near
+    // submitMediaConsent below, which uses this to answer the pending-
+    // consent question the instant it appears — before the old post-upload
+    // dialog ever gets a chance to render). Keyed by the two independent
+    // decisions a talent can make in one sitting: `intro_video` and
+    // `images` (one choice covers whichever image sub-category — generic/
+    // Indian/Western — they upload into, matching the single on-screen
+    // toggle). "project" is the default for both, same as the old dialog's
+    // default choice, so untouched uploads behave exactly as before.
+    const [mediaDestination, setMediaDestination] = useState({ intro_video: "project", images: "project" });
     // Sprint 1 — autosave indicator. "idle" | "saving" | "saved". Driven by the
     // debounced draft-persistence effect below so it reflects real save activity.
     const [saveStatus, setSaveStatus] = useState("idle");
@@ -1375,20 +1387,28 @@ function SubmissionPage() {
         setTimeout(scrollToTalentDetails, 50);
     };
 
-    const handleUploadTestClick = useCallback(async () => {
+    // Shared silent-recognition core — verifies a real portal-token bearer
+    // proof server-side (via /public/prefill) and, on success, performs
+    // every state update needed to treat this as an already-authenticated
+    // returning-talent session (no OTP: the token IS the proof of
+    // ownership). Used both by the "UPLOAD TEST" CTA (no candidate email —
+    // reads whatever token/email pair is in localStorage) and by the Step A
+    // typed-email lookup (candidateEmail = what the talent just typed), so a
+    // talent who already holds a valid trusted session for that exact email
+    // never gets funneled into the untrusted, OTP-required Step B card just
+    // because they typed their email instead of clicking Upload Test first.
+    // Returns true on successful silent unlock, false otherwise — callers
+    // decide what "otherwise" means (reveal Step A, or fall through to the
+    // self-reported-match-then-OTP path).
+    const attemptSilentRecognition = useCallback(async (candidateEmail) => {
         const token = typeof window !== "undefined" ? localStorage.getItem(PORTAL_TOKEN_KEY) : null;
         // talentgram_portal_email is always written/cleared alongside the
         // portal token itself (see handleVerifyOtp / the portalApi 401
         // interceptor in lib/api.js) — the two are kept in sync as a pair.
-        const email = typeof window !== "undefined" ? localStorage.getItem("talentgram_portal_email") : null;
-        if (!shouldAttemptSilentRecognition({ adminMode, emailGateUnlocked, token, email })) {
-            // Admin Mode's gate is already unlocked (see emailGateUnlocked's
-            // initializer); everything else just falls through to the
-            // existing Step A UI below.
-            revealAndScrollToTalentDetails();
-            return;
-        }
-        setRecognizing(true);
+        const tokenEmail = typeof window !== "undefined" ? localStorage.getItem("talentgram_portal_email") : null;
+        if (!tokenAuthenticatesEmail({ tokenEmail, candidateEmail })) return false;
+        const email = (candidateEmail || tokenEmail || "").trim().toLowerCase();
+        if (!shouldAttemptSilentRecognition({ adminMode, emailGateUnlocked, token, email })) return false;
         try {
             // /public/prefill (not /portal/profile) deliberately — it's the
             // one canonical prefill builder this page's populatePrefillData/
@@ -1397,12 +1417,7 @@ function SubmissionPage() {
             // auto-reuse) and it accepts the same bearer portal token via
             // verify_email_ownership, so recognition still requires zero OTP.
             const { data } = await portalApi.get(`/public/prefill?email=${encodeURIComponent(email)}`);
-            if (!data || !data.first_name) {
-                // Token valid but no matching/complete profile — nothing to
-                // silently recognize; fall through to Step A.
-                revealAndScrollToTalentDetails();
-                return;
-            }
+            if (!data || !data.first_name) return false; // token valid, but no matching/complete profile
             populatePrefillData(data);
             setPrefillSuggestion({ data });
             setPrefillTried(true);
@@ -1414,16 +1429,24 @@ function SubmissionPage() {
             setPrefillEmail(email);
             setCurrentStep(computeReturningTalentStartStep(data, email));
             toast.success(`Welcome back, ${data.first_name}!`);
+            return true;
         } catch (error) {
             // 401 → the portalApi interceptor already cleared the stale
             // token; any other failure just means recognition didn't work.
-            // Either way, fall through to the existing Step A UI.
             console.error("Silent recognition failed:", error);
-            revealAndScrollToTalentDetails();
+            return false;
+        }
+    }, [adminMode, emailGateUnlocked, computeReturningTalentStartStep]);
+
+    const handleUploadTestClick = useCallback(async () => {
+        setRecognizing(true);
+        try {
+            const ok = await attemptSilentRecognition();
+            if (!ok) revealAndScrollToTalentDetails();
         } finally {
             setRecognizing(false);
         }
-    }, [adminMode, emailGateUnlocked, computeReturningTalentStartStep]);
+    }, [attemptSilentRecognition]);
 
     const tryPrefill = async () => {
         if (saved) return; // submission already started — too late
@@ -1533,6 +1556,18 @@ function SubmissionPage() {
 
         setGatewayLoading(true);
         try {
+            // Trusted-session check FIRST — if this browser already holds a
+            // valid portal token that authenticates THIS exact email,
+            // that's real server-verified proof of ownership, identical to
+            // what clicking "UPLOAD TEST" itself would have found. Treat it
+            // the same way and skip Step B/OTP entirely (see
+            // attemptSilentRecognition — this is what keeps an
+            // already-authenticated talent from being asked to re-verify
+            // just because they typed their email instead of clicking
+            // Upload Test). Only when there's no trusted token for this
+            // email does the self-reported-match-then-OTP flow below apply.
+            if (await attemptSilentRecognition(trimmedEmail)) return;
+
             // Pre-auth recognition first — if we already know this talent,
             // show the "Is this you?" card (Step B) instead of jumping
             // straight into OTP. Only the minimal non-sensitive fields
@@ -2223,6 +2258,31 @@ function SubmissionPage() {
     const setMediaConsentForItem = (mediaId, saveToMasterProfile) => {
         submitMediaConsent(saveToMasterProfile ? "update_profile" : "only_this_project", [mediaId]);
     };
+
+    // UX-polish fix — talent-facing uploads now answer their own pending-
+    // consent question the instant it appears server-side, using whatever
+    // destination the talent already picked BEFORE selecting the file (see
+    // `mediaDestination`'s declaration above). This is what keeps the old
+    // "how would you like to use this?" dialog from ever rendering for a
+    // normal upload made through the new pre-choice flow — by the time
+    // React would paint it, the item is no longer pending. Admin Mode is
+    // untouched (it already resolves consent through its own per-item
+    // checkbox, never this dialog).
+    useEffect(() => {
+        if (adminMode) return;
+        if (pendingMediaConsent.length === 0) return;
+        const destinationForCategory = (category) =>
+            category === "intro_video" ? mediaDestination.intro_video : mediaDestination.images;
+        const toResolve = pendingMediaConsent.filter((m) => destinationForCategory(m.category));
+        if (toResolve.length === 0) return;
+        const byDecision = toResolve.reduce((acc, m) => {
+            const decision = destinationForCategory(m.category) === "library" ? "update_profile" : "only_this_project";
+            (acc[decision] = acc[decision] || []).push(m.id);
+            return acc;
+        }, {});
+        Object.entries(byDecision).forEach(([decision, ids]) => submitMediaConsent(decision, ids));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [adminMode, pendingMediaConsent, mediaDestination]);
 
     // Phase 2, item 5 — Admin Mode no longer auto-resolves every pending
     // item to "update_profile" in one blanket batch call (Phase 1's
@@ -3200,9 +3260,20 @@ function SubmissionPage() {
                     <form onSubmit={startSubmission} className="space-y-8">
                         {/* Phase 1 — email-first identity. The email field
                             anchors the form so we can prefill known talents
-                            BEFORE they retype everything. */}
+                            BEFORE they retype everything. UX-polish fix —
+                            email is an identity/auth mechanism, not a
+                            project submission field: once
+                            `emailGateUnlocked` is true there is nothing to
+                            render here at all (see the removed "Locked
+                            Email State" branch below this used to render an
+                            always-visible, editable "Email *" field on
+                            every single step of the wizard, not just the
+                            first — form.email stays correct internally via
+                            the OTP/token/new-talent-unlock paths that set it
+                            without ever needing a visible re-editable
+                            field). */}
                         <div data-step="1">
-                            {!emailGateUnlocked ? (
+                            {!emailGateUnlocked && (
                                 otpSent ? (
                                     /* Step A.5: OTP Verification Input */
                                     <div className="flex flex-col gap-4 animate-in fade-in duration-200 text-left">
@@ -3383,41 +3454,6 @@ function SubmissionPage() {
                                         </div>
                                     </div>
                                 )
-                            ) : (
-                                /* Locked Email State (if unlocked) */
-                                <>
-                                    <PremiumFormField
-                                        label="Email *"
-                                        type="email"
-                                        value={form.email}
-                                        onChange={(v) => {
-                                            const trimmed = v.trim().toLowerCase();
-                                            setForm({ ...form, email: v });
-                                            if (!saved && trimmed !== prefillEmail) {
-                                                setPrefillTried(false);
-                                                setPrefillSuggestion(null);
-                                                setEmailGateUnlocked(false);
-                                            }
-                                            // Safari Autofill / Keystroke detection: trigger prefill immediately when a valid email structure is completed
-                                            if (!saved && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-                                                setTimeout(() => {
-                                                    tryPrefill();
-                                                }, 50);
-                                            }
-                                        }}
-                                        onBlur={() => {
-                                            saveForm();
-                                            tryPrefill();
-                                        }}
-                                        testid="form-email"
-                                        required
-                                        disabled={!!saved}
-                                        wide
-                                    />
-                                    <p className="text-[11px] text-[#333333] mt-3 font-mono">
-                                        We use your email to recognise you and load any previously submitted details.
-                                    </p>
-                                </>
                             )}
                         </div>
 
@@ -4389,12 +4425,17 @@ function SubmissionPage() {
                                 {requirements.audition_takes_visibility !== REQUIREMENT_TIERS.HIDDEN && (
                                     <div className="mb-10" data-testid="takes-section">
                                         <div className="flex items-center justify-between mb-4">
-                                            <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">
-                                                Audition Takes{" "}
-                                                <span className="text-[#333333]">
-                                                    (up to {MAX_TAKES})
+                                            <div className="flex items-center gap-2.5">
+                                                <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-[#0c2340]/8 text-[#0c2340] shrink-0">
+                                                    <Video className="w-4 h-4" />
                                                 </span>
-                                            </p>
+                                                <h3 className="font-display text-base sm:text-lg font-bold tracking-tight text-[#0c2340] uppercase">
+                                                    Audition Takes{" "}
+                                                    <span className="text-[13px] font-mono font-normal normal-case text-[#333333]">
+                                                        (up to {MAX_TAKES})
+                                                    </span>
+                                                </h3>
+                                            </div>
                                             <span
                                                 className="text-[11px] font-mono text-[#333333]"
                                                 data-testid="takes-counter"
@@ -4548,6 +4589,14 @@ function SubmissionPage() {
                                 )}
 
                                 {requirements.intro_video !== REQUIREMENT_TIERS.HIDDEN && (
+                                    <>
+                                    {!intro && (
+                                        <MediaDestinationToggle
+                                            value={mediaDestination.intro_video}
+                                            onChange={(v) => setMediaDestination((d) => ({ ...d, intro_video: v }))}
+                                            testidPrefix="intro"
+                                        />
+                                    )}
                                     <PremiumUploadSlot
                                         title="Introduction Video"
                                         note="Upload your recent professional introduction video (no contact info)."
@@ -4564,6 +4613,7 @@ function SubmissionPage() {
                                         onRetry={() => retryUpload("intro_video")}
                                         hint="Recommended duration: 20–60 seconds."
                                     />
+                                    </>
                                 )}
 
                                 {/* NOTE: this block was relocated to render first — see
@@ -4575,12 +4625,17 @@ function SubmissionPage() {
                                 {showImagesSection && (
                                     <div className="mb-8" data-testid="images-upload-section">
                                     <div className="flex items-center justify-between mb-3">
-                                        <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">
-                                            Images{" "}
-                                            <span className="text-[#333333]">
-                                                (optional)
+                                        <div className="flex items-center gap-2.5">
+                                            <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-[#0c2340]/8 text-[#0c2340] shrink-0">
+                                                <Camera className="w-4 h-4" />
                                             </span>
-                                        </p>
+                                            <h3 className="font-display text-base sm:text-lg font-bold tracking-tight text-[#0c2340] uppercase">
+                                                Images{" "}
+                                                <span className="text-[13px] font-mono font-normal normal-case text-[#333333]">
+                                                    (optional)
+                                                </span>
+                                            </h3>
+                                        </div>
                                         <span
                                             data-testid="image-counter"
                                             className="text-[11px] font-mono text-[#333333]"
@@ -4591,6 +4646,12 @@ function SubmissionPage() {
                                     <p className="text-[13px] leading-relaxed text-[#222222] mb-6">
                                         Upload up to {MAX_IMAGES_PER_CATEGORY} images per category. Add your strongest recent professional looks.
                                     </p>
+
+                                    <MediaDestinationToggle
+                                        value={mediaDestination.images}
+                                        onChange={(v) => setMediaDestination((d) => ({ ...d, images: v }))}
+                                        testidPrefix="images"
+                                    />
 
                                     {/* Phase 2 — optional Indian look images */}
                                     {requirements.portfolio_indian_visibility !== REQUIREMENT_TIERS.HIDDEN && (
@@ -5230,6 +5291,48 @@ function MediaSyncStatusBadge({ status, className = "" }) {
     );
 }
 
+// UX-polish fix — the "what's this upload for?" question now has to be
+// asked BEFORE the talent picks a file, not after the upload completes
+// (see `mediaDestination` and its auto-resolve effect in SubmissionPage).
+// Rendered above the Introduction Video slot and above the Images block;
+// never shown for Audition Takes, which are never reusable outside a
+// project by design.
+function MediaDestinationToggle({ value, onChange, testidPrefix }) {
+    return (
+        <div className="flex flex-wrap items-center gap-2.5 mb-4" data-testid={`${testidPrefix}-destination-toggle`}>
+            <span className="text-[11px] font-mono text-[#333333] uppercase tracking-wider shrink-0">
+                What&apos;s this for?
+            </span>
+            <div className="flex gap-2">
+                <button
+                    type="button"
+                    onClick={() => onChange("project")}
+                    data-testid={`${testidPrefix}-destination-project-btn`}
+                    className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-all duration-200 ${
+                        value === "project"
+                            ? "bg-[#0c2340] text-white border-[#0c2340]"
+                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
+                    }`}
+                >
+                    This Project
+                </button>
+                <button
+                    type="button"
+                    onClick={() => onChange("library")}
+                    data-testid={`${testidPrefix}-destination-library-btn`}
+                    className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-all duration-200 ${
+                        value === "library"
+                            ? "bg-[#0c2340] text-white border-[#0c2340]"
+                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
+                    }`}
+                >
+                    My Media Library
+                </button>
+            </div>
+        </div>
+    );
+}
+
 function PremiumPortfolioGroup({
     label,
     hint,
@@ -5749,12 +5852,19 @@ function PremiumUploadSlot({
         >
             {!compact && (
                 <div className="flex items-center justify-between mb-3">
-                    <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340]/70">
-                        {title}
-                        {required && (
-                            <span className="text-rose-500"> *</span>
+                    <div className="flex items-center gap-2.5">
+                        {Icon && (
+                            <span className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-[#0c2340]/8 text-[#0c2340] shrink-0">
+                                <Icon className="w-4 h-4" />
+                            </span>
                         )}
-                    </p>
+                        <h3 className="font-display text-base sm:text-lg font-bold tracking-tight text-[#0c2340] uppercase">
+                            {title}
+                            {required && (
+                                <span className="text-rose-500"> *</span>
+                            )}
+                        </h3>
+                    </div>
                     {hasFile && (
                         <span className="inline-flex items-center gap-1 text-[10px] tracking-[0.2em] uppercase font-mono text-emerald-600">
                             <Check className="w-3 h-3" /> Uploaded

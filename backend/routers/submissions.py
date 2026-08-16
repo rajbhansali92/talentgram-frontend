@@ -1931,8 +1931,17 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             raise HTTPException(400, "Instagram Followers is required")
         if fields_config.get("bio") == "required" and not (form.get("bio") or "").strip():
             raise HTTPException(400, "Bio is required")
-        if fields_config.get("competitive_brand") == "required" and not (form.get("competitive_brand") or "").strip():
-            raise HTTPException(400, "Competitive Brand is required")
+        if fields_config.get("competitive_brand") == "required":
+            has_brand_exp = form.get("has_competitive_brand_experience")
+            # An explicit NONE (false) is itself a complete, valid answer —
+            # the free-text field only needs to be non-empty when the
+            # talent answered YES (true). Unanswered (anything else) still
+            # blocks, same as before.
+            if has_brand_exp is True:
+                if not (form.get("competitive_brand") or "").strip():
+                    raise HTTPException(400, "Competitive Brand is required")
+            elif has_brand_exp is not False:
+                raise HTTPException(400, "Competitive Brand is required")
 
         if fields_config.get("availability") == "required":
             avail = form.get("availability") or {}

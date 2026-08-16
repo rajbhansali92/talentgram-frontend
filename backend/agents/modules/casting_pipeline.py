@@ -638,6 +638,24 @@ async def _handle_pipeline_query(
 # is offered via the SAME session_context.pending_disambiguation +
 # _query_parse_edits_async plumbing project/stage ambiguity already use.
 # ---------------------------------------------------------------------------
+async def _resolve_talent_query_target_by_name(
+    name_query: str, candidates: List[nlu.Candidate]
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[List[nlu.Candidate]]]:
+    """Single-name resolution against an ALREADY-FETCHED candidate list —
+    factored out of _resolve_talent_query_target so a multi-talent query
+    (_handle_talent_projects_multi) can resolve each name independently
+    without re-fetching the whole talent roster once per name. Same
+    (talent_id, talent_label, error, ambiguous_candidates) shape."""
+    if not name_query:
+        return None, None, "I didn't catch who you meant.", None
+    with request_scope.stage("fuzzy"):
+        resolved = nlu.resolve_against_candidates(nlu.SelectorResult(ok=True, name_query=name_query), candidates)
+    _log_talent_resolve_timing(resolved)
+    if not resolved.ok:
+        return None, None, resolved.error, resolved.ambiguous_candidates
+    return resolved.talent_ids[0], resolved.talent_labels[0], None, None
+
+
 async def _resolve_talent_query_target(
     raw: str
 ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[List[nlu.Candidate]]]:
@@ -659,12 +677,7 @@ async def _resolve_talent_query_target(
     candidates = await _fetch_all_talent_candidates()
     if not candidates:
         return None, None, "No talents found.", None
-    with request_scope.stage("fuzzy"):
-        resolved = nlu.resolve_against_candidates(nlu.SelectorResult(ok=True, name_query=name_query), candidates)
-    _log_talent_resolve_timing(resolved)
-    if not resolved.ok:
-        return None, None, resolved.error, resolved.ambiguous_candidates
-    return resolved.talent_ids[0], resolved.talent_labels[0], None, None
+    return await _resolve_talent_query_target_by_name(name_query, candidates)
 
 
 async def _ask_talent_clarification(
@@ -725,7 +738,45 @@ def _render_talent_projects(talent_label: str, memberships: List[Dict[str, Any]]
     return "\n".join(lines)
 
 
+async def _handle_talent_projects_multi(ctx: ExecContext, name_queries: List[str]) -> ExecResult:
+    """"Show pending projects for A, B and C" — resolves each name
+    INDEPENDENTLY (same fuzzy matcher, same candidate roster, one fetch
+    shared across all of them) and renders one grouped block per talent,
+    reusing _render_talent_projects verbatim so the per-talent formatting
+    stays identical to the single-talent query. A name that's ambiguous or
+    unmatched is reported inline rather than blocking the whole query —
+    unlike a write, a read has no wrong-record risk, so there's no reason
+    to make the user resolve every ambiguity before seeing the other
+    talents' results; they can re-ask about just that one name to
+    disambiguate it via the normal single-talent flow."""
+    candidates = await _fetch_all_talent_candidates()
+    if not candidates:
+        return ExecResult(ok=False, error="no_talents", message="No talents found.")
+
+    blocks: List[str] = []
+    any_found = False
+    for name_query in name_queries:
+        talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target_by_name(
+            name_query, candidates
+        )
+        if err:
+            if ambiguous:
+                blocks.append(f'"{name_query}" — multiple matching talents found. Ask about them one at a time to pick.')
+            else:
+                blocks.append(f'"{name_query}" — no matching talent.')
+            continue
+        any_found = True
+        memberships = await _fetch_talent_active_memberships(talent_id)
+        with request_scope.stage("response_formatting"):
+            blocks.append(_render_talent_projects(talent_label, memberships))
+    return ExecResult(ok=any_found, message="\n\n".join(blocks))
+
+
 async def _handle_talent_projects(ctx: ExecContext, raw_talent_ref: str) -> ExecResult:
+    selector = nlu.parse_talent_selector(raw_talent_ref)
+    if selector.ok and selector.name_queries:
+        return await _handle_talent_projects_multi(ctx, selector.name_queries)
+
     talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(raw_talent_ref)
     if err:
         if ambiguous:
@@ -1897,17 +1948,57 @@ def _deserialize_plan(raw: Optional[str]) -> List[Dict[str, str]]:
         return []
 
 
-async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List[Dict[str, Any]]:
+async def _resolve_one_plan_step(
+    step: Dict[str, str], ctx: ExecContext, touched_pairs: List[Dict[str, str]]
+) -> List[Dict[str, Any]]:
     """Resolves ONE plan step (one raw-text chunk) into one or more
-    resolved sub-steps — more than one only when the chunk cross-product-
-    expands (multiple talent names AND/OR multiple project names on the
-    SAME chunk, e.g. "Add Ahana and Prajal to Toyota and Nykaa" -> 4
-    sub-steps, or "Move 4 to Approved in Toyota and ABC" -> 2). Each
-    result dict: {"intent_id", "raw_text", "label" (a project label once
-    resolved, else the raw chunk text), "resolved" (ResolvedMove/
-    ResolvedAdd or None), "error" (str or None)}."""
+    resolved sub-steps. A chunk naming several independent talent-group ->
+    project-group MAPPINGS in one go ("A and B to X, C to Y, D to X and
+    Z") is first split into one segment per mapping
+    (nlu.split_multi_segment_pairs) — each segment is then resolved
+    exactly like any other single-project-or-cross-product chunk always
+    has been (see _resolve_one_plan_segment). `touched_pairs` is a plan-
+    wide accumulator (fresh per _build_plan_confirmation/_execute_plan
+    call, mutated in place) of every (talent, project) pair the plan has
+    successfully resolved so far — see _resolve_one_plan_segment's
+    docstring for how a later, fully-implicit chained step ("...and move
+    to Follow Up") uses it to apply to the WHOLE set instead of only
+    whoever was last discussed."""
     intent_id = step.get("intent_id") or "casting.move"
     raw_text = step.get("raw_text") or ""
+    triggers = nlu.ADD_TRIGGERS if intent_id == "casting.add" else nlu.MOVE_TRIGGERS
+    with request_scope.stage("nlu"):
+        segments = nlu.split_multi_segment_pairs(raw_text, triggers) or [raw_text]
+
+    out: List[Dict[str, Any]] = []
+    for segment_text in segments:
+        out.extend(await _resolve_one_plan_segment(intent_id, segment_text, ctx, touched_pairs))
+    return out
+
+
+async def _resolve_one_plan_segment(
+    intent_id: str, raw_text: str, ctx: ExecContext, touched_pairs: List[Dict[str, str]]
+) -> List[Dict[str, Any]]:
+    """Resolves ONE segment — a single "<talent(s)> to <project(s)>"
+    mapping — into one or more resolved sub-steps, more than one only when
+    IT ITSELF cross-product-expands (multiple talent names AND/OR multiple
+    project names on the SAME segment, e.g. "Add Ahana and Prajal to
+    Toyota and Nykaa" -> 4 sub-steps, or "Move 4 to Approved in Toyota and
+    ABC" -> 2). Each result dict: {"intent_id", "raw_text", "label" (a
+    project label once resolved, else the raw text), "resolved"
+    (ResolvedMove/ResolvedAdd or None), "error" (str or None)}.
+
+    A fully-implicit MOVE segment — no talent named (PRONOUN_LAST_MARKER)
+    AND no project named — is the "...and move to Follow Up" trailing-
+    action shape. Rather than resolving against session.last_talent_id
+    (a single referent), it fans out across every (talent, project) pair
+    `touched_pairs` has accumulated from EARLIER steps/segments in this
+    SAME plan, grouped by project (one bulk write per project, matching
+    the existing "one Mongo call per project" bulk-move convention rather
+    than one call per talent). An explicitly-scoped trailing action
+    (naming its own talent and/or project) never reaches this branch —
+    it resolves through the normal single/cross-product path below,
+    exactly as before."""
     with request_scope.stage("nlu"):
         if intent_id == "casting.add":
             fields = nlu.extract_add_fields(raw_text)
@@ -1925,9 +2016,51 @@ async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List
                 fields["target_stage"] = stage_result.value
 
         talent_raw = fields.get("talent_selector") or ""
-        talent_names = nlu.split_multi_names(talent_raw) or [talent_raw]
         project_raw = fields.get("project_query")
-        project_names = nlu.split_multi_names(project_raw) if project_raw else [None]
+
+    if (
+        intent_id == "casting.move"
+        and talent_raw == nlu.PRONOUN_LAST_MARKER
+        and not project_raw
+        and touched_pairs
+    ):
+        target_stage = fields.get("target_stage") or ""
+        if target_stage not in PIPELINE_STAGES:
+            return [{
+                "intent_id": intent_id, "raw_text": raw_text,
+                "label": raw_text, "resolved": None, "error": "Pipeline not found.",
+            }]
+        by_project: Dict[str, Dict[str, Any]] = {}
+        for pair in touched_pairs:
+            bucket = by_project.setdefault(
+                pair["project_id"],
+                {"project_label": pair["project_label"], "talent_ids": [], "talent_labels": []},
+            )
+            if pair["talent_id"] not in bucket["talent_ids"]:
+                bucket["talent_ids"].append(pair["talent_id"])
+                bucket["talent_labels"].append(pair["talent_label"])
+        out: List[Dict[str, Any]] = []
+        for project_id, bucket in by_project.items():
+            resolved = ResolvedMove(
+                project_id=project_id, project_label=bucket["project_label"],
+                target_stage=target_stage,
+                talent_ids=bucket["talent_ids"], talent_labels=bucket["talent_labels"],
+            )
+            for tid, tl in zip(resolved.talent_ids, resolved.talent_labels):
+                touched_pairs.append({
+                    "talent_id": tid, "talent_label": tl,
+                    "project_id": resolved.project_id, "project_label": resolved.project_label,
+                })
+            out.append({
+                "intent_id": intent_id, "raw_text": raw_text,
+                "label": resolved.project_label, "resolved": resolved, "error": None,
+            })
+        if out:
+            await _remember_last_talent(ctx, out[-1]["resolved"])
+        return out
+
+    talent_names = nlu.split_multi_names(talent_raw) or [talent_raw]
+    project_names = nlu.split_multi_names(project_raw) if project_raw else [None]
 
     if len(project_names) > 1:
         # Cross-product-expand ONLY on multi-project — a multi-name talent
@@ -1956,13 +2089,13 @@ async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List
     else:
         pairs = [(talent_raw, project_raw)]
 
-    out: List[Dict[str, Any]] = []
+    out = []
     # Opt 2 (2026-08-05 latency sprint): _remember_last_talent used to be
     # called once PER PAIR — for a multi-project cross-product step that's
     # N sequential write+read-back round trips to persist a value only the
     # LAST one ends up keeping (last-write-wins). Nothing within this same
     # step's pair loop ever reads session.last_talent_id back (only a
-    # LATER, separate plan step does — see the docstring note below), so
+    # LATER, separate plan step does — see the docstring note above), so
     # it's safe to collect the last successful resolution and write it
     # once, after the loop, instead of once per pair.
     last_resolved_single = None
@@ -1976,8 +2109,14 @@ async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List
             resolved, err, _dis = await _resolve_add_selection(sub_fields, session)
         else:
             resolved, err, _dis = await _resolve_move_selection(sub_fields, session)
-        if resolved is not None and len(resolved.talent_ids) == 1:
-            last_resolved_single = resolved
+        if resolved is not None:
+            if len(resolved.talent_ids) == 1:
+                last_resolved_single = resolved
+            for tid, tl in zip(resolved.talent_ids, resolved.talent_labels):
+                touched_pairs.append({
+                    "talent_id": tid, "talent_label": tl,
+                    "project_id": resolved.project_id, "project_label": resolved.project_label,
+                })
         out.append({
             "intent_id": intent_id, "raw_text": raw_text,
             "label": (resolved.project_label if resolved else (project_text or raw_text)),
@@ -1998,8 +2137,9 @@ async def _resolve_one_plan_step(step: Dict[str, str], ctx: ExecContext) -> List
 async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
     steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
     resolved_steps: List[Dict[str, Any]] = []
+    touched_pairs: List[Dict[str, str]] = []
     for step in steps:
-        resolved_steps.extend(await _resolve_one_plan_step(step, ctx))
+        resolved_steps.extend(await _resolve_one_plan_step(step, ctx, touched_pairs))
 
     lines = ["You are about to run this plan:", ""]
     for i, rs in enumerate(resolved_steps, start=1):
@@ -2027,10 +2167,11 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
     steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
     summary_lines = ["Completed", ""]
     any_success = False
+    touched_pairs: List[Dict[str, str]] = []
 
     for step in steps:
         try:
-            sub_steps = await _resolve_one_plan_step(step, ctx)
+            sub_steps = await _resolve_one_plan_step(step, ctx, touched_pairs)
         except Exception:
             logger.exception("plan step resolution failed raw_text=%r", step.get("raw_text"))
             summary_lines += [f"✗ {step.get('raw_text', 'step')}", "", "Something went wrong resolving this step.", ""]

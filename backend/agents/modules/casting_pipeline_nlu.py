@@ -1047,6 +1047,43 @@ def split_multi_names(text: str) -> List[str]:
     return [p.strip() for p in cleaned.split(",") if p.strip()]
 
 
+# Bulk multi-mapping ("Add A and B to Project A, C and D to Project B, E to
+# Project C and D") — every comma-separated SEGMENT names its own
+# project(s), unlike a plain multi-name list sharing one trailing project
+# ("Add A, B, C to Project A", where only the LAST segment carries a
+# connector). Requiring every segment to carry its own to/in/for is what
+# tells the two shapes apart without any new fuzzy matching — it's a
+# structural check on the raw text, done before name/project resolution
+# ever runs.
+_SEGMENT_CONNECTOR_RE = re.compile(r"\b(?:to|in|for)\b", re.IGNORECASE)
+
+
+def split_multi_segment_pairs(chunk: str, triggers: List[str]) -> Optional[List[str]]:
+    """Splits ONE Add/Move raw-text chunk into one independent raw-text
+    segment per talent-group -> project-group mapping, when 2+ comma-
+    separated segments are present and EVERY one of them carries its own
+    to/in/for connector (each names its own project). Returns None
+    (unchanged) for the ordinary shapes — a single segment, or a plain
+    comma/"and"-separated name list sharing one trailing project — so
+    callers fall back to their existing single-project-or-cross-product
+    handling untouched.
+
+    Each returned segment is a complete, independently parseable chunk:
+    the first segment keeps whatever trigger word the original chunk
+    started with; every later segment gets that SAME trigger word
+    reattached (not a generic "add"/"move" default) so verb-implied-stage
+    triggers ("Approve A in X, B in Y") keep working per segment too."""
+    verb, _ = _strip_leading_trigger(chunk, triggers)
+    if verb is None:
+        return None
+    segments = [s.strip() for s in (chunk or "").split(",") if s.strip()]
+    if len(segments) < 2:
+        return None
+    if not all(_SEGMENT_CONNECTOR_RE.search(s) for s in segments):
+        return None
+    return [seg if i == 0 else f"{verb} {seg}" for i, seg in enumerate(segments)]
+
+
 # ---------------------------------------------------------------------------
 # Move command extraction — trigger verb + selector text + stage text
 # ---------------------------------------------------------------------------
@@ -1409,30 +1446,42 @@ class QueryIntent:
 # falling through to a worse (or wrong) classification instead.
 _NAME_SPAN = r"([A-Za-z0-9][A-Za-z0-9.'’\-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.'’\-]*)*)"
 
+# Multi-talent variant of _NAME_SPAN — same shape, plus a tolerated comma so
+# "Ahana, Priya and Zara" (already normalized to a comma-list by the time
+# any consumer downstream calls parse_talent_selector/split_multi_names on
+# it) can be captured as ONE span here, instead of failing the whole
+# pattern match at the first comma. Scoped to _TALENT_PROJECTS_PATTERNS
+# only (not the single-talent boolean/stage patterns below) — a real
+# person's name essentially never contains a comma, so this is purely
+# additive for the "multiple talents in one query" shape.
+_MULTI_NAME_SPAN = r"([A-Za-z0-9][A-Za-z0-9.,'’\-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.,'’\-]*)*)"
+
 _TALENT_PROJECTS_PATTERNS = [
-    # "Show me all pending projects of Ahana Pocha" / "Show active projects of Ahana"
+    # "Show me all pending projects of Ahana Pocha" / "Show active projects
+    # of Ahana" / "Show pending projects for Ahana, Priya and Zara".
     re.compile(
-        r"^\s*show\s+(?:me\s+)?(?:all\s+)?(?:the\s+)?(?:pending|active|ongoing|current)?\s*projects?\s+of\s+"
-        + _NAME_SPAN + r"\s*[.?!]*\s*$",
+        r"^\s*show\s+(?:me\s+)?(?:all\s+)?(?:the\s+)?(?:pending|active|ongoing|current)?\s*projects?\s+(?:of|for)\s+"
+        + _MULTI_NAME_SPAN + r"\s*[.?!]*\s*$",
         re.IGNORECASE,
     ),
     # "Show Ahana's ongoing projects" / "Show Ahana Pocha's active projects"
     re.compile(
-        r"^\s*show\s+" + _NAME_SPAN + r"['’]s\s+(?:ongoing|active|current|pending)\s+projects?\s*[.?!]*\s*$",
+        r"^\s*show\s+" + _MULTI_NAME_SPAN + r"['’]s\s+(?:ongoing|active|current|pending)\s+projects?\s*[.?!]*\s*$",
         re.IGNORECASE,
     ),
     # "What projects is Ahana Pocha part of?" / "Which projects is Ahana
     # working on?" / "Which projects is Ahana testing for?" (the last one
     # implies a stage — classify_query re-checks the whole matched text for
-    # an embedded stage phrase separately, below).
+    # an embedded stage phrase separately, below). "is/are" already agrees
+    # with a plural multi-name span too.
     re.compile(
-        r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+(?:is|are)\s+" + _NAME_SPAN
+        r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+(?:is|are)\s+" + _MULTI_NAME_SPAN
         + r"\s+(?:part\s+of|working\s+on|involved\s+in|testing\s+for)\s*[.?!]*\s*$",
         re.IGNORECASE,
     ),
     # "Which casting projects involve Ahana?"
     re.compile(
-        r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+involve\s+" + _NAME_SPAN + r"\s*[.?!]*\s*$",
+        r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+involve\s+" + _MULTI_NAME_SPAN + r"\s*[.?!]*\s*$",
         re.IGNORECASE,
     ),
 ]

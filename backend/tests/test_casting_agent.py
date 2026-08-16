@@ -3081,6 +3081,205 @@ async def test_independent_multi_move_partial_failure_summary():
 
 
 # ---------------------------------------------------------------------------
+# Bulk multi-mapping (talent-group -> project-group segments) + trailing
+# actions applying to the whole resolved set, and multi-talent pending-
+# project queries.
+# ---------------------------------------------------------------------------
+async def test_bulk_multi_segment_add_fan_out_follow_up_and_confirm():
+    """The full mega-example: several independent talent-group ->
+    project-group mappings in ONE Add command, followed by a trailing
+    "move to Follow Up" with no name/project of its own — must apply to
+    every pair the command just created, not just the last one touched.
+    "and confirm" only bypasses the approval card; it is NOT a second
+    stage (see casting_pipeline.py's _resolve_one_plan_segment)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    proj_a = await _seed_project(brand_name=f"FanOutA Brand {tag}")
+    proj_b = await _seed_project(brand_name=f"FanOutB Brand {tag}")
+    proj_c = await _seed_project(brand_name=f"FanOutC Brand {tag}")
+    proj_d = await _seed_project(brand_name=f"FanOutD Brand {tag}")
+    label_a = (await db.projects.find_one({"id": proj_a}))["brand_name"]
+    label_b = (await db.projects.find_one({"id": proj_b}))["brand_name"]
+    label_c = (await db.projects.find_one({"id": proj_c}))["brand_name"]
+    label_d = (await db.projects.find_one({"id": proj_d}))["brand_name"]
+    ta = await _seed_talent(f"FanOutTalentA {tag}")
+    tb = await _seed_talent(f"FanOutTalentB {tag}")
+    tc = await _seed_talent(f"FanOutTalentC {tag}")
+    td = await _seed_talent(f"FanOutTalentD {tag}")
+    te = await _seed_talent(f"FanOutTalentE {tag}")
+    all_talent_ids = [ta, tb, tc, td, te]
+    all_project_ids = [proj_a, proj_b, proj_c, proj_d]
+    try:
+        text = (
+            f"Add FanOutTalentA {tag} and FanOutTalentB {tag} to {label_a}, "
+            f"FanOutTalentC {tag} and FanOutTalentD {tag} to {label_b}, "
+            f"FanOutTalentE {tag} to {label_c} and {label_d}, "
+            f"and move to follow up and confirm"
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Reply:" not in r.reply
+        assert "Completed" in r.reply
+        assert "✗" not in r.reply
+
+        for tid, pid in [
+            (ta, proj_a), (tb, proj_a), (tc, proj_b), (td, proj_b), (te, proj_c), (te, proj_d),
+        ]:
+            doc = await db.casting_pipeline.find_one({"project_id": pid, "talent_id": tid})
+            assert doc is not None and doc["stage"] == "follow_up", (tid, pid, doc)
+    finally:
+        await _cleanup(phone, project_ids=all_project_ids, talent_ids=all_talent_ids)
+        await _restore_config(original)
+
+
+async def test_bulk_multi_segment_add_without_chaining_requires_approval():
+    """"Add A to X, B to Y" (no trailing action, no "confirm") — each
+    talent -> project mapping is its own segment; the plan preview lists
+    both, and approving executes both as separate additions in their own
+    projects (not a garbled cross-product)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    proj_a = await _seed_project(brand_name=f"SegNoChainA Brand {tag}")
+    proj_b = await _seed_project(brand_name=f"SegNoChainB Brand {tag}")
+    label_a = (await db.projects.find_one({"id": proj_a}))["brand_name"]
+    label_b = (await db.projects.find_one({"id": proj_b}))["brand_name"]
+    ta = await _seed_talent(f"SegNoChainTalentA {tag}")
+    tb = await _seed_talent(f"SegNoChainTalentB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add SegNoChainTalentA {tag} to {label_a}, SegNoChainTalentB {tag} to {label_b}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply
+        assert f"SegNoChainTalentA {tag}" in r.reply
+        assert f"SegNoChainTalentB {tag}" in r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r.reply
+        assert r.reply.count("✓") == 2
+        assert (await db.casting_pipeline.find_one({"project_id": proj_a, "talent_id": ta}))["stage"] == "ask_to_test"
+        assert (await db.casting_pipeline.find_one({"project_id": proj_b, "talent_id": tb}))["stage"] == "ask_to_test"
+    finally:
+        await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb])
+        await _restore_config(original)
+
+
+async def test_bulk_multi_segment_add_ambiguous_talent_in_one_segment_isolated():
+    """An ambiguous name in ONE segment of a multi-mapping Add reports
+    that segment's error (rather than silently guessing) without touching
+    the other, unambiguous segments — the same partial-failure isolation
+    the plan engine already guarantees for independent multi-step
+    commands."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    proj_a = await _seed_project(brand_name=f"AmbigSegA Brand {tag}")
+    proj_b = await _seed_project(brand_name=f"AmbigSegB Brand {tag}")
+    label_a = (await db.projects.find_one({"id": proj_a}))["brand_name"]
+    label_b = (await db.projects.find_one({"id": proj_b}))["brand_name"]
+    shared_name = f"AmbigSegTwin {tag}"
+    t1 = await _seed_talent(shared_name)
+    t2 = await _seed_talent(shared_name)
+    tb = await _seed_talent(f"AmbigSegTalentB {tag}")
+    try:
+        text = f"Add {shared_name} to {label_a}, AmbigSegTalentB {tag} to {label_b}, and confirm"
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "✓" in r.reply
+        assert "✗" in r.reply
+        assert (await db.casting_pipeline.find_one({"project_id": proj_b, "talent_id": tb})) is not None
+        assert (await db.casting_pipeline.find_one({"project_id": proj_a, "talent_id": t1})) is None
+        assert (await db.casting_pipeline.find_one({"project_id": proj_a, "talent_id": t2})) is None
+    finally:
+        await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[t1, t2, tb])
+        await _restore_config(original)
+
+
+async def test_multi_talent_pending_projects_query_grouped():
+    """"Show pending projects for A, B and C" — resolves all three names
+    independently via the existing fuzzy matcher (parse_talent_selector's
+    name_queries split), and groups the response by talent, one talent
+    with no active pipeline included alongside the ones that do."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    proj_a = await _seed_project(status="ongoing", brand_name=f"MultiQA Brand {tag}")
+    proj_b = await _seed_project(status="ongoing", brand_name=f"MultiQB Brand {tag}")
+    ta = await _seed_talent(f"MultiQTalentA {tag}")
+    tb = await _seed_talent(f"MultiQTalentB {tag}")
+    tc = await _seed_talent(f"MultiQTalentC {tag}")
+    try:
+        await _seed_pipeline_row(proj_a, ta, "ask_to_test")
+        await _seed_pipeline_row(proj_b, tb, "follow_up")
+        # tc has no active pipeline row at all.
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Show pending projects for MultiQTalentA {tag}, MultiQTalentB {tag} and MultiQTalentC {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"MultiQTalentA {tag}" in r.reply
+        assert f"MultiQTalentB {tag}" in r.reply
+        assert f"MultiQTalentC {tag}" in r.reply
+        assert "MultiQA Brand" in r.reply
+        assert "MultiQB Brand" in r.reply
+        assert "is currently not part of any active casting pipeline" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb, tc])
+        await _restore_config(original)
+
+
+async def test_multi_talent_pending_projects_query_with_of_and_fuzzy_typo():
+    """Matches the original spec's "of" phrasing too, and tolerates a
+    minor spelling typo in one of the names via the existing fuzzy
+    matcher — reused unchanged, not a new matching system."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tag_b = uuid.uuid4().hex[:6]
+    proj_a = await _seed_project(status="ongoing", brand_name=f"FuzzyQA Brand {tag}")
+    ta = await _seed_talent(f"Ahana Pocha {tag}")
+    tb = await _seed_talent(f"FuzzyQTalentB {tag_b}")
+    try:
+        await _seed_pipeline_row(proj_a, ta, "ask_to_test")
+
+        # "Ahna" (missing an 'a') should still fuzzy-resolve to "Ahana Pocha".
+        # A DIFFERENT random tag on the second name — sharing one token with
+        # the first name's tag would itself create a spurious fuzzy match
+        # (this matcher scores best-TOKEN, not whole-string, similarity).
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Show pending projects of Ahna Pocha {tag}, FuzzyQTalentB {tag_b}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert f"Ahana Pocha {tag}" in r.reply
+        assert "FuzzyQA Brand" in r.reply
+        assert f"FuzzyQTalentB {tag_b}" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[proj_a], talent_ids=[ta, tb])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
 # Compact line/slash-delimited formats.
 # ---------------------------------------------------------------------------
 async def test_slash_delimited_single_add_command():

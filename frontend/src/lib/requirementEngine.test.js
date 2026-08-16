@@ -20,6 +20,7 @@ const baseForm = () => ({
     instagram_handle: "",
     instagram_followers: "",
     bio: "",
+    has_competitive_brand_experience: null,
     competitive_brand: "",
     availability: { status: "", note: "" },
     budget: { status: "", value: "" },
@@ -44,7 +45,8 @@ const filledForm = () => ({
     instagram_handle: "priya",
     instagram_followers: "10k-50k",
     bio: "An actor.",
-    competitive_brand: "None",
+    has_competitive_brand_experience: false,
+    competitive_brand: "",
     availability: { status: "yes", note: "" },
     budget: { status: "accept", value: "" },
     interested_in: ["Acting"],
@@ -152,6 +154,84 @@ describe("computeRequirementItems — requirement tiers", () => {
         const project = strictProject({ fields: { location: "required" } });
         const items = computeRequirementItems({ project, form: baseForm(), submission: null });
         expect(findItem(items, "location").section).toBe("projectQuestions");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Manual-testing fix — Competitive Brands (NONE/YES conditional UI)
+// ---------------------------------------------------------------------------
+
+describe("computeRequirementItems — competitive brand (NONE/YES, single free-text field)", () => {
+    it("is unsatisfied when unanswered (has_competitive_brand_experience is null)", () => {
+        const project = strictProject({ fields: { competitive_brand: "required" } });
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null });
+        const item = findItem(items, "competitive_brand");
+        expect(item.requirement).toBe(REQUIREMENT_TIERS.REQUIRED);
+        expect(item.satisfied).toBe(false);
+        // No details sub-item exists until the talent actually answers YES.
+        expect(findItem(items, "competitive_brand_details")).toBeUndefined();
+    });
+
+    // Case 1 — NONE: has_competitive_brand_experience=false, no text field
+    // required, competitive_brand stays empty.
+    it("Case 1 — NONE: satisfied on its own, no text field required, competitive_brand is empty", () => {
+        const project = strictProject({ fields: { competitive_brand: "required" } });
+        const form = { ...baseForm(), has_competitive_brand_experience: false, competitive_brand: "" };
+        const items = computeRequirementItems({ project, form, submission: null });
+        expect(findItem(items, "competitive_brand").satisfied).toBe(true);
+        expect(findItem(items, "competitive_brand_details")).toBeUndefined();
+        expect(form.competitive_brand).toBe("");
+    });
+
+    // Case 2 — YES: single free-text field appears (as the details
+    // sub-item), unsatisfied until the talent types anything into it, and
+    // that same text is what persists to `competitive_brand`.
+    it("Case 2 — YES: a single free-text details field appears, satisfied once any text is entered", () => {
+        const project = strictProject({ fields: { competitive_brand: "required" } });
+        const form = { ...baseForm(), has_competitive_brand_experience: true };
+        const items = computeRequirementItems({ project, form, submission: null });
+        expect(findItem(items, "competitive_brand").satisfied).toBe(true);
+        const empty = findItem(items, "competitive_brand_details");
+        expect(empty).toBeDefined();
+        expect(empty.requirement).toBe(REQUIREMENT_TIERS.REQUIRED);
+        expect(empty.satisfied).toBe(false);
+
+        const filled = computeRequirementItems({
+            project,
+            form: { ...form, competitive_brand: "Brand A — June 2025; Brand B — March 2026" },
+            submission: null,
+        });
+        expect(findItem(filled, "competitive_brand_details").satisfied).toBe(true);
+    });
+
+    // Case 3 — YES -> NONE: switching to NONE must clear the previously
+    // entered text (enforced by the NONE button's onClick in
+    // SubmissionPage.jsx, verified live in the smoke test) so that, from
+    // the engine's point of view, a NONE answer is never accompanied by
+    // leftover text — the details item must not exist regardless of what
+    // (if anything) is still sitting in `competitive_brand`.
+    it("Case 3 — YES to NONE: once cleared, NONE is satisfied on its own with no details item, even if stale text somehow remained", () => {
+        const project = strictProject({ fields: { competitive_brand: "required" } });
+        const clearedForm = { ...baseForm(), has_competitive_brand_experience: false, competitive_brand: "" };
+        const items = computeRequirementItems({ project, form: clearedForm, submission: null });
+        expect(findItem(items, "competitive_brand").satisfied).toBe(true);
+        expect(findItem(items, "competitive_brand_details")).toBeUndefined();
+    });
+
+    // Case 4 — NONE -> YES again: the field must reappear EMPTY, not
+    // prefilled with whatever was typed before switching to NONE (the
+    // component never restores it — case 3's clear is what guarantees this).
+    it("Case 4 — NONE back to YES: the details field starts unsatisfied/empty again, previous text does not come back", () => {
+        const project = strictProject({ fields: { competitive_brand: "required" } });
+        const reAnsweredYes = { ...baseForm(), has_competitive_brand_experience: true, competitive_brand: "" };
+        const items = computeRequirementItems({ project, form: reAnsweredYes, submission: null });
+        expect(findItem(items, "competitive_brand_details").satisfied).toBe(false);
+    });
+
+    it("is classified as a project question, not a profile field", () => {
+        const project = strictProject({ fields: { competitive_brand: "required" } });
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null });
+        expect(findItem(items, "competitive_brand").section).toBe("projectQuestions");
     });
 });
 

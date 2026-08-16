@@ -94,7 +94,23 @@ export function computeRequirementItems({ project, form, submission }) {
     items.push({ id: "instagram_handle", label: "Instagram Handle", section: "profile", selector: '[data-testid="form-instagram-handle"]', requirement: fieldTier("instagram_handle"), satisfied: !!form.instagram_handle?.trim() });
     items.push({ id: "instagram_followers", label: "Instagram Followers", section: "profile", selector: '[data-testid="form-instagram-followers-field"]', requirement: fieldTier("instagram_followers"), satisfied: !!form.instagram_followers?.trim() });
     items.push({ id: "bio", label: "Bio", section: "skills", selector: '[data-testid="form-bio-field"]', requirement: fieldTier("bio"), satisfied: !!form.bio?.trim() });
-    items.push({ id: "competitive_brand", label: "Competitive Brand details", section: "projectQuestions", selector: '[data-testid="form-competitive-brand"]', requirement: fieldTier("competitive_brand"), satisfied: !!form.competitive_brand?.trim() });
+    // Competitive-brand is a NONE/YES question (mirrors the availability/
+    // budget pattern below): the base item is satisfied once ANSWERED
+    // (either NONE or YES), and a second item only exists — and must itself
+    // be satisfied — when the answer is YES, since that's the only time the
+    // single free-text "Competitive Brands & When" field is even rendered.
+    {
+        const hasExp = form.has_competitive_brand_experience;
+        const tier = fieldTier("competitive_brand");
+        if (hasExp !== true && hasExp !== false) {
+            items.push({ id: "competitive_brand", label: "Competitive brand experience (None / Yes)", section: "projectQuestions", selector: '[data-testid="form-competitive-brand"]', requirement: tier, satisfied: false });
+        } else {
+            items.push({ id: "competitive_brand", label: "Competitive brand experience (None / Yes)", section: "projectQuestions", selector: '[data-testid="form-competitive-brand"]', requirement: tier, satisfied: true });
+            if (hasExp === true) {
+                items.push({ id: "competitive_brand_details", label: "Competitive brands & when", section: "projectQuestions", selector: '[data-testid="form-competitive-brand-text"]', requirement: tier, satisfied: !!form.competitive_brand?.trim() });
+            }
+        }
+    }
 
     {
         const avail = form.availability || {};

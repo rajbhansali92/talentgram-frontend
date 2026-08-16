@@ -473,6 +473,11 @@ function SubmissionPage() {
             bio: "",
             work_links: [],
             skills: [],
+            // NONE/YES answer; `competitive_brand` itself (below, kept in
+            // its original spot alphabetically-adjacent fields) is the
+            // free-text response, only meaningful when this is true — the
+            // canonical downstream string field, unchanged in shape.
+            has_competitive_brand_experience: null,
             competitive_brand: "",
             availability: { status: "", note: "" },
             budget: { status: "", value: "" },
@@ -647,6 +652,16 @@ function SubmissionPage() {
     // existing, or Google-existing), never guessed at.
     const [isReturningTalent, setIsReturningTalent] = useState(false);
 
+    // Manual-testing fix — the first project page must show ONLY Project
+    // Details + the "UPLOAD TEST" CTA, with no auth UI (Google/Email/OTP/
+    // Identity Confirmation) visible before the talent acts. The Talent
+    // Details section below (Step A/B auth, Profile, Skills, Project
+    // Questions) used to render unconditionally on load; it's now gated on
+    // this flag OR `emailGateUnlocked` (so admin mode / a resumed in-
+    // progress draft, which already unlock the gate on mount, still render
+    // immediately with no extra click needed). Flipped true only by an
+    // explicit "UPLOAD TEST" click, via `revealAndScrollToTalentDetails`.
+    const [talentDetailsRevealed, setTalentDetailsRevealed] = useState(false);
 
     const introRef = useRef();
     const take1Ref = useRef();
@@ -1172,7 +1187,8 @@ function SubmissionPage() {
                         bio: form.bio || "",
                         work_links: form.work_links || [],
                         skills: form.skills || [],
-                        competitive_brand: form.competitive_brand || "",
+                        has_competitive_brand_experience: form.has_competitive_brand_experience,
+                        competitive_brand: form.has_competitive_brand_experience ? (form.competitive_brand || "") : "",
                         availability: form.availability,
                         budget: form.budget,
                         custom_answers: form.custom_answers || {},
@@ -1349,6 +1365,16 @@ function SubmissionPage() {
         document.querySelector('[data-testid="talent-details-section"]')?.scrollIntoView({ behavior: "smooth", block: "start" });
     };
 
+    // The section this scrolls to doesn't exist in the DOM until
+    // `talentDetailsRevealed` flips true (see its declaration above), so the
+    // reveal has to commit and re-render before `scrollIntoView` can find
+    // it — hence the setTimeout rather than calling scrollToTalentDetails
+    // directly.
+    const revealAndScrollToTalentDetails = () => {
+        setTalentDetailsRevealed(true);
+        setTimeout(scrollToTalentDetails, 50);
+    };
+
     const handleUploadTestClick = useCallback(async () => {
         const token = typeof window !== "undefined" ? localStorage.getItem(PORTAL_TOKEN_KEY) : null;
         // talentgram_portal_email is always written/cleared alongside the
@@ -1359,7 +1385,7 @@ function SubmissionPage() {
             // Admin Mode's gate is already unlocked (see emailGateUnlocked's
             // initializer); everything else just falls through to the
             // existing Step A UI below.
-            scrollToTalentDetails();
+            revealAndScrollToTalentDetails();
             return;
         }
         setRecognizing(true);
@@ -1374,7 +1400,7 @@ function SubmissionPage() {
             if (!data || !data.first_name) {
                 // Token valid but no matching/complete profile — nothing to
                 // silently recognize; fall through to Step A.
-                scrollToTalentDetails();
+                revealAndScrollToTalentDetails();
                 return;
             }
             populatePrefillData(data);
@@ -1393,7 +1419,7 @@ function SubmissionPage() {
             // token; any other failure just means recognition didn't work.
             // Either way, fall through to the existing Step A UI.
             console.error("Silent recognition failed:", error);
-            scrollToTalentDetails();
+            revealAndScrollToTalentDetails();
         } finally {
             setRecognizing(false);
         }
@@ -1474,6 +1500,7 @@ function SubmissionPage() {
             bio: "",
             work_links: [],
             skills: [],
+            has_competitive_brand_experience: null,
             competitive_brand: "",
             availability: { status: "", note: "" },
             budget: { status: "", value: "" },
@@ -1725,8 +1752,11 @@ function SubmissionPage() {
                     bio: form.bio || "",
                     work_links: form.work_links || [],
                     skills: form.skills || [],
-                    competitive_brand: project.competitive_brand_enabled
-                        ? form.competitive_brand
+                    has_competitive_brand_experience: project.competitive_brand_enabled
+                        ? form.has_competitive_brand_experience
+                        : null,
+                    competitive_brand: (project.competitive_brand_enabled && form.has_competitive_brand_experience)
+                        ? (form.competitive_brand || "")
                         : "",
                     availability: form.availability,
                     budget: form.budget,
@@ -2122,14 +2152,17 @@ function SubmissionPage() {
         }
     };
 
-    // Returning-talent Media step: reuse existing photos/intro by default
-    // instead of waiting for a manual "Select All" tap. Runs once (guarded
-    // by autoReuseAttemptedRef) the first time the talent reaches the
-    // Uploads step with unclaimed Library items, then collapses the picker
-    // to a compact summary — "Change Photos"/"Change Intro" (rendered at the
-    // call site) re-expand it. Admin Mode is excluded: the admin is
-    // uploading/curating media on the talent's behalf and should see the
-    // full picker, not have it auto-select-then-hide itself.
+    // Manual-testing fix — existing Library media (photos/intro) must NOT be
+    // preselected: the talent has to explicitly tap each item they want to
+    // include (see LibraryMediaPicker below, which renders every item
+    // unselected until toggled). This used to auto-attach every Library item
+    // to the submission the first time the Uploads step was reached; that
+    // auto-attach call has been removed. The one thing still worth doing
+    // automatically is collapsing to the compact "Using your saved photos"
+    // summary when a RESUMED draft already has real selections attached
+    // (`selectedLibrarySourceIds` is derived straight from the submission's
+    // own media, not from this effect) — that's reflecting a prior explicit
+    // choice, not preselecting anything new.
     useEffect(() => {
         if (adminMode) return;
         if (sectionForStep(currentStep) !== "uploads") return;
@@ -2137,16 +2170,9 @@ function SubmissionPage() {
         if (libraryMedia.length === 0) return;
         autoReuseAttemptedRef.current = true;
         if (selectedLibrarySourceIds.size > 0) {
-            // Already has selections (e.g., a resumed draft) — nothing to
-            // auto-run, just start collapsed like a completed auto-reuse.
             setShowLibraryPicker(false);
-            return;
         }
-        (async () => {
-            await selectAllLibraryMedia();
-            setShowLibraryPicker(false);
-        })();
-    }, [adminMode, currentStep, libraryMedia.length, selectedLibrarySourceIds.size, selectAllLibraryMedia]);
+    }, [adminMode, currentStep, libraryMedia.length, selectedLibrarySourceIds.size]);
 
     const dismissRemovedWarning = (mid) => {
         // "Keep for this submission" — the item is already in
@@ -3149,7 +3175,15 @@ function SubmissionPage() {
                     />
                 )}
 
-                {/* SECTION 2 — TALENT DETAILS FORM */}
+                {/* SECTION 2 — TALENT DETAILS FORM. Manual-testing fix: the
+                    first project page must show ONLY Project Details +
+                    "UPLOAD TEST" — no auth UI, no Profile/Skills/Project
+                    Questions — until the talent explicitly clicks UPLOAD
+                    TEST (or is silently recognized, or Admin Mode/a resumed
+                    draft already unlocked the gate on mount). See
+                    `talentDetailsRevealed`'s declaration for the full
+                    rationale. */}
+                {(talentDetailsRevealed || emailGateUnlocked) && (
                 <section
                     className="pt-4 mb-10 sm:mb-16"
                     data-testid="talent-details-section"
@@ -4159,20 +4193,71 @@ function SubmissionPage() {
                                             data-step="2"
                                             className="mb-6"
                                         >
-                                            <PremiumFormField
-                                                label="Competitive Brand (declare conflicts)"
-                                                value={form.competitive_brand}
-                                                onChange={(v) => {
-                                                    setForm({ ...form, competitive_brand: v });
-                                                    if (validationErrors.competitive_brand) setValidationErrors((e) => ({ ...e, competitive_brand: undefined }));
-                                                }}
-                                                onBlur={saveForm}
-                                                placeholder="Any brand conflict? Type 'None' if not"
-                                                testid="form-competitive-brand"
-                                                wide
-                                                error={validationErrors.competitive_brand}
-                                                inputRef={(el) => { fieldRefs.current.competitive_brand = el; }}
-                                            />
+                                            <span className="text-[11px] text-[#111111] tracking-[0.08em] font-semibold uppercase font-mono block mb-3">
+                                                Have you worked with a competitive brand?
+                                            </span>
+                                            <div className="grid grid-cols-2 gap-3" data-testid="form-competitive-brand">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setForm({
+                                                            ...form,
+                                                            has_competitive_brand_experience: false,
+                                                            // Switching to NONE clears any previously
+                                                            // entered text so stale data can never be
+                                                            // submitted, and doesn't silently reappear if
+                                                            // the talent flips back to YES later.
+                                                            competitive_brand: "",
+                                                        });
+                                                        if (validationErrors.competitive_brand) setValidationErrors((e) => ({ ...e, competitive_brand: undefined }));
+                                                        setTimeout(saveForm, 0);
+                                                    }}
+                                                    data-testid="competitive-brand-none-btn"
+                                                    className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
+                                                        form.has_competitive_brand_experience === false
+                                                            ? "bg-[#0c2340] text-white border-[#0c2340] shadow-sm"
+                                                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
+                                                    }`}
+                                                >
+                                                    None
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setForm({ ...form, has_competitive_brand_experience: true });
+                                                        if (validationErrors.competitive_brand) setValidationErrors((e) => ({ ...e, competitive_brand: undefined }));
+                                                        setTimeout(saveForm, 0);
+                                                    }}
+                                                    data-testid="competitive-brand-yes-btn"
+                                                    className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
+                                                        form.has_competitive_brand_experience === true
+                                                            ? "bg-[#0c2340] text-white border-[#0c2340] shadow-sm"
+                                                            : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
+                                                    }`}
+                                                >
+                                                    Yes
+                                                </button>
+                                            </div>
+                                            {form.has_competitive_brand_experience === true && (
+                                                <label className="block mt-4" data-testid="form-competitive-brand-text">
+                                                    <span className="text-[11px] text-[#111111] tracking-[0.08em] font-semibold uppercase font-mono">
+                                                        Competitive Brands &amp; When
+                                                    </span>
+                                                    <textarea
+                                                        value={form.competitive_brand}
+                                                        onChange={(e) => {
+                                                            setForm({ ...form, competitive_brand: e.target.value });
+                                                            if (validationErrors.competitive_brand_details) setValidationErrors((e2) => ({ ...e2, competitive_brand_details: undefined }));
+                                                        }}
+                                                        onBlur={saveForm}
+                                                        rows={3}
+                                                        data-testid="input-competitive-brand-text"
+                                                        className="mt-2 w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] resize-none transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                                                        placeholder="Mention all competitive brands you have worked with and when. Example: Brand A — June 2025; Brand B — March 2026"
+                                                        ref={(el) => { fieldRefs.current.competitive_brand_details = el; }}
+                                                    />
+                                                </label>
+                                            )}
                                         </div>
                                     )}
 
@@ -4229,6 +4314,7 @@ function SubmissionPage() {
                     </form>
                     </div>
                 </section>
+                )}
 
                 {/* Wizard Back/Next — visible for Steps 1-3; Step 4 keeps its
                     own existing Submit footer further down, unchanged. */}

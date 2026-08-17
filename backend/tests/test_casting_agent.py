@@ -1947,6 +1947,38 @@ async def test_fuzzy_project_matching_token_variations():
         await _restore_config(original)
 
 
+async def test_project_fuzzy_matching_tolerates_campaign_filler_word():
+    """"campaign" was added to the project filler-word set for the
+    WhatsApp Campaign Agent's benefit (casting_pipeline_nlu.py's
+    _PROJECT_FILLER_WORDS, shared verbatim with casting-agent's own project
+    matching) — "Toyota Glanza Campaign" must still resolve to a project
+    literally named "Toyota Glanza", exactly like "Toyota Glanza Film"/
+    "Toyota Glanza Project" already did before this change. A project
+    whose REAL name happens to contain "Campaign" must still resolve by
+    its full name too — filler-word stripping is symmetric (applied to
+    both the query and every candidate label), so it can never make an
+    exact, unambiguous name unmatchable."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"Toyota Glanza {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"CampaignFillerTalent {tag}")
+    talent_ids = [t]
+    try:
+        await _seed_pipeline_row(project_id, t, "hold")
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move CampaignFillerTalent {tag} to Approved in Toyota Glanza Campaign {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Project" in r.reply and label in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
+        await _restore_config(original)
+
+
 async def test_fuzzy_talent_matching_honorific_and_partial():
     """"Mr Prajal" / "Tushir" / "Prajal Kumar" all resolve to the one
     "Prajal Tushir" — honorific stripping + existing best-token fuzzy."""

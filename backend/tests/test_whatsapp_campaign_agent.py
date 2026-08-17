@@ -2365,7 +2365,14 @@ async def test_multi_recipient_duplicate_names_deduped():
         await _restore_config(original)
 
 
-async def test_multi_recipient_unknown_name_reports_clearly():
+async def test_multi_recipient_unknown_name_proceeds_with_confidently_resolved():
+    """Partial-Failure-Tolerant Multi-Recipient Resolution (2026-08-17) —
+    superseded the earlier "never silently proceed" behavior: a
+    confidently-resolved name in a multi-name list is no longer discarded
+    just because ANOTHER name in the same list couldn't be found. The send
+    proceeds with the known recipient(s), and the unresolved name is
+    surfaced as a warning on the confirmation card instead of blocking
+    the whole command."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
@@ -2383,8 +2390,8 @@ async def test_multi_recipient_unknown_name_reports_clearly():
         assert r.handled
         assert "Couldn't find" in r.reply
         assert unknown in r.reply
-        # never silently proceeds with just the known one
-        assert "3 Approve" not in r.reply and "1 Approve" not in r.reply
+        assert n1 in r.reply
+        assert "1 Approve" in r.reply
     finally:
         await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)
@@ -3820,3 +3827,719 @@ async def test_instagram_and_campaign_sender_agree_on_the_production_repro_name(
         assert name in instagram_target.subject_label
     finally:
         await db.talents.delete_one({"id": t1})
+
+
+# ---------------------------------------------------------------------------
+# Bulk Multi-Target Sends (2026-08-17) — template/message x multi-project x
+# multi-talent x multi-stage, "and confirm", partial-ambiguity preservation,
+# multi-pick disambiguation replies, deduplication, and parenthesized
+# custom messages.
+# ---------------------------------------------------------------------------
+async def test_template_one_project_multiple_talents_narrowed_by_pipeline():
+    """"Send the Follow Up template for Project A to Talent A, Talent B" —
+    item 1's shape: named project(s) narrow the named talent(s) down to
+    whoever actually belongs to that project's pipeline."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"FollowUp {tag}"
+    template_id = await _seed_template(template_name)
+    project_id = await _seed_project(f"ProjOne {tag}")
+    label = f"ProjOne {tag}"
+    t1 = await _seed_talent(f"TalentOne {tag}", phone="917000200001")
+    t2 = await _seed_talent(f"TalentTwo {tag}", phone="917000200002")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    await _seed_pipeline_row(project_id, t2, "approved")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template for {label} to TalentOne {tag}, TalentTwo {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert f"TalentOne {tag}" in r.reply and f"TalentTwo {tag}" in r.reply
+        assert "1 Approve" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_template_multiple_projects_one_talent_narrowed_by_pipeline():
+    """"Send the Follow Up template for Project A and Project B to Talent
+    A" — a talent who belongs to only ONE of the two named projects still
+    resolves correctly (narrowing is a union across every named project,
+    not an intersection)."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"FollowUp {tag}"
+    template_id = await _seed_template(template_name)
+    project_a = await _seed_project(f"ProjA {tag}")
+    project_b = await _seed_project(f"ProjB {tag}")
+    label_a, label_b = f"ProjA {tag}", f"ProjB {tag}"
+    t1 = await _seed_talent(f"SoloTalent {tag}", phone="917000200010")
+    await _seed_pipeline_row(project_b, t1, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template for {label_a} and {label_b} to SoloTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert f"SoloTalent {tag}" in r.reply
+        assert "1 Approve" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1 and jobs[0]["talent_id"] == t1
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_template_multiple_projects_multiple_talents_narrowed_by_pipeline():
+    """1 template -> multiple projects -> multiple talents, arbitrary
+    counts — the full item-1 shape."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"FollowUp {tag}"
+    template_id = await _seed_template(template_name)
+    project_a = await _seed_project(f"MProjA {tag}")
+    project_b = await _seed_project(f"MProjB {tag}")
+    label_a, label_b = f"MProjA {tag}", f"MProjB {tag}"
+    t1 = await _seed_talent(f"MTalentA {tag}", phone="917000200020")
+    t2 = await _seed_talent(f"MTalentB {tag}", phone="917000200021")
+    t3 = await _seed_talent(f"MTalentC {tag}", phone="917000200022")  # not in either project
+    await _seed_pipeline_row(project_a, t1, "follow_up")
+    await _seed_pipeline_row(project_b, t2, "approved")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Send {template_name} template for {label_a} and {label_b} "
+                f"to MTalentA {tag}, MTalentB {tag} and MTalentC {tag}"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "1 Approve" in r.reply
+        assert f"Not part of" in r.reply and f"MTalentC {tag}" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(
+            phone, project_ids=[project_a, project_b], talent_ids=[t1, t2, t3], template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_template_multiple_projects_one_stage():
+    """"Send Follow Up template for Project A, B to the Follow Up list" —
+    stage targeting across multiple named projects, deduplicated."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"Reminder {tag}"
+    template_id = await _seed_template(template_name)
+    project_a = await _seed_project(f"StageProjA {tag}")
+    project_b = await _seed_project(f"StageProjB {tag}")
+    label_a, label_b = f"StageProjA {tag}", f"StageProjB {tag}"
+    t1 = await _seed_talent(f"StageTalentA {tag}", phone="917000200030")
+    t2 = await _seed_talent(f"StageTalentB {tag}", phone="917000200031")
+    t3 = await _seed_talent(f"StageTalentC {tag}", phone="917000200032")  # wrong stage
+    await _seed_pipeline_row(project_a, t1, "follow_up")
+    await _seed_pipeline_row(project_b, t2, "follow_up")
+    await _seed_pipeline_row(project_b, t3, "approved")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template for {label_a} and {label_b} to the Follow Up list",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "1 Approve" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(
+            phone, project_ids=[project_a, project_b], talent_ids=[t1, t2, t3], template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_template_multiple_projects_multiple_stages_dedup():
+    """"Send the Follow Up template for Project A and Project B to Follow
+    Up and Approved" — union of (A,FollowUp)+(A,Approved)+(B,FollowUp)+
+    (B,Approved), deduplicated so a talent in more than one of those
+    groups is queued exactly once. Also confirms template != stage word
+    confusion: the template is literally named "Follow Up" too, and must
+    not be misread as a target stage."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    # Deliberately NOT literally "Follow Up <tag>" — a real, non-test
+    # "Follow Up" template already exists in this shared dev DB (seed
+    # data), and the shared fuzzy matcher's substring tier would make
+    # "Follow Up <tag>" genuinely ambiguous against it. "ZFollowTemplate"
+    # still starts with the same word-ish token to prove template-name-vs-
+    # stage-word disambiguation without colliding with real seed data.
+    template_name = f"ZFollowTemplate {tag}"
+    template_id = await _seed_template(template_name)
+    project_a = await _seed_project(f"UnionProjA {tag}")
+    project_b = await _seed_project(f"UnionProjB {tag}")
+    label_a, label_b = f"UnionProjA {tag}", f"UnionProjB {tag}"
+    t1 = await _seed_talent(f"UnionTalentA {tag}", phone="917000200040")
+    t2 = await _seed_talent(f"UnionTalentB {tag}", phone="917000200041")
+    # t1 belongs to project A in BOTH Follow Up and (after a later re-test)
+    # Approved is not possible for one talent/one project — instead prove
+    # dedup by putting t1 in Follow Up for BOTH projects (the union should
+    # still only queue t1 once).
+    await _seed_pipeline_row(project_a, t1, "follow_up")
+    await _seed_pipeline_row(project_b, t1, "follow_up")
+    await _seed_pipeline_row(project_a, t2, "approved")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send the {template_name} template for {label_a} and {label_b} to Follow Up and Approved",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert f"Template\n{template_name}" in r.reply
+        assert "1 Approve" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        # t1 appears in TWO resolved (project, stage) groups but must be
+        # queued exactly once.
+        assert [j["talent_id"] for j in jobs].count(t1) == 1
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(
+            phone, project_ids=[project_a, project_b], talent_ids=[t1, t2], template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_template_for_project_to_approved_list_not_confused_with_stage_move():
+    """"Send Follow Up template for Project A to Approved list" means:
+    template=Follow Up, project=Project A, recipient stage=Approved — NOT
+    a request to move anyone's pipeline stage (this agent never mutates
+    casting_pipeline at all, only reads it to resolve recipients)."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    # See the sibling union test above — avoiding a literal "Follow Up
+    # <tag>" template name to sidestep ambiguity against the real seeded
+    # "Follow Up" template in this shared dev DB.
+    template_name = f"ZFollowTemplate {tag}"
+    template_id = await _seed_template(template_name)
+    project_id = await _seed_project(f"ConfuseProj {tag}")
+    label = f"ConfuseProj {tag}"
+    t1 = await _seed_talent(f"ConfuseTalent {tag}", phone="917000200050")
+    await _seed_pipeline_row(project_id, t1, "approved")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template for {label} to Approved list",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert f"Template\n{template_name}" in r.reply
+        assert "Stage\nApproved" in r.reply
+        assert "1 Approve" in r.reply
+
+        # The talent's own pipeline stage must be completely untouched —
+        # this agent only ever reads casting_pipeline, never writes it.
+        row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1})
+        assert row["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_custom_message_single_stage_single_project_previously_broken():
+    """Custom-message mode never applied _split_stage_and_project to its
+    own recipient clause before this fix — "the Follow Up list of Project
+    A" would have been fuzzy-matched as a single (nonexistent) project
+    name in its entirety and failed outright."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"CustomStageProj {tag}")
+    label = f"CustomStageProj {tag}"
+    t1 = await _seed_talent(f"CustomStageTalent {tag}", phone="917000200060")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f'Send "Hi, just following up regarding the shoot." to the Follow Up list of {label}',
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Stage\nFollow Up" in r.reply or "STAGE" in r.reply.upper()
+        assert "1 Approve" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_custom_message_multiple_stages_multiple_projects():
+    """"Send '...' to Follow Up and Approved for Project A and Project B"
+    — custom message, full multi-stage x multi-project union."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    project_a = await _seed_project(f"CustomUnionA {tag}")
+    project_b = await _seed_project(f"CustomUnionB {tag}")
+    label_a, label_b = f"CustomUnionA {tag}", f"CustomUnionB {tag}"
+    t1 = await _seed_talent(f"CustomUnionT1 {tag}", phone="917000200070")
+    t2 = await _seed_talent(f"CustomUnionT2 {tag}", phone="917000200071")
+    await _seed_pipeline_row(project_a, t1, "follow_up")
+    await _seed_pipeline_row(project_b, t2, "approved")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f'Send "Please confirm your availability." to Follow Up and Approved for {label_a} and {label_b}',
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "1 Approve" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+        for j in jobs:
+            assert j["message_body"] == "Please confirm your availability."
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_custom_message_parenthesized():
+    """Send (\"...\") and Send (...) (no quotes at all) both resolve to
+    the same custom_message intent as the plain quoted form."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_talent(f"ParenTalent {tag}", phone="917000200080")
+    try:
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f'Send ("Hi, please confirm your availability.") to ParenTalent {tag}',
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r1.handled, r1.reply
+        assert "MESSAGE\nHi, please confirm your availability." in r1.reply
+        assert "1 Approve" in r1.reply
+        # Cancel this one so the second command starts from a clean slate.
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send (Hi, please confirm your availability.) to ParenTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert "MESSAGE\nHi, please confirm your availability." in r2.reply
+    finally:
+        await _cleanup(phone, talent_ids=[t1])
+        await _restore_config(original)
+
+
+def test_paren_incidental_to_ordinary_template_send_unaffected():
+    """An incidental paren mid-sentence ("Ahana (the lead)") must NOT be
+    misread as a custom-message delimiter — _detect_send_mode must still
+    classify this as "requirement" (an ordinary template send), exactly as
+    before parenthesis support existed. Pure extraction-layer check (no
+    DB) — the SAFETY gate on top of recipient resolution is a separate,
+    deliberate concern covered elsewhere, not what this test is about."""
+    remainder = wca._strip_leading_trigger_preserve_newlines(
+        "Send Reminder template to Ahana (the lead)", wca.SEND_TRIGGERS,
+    )
+    assert wca._detect_send_mode(remainder) == "requirement"
+
+
+async def test_paren_wrapping_quote_and_bare_paren_both_map_to_custom_message():
+    """Send ("...") and Send (...) (no quotes) both classify as
+    custom_message — the two forms from the spec's own examples."""
+    remainder1 = wca._strip_leading_trigger_preserve_newlines(
+        'Send ("Hi, please confirm your availability.") to Project A', wca.SEND_TRIGGERS,
+    )
+    assert wca._detect_send_mode(remainder1) == "custom_message"
+    fields1 = wca._extract_custom_message_fields(remainder1)
+    assert fields1["source_query"] == "Hi, please confirm your availability."
+
+    remainder2 = wca._strip_leading_trigger_preserve_newlines(
+        "Send (Hi, please confirm your availability.) to Project A", wca.SEND_TRIGGERS,
+    )
+    assert wca._detect_send_mode(remainder2) == "custom_message"
+    fields2 = wca._extract_custom_message_fields(remainder2)
+    assert fields2["source_query"] == "Hi, please confirm your availability."
+
+
+async def test_and_confirm_bypasses_approval_card():
+    """"...and confirm" executes immediately, same convention as
+    casting-agent — "confirm" never means a pipeline-stage move here
+    (this agent has no stage-mutation concept at all)."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"ConfirmNow {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"ConfirmTalent {tag}", phone="917000200100")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to ConfirmTalent {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sent." in r.reply
+        assert "1 Approve" not in r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_and_confirm_with_multi_project_stage_union():
+    """"...and confirm" also bypasses approval for the NEW multi-project/
+    multi-stage union path, not just the original single-target shape."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"ConfirmUnion {tag}"
+    template_id = await _seed_template(template_name)
+    project_a = await _seed_project(f"ConfirmProjA {tag}")
+    project_b = await _seed_project(f"ConfirmProjB {tag}")
+    label_a, label_b = f"ConfirmProjA {tag}", f"ConfirmProjB {tag}"
+    t1 = await _seed_talent(f"ConfirmUnionT1 {tag}", phone="917000200110")
+    t2 = await _seed_talent(f"ConfirmUnionT2 {tag}", phone="917000200111")
+    await _seed_pipeline_row(project_a, t1, "follow_up")
+    await _seed_pipeline_row(project_b, t2, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Send {template_name} template for {label_a} and {label_b} "
+                f"to the Follow Up list and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sent." in r.reply
+        assert "1 Approve" not in r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(
+            phone, project_ids=[project_a, project_b], talent_ids=[t1, t2], template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_multi_pick_disambiguation_reply_numbers():
+    """"Send Follow Up template to Ayushi" with 3 similarly-named
+    talents -> numbered clarification -> "1 and 3" sends to BOTH picked
+    people, resuming the original template/command."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"MultiPick {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Ayushi Thakur {tag}", phone="917000200120")
+    t2 = await _seed_talent(f"Ayushi Sharma {tag}", phone="917000200121")
+    t3 = await _seed_talent(f"Ayushi Singh {tag}", phone="917000200122")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to Ayushi {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "I found multiple" in r.reply
+        assert f"Ayushi Thakur {tag}" in r.reply
+        assert f"Ayushi Sharma {tag}" in r.reply
+        assert f"Ayushi Singh {tag}" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1 and 3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert f"Ayushi Thakur {tag}" in r2.reply
+        assert f"Ayushi Singh {tag}" in r2.reply
+        assert f"Ayushi Sharma {tag}" not in r2.reply
+        assert "1 Approve" in r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r3.reply
+        batch_id = r3.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t3}
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2, t3], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_multi_pick_disambiguation_reply_surname_text():
+    """The same clarification round trip, but replying with surname text
+    ("Thakur and Singh") instead of numbers."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"MultiPickText {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"Ayushi Thakur {tag}", phone="917000200130")
+    t2 = await _seed_talent(f"Ayushi Sharma {tag}", phone="917000200131")
+    t3 = await _seed_talent(f"Ayushi Singh {tag}", phone="917000200132")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to Ayushi {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Thakur {tag} and Singh {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert f"Ayushi Thakur {tag}" in r2.reply
+        assert f"Ayushi Singh {tag}" in r2.reply
+        assert f"Ayushi Sharma {tag}" not in r2.reply
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2, t3], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_partial_ambiguity_resolves_known_asks_only_about_unresolved():
+    """"Send the Follow Up template to Ayushi Thakur, Priya Sharma and
+    Rahul Mehta" where Rahul is ambiguous — Ayushi and Priya must be
+    preserved, only Rahul needs clarifying, and the original command
+    resumes with everyone once Rahul is picked."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    # Distinct suffix PER TALENT (not one shared tag glued onto every
+    # name) — the shared fuzzy matcher scores best-TOKEN similarity, so a
+    # single tag repeated across every candidate would make them all
+    # spuriously tie on that shared token once a fuzzy (non-exact) query
+    # forces the fuzzy tier to run, turning "Rahul" into an ambiguity
+    # against ALL FOUR people instead of just the two real Rahuls. Only
+    # "Rahul" itself is deliberately shared between t3/t4 here.
+    template_tag = uuid.uuid4().hex[:6]
+    template_name = f"Partial {template_tag}"
+    template_id = await _seed_template(template_name)
+    s1, s2, s3, s4 = (uuid.uuid4().hex[:6] for _ in range(4))
+    t1 = await _seed_talent(f"Ayushi Thakur {s1}", phone="917000200140")
+    t2 = await _seed_talent(f"Priya Sharma {s2}", phone="917000200141")
+    t3 = await _seed_talent(f"Rahul Mehta {s3}", phone="917000200142")
+    t4 = await _seed_talent(f"Rahul Kumar Mehta {s4}", phone="917000200143")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            # Bare "Rahul" (not the full "Rahul Mehta <suffix>") — an
+            # EXACT match to either full name would resolve directly via
+            # the matcher's exact-match tier with no ambiguity at all;
+            # the partial first-name-only fragment is what genuinely ties
+            # between "Rahul Mehta" and "Rahul Kumar Mehta".
+            text=(
+                f"Send the {template_name} template to Ayushi Thakur {s1}, "
+                f"Priya Sharma {s2} and Rahul"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "I found multiple" in r.reply
+        assert f"Rahul Mehta {s3}" in r.reply and f"Rahul Kumar Mehta {s4}" in r.reply
+
+        # Pick whichever numbered option is actually "Rahul Kumar Mehta"
+        # — candidate ORDER isn't a contract this test should assume.
+        pick = "1" if r.reply.index(f"Rahul Kumar Mehta {s4}") < r.reply.index(f"Rahul Mehta {s3}\n") else "2"
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=pick,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert f"Ayushi Thakur {s1}" in r2.reply
+        assert f"Priya Sharma {s2}" in r2.reply
+        assert f"Rahul Kumar Mehta {s4}" in r2.reply
+        assert "1 Approve" in r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r3.reply
+        batch_id = r3.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2, t4}
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2, t3, t4], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_partial_not_found_preserves_confidently_resolved():
+    """A genuinely-unresolvable name alongside confidently-resolved ones
+    no longer blocks the whole send — the known recipient(s) are queued
+    and the unresolved name is surfaced as a warning."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"NotFoundPartial {tag}"
+    template_id = await _seed_template(template_name)
+    t1 = await _seed_talent(f"KnownTalent {tag}", phone="917000200150")
+    # Deliberately avoids the word "Person" — a real, non-test talent
+    # literally named "Repro Person" already exists in this shared dev DB
+    # (seed/leftover data) and would fuzzy-match on that shared word,
+    # turning this into an ambiguity case instead of a clean not-found.
+    unknown = f"Totally Unknown Xyzzyx {tag}"
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to KnownTalent {tag}, {unknown}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert f"KnownTalent {tag}" in r.reply
+        assert "Couldn't find" in r.reply and unknown in r.reply
+        assert "1 Approve" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r2.reply
+        batch_id = r2.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1}
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(phone, talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_fuzzy_talent_and_project_matching_reused_in_campaign_agent():
+    """Confirms the shared fuzzy matchers (casting_pipeline_nlu) are
+    genuinely reused here, not reimplemented. Note: this agent's recipient
+    resolution additionally applies _fuzzy_match_is_safe — a stricter,
+    deliberate SEND-time-only gate added after a real production incident
+    (a character-level fuzzy match sent a WhatsApp message to the wrong
+    real person) — so a full character-typo'd name ("Ayushii" for
+    "Ayushi") is correctly REJECTED here even though casting-agent's own
+    (undo-able, internal-only) pipeline edits would tolerate it; a
+    genuine PARTIAL name (surname alone) is what this gate does allow,
+    exercised below instead."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    # Distinct suffixes for the template/project/talent — a shared tag
+    # across all of them would let the fuzzy matcher's best-TOKEN scoring
+    # tie the project query to the talent (and vice versa) purely on that
+    # common token, exactly the false-ambiguity trap already hit earlier
+    # in this file (see test_partial_ambiguity_resolves_known_asks_only_
+    # about_unresolved).
+    template_tag, project_tag, talent_tag = (uuid.uuid4().hex[:6] for _ in range(3))
+    template_name = f"FuzzyReuse {template_tag}"
+    template_id = await _seed_template(template_name)
+    project_id = await _seed_project(f"Tira Suhana Film {project_tag}")
+    t1 = await _seed_talent(f"Ayushi Thakur {talent_tag}", phone="917000200160")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    try:
+        # Partial (surname-only) talent match — safety-gate compatible.
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to Thakur {talent_tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r1.handled and "1 Approve" in r1.reply, r1.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+
+        # Project fuzzy/filler tolerance — "Tira Suhana Project" resolves
+        # to a project literally named "... Film" via the shared filler-
+        # word normalization (_PROJECT_FILLER_WORDS), same as casting-agent.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send {template_name} template to Tira Suhana Project {project_tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert f"Tira Suhana Film {project_tag}" in r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)

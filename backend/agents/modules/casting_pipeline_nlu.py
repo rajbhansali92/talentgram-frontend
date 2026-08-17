@@ -2086,7 +2086,17 @@ def resolve_selection_spec(
 # list: common words a project name may or may not include, which
 # shouldn't cost a match either way once removed symmetrically from both
 # the query and every candidate label before comparing.
-_PROJECT_FILLER_WORDS = {"the", "a", "an", "project", "film", "movie", "show", "series", "shoot", "shoots"}
+_PROJECT_FILLER_WORDS = {
+    "the", "a", "an", "project", "film", "movie", "show", "series", "shoot", "shoots",
+    # "campaign" (2026-08-17, WhatsApp Campaign Agent) — a project referenced
+    # from the campaign agent is routinely called "the Toyota campaign"/
+    # "Toyota Glanza campaign" the same way it's already called "the Toyota
+    # film"/"Toyota project" elsewhere in this codebase; added alongside the
+    # existing entries above rather than in a parallel list so casting-agent's
+    # own project matching (which shares this exact function/set) gets the
+    # same tolerance for free, not a second implementation.
+    "campaign",
+}
 
 # Looser than talent matching's shared cutoff/margin (0.85 / 0.05) — a
 # project reference is usually the ONLY thing being named in that part of

@@ -313,6 +313,16 @@ class ManualContact(BaseModel):
     # existing MANUAL caller via the web app UI) preserves phone-only
     # routing byte-for-byte.
     whatsapp_group_name: str = ""
+    # Optional (2026-08-17, Bulk Multi-Target Sends) — when a MANUAL
+    # contact was actually resolved via a PROJECT pipeline lookup (e.g.
+    # the WhatsApp agent merging several projects'/stages' recipients into
+    # one deduplicated send), passing her real talent id here preserves
+    # talent_id/recipient_id continuity through resolve_recipients_engine
+    # instead of falling back to a synthetic phone-based id — so
+    # campaign-history/audit attribution for a MANUAL-routed talent still
+    # matches her real record. "" (the default, and every existing MANUAL
+    # caller) preserves the synthetic-id behaviour byte-for-byte.
+    talent_id: str = ""
 
 
 class SourceParams(BaseModel):
@@ -922,7 +932,18 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
         for mc in params.contacts:
             phone = _normalize_phone(mc.phone)
             group_name = (mc.whatsapp_group_name or "").strip()
-            rid = "manual:" + (phone or (mc.phone or "").strip().lower() or group_name.lower())
+            # A MANUAL contact built from a known talent record (talent_id
+            # set — see ManualContact.talent_id) keeps HER real id as the
+            # recipient_id/kind, exactly like the PROJECT branch already
+            # does, instead of falling back to a synthetic phone-based id
+            # — preserves talent_id/campaign-history attribution end to
+            # end even when the actual send is routed as MANUAL (e.g. a
+            # multi-project recipient union). Every other MANUAL contact
+            # (talent_id unset — the default, and every existing caller)
+            # is completely unaffected.
+            talent_id = (mc.talent_id or "").strip()
+            rid = talent_id or ("manual:" + (phone or (mc.phone or "").strip().lower() or group_name.lower()))
+            kind = "TALENT" if talent_id else "MANUAL"
             if rid in seen:
                 continue
             # A group-routed contact (e.g. a talent resolved by name, with
@@ -941,7 +962,7 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
                 continue
             _add(*_make_recipient(
                 name=mc.name or "", phone=phone, group_name=group_name,
-                source="MANUAL", source_id=None, kind="MANUAL", recipient_id=rid))
+                source="MANUAL", source_id=None, kind=kind, recipient_id=rid))
     elif source_type == "SAVED_LISTS":
         if not params.contact_list_ids and not params.group_list_ids:
             raise HTTPException(400, "contact_list_ids or group_list_ids required for SAVED_LISTS source")

@@ -192,3 +192,56 @@ def resolve_reply(text: str, candidates: List[Candidate]) -> Optional[Candidate]
     if match.item is not None:
         return match.item
     return None
+
+
+_MULTI_REPLY_AND_RE = re.compile(r"\band\b", re.IGNORECASE)
+
+
+def _split_multi_reply(text: str) -> List[str]:
+    """Splits a multi-pick reply ("1 and 3", "1, 3 and 4", "Thakur and
+    Singh") into its individual picks — pure text splitting, no matching of
+    any kind (mirrors the comma/"and" grammar every multi-name splitter on
+    this platform already uses, kept local rather than importing one since
+    this module is deliberately domain-agnostic — see the module
+    docstring)."""
+    cleaned = _MULTI_REPLY_AND_RE.sub(",", text or "")
+    return [p.strip() for p in cleaned.split(",") if p.strip()]
+
+
+def resolve_reply_multi(text: str, candidates: List[Candidate]) -> Optional[List[Candidate]]:
+    """Additive sibling of resolve_reply — accepts a reply naming MULTIPLE
+    picks from the same numbered list in one go: "1 and 3", "1, 3 and 4",
+    or multiple name/surname fragments ("Thakur and Singh", "Ayushi Thakur
+    and Ayushi Sharma"). Each fragment is resolved independently through
+    the EXACT SAME single-pick resolution resolve_reply already uses
+    (digit/circled-digit/ordinal/fuzzy-name) — no separate matching logic.
+    Deduplicates by candidate id, preserves the order picks were named in.
+
+    A single-fragment reply (no "and"/comma present) falls straight
+    through to resolve_reply, so this function is a strict superset — safe
+    for a caller to try as a fallback after resolve_reply already failed,
+    or to use as the only entry point.
+
+    Returns None if ANY fragment fails to resolve to exactly one candidate
+    — never silently drops a pick the caller can't account for; the
+    caller re-prompts rather than guessing which of several ambiguous
+    picks was meant."""
+    raw = (text or "").strip()
+    if not raw or not candidates:
+        return None
+
+    fragments = _split_multi_reply(raw)
+    if len(fragments) <= 1:
+        single = resolve_reply(raw, candidates)
+        return [single] if single is not None else None
+
+    picked: List[Candidate] = []
+    seen_ids: set = set()
+    for frag in fragments:
+        c = resolve_reply(frag, candidates)
+        if c is None:
+            return None
+        if c.id not in seen_ids:
+            seen_ids.add(c.id)
+            picked.append(c)
+    return picked or None

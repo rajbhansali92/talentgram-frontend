@@ -400,6 +400,31 @@ _QUOTE_CHARS = "\"“”"
 _QUOTE_CHAR_RE = re.compile("[" + re.escape(_QUOTE_CHARS) + "]")
 
 
+def _find_paren_span(remainder: str) -> Optional["tuple[int, int, int, int]"]:
+    """Bare-parenthesis delimiter — recognized ONLY when the message
+    STARTS with "(" (ignoring leading whitespace), mirroring the sprint's
+    own examples ("Send (Hi, please confirm your availability.) to X").
+    Deliberately NOT triggered by an incidental paren anywhere ELSE in an
+    ordinary sentence ("Send Reminder template to Ahana (the lead)") —
+    that's prose, not a message delimiter, and must keep resolving as
+    template mode, completely unaffected. Same first-open-to-last-close
+    "one opaque payload" shape as _find_quote_span, just a different
+    delimiter character and a stricter leading-position gate (parens are
+    common in ordinary text in a way quote characters aren't, so this
+    needs the extra precision to avoid misfiring)."""
+    stripped = remainder.lstrip()
+    if not stripped.startswith("("):
+        return None
+    offset = len(remainder) - len(stripped)
+    closes = [i for i, ch in enumerate(remainder) if ch == ")"]
+    if not closes:
+        return None
+    last = closes[-1]
+    if last <= offset:
+        return None
+    return offset, offset + 1, last, last + 1
+
+
 def _find_quote_span(remainder: str) -> Optional["tuple[int, int, int, int]"]:
     """FIRST-to-LAST quote-character span in the whole message — everything
     between them is treated as one opaque payload, never tokenized or
@@ -429,6 +454,8 @@ def _detect_send_mode(remainder: str) -> str:
         return "custom_message"
     if _find_quote_span(remainder):
         return "custom_message"
+    if _find_paren_span(remainder):
+        return "custom_message"
     first_nl = remainder.find("\n")
     first_line = remainder[:first_nl] if first_nl != -1 else remainder
     if first_line.rstrip().endswith(":"):
@@ -436,12 +463,34 @@ def _detect_send_mode(remainder: str) -> str:
     return "requirement"
 
 
+def _apply_recipient_split(out: Dict[str, str], recipient_part: str) -> None:
+    """Shared by every custom-message recipient-clause shape below — same
+    stage/project splitting Tier 3 (template mode) already applies to its
+    own recipient clause (_split_stage_and_project), so "to the Follow Up
+    list of Project A"/"to Follow Up and Approved for Project A and B"
+    resolve identically for a custom message as they already do for a
+    template send. A recipient clause that ISN'T stage-shaped (a talent
+    list, a project name, a phone number, ...) is left completely
+    untouched, exactly as before this existed."""
+    if not recipient_part:
+        return
+    split = _split_stage_and_project(recipient_part)
+    if split:
+        stage_phrase, project_phrase = split
+        out["stage_query"] = stage_phrase
+        out["recipient_query"] = project_phrase or _ALL_PROJECTS_SENTINEL
+        if project_phrase:
+            out["project_query"] = project_phrase
+    else:
+        out["recipient_query"] = recipient_part
+
+
 def _extract_custom_message_fields(remainder: str) -> Dict[str, str]:
-    """Custom Message mode — the quoted/colon-delimited span is the EXACT
-    text to send, verbatim (internal whitespace/newlines/blank lines/
-    emoji/URLs/bullets/commas/embedded quotes/unicode untouched; only the
-    shared FieldSpec.validate layer trims OUTER whitespace later, same as
-    every other field on this intent)."""
+    """Custom Message mode — the quoted/parenthesized/colon-delimited span
+    is the EXACT text to send, verbatim (internal whitespace/newlines/
+    blank lines/emoji/URLs/bullets/commas/embedded quotes/unicode
+    untouched; only the shared FieldSpec.validate layer trims OUTER
+    whitespace later, same as every other field on this intent)."""
     out: Dict[str, str] = {}
     span = _find_quote_span(remainder)
     if span:
@@ -455,11 +504,34 @@ def _extract_custom_message_fields(remainder: str) -> Dict[str, str]:
         # this to\nRiya\n\n\"text\""), so both sides are tried.
         after = remainder[close_end:]
         before = remainder[:open_start]
+        # A bare "(" / ")" immediately wrapping the quoted span ("Send
+        # (\"Hi...\") to X") is pure delimiter wrapping, not part of
+        # either the message or the recipient clause — stripped before
+        # searching either side for a "to"/"with" connector, so it can
+        # never end up glued onto the recipient text.
+        after_stripped = after.lstrip()
+        if after_stripped.startswith(")"):
+            after = after_stripped[1:]
+        before_rstripped = before.rstrip()
+        if before_rstripped.endswith("("):
+            before = before_rstripped[:len(before_rstripped) - 1]
         r_m = _TO_OR_WITH_RE.search(after) or _TO_OR_WITH_RE.search(before)
         if r_m:
-            recipient_part = r_m.group(1).strip(" .!?\n")
-            if recipient_part:
-                out["recipient_query"] = recipient_part
+            _apply_recipient_split(out, r_m.group(1).strip(" .!?\n"))
+        return out
+
+    # Bare-parenthesis shape, no quotes at all ("Send (Hi, please confirm
+    # your availability.) to X") — same opaque-payload treatment as a
+    # quoted span, just delimited by () instead of quote characters.
+    paren_span = _find_paren_span(remainder)
+    if paren_span:
+        open_start, open_end, close_start, close_end = paren_span
+        out["source_query"] = remainder[open_end:close_start]
+        after = remainder[close_end:]
+        before = remainder[:open_start]
+        r_m = _TO_OR_WITH_RE.search(after) or _TO_OR_WITH_RE.search(before)
+        if r_m:
+            _apply_recipient_split(out, r_m.group(1).strip(" .!?\n"))
         return out
 
     # Colon-body shape: "message Raj and Karan:\n<verbatim rest>".
@@ -468,9 +540,7 @@ def _extract_custom_message_fields(remainder: str) -> Dict[str, str]:
     stripped_first = first_line.rstrip()
     if stripped_first.endswith(":"):
         colon_idx = len(stripped_first) - 1
-        recipient_part = first_line[:colon_idx].strip()
-        if recipient_part:
-            out["recipient_query"] = recipient_part
+        _apply_recipient_split(out, first_line[:colon_idx].strip())
         out["source_query"] = remainder[colon_idx + 1:]
     return out
 
@@ -522,16 +592,27 @@ def _extract_instagram_fields(remainder: str) -> Dict[str, str]:
 
 
 def extract_send_requirement_fields(text: str) -> Dict[str, str]:
-    remainder = _strip_leading_trigger_preserve_newlines(text or "", SEND_TRIGGERS)
+    # "...and confirm" — stripped FIRST, before mode detection/trigger
+    # parsing, exactly like casting-agent's preprocess_command does, so it
+    # works identically across every send_mode (requirement/custom_message/
+    # instagram) without each mode's own extraction needing to know about
+    # it. Reuses casting_pipeline_nlu's implementation verbatim — no
+    # second "and confirm" recognizer.
+    raw_text, auto_confirm = nlu.strip_and_confirm(text or "")
+    remainder = _strip_leading_trigger_preserve_newlines(raw_text, SEND_TRIGGERS)
 
     send_mode = _detect_send_mode(remainder)
     if send_mode == "instagram":
         out = _extract_instagram_fields(remainder)
         out["send_mode"] = "instagram"
+        if auto_confirm:
+            out[AUTO_CONFIRM_FIELD.key] = "1"
         return out
     if send_mode == "custom_message":
         out = _extract_custom_message_fields(remainder)
         out["send_mode"] = "custom_message"
+        if auto_confirm:
+            out[AUTO_CONFIRM_FIELD.key] = "1"
         return out
 
     out: Dict[str, str] = {}
@@ -553,6 +634,8 @@ def extract_send_requirement_fields(text: str) -> Dict[str, str]:
                 stage_key, _ambig, _rest = nlu.extract_stage_phrase(head, PIPELINE_STAGE_ORDER)
                 if stage_key:
                     out["stage_query"] = stage_key
+            if auto_confirm:
+                out[AUTO_CONFIRM_FIELD.key] = "1"
             return out
 
     # Tier 2: "<verb> <recipient> the <source>" inverted shape — only when
@@ -565,6 +648,8 @@ def extract_send_requirement_fields(text: str) -> Dict[str, str]:
             if recipient_part and source_part:
                 out["recipient_query"] = recipient_part
                 out["source_query"] = source_part
+                if auto_confirm:
+                    out[AUTO_CONFIRM_FIELD.key] = "1"
                 return out
 
     # Tier 3: generic "<source> to|with <recipient>" shape.
@@ -578,11 +663,15 @@ def extract_send_requirement_fields(text: str) -> Dict[str, str]:
                 stage_phrase, project_phrase = split
                 out["stage_query"] = stage_phrase  # validated centrally in _resolve_recipient
                 out["recipient_query"] = project_phrase or _ALL_PROJECTS_SENTINEL
+                if project_phrase:
+                    out["project_query"] = project_phrase
             else:
                 out["recipient_query"] = recipient_part
         if source_part:
             out["source_query"] = source_part
 
+    if auto_confirm:
+        out[AUTO_CONFIRM_FIELD.key] = "1"
     return out
 
 
@@ -606,11 +695,30 @@ RECIPIENT_QUERY_FIELD = FieldSpec(
 # Optional — never blocks confirmation. Only meaningful when the recipient
 # resolves to a whole PROJECT (absent means "every stage"). Kept as a real
 # field so the generic "Key = value" edit parser can still match a
-# "Pipeline = Approved" edit line against its label/aliases.
+# "Pipeline = Approved" edit line against its label/aliases. Carries RAW
+# (possibly multi-item, "Follow Up and Approved") text — actual splitting
+# into individual stage keys happens at resolution time, in
+# _resolve_pipeline_stages, the same "extraction is a pure text transform,
+# resolution does the DB-backed matching" split every other field here
+# already follows.
 STAGE_QUERY_FIELD = FieldSpec(
     key="stage_query", label="Pipeline",
     question="Which pipeline stage?",
     validate=_validate_query_text, aliases=["stage", "pipeline"],
+    required=False,
+)
+# Bulk Multi-Target Sends (2026-08-17) — an explicit project reference
+# carried PARALLEL to recipient_query, populated whenever a project
+# reference was found either on the recipient side ("...to the Follow Up
+# list of Project A") or the source side ("Follow Up template for Project
+# A..."). Raw (possibly multi-item) text, same deferred-resolution
+# philosophy as STAGE_QUERY_FIELD — see _resolve_multi_project_names.
+# Never required: its ABSENCE is exactly today's single-project behaviour,
+# completely unaffected.
+PROJECT_QUERY_FIELD = FieldSpec(
+    key="project_query", label="Project",
+    question="Which project?",
+    validate=_validate_query_text, aliases=["project", "projects"],
     required=False,
 )
 # Private metadata, never asked about (question="") and never blocks
@@ -621,6 +729,18 @@ STAGE_QUERY_FIELD = FieldSpec(
 # Absent/empty means "requirement" (the original, only, mode).
 SEND_MODE_FIELD = FieldSpec(
     key="send_mode", label="Mode", question="",
+    validate=_validate_query_text, required=False,
+)
+# "...and confirm" (2026-08-17) — same convention casting-agent already
+# established (casting_pipeline_nlu.strip_and_confirm): skip the approval
+# card and send immediately. "confirm" has no other meaning anywhere in
+# this agent's own vocabulary (no pipeline-stage concept exists here at
+# all — this agent only ever SENDS messages), so there is no keyword
+# collision to resolve, unlike casting-agent's own "confirm". Never
+# required, never asked about — absence means "show the confirmation card"
+# (100% of existing behaviour, unaffected).
+AUTO_CONFIRM_FIELD = FieldSpec(
+    key="_auto_confirm", label="AutoConfirm", question="",
     validate=_validate_query_text, required=False,
 )
 
@@ -661,6 +781,25 @@ _UNSUPPORTED_SOURCE_REPLY = (
 def _strip_source_filler(q: str) -> str:
     tokens = [t for t in q.split() if t.lower() not in _SOURCE_FILLER_WORDS]
     return " ".join(tokens).strip()
+
+
+_SOURCE_FOR_PROJECT_RE = re.compile(r"^(.*?)\s+(?:for|of)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_source_project_clause(q: str) -> "tuple[str, str]":
+    """Best-effort split of a trailing "for/of <project(s)>" clause off a
+    source phrase — "Follow Up template for Project A and Project B" ->
+    ("Follow Up template", "Project A and Project B"). Purely speculative:
+    _resolve_requirement_target only commits to this split when the
+    REMAINING head text still resolves to a real template, tried ONLY
+    after the raw and filler-stripped phrases have both already failed to
+    match anything — so a template whose own name genuinely contains
+    "for"/"of" (matched in full on the first attempt) is never touched."""
+    m = _SOURCE_FOR_PROJECT_RE.match(q)
+    if not m:
+        return q, ""
+    head, tail = m.group(1).strip(), m.group(2).strip()
+    return (head, tail) if head else (q, "")
 
 
 _TOKEN_PUNCT_RE = re.compile(r"[.,!?'\"]")
@@ -719,13 +858,22 @@ class _RecipientTarget:
     # of the generic per-recipient list.
     project_label: Optional[str] = None
     pipeline_stage_label: Optional[str] = None
+    # Bulk Multi-Target Sends (2026-08-17) — non-blocking note surfaced on
+    # the confirmation card ("Couldn't find project: X") when a multi-
+    # project/multi-talent resolution partially failed but still found AT
+    # LEAST one real recipient — see _resolve_project_stage_union /
+    # _resolve_talents_narrowed_by_projects. None (every existing single-
+    # target resolution) means nothing to show, unaffected.
+    warning: Optional[str] = None
 
 
 _PHONE_RE = re.compile(r"^[\d\s\+\-\(\)]{7,}$")
 _NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _fuzzy_match_is_safe(query_fragment: str, matched_label: str) -> bool:
+def _fuzzy_match_is_safe(
+    query_fragment: str, matched_label: str, *, ignore_words: Optional[set] = None,
+) -> bool:
     """(2026-08-09, live production incident + one caught in testing)
     "Ami Trivedi" fuzzy-matched "Kripa Trivedi" — the ONLY talent sharing
     the surname "Trivedi" — and a real WhatsApp message went to the wrong
@@ -751,9 +899,24 @@ def _fuzzy_match_is_safe(query_fragment: str, matched_label: str) -> bool:
     matched name/label (a surname-only query like "Trivedi" alone still
     legitimately matches
     a single same-surnamed talent; a two-word query where only the surname
-    overlaps does not)."""
+    overlaps does not).
+
+    `ignore_words` (2026-08-17, Bulk Multi-Target Sends) — optional set of
+    words dropped from BOTH sides before the subset check, passed by
+    PROJECT-context callers as casting_pipeline_nlu's own
+    _PROJECT_FILLER_WORDS (the exact same list resolve_project_by_name
+    already uses to tolerate "Toyota Glanza Campaign" for a project
+    literally named "Toyota Glanza") — without this, this gate would
+    silently defeat that tolerance by rejecting "campaign"/"project"/
+    "film" as an unmatched query word even when the underlying matcher
+    correctly treated it as filler. None (every existing TALENT-context
+    caller) preserves the exact original token-subset check byte-for-byte
+    — names have no filler-word concept."""
     q_tokens = set(_NAME_TOKEN_RE.findall((query_fragment or "").lower()))
     l_tokens = set(_NAME_TOKEN_RE.findall((matched_label or "").lower()))
+    if ignore_words:
+        q_tokens -= ignore_words
+        l_tokens -= ignore_words
     if not q_tokens:
         return False
     return q_tokens <= l_tokens
@@ -769,7 +932,14 @@ async def _resolve_pipeline_stage(stage_query: str) -> "tuple[Optional[str], Opt
     caller returns immediately."""
     if not stage_query:
         return None, None
-    stage_match = nlu.match_stage_phrase(stage_query, PIPELINE_STAGE_ORDER)
+    # A leading "the"/"a"/"an" ("the Follow Up list" -> stage_phrase "the
+    # Follow Up") makes the shared matcher treat the phrase as merely
+    # fuzzy-similar to a real stage rather than a confident exact match —
+    # stripped here, local to this agent's OWN stage resolution, rather
+    # than loosening casting_pipeline_nlu.match_stage_phrase itself (which
+    # casting-agent depends on unchanged).
+    stripped_query = re.sub(r"^\s*(?:the|a|an)\s+", "", stage_query, flags=re.IGNORECASE)
+    stage_match = nlu.match_stage_phrase(stripped_query or stage_query, PIPELINE_STAGE_ORDER)
     if stage_match.key:
         return stage_match.key, None
     if stage_match.ambiguous and len(stage_match.ambiguous) >= 2:
@@ -794,6 +964,447 @@ async def _resolve_pipeline_stage(stage_query: str) -> "tuple[Optional[str], Opt
         ok=False,
         error=f'I don\'t recognize the stage "{stage_query}" — valid stages are: {valid}.',
     )
+
+
+# ---------------------------------------------------------------------------
+# Bulk Multi-Target Sends (2026-08-17) — one-or-many PROJECTS x one-or-many
+# STAGES, resolved as a full, deduplicated recipient set BEFORE any send:
+# Template/message -> Projects -> Stages -> Recipient sets -> Unique
+# recipients -> (existing, unmodified) confirmation/create_batch. Every
+# per-project/per-stage recipient lookup below still goes through the SAME
+# resolve_recipients_engine call (via create_batch's dry-run) the original
+# single-project path already made — this section's only new work is
+# looping over N projects/stages and merging + deduplicating the results,
+# never a parallel recipient-resolution implementation.
+# ---------------------------------------------------------------------------
+_PENDING_MULTI_STAGE_PICK_KEY = "_pending_multi_stage_pick"
+_PENDING_MULTI_STAGE_FRAGMENTS_KEY = "_pending_multi_stage_fragments"
+_PENDING_MULTI_STAGE_INDEX_KEY = "_pending_multi_stage_index"
+
+
+async def _resolve_pipeline_stages(
+    stage_query: str,
+) -> "tuple[Optional[List[str]], Optional[_RecipientTarget]]":
+    """Multi-stage counterpart of _resolve_pipeline_stage — "Follow Up and
+    Approved" -> ["follow_up", "approved"]. A single stage (no "and"/comma
+    present — the overwhelmingly common case) delegates straight to
+    _resolve_pipeline_stage unchanged, so its existing ambiguous/error
+    shape is completely unaffected. For 2+ stage fragments: each resolves
+    independently, but an unrecognized OR ambiguous fragment stops
+    immediately rather than being silently dropped — stages are a small,
+    fixed, well-known vocabulary (unlike a talent/project name), so a bad
+    stage word is virtually always a typo worth fixing outright. An
+    ambiguous fragment still preserves every OTHER already-resolved
+    fragment across the disambiguation round trip (same fragments+index
+    resume pattern _resolve_multi_project_names/_resume_pending_multi_
+    project use, just for stages)."""
+    fragments = nlu.split_multi_names(stage_query) if stage_query else []
+    if len(fragments) <= 1:
+        key, err = await _resolve_pipeline_stage(stage_query)
+        if err:
+            return None, err
+        return ([key] if key else None), None
+
+    resolved_keys: List[str] = []
+    for idx, frag in enumerate(fragments):
+        key, err = await _resolve_pipeline_stage(frag)
+        if err:
+            if err.ambiguous:
+                return None, _RecipientTarget(
+                    ok=False,
+                    ambiguous=AmbiguousEntity(
+                        entity_type="pipeline_stage", field_key=_PENDING_MULTI_STAGE_PICK_KEY,
+                        candidates=err.ambiguous.candidates,
+                        extra_collected={
+                            _PENDING_MULTI_STAGE_FRAGMENTS_KEY: json.dumps(fragments),
+                            _PENDING_MULTI_STAGE_INDEX_KEY: str(idx),
+                        },
+                    ),
+                )
+            return None, err
+        if key and key not in resolved_keys:
+            resolved_keys.append(key)
+    return resolved_keys, None
+
+
+async def _resume_pending_multi_stage(collected: dict, ctx: ExecContext) -> dict:
+    """Mirror of _resume_pending_multi_project, for a multi-stage list
+    where one stage word was ambiguous. A no-op when no multi-stage
+    disambiguation is pending."""
+    picked_label = collected.get(_PENDING_MULTI_STAGE_PICK_KEY)
+    fragments_json = collected.get(_PENDING_MULTI_STAGE_FRAGMENTS_KEY)
+    index_raw = collected.get(_PENDING_MULTI_STAGE_INDEX_KEY)
+    if not picked_label or fragments_json is None or index_raw is None:
+        return collected
+    try:
+        fragments = json.loads(fragments_json)
+        index = int(index_raw)
+    except (TypeError, ValueError):
+        fragments = None
+        index = -1
+    new_collected = dict(collected)
+    for key in (_PENDING_MULTI_STAGE_PICK_KEY, _PENDING_MULTI_STAGE_FRAGMENTS_KEY, _PENDING_MULTI_STAGE_INDEX_KEY):
+        new_collected.pop(key, None)
+    if isinstance(fragments, list) and 0 <= index < len(fragments):
+        fragments[index] = picked_label
+        new_collected["stage_query"] = ", ".join(fragments)
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    return new_collected
+
+
+@dataclass
+class _MultiProjectResolution:
+    resolved: List[Tuple[str, str]] = field(default_factory=list)  # (project_id, project_label)
+    not_found: List[str] = field(default_factory=list)
+    # (fragment, ambiguous candidates [{"id","label"}], index-into-fragments)
+    # — set only for the FIRST ambiguous fragment; mirrors
+    # _MultiRecipientResolution.ambiguous exactly.
+    ambiguous: Optional[Tuple[str, List[Dict[str, str]], int]] = None
+
+
+async def _resolve_multi_project_names(
+    fragments: List[str], projects: List[Dict[str, str]],
+) -> _MultiProjectResolution:
+    """Resolves each project-name fragment INDEPENDENTLY against the SAME
+    project matcher every other project reference in this codebase uses
+    (nlu.resolve_project_by_name + the safety gate) — no separate
+    matching logic. Scans the WHOLE list before returning (mirrors
+    _resolve_multi_recipient_names' own "never mask a not-found by an
+    earlier ambiguity" rule), pausing on the FIRST ambiguous fragment
+    only."""
+    out = _MultiProjectResolution()
+    seen_ids: set = set()
+    for idx, frag in enumerate(fragments):
+        match = nlu.resolve_project_by_name(frag, projects)
+        if match.project and _fuzzy_match_is_safe(
+            frag, match.project["label"], ignore_words=nlu._PROJECT_FILLER_WORDS,
+        ):
+            pid = match.project["id"]
+            if pid not in seen_ids:
+                seen_ids.add(pid)
+                out.resolved.append((pid, match.project["label"]))
+            continue
+        if match.ambiguous:
+            if out.ambiguous is None:
+                out.ambiguous = (frag, match.ambiguous, idx)
+            continue
+        out.not_found.append(frag)
+    return out
+
+
+_PENDING_MULTI_PROJECT_PICK_KEY = "_pending_multi_project_pick"
+_PENDING_MULTI_PROJECT_FRAGMENTS_KEY = "_pending_multi_project_fragments"
+_PENDING_MULTI_PROJECT_INDEX_KEY = "_pending_multi_project_index"
+
+
+async def _resume_pending_multi_project(collected: dict, ctx: ExecContext) -> dict:
+    """Mirror of _resume_pending_multi_recipient, for a multi-project list
+    where one project name was ambiguous. A no-op when no multi-project
+    disambiguation is pending."""
+    picked_label = collected.get(_PENDING_MULTI_PROJECT_PICK_KEY)
+    fragments_json = collected.get(_PENDING_MULTI_PROJECT_FRAGMENTS_KEY)
+    index_raw = collected.get(_PENDING_MULTI_PROJECT_INDEX_KEY)
+    if not picked_label or fragments_json is None or index_raw is None:
+        return collected
+    try:
+        fragments = json.loads(fragments_json)
+        index = int(index_raw)
+    except (TypeError, ValueError):
+        fragments = None
+        index = -1
+    new_collected = dict(collected)
+    for key in (_PENDING_MULTI_PROJECT_PICK_KEY, _PENDING_MULTI_PROJECT_FRAGMENTS_KEY, _PENDING_MULTI_PROJECT_INDEX_KEY):
+        new_collected.pop(key, None)
+    if isinstance(fragments, list) and 0 <= index < len(fragments):
+        fragments[index] = picked_label
+        new_collected["project_query"] = ", ".join(fragments)
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    return new_collected
+
+
+async def _probe_template() -> Optional[Dict[str, str]]:
+    """Any real, always-present template works to run a resolution-only
+    dry-run preview (jobs/routing only — the actual template used for the
+    real send is target.template, resolved separately and unaffected).
+    Reuses the seeded custom-message template rather than inventing a
+    second bootstrap-guaranteed record."""
+    return await _fetch_custom_template()
+
+
+async def _resolve_project_stage_union(project_query: str, stage_query: str) -> _RecipientTarget:
+    """Send template/message -> one-or-many PROJECTS x one-or-many
+    STAGES. A project fragment that doesn't resolve is reported as a
+    warning rather than blocking the whole send, as long as AT LEAST one
+    project resolved — "don't lose confidently resolved recipients while
+    waiting on one unresolved name" (see _resolve_talent_names' matching
+    fix), generalized to projects here too."""
+    stage_keys, stage_err = await _resolve_pipeline_stages(stage_query)
+    if stage_err:
+        return stage_err
+    stage_list = stage_keys if stage_keys else list(PIPELINE_STAGE_ORDER)
+    stage_label_str = " + ".join(nlu.stage_label(s) for s in stage_keys) if stage_keys else "All stages"
+
+    q = (project_query or "").strip()
+    projects = await _fetch_ongoing_projects()
+    not_found_projects: List[str] = []
+
+    if not q or q == _ALL_PROJECTS_SENTINEL:
+        if not projects:
+            return _RecipientTarget(ok=False, error="There are no ongoing projects to send to.")
+        if len(projects) == 1:
+            resolved_projects = [(projects[0]["id"], projects[0]["label"])]
+        else:
+            return _RecipientTarget(
+                ok=False,
+                ambiguous=AmbiguousEntity(
+                    entity_type="project", field_key="project_query",
+                    candidates=[disambiguation.Candidate(id=p["id"], label=p["label"]) for p in projects],
+                ),
+            )
+    else:
+        fragments = nlu.split_multi_names(q)
+        multi = await _resolve_multi_project_names(fragments, projects)
+        if multi.ambiguous:
+            frag, amb_candidates, idx = multi.ambiguous
+            return _RecipientTarget(
+                ok=False,
+                ambiguous=AmbiguousEntity(
+                    entity_type="project", field_key=_PENDING_MULTI_PROJECT_PICK_KEY,
+                    candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in amb_candidates],
+                    extra_collected={
+                        _PENDING_MULTI_PROJECT_FRAGMENTS_KEY: json.dumps(fragments),
+                        _PENDING_MULTI_PROJECT_INDEX_KEY: str(idx),
+                    },
+                ),
+            )
+        if not multi.resolved:
+            return _RecipientTarget(ok=False, error=f'I couldn\'t find a project matching "{q}".')
+        resolved_projects = multi.resolved
+        not_found_projects = multi.not_found
+
+    if len(resolved_projects) == 1:
+        # The overwhelmingly common case — a single project (whether named
+        # explicitly or auto-picked as the only ongoing one) — stays on
+        # the EXACT SAME source_type="PROJECT" + SourceParams(project_id,
+        # pipeline_stages) path _resolve_recipient's own stage handling
+        # always used before this existed: real talent_ids are preserved
+        # (Exclude/Include-by-name, campaign-history "Project" attribution,
+        # and every other PROJECT-source-specific behavior stay intact),
+        # and no extra dry-run probe round trip is spent. The MANUAL-merge
+        # path below exists ONLY for a genuine 2+-project union, where
+        # SourceParams.project_id (singular) has no way to represent more
+        # than one project at all.
+        pid, plabel = resolved_projects[0]
+        warning = f"Couldn't find project: {', '.join(not_found_projects)}" if not_found_projects else None
+        return _RecipientTarget(
+            ok=True, source_type="PROJECT",
+            source_params=SourceParams(project_id=pid, pipeline_stages=stage_list),
+            display_label=f"{plabel} — {stage_label_str}",
+            project_label=plabel, pipeline_stage_label=stage_label_str,
+            warning=warning,
+        )
+
+    admin = await _service_admin()
+    probe_template = await _probe_template()
+    if not probe_template:
+        return _RecipientTarget(
+            ok=False, error="The built-in custom-message template is missing — please contact an admin.",
+        )
+
+    merged: Dict[str, dict] = {}
+    for pid, _plabel in resolved_projects:
+        try:
+            preview = await create_batch(
+                BatchIn(
+                    source_type="PROJECT",
+                    source_params=SourceParams(project_id=pid, pipeline_stages=stage_list),
+                    template_id=probe_template["id"], is_dry_run=True,
+                ),
+                admin=admin,
+            )
+        except HTTPException:
+            continue
+        for job in preview["jobs"]:
+            merged.setdefault(job["recipient_id"], job)
+
+    project_labels = ", ".join(plabel for _pid, plabel in resolved_projects)
+    if not merged:
+        note = f" (also couldn't find: {', '.join(not_found_projects)})" if not_found_projects else ""
+        return _RecipientTarget(
+            ok=False, error=f"No recipients found for {stage_label_str} across {project_labels}.{note}",
+        )
+
+    contacts = [
+        ManualContact(
+            name=job.get("talent_name") or "",
+            phone=job["destination"] if job.get("destination_type") == "number" else "",
+            whatsapp_group_name=job["destination"] if job.get("destination_type") == "group" else "",
+            talent_id=job.get("talent_id") or job.get("recipient_id") or "",
+        )
+        for job in merged.values()
+    ]
+    warning = f"Couldn't find project: {', '.join(not_found_projects)}" if not_found_projects else None
+    return _RecipientTarget(
+        ok=True, source_type="MANUAL", source_params=SourceParams(contacts=contacts),
+        display_label=f"{project_labels} — {stage_label_str}",
+        project_label=project_labels, pipeline_stage_label=stage_label_str,
+        warning=warning,
+    )
+
+
+async def _resolve_talents_narrowed_by_projects(recipient_query: str, project_query: str) -> _RecipientTarget:
+    """"Send the Follow Up template for Project A, B and C to Talent A,
+    Talent B and Talent C" — resolves the named talent(s) via the SAME
+    shared talent resolver every other recipient clause here uses, and the
+    named project(s) via the SAME project matcher every stage/project
+    reference here already uses, then narrows the send to whichever of
+    those talents actually belong to one of the named projects' pipelines
+    (SourceParams.talent_ids — an existing, purpose-built narrowing field,
+    added for this exact "specific talents within a specific project"
+    shape, not new infrastructure). A named talent who isn't part of ANY
+    of the named projects is reported as a warning, never silently
+    dropped without explanation."""
+    talents = await _resolve_talent_names(
+        recipient_query,
+        single_ambiguous_field_key="recipient_query",
+        multi_pick_field_key=_PENDING_MULTI_RECIPIENT_PICK_KEY,
+        multi_fragments_key=_PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY,
+        multi_index_key=_PENDING_MULTI_RECIPIENT_INDEX_KEY,
+    )
+    if talents.ambiguous:
+        return _RecipientTarget(ok=False, ambiguous=talents.ambiguous)
+    if not talents.ok:
+        return _RecipientTarget(
+            ok=False, error=talents.error or f'I couldn\'t figure out who "{recipient_query}" refers to.',
+        )
+
+    projects = await _fetch_ongoing_projects()
+    fragments = nlu.split_multi_names(project_query)
+    multi = await _resolve_multi_project_names(fragments, projects)
+    if multi.ambiguous:
+        frag, amb_candidates, idx = multi.ambiguous
+        return _RecipientTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="project", field_key=_PENDING_MULTI_PROJECT_PICK_KEY,
+                candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in amb_candidates],
+                extra_collected={
+                    _PENDING_MULTI_PROJECT_FRAGMENTS_KEY: json.dumps(fragments),
+                    _PENDING_MULTI_PROJECT_INDEX_KEY: str(idx),
+                },
+            ),
+        )
+    if not multi.resolved:
+        return _RecipientTarget(ok=False, error=f'I couldn\'t find a project matching "{project_query}".')
+
+    admin = await _service_admin()
+    probe_template = await _probe_template()
+    if not probe_template:
+        return _RecipientTarget(
+            ok=False, error="The built-in custom-message template is missing — please contact an admin.",
+        )
+
+    talent_id_list = list(dict.fromkeys(talents.talent_ids))
+    merged: Dict[str, dict] = {}
+    for pid, _plabel in multi.resolved:
+        try:
+            preview = await create_batch(
+                BatchIn(
+                    source_type="PROJECT",
+                    source_params=SourceParams(
+                        project_id=pid, pipeline_stages=list(PIPELINE_STAGE_ORDER),
+                        talent_ids=talent_id_list,
+                    ),
+                    template_id=probe_template["id"], is_dry_run=True,
+                ),
+                admin=admin,
+            )
+        except HTTPException:
+            continue
+        for job in preview["jobs"]:
+            merged.setdefault(job["recipient_id"], job)
+
+    project_labels = ", ".join(plabel for _pid, plabel in multi.resolved)
+    missing = [label for tid, label in zip(talents.talent_ids, talents.talent_labels) if tid not in merged]
+    warning_parts = []
+    if talents.warning:
+        warning_parts.append(talents.warning)
+    if multi.not_found:
+        warning_parts.append(f"Couldn't find project: {', '.join(multi.not_found)}")
+    if missing:
+        warning_parts.append(f"Not part of {project_labels}: {', '.join(missing)}")
+    warning = " | ".join(warning_parts) if warning_parts else None
+
+    if not merged:
+        return _RecipientTarget(
+            ok=False, error=f"None of the named talent(s) are part of {project_labels}'s pipeline.",
+        )
+
+    contacts = [
+        ManualContact(
+            name=job.get("talent_name") or "",
+            phone=job["destination"] if job.get("destination_type") == "number" else "",
+            whatsapp_group_name=job["destination"] if job.get("destination_type") == "group" else "",
+            talent_id=job.get("talent_id") or job.get("recipient_id") or "",
+        )
+        for job in merged.values()
+    ]
+    return _RecipientTarget(
+        ok=True, source_type="MANUAL", source_params=SourceParams(contacts=contacts),
+        display_label=", ".join(job.get("talent_name") or "" for job in merged.values()),
+        project_label=project_labels, warning=warning,
+    )
+
+
+async def _resolve_recipient_multi_aware(
+    recipient_query: str, stage_query: str, project_query: str,
+) -> _RecipientTarget:
+    """Entry point every send-target resolver now calls instead of
+    _resolve_recipient directly — routes to the multi-project/multi-stage
+    union resolver or the talents-narrowed-by-project resolver ONLY when
+    this command's shape actually calls for one of them; every other
+    shape (single project, named talent(s) with no project, phone number,
+    CRM category, saved list) delegates straight through to the existing,
+    completely unmodified _resolve_recipient — zero risk to any
+    already-working, already-tested path."""
+    if stage_query:
+        return await _resolve_project_stage_union(project_query or recipient_query, stage_query)
+
+    if project_query and recipient_query and recipient_query != _ALL_PROJECTS_SENTINEL:
+        # A project reference is already known (e.g. a source-side "for
+        # Project(s)" clause — item 2/3's shape), but the recipient clause
+        # itself carries no "list"/"pipeline" connector word for
+        # _split_stage_and_project to have recognized ("...to Follow Up
+        # and Approved", with the project clause elsewhere in the
+        # sentence). Still worth checking whether the recipient text IS
+        # itself a stage (or stage list) before assuming it names
+        # talent(s) — but ONLY commits when every fragment confidently
+        # resolves as a real stage, so an ordinary talent list ("to Ahana
+        # and Priya") keeps resolving as talents, unaffected.
+        probe_keys, probe_err = await _resolve_pipeline_stages(recipient_query)
+        if probe_keys and not probe_err:
+            return await _resolve_project_stage_union(project_query, recipient_query)
+        return await _resolve_talents_narrowed_by_projects(recipient_query, project_query)
+
+    if recipient_query and recipient_query != _ALL_PROJECTS_SENTINEL:
+        # Bare multi-project reference with no stage at all ("to Project A
+        # and Project B") -> whole-pipeline union across all named
+        # projects, but ONLY when every fragment we can classify is
+        # confidently project-shaped — never guessed over a talent list
+        # that happens to share the same "X and Y" text shape ("to Ahana
+        # and Priya" must keep resolving as talents, exactly as before).
+        fragments = nlu.split_multi_names(recipient_query)
+        if len(fragments) >= 2:
+            projects = await _fetch_ongoing_projects()
+            probe = await _resolve_multi_project_names(fragments, projects)
+            fully_project_shaped = (
+                bool(probe.resolved) and not probe.not_found
+                and (len(probe.resolved) + (1 if probe.ambiguous else 0)) == len(fragments)
+            )
+            if fully_project_shaped:
+                return await _resolve_project_stage_union(recipient_query, "")
+
+    return await _resolve_recipient(recipient_query, stage_query)
 
 
 # ---------------------------------------------------------------------------
@@ -898,7 +1509,9 @@ async def _build_manual_contacts(resolved: List[Tuple[str, str]]) -> "tuple[List
         if not group_name and not phone:
             no_contact_info.append(label)
             continue
-        contacts.append(ManualContact(name=d.get("name") or "", phone=phone, whatsapp_group_name=group_name))
+        contacts.append(ManualContact(
+            name=d.get("name") or "", phone=phone, whatsapp_group_name=group_name, talent_id=tid,
+        ))
     return contacts, no_contact_info
 
 
@@ -1017,6 +1630,15 @@ class _TalentNamesResolution:
     # caller, including a 2+-name list (never a project/CRM/saved-list
     # name) and a safety-gate rejection (a real match too risky to trust).
     not_found: bool = False
+    # Partial-Failure-Tolerant Multi-Recipient Resolution (2026-08-17) — set
+    # alongside ok=True when a 2+-name list had SOME confidently-resolved
+    # names AND some genuinely not-found/unsafe ones. The confidently-
+    # resolved names are never discarded just because one other name in
+    # the same list couldn't be found — see the multi-fragment branch
+    # below. None (every single-name resolution, and every multi-name
+    # resolution where every fragment resolved) means nothing to warn
+    # about, unaffected.
+    warning: Optional[str] = None
 
 
 async def _resolve_talent_names(
@@ -1050,6 +1672,21 @@ async def _resolve_talent_names(
         multi = await _resolve_multi_recipient_names(fragments)
         if multi.not_found or multi.unsafe:
             problems = list(multi.not_found) + [frag for frag, _label in multi.unsafe]
+            if multi.resolved:
+                # Partial-Failure-Tolerant Multi-Recipient Resolution
+                # (2026-08-17) — confidently-resolved names are preserved
+                # and the send proceeds with them; the unresolved ones are
+                # surfaced as a warning rather than blocking everyone.
+                # Matches the ambiguous-fragment case just below, which
+                # already resumes with the rest of the list intact — this
+                # extends the same "don't lose what's already confidently
+                # known" principle to the not-found/unsafe case too.
+                return _TalentNamesResolution(
+                    ok=True,
+                    talent_ids=[tid for tid, _label in multi.resolved],
+                    talent_labels=[label for _tid, label in multi.resolved],
+                    warning=f"Couldn't find: {', '.join(problems)}",
+                )
             return _TalentNamesResolution(ok=False, error=f"Couldn't find:\n\n{chr(10).join(problems)}")
         if multi.ambiguous:
             frag, amb_candidates, idx = multi.ambiguous
@@ -1169,7 +1806,9 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
     # rejected here like the talent tier does; it just falls through to
     # try the remaining tiers, since a project match this weak is just as
     # likely to actually be a talent/CRM/saved-list name instead.
-    if proj_match.project and _fuzzy_match_is_safe(q, proj_match.project["label"]):
+    if proj_match.project and _fuzzy_match_is_safe(
+        q, proj_match.project["label"], ignore_words=nlu._PROJECT_FILLER_WORDS,
+    ):
         stage_list = [normalized_stage] if normalized_stage else list(PIPELINE_STAGE_ORDER)
         return _RecipientTarget(
             ok=True, source_type="PROJECT",
@@ -1227,6 +1866,7 @@ async def _resolve_recipient(recipient_query: str, stage_query: str) -> _Recipie
                 ok=True, source_type="MANUAL",
                 source_params=SourceParams(contacts=contacts),
                 display_label=", ".join(talents.talent_labels),
+                warning=talents.warning,
             )
         return _RecipientTarget(
             ok=False,
@@ -1339,6 +1979,8 @@ class _SendTarget:
     # Instagram Profile mode only — display label for "whose profile(s)",
     # shown on the confirmation card in place of a template name.
     subject_label: str = ""
+    # See _RecipientTarget.warning — carried through unchanged.
+    warning: Optional[str] = None
 
 
 async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
@@ -1359,8 +2001,33 @@ async def _resolve_requirement_target(collected: Dict[str, str]) -> _SendTarget:
     source_query = (collected.get("source_query") or "").strip()
     recipient_query = (collected.get("recipient_query") or "").strip()
     stage_query = (collected.get("stage_query") or "").strip()
+    project_query = (collected.get("project_query") or "").strip()
 
     tmpl_match = await _resolve_source(source_query)
+    if not project_query:
+        # Speculative "for/of <project(s)>" split, tried whenever no
+        # project_query was already extracted on the recipient side — "the
+        # Follow Up template for Project A" (item 1/2/3's shape: the
+        # project clause sits inside the SOURCE text, before "to"). Tried
+        # UNCONDITIONALLY (not just when the raw attempt already failed):
+        # the shared template matcher's generous substring tolerance can
+        # otherwise match the RAW, un-split text anyway (a real template
+        # named "X" is a substring of "X for Project A"), silently
+        # swallowing the "for Project A" clause as harmless trailing noise
+        # instead of extracting it — this always prefers the cleaner split
+        # interpretation whenever ITS head resolves too, so the project
+        # clause is never lost just because the noisy raw text happened to
+        # match as well. A template whose own real name genuinely contains
+        # "for"/"of" is still safe: the split's HEAD (e.g. "Thanks" out of
+        # "Thanks for your time") only wins when it ALSO resolves to a
+        # real template — an unrelated fragment essentially never does.
+        head, project_tail = _strip_source_project_clause(source_query)
+        if project_tail:
+            retry_match = await _resolve_source(head)
+            if retry_match.template or retry_match.ambiguous:
+                tmpl_match = retry_match
+                project_query = project_tail
+
     if tmpl_match.error:
         return _SendTarget(ok=False, error=tmpl_match.error)
     if tmpl_match.ambiguous:
@@ -1378,7 +2045,7 @@ async def _resolve_requirement_target(collected: Dict[str, str]) -> _SendTarget:
     # Source resolved cleanly — only now check the recipient, so at most
     # ONE disambiguation is ever open at a time (source first, then
     # recipient), matching the engine's single-pending-choice state model.
-    recipient = await _resolve_recipient(recipient_query, stage_query)
+    recipient = await _resolve_recipient_multi_aware(recipient_query, stage_query, project_query)
     if not recipient.ok:
         if recipient.ambiguous:
             return _SendTarget(ok=False, ambiguous=recipient.ambiguous)
@@ -1388,15 +2055,16 @@ async def _resolve_requirement_target(collected: Dict[str, str]) -> _SendTarget:
         ok=True, source_type=recipient.source_type, source_params=recipient.source_params,
         recipient_label=recipient.display_label, template=tmpl_match.template,
         project_label=recipient.project_label, pipeline_stage_label=recipient.pipeline_stage_label,
+        warning=recipient.warning,
     )
 
 
 async def _resolve_custom_message_target(collected: Dict[str, str]) -> _SendTarget:
     """Custom Message mode — source_query holds the exact quoted/colon-body
     text (see _extract_custom_message_fields); recipient resolution reuses
-    _resolve_recipient completely unmodified (phone/project/talent(s)/CRM/
+    _resolve_recipient_multi_aware (project/stage/talent(s)/phone/CRM/
     saved-list, same disambiguation/safety-gate machinery as every other
-    send)."""
+    send, now multi-project/multi-stage aware too)."""
     message_text = collected.get("source_query") or ""
     if not message_text:
         return _SendTarget(ok=False, error="What should the message say?")
@@ -1409,7 +2077,9 @@ async def _resolve_custom_message_target(collected: Dict[str, str]) -> _SendTarg
         )
 
     recipient_query = (collected.get("recipient_query") or "").strip()
-    recipient = await _resolve_recipient(recipient_query, "")
+    stage_query = (collected.get("stage_query") or "").strip()
+    project_query = (collected.get("project_query") or "").strip()
+    recipient = await _resolve_recipient_multi_aware(recipient_query, stage_query, project_query)
     if not recipient.ok:
         if recipient.ambiguous:
             return _SendTarget(ok=False, ambiguous=recipient.ambiguous)
@@ -1420,6 +2090,7 @@ async def _resolve_custom_message_target(collected: Dict[str, str]) -> _SendTarg
         recipient_label=recipient.display_label, template=custom_template,
         literal_message=message_text,
         project_label=recipient.project_label, pipeline_stage_label=recipient.pipeline_stage_label,
+        warning=recipient.warning,
     )
 
 
@@ -1706,6 +2377,8 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
     collected = await _resume_pending_recipient_edit(collected, ctx)
     collected = await _resume_pending_multi_recipient(collected, ctx)
     collected = await _resume_pending_multi_subject(collected, ctx)
+    collected = await _resume_pending_multi_project(collected, ctx)
+    collected = await _resume_pending_multi_stage(collected, ctx)
     target = await _resolve_send_target(collected)
     if target.ok and target.reply_in_chat:
         # Instagram Profile Send, no recipient named ("share Pankuri's
@@ -1801,6 +2474,8 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
         lines += edit_lines
         if skipped:
             lines += ["", f"⚠ {len(skipped)} skipped (no phone/group on file)"]
+        if target.warning:
+            lines += ["", f"⚠ {target.warning}"]
         if jobs:
             lines += ["", "Sample message", "", _truncate(jobs[0]["message_body"])]
         lines += ["", "Reply", "1 Approve", "2 Edit", "3 Cancel"]
@@ -1823,6 +2498,8 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
     lines += edit_lines
     if skipped:
         lines += ["", f"⚠ {len(skipped)} skipped (no phone/group on file)"]
+    if target.warning:
+        lines += ["", f"⚠ {target.warning}"]
     if jobs:
         lines += ["", "Sample message", "", _truncate(jobs[0]["message_body"])]
     lines += ["", "Reply", "1 Approve", "2 Edit", "3 Cancel"]
@@ -1880,6 +2557,28 @@ async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecR
         f"Batch ID: {batch['id']}"
     )
     return ExecResult(ok=True, message=message, data={"batch_id": batch["id"], "queued": queued})
+
+
+async def _send_requirement_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    """"...and confirm" — mirrors casting-agent's _move_try_auto_execute/
+    _add_try_auto_execute exactly: skip the approval card and send
+    immediately, but ONLY once resolution is fully clean. If resolution is
+    still ambiguous/erroring, return None so the normal confirmation flow
+    runs instead (which sets up disambiguation as usual); AUTO_CONFIRM_
+    FIELD persists in `collected` across that continuation, so this check
+    re-fires and auto-sends once the ambiguity resolves — no extra state
+    needed for "keep going automatically after resolving the ambiguity,
+    without asking for a second approval"."""
+    if not collected.get(AUTO_CONFIRM_FIELD.key):
+        return None
+    target = await _resolve_send_target(collected)
+    if not target.ok or target.reply_in_chat:
+        # Still ambiguous/erroring, or an Instagram reply-in-chat (which
+        # has nothing to approve at all and is handled by its own
+        # short-circuit in _build_send_requirement_confirmation) — either
+        # way, fall through to the normal flow rather than sending.
+        return None
+    return await _send_requirement_executor(collected, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -2319,11 +3018,15 @@ async def _handle_campaign_confirming_edit(text: str, collected: dict, ctx: Exec
 SEND_REQUIREMENT_INTENT = IntentDefinition(
     intent_id="whatsapp_campaign.send_requirement",
     triggers=SEND_TRIGGERS,
-    fields=[SOURCE_QUERY_FIELD, RECIPIENT_QUERY_FIELD, STAGE_QUERY_FIELD, SEND_MODE_FIELD],
+    fields=[
+        SOURCE_QUERY_FIELD, RECIPIENT_QUERY_FIELD, STAGE_QUERY_FIELD, PROJECT_QUERY_FIELD,
+        SEND_MODE_FIELD, AUTO_CONFIRM_FIELD,
+    ],
     executor=_send_requirement_executor,
     extract_fields=extract_send_requirement_fields,
     build_confirmation=_build_send_requirement_confirmation,
     handle_confirming_reply=_handle_campaign_confirming_edit,
+    try_auto_execute=_send_requirement_try_auto_execute,
     summary_title="You are about to send:",
 )
 

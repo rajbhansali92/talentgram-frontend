@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Optional
+from typing import List, Optional
 
 from agents import audit, conversation, disambiguation, registry, request_scope, session_context, tasks
 from agents.confirmation import (
@@ -328,6 +328,22 @@ async def _advance_disambiguation(
 
     candidates = [disambiguation.Candidate(**c) for c in pending["candidates"]]
     picked = disambiguation.resolve_reply(text, candidates)
+    # Multi-pick fallback ("1 and 3", "1, 3 and 4", "Thakur and Singh") —
+    # tried ONLY when the single-pick resolver above already failed, so
+    # every existing single-pick reply (a bare digit/ordinal/name, which
+    # resolve_reply already handles) is completely unaffected; this only
+    # gives a SECOND chance to a reply that would previously have just
+    # re-prompted "Sorry, I didn't catch that." Joining multiple picked
+    # labels with ", " reuses each domain module's own existing multi-name
+    # field syntax (e.g. casting-agent's talent_selector, the campaign
+    # agent's recipient_query) to carry more than one resolved value back
+    # through a single string field — no new field shape needed.
+    picked_multi: Optional[List[disambiguation.Candidate]] = None
+    if picked is None:
+        picked_multi = disambiguation.resolve_reply_multi(text, candidates)
+        if picked_multi:
+            picked = picked_multi[0]
+
     if picked is None:
         await audit.log_turn(
             agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
@@ -343,7 +359,10 @@ async def _advance_disambiguation(
         return DispatchResult(handled=False)
 
     collected = dict(pending.get("collected") or {})
-    collected[pending["field_key"]] = picked.label
+    if picked_multi and len(picked_multi) > 1:
+        collected[pending["field_key"]] = ", ".join(c.label for c in picked_multi)
+    else:
+        collected[pending["field_key"]] = picked.label
     await disambiguation.clear(agent.agent_id, phone)
 
     still_missing = next_missing_field(intent, collected)

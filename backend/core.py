@@ -1788,6 +1788,23 @@ async def seed_admin() -> None:
         ("talent_migration_candidates", [("authenticated_talent_id", 1)], {"name": "tmc_authenticated_talent_id"}),
         ("talent_migration_candidates", [("review_status", 1), ("created_at", -1)], {"name": "tmc_review_status_created_at"}),
         ("talents", [("originating_submission_id", 1)], {"sparse": True, "name": "talents_originating_submission_id"}),
+        # Safe Talent Deduplication (2026-08-17): talent_merges is the
+        # permanent audit trail for every place two previously-distinct
+        # Talent identities were reconciled into one canonical record —
+        # both the real-time "never even created a second Talent" case
+        # (source_talent_id is null; see _auto_link_migration_candidate)
+        # and any future bulk migration merge of two already-existing
+        # duplicate documents (source_talent_id is the losing record's id).
+        # Indexed both ways so an admin/audit UI can answer "what merged
+        # into this talent" and "what did this now-archived talent merge
+        # into" without a collection scan.
+        ("talent_merges", [("canonical_talent_id", 1), ("timestamp", -1)], {"name": "merges_canonical_talent_id"}),
+        ("talent_merges", [("source_talent_id", 1)], {"sparse": True, "name": "merges_source_talent_id"}),
+        # MERGED is a valid `talents.status` value (Part 12: archival, never
+        # hard-delete) — the roster's default `$nin` filter must exclude it
+        # the same way DRAFT/ARCHIVED already are; indexed here since it's
+        # now a real filter value, not just a UI label.
+        ("talents", [("status", 1), ("merged_into", 1)], {"sparse": True, "name": "talents_status_merged_into"}),
     ]
     for coll, keys, opts in p0_indexes:
         try:
@@ -3592,59 +3609,60 @@ async def insert_talent_or_recover(
     independently hand-rolled `try/except DuplicateKeyError` blocks with
     identical (and identically incomplete) recovery logic.
 
-    On a uniqueness collision at insert, the ONLY recovery attempted is the
-    same canonical email lookup every other entry point uses
-    (`resolve_canonical_talent`) — this never merges into or links to a
-    record found any other way, and never decides on the caller's behalf
-    whether to merge into a recovered record (the two call sites already
-    differ on this — `finalize()` merges the incoming form into a recovered
-    record, `set_decision()`'s fallback does not — that existing difference
-    is preserved via the `recovered` return value, not collapsed here). An
-    admin-created legacy profile and an authenticated submission-created
-    profile are intentionally allowed to coexist (see
-    `docs/ADR_CANONICAL_PROFILE_OWNERSHIP.md`); silently joining them
-    because of an incidental collision on some other field (e.g. a shared
-    phone number) would violate that policy, not fix it.
+    On a uniqueness collision at insert, the primary recovery is the same
+    canonical email lookup every other entry point uses
+    (`resolve_canonical_talent`).
 
-    2026-08-13: if the collision is NOT resolvable by email, this logs the
-    failure clearly instead of the previous silent no-op (`talent_doc`
-    simply stayed `None`, both callers' `if talent_doc:` guard skipped, so
-    `submissions.talent_id` was never set even though `status`/`decision`
-    were written unconditionally regardless — a submission is fully
-    "submitted"/"approved" and renders correctly everywhere that doesn't
-    touch `db.talents`, yet never appeared in Global Talent).
+    Safe Talent Deduplication (2026-08-17): a prior version of this
+    docstring claimed an admin-created legacy profile and an authenticated
+    submission-created profile were "intentionally allowed to coexist,"
+    citing `docs/ADR_CANONICAL_PROFILE_OWNERSHIP.md` — that citation was
+    incorrect (re-verified directly against the document: it never uses the
+    word "coexist" and its entire scope is field-sync direction WITHIN one
+    canonical record, not whether two records for the same person may both
+    exist). Coexistence was in fact the production bug this fix closes (a
+    real person appearing twice on the Global Talent roster, e.g. "Kripa
+    Trivedi" with 19 assets on one row and 2 on another). Before ANY insert
+    is attempted, `_find_migration_candidate` now looks for an existing,
+    non-submission-created talent that plausibly represents the same real
+    person (exact phone/instagram match, broadened to also catch legacy
+    records with no `source` field at all — the ~93.5% majority that the
+    original `source.type == "admin"` filter silently missed). If found and
+    Part 2's conflict check (`_talent_identity_conflict`) finds no
+    conflicting strong identifier, `_auto_link_migration_candidate` links
+    onto that EXISTING record and this function returns it with
+    `recovered=True` — no second Talent document is ever created. If a
+    candidate conflicts (different verified email/phone/DOB — the two
+    records more likely represent two different real people), or the link
+    attempt itself fails, this degrades to the original behavior: proceed
+    with a normal insert and record an advisory `talent_migration_candidates`
+    row for manual review (Part 2's stated preference: leaving an uncertain
+    duplicate for a human rather than ever risking joining two different
+    people).
 
-    2026-08-14 — migration-aware coexistence redesign: the actual root
-    cause of that collision was that `talents.phone` carried a
-    COLLECTION-WIDE unique index, treating an editable profile field as a
-    global identity field. The fix keeps that constraint (removing it
-    outright would have thrown away real accidental-duplicate protection
-    for the Data Hub admin/CSV-import path) but SCOPES it, via a partial
-    filter, to `source.type == "admin"` only (`seed_admin()`'s startup
-    index setup, self-healing on every boot). A submission-created talent
-    (`source.type == "audition_submission"`) is structurally never subject
-    to that constraint, so this insert now succeeds cleanly for the
-    coexistence case without needing to catch anything — the
-    non-email-collision branch below remains only as a defensive backstop
-    for a genuinely unexpected constraint, not the primary mechanism.
-    `email`/`normalized_email` remain the only globally-unique fields —
-    the real authenticated identity is untouched.
+    2026-08-13: if a uniqueness collision is NOT resolvable by email, this
+    logs the failure clearly instead of the previous silent no-op
+    (`talent_doc` simply stayed `None`, both callers' `if talent_doc:` guard
+    skipped, so `submissions.talent_id` was never set even though
+    `status`/`decision` were written unconditionally regardless — a
+    submission is fully "submitted"/"approved" and renders correctly
+    everywhere that doesn't touch `db.talents`, yet never appeared in
+    Global Talent).
 
-    2026-08-14 (revised) — the relationship is NOT stored on the Talent
-    document at all. It's modeled as its own row in
-    `db.talent_migration_candidates` (see `_record_migration_candidate`),
-    referencing both talent ids, so the Talent schema stays clean, a
-    single authenticated talent can in principle carry more than one
-    candidate relationship, and this collection can become the data
-    source for a future Migration Review Center. The legacy document
-    itself is never read for writing and never touched by any of this.
+    2026-08-14: `talents.phone`'s uniqueness constraint is scoped, via a
+    partial filter, to `source.type == "admin"` only (`seed_admin()`'s
+    startup index setup, self-healing on every boot) — a submission-created
+    talent is structurally never subject to it, so a clean insert (when no
+    migration candidate applies) never collides on phone. `email`/
+    `normalized_email` remain the only globally-unique fields.
 
     Returns `(talent_doc, recovered)` — `recovered=True` means the returned
-    doc is a PRE-EXISTING record found via the email-based collision
-    recovery (not the just-inserted `new_talent`); `(None, False)` means
-    creation failed and could not be resolved — callers must keep treating
-    that exactly as before (talent_id stays unset; nothing else about the
-    submission's own write path changes)."""
+    doc is a PRE-EXISTING record, found either via email-based collision
+    recovery or via a confirmed, non-conflicting migration-candidate
+    auto-link (not the just-inserted `new_talent` in either case);
+    `(None, False)` means creation failed and could not be resolved —
+    callers must keep treating that exactly as before (talent_id stays
+    unset; nothing else about the submission's own write path changes)."""
     # Detection runs OUTSIDE the insert's try/except on purpose, but is its
     # own try/except: a migration-candidate LOOKUP failure (e.g. a transient
     # Mongo error on this read) must degrade to "no candidate found," never
@@ -3658,6 +3676,24 @@ async def insert_talent_or_recover(
             "proceeding without one — context=%s error=%s", context, e,
         )
         candidate = None
+
+    if candidate and not candidate.get("conflict"):
+        try:
+            linked = await _auto_link_migration_candidate(candidate, new_talent, context=context)
+        except Exception as e:
+            logger.error(
+                "insert_talent_or_recover: auto-link raised, falling back to "
+                "a normal insert -- context=%s legacy_talent_id=%s error=%s",
+                context, candidate.get("legacy_talent_id"), e,
+            )
+            linked = None
+        if linked:
+            return linked, True
+        # Candidate vanished (race) or the link write failed -- fall through
+        # to a normal insert below, same as if no candidate had been found,
+        # but still record the advisory row afterward (see the `if candidate:`
+        # block below) so this near-miss isn't silently lost.
+
     try:
         await db.talents.insert_one(new_talent)
         await update_talent_cover_cache(new_talent["id"])
@@ -3705,16 +3741,56 @@ _MIGRATION_CONFIDENCE_PHONE_ONLY = 0.85
 _MIGRATION_CONFIDENCE_INSTAGRAM_ONLY = 0.75
 
 
+def _normalize_identity_value(v: Any) -> Optional[str]:
+    return v.strip().lower() if isinstance(v, str) and v.strip() else None
+
+
+def _talent_identity_conflict(candidate: dict, new_talent: dict) -> Optional[str]:
+    """Safe Talent Deduplication, Part 2's CRITICAL SAFETY RULE: two records
+    with a conflicting strong identifier — differing non-empty email, phone,
+    Instagram handle, or DOB — must never be auto-merged, even though some
+    OTHER field matched exactly (that's precisely how they were found as a
+    candidate in the first place). Optimizes for "no accidental merging of
+    two different people," at the cost of leaving some real duplicates for
+    manual review rather than risk joining two different people.
+
+    Only compares fields that are non-empty on BOTH sides — a field missing
+    on one side is not a conflict, it's exactly the kind of gap this feature
+    is meant to fill in (Part 4/17). Returns a comma-joined string naming
+    the conflicting field(s), or `None` if there's nothing blocking an
+    auto-link.
+    """
+    conflicts = []
+    for field, a_val, b_val in (
+        ("email", candidate.get("normalized_email") or candidate.get("email"), new_talent.get("normalized_email") or new_talent.get("email")),
+        ("phone", candidate.get("phone"), new_talent.get("phone")),
+        ("instagram_handle", candidate.get("instagram_handle"), new_talent.get("instagram_handle")),
+        ("dob", candidate.get("dob"), new_talent.get("dob")),
+    ):
+        a_norm, b_norm = _normalize_identity_value(a_val), _normalize_identity_value(b_val)
+        if a_norm and b_norm and a_norm != b_norm:
+            conflicts.append(field)
+    return ",".join(conflicts) if conflicts else None
+
+
 async def _find_migration_candidate(new_talent: dict) -> Optional[dict]:
-    """Look for an existing admin-created (`source.type == "admin"`) talent
-    that plausibly represents the SAME real person as `new_talent` (a
-    freshly authenticated, submission-created talent about to be
-    inserted) — an exact match on `phone` or `instagram_handle` only,
-    deliberately no fuzzy name matching, to avoid ever recording a
-    speculative/low-confidence relationship. Read-only: never mutates the
-    candidate, never merges, never deletes. Returns a small dict describing
-    the match (not yet the stored document shape — see
-    `_record_migration_candidate`), or `None`.
+    """Look for an existing, NOT-submission-created talent (an admin-created
+    profile, or a legacy record that predates the `source` field entirely —
+    `[CONFIRMED]` ~93.5% of real production admin-created talents have no
+    `source` field at all, so restricting this to `source.type == "admin"`
+    silently missed the large majority of real duplicates) that plausibly
+    represents the SAME real person as `new_talent` (a freshly
+    authenticated, submission-created talent about to be inserted) — an
+    exact match on `phone` or `instagram_handle` only, deliberately no fuzzy
+    name matching, to avoid ever recording a speculative/low-confidence
+    relationship (Part 2, Tier 1/exact-match only for auto-linking).
+
+    Read-only: never mutates the candidate, never merges, never deletes.
+    Returns a small dict describing the match — `legacy_talent_id`,
+    `matched_on`, and `conflict` (a non-`None` reason string means Part 2's
+    safety rule blocks any auto-link; the caller must fall back to the
+    advisory-only `talent_migration_candidates` record instead) — or `None`
+    if nothing matched at all.
     """
     phone = new_talent.get("phone")
     insta = new_talent.get("instagram_handle")
@@ -3727,8 +3803,9 @@ async def _find_migration_candidate(new_talent: dict) -> Optional[dict]:
         return None
 
     candidate = await db.talents.find_one(
-        {"source.type": "admin", "$or": or_clauses},
-        {"_id": 0, "id": 1, "name": 1, "phone": 1, "instagram_handle": 1},
+        {"source.type": {"$ne": "audition_submission"}, "$or": or_clauses},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "instagram_handle": 1,
+         "email": 1, "normalized_email": 1, "dob": 1},
     )
     if not candidate:
         return None
@@ -3739,7 +3816,11 @@ async def _find_migration_candidate(new_talent: dict) -> Optional[dict]:
     if insta and candidate.get("instagram_handle") == insta:
         matched_on.append("instagram_handle")
 
-    return {"legacy_talent_id": candidate["id"], "matched_on": matched_on}
+    return {
+        "legacy_talent_id": candidate["id"],
+        "matched_on": matched_on,
+        "conflict": _talent_identity_conflict(candidate, new_talent),
+    }
 
 
 async def _record_migration_candidate(authenticated_talent_id: str, match: dict) -> None:
@@ -3765,6 +3846,12 @@ async def _record_migration_candidate(authenticated_talent_id: str, match: dict)
         "authenticated_talent_id": authenticated_talent_id,
         "matched_fields": matched_on,
         "confidence_score": confidence,
+        # Safe Talent Deduplication, Part 2: non-`None` means this candidate
+        # was found but NOT auto-linked because a strong identifier
+        # conflicted (see `_talent_identity_conflict`) — surfaced here so a
+        # human reviewer immediately sees WHY it's still pending instead of
+        # having to re-derive it.
+        "conflict_reason": match.get("conflict"),
         "review_status": "pending",
         "created_at": _now(),
         "updated_at": _now(),
@@ -3789,6 +3876,131 @@ async def _record_migration_candidate(authenticated_talent_id: str, match: dict)
             "legacy=%s authenticated=%s matched_on=%s error=%s",
             match["legacy_talent_id"], authenticated_talent_id, matched_on, e,
         )
+
+
+async def _auto_link_migration_candidate(candidate: dict, new_talent: dict, *, context: str) -> Optional[dict]:
+    """Safe Talent Deduplication, Part 1's actual fix: a CONFIRMED, non-
+    conflicting migration candidate (see `_find_migration_candidate`) means
+    `new_talent` and the existing legacy/admin record represent the same
+    real person — link onto the EXISTING record instead of letting the
+    caller insert a second Talent document.
+
+    Deliberately touches only the two things that need to happen exactly
+    ONCE, at the moment two previously-separate identities are first
+    confirmed to be the same person:
+
+      1. REVIEW_FIELDS (dob/gender/height/ethnicity): the talent's own
+         freshly-authenticated self-report overwrites an older admin-entered
+         value when provided (Part 4's explicit data-precedence rule, e.g.
+         Admin height 5'4" + Talent height 5'5" -> 5'5"). This is
+         deliberately MORE aggressive than `merge_talent_profile`'s
+         fill-once-else-conflict-log policy for these same fields — that
+         policy exists to protect an ALREADY-linked canonical profile from a
+         stale resubmission clobbering a newer Admin Dashboard edit (Issue 1
+         / ADR Part 4), a genuinely different scenario where both sides
+         already refer to the one and only Talent document. Here, one side
+         (the legacy record) has never had a chance to receive the talent's
+         own data before — there is no "newer edit" to protect against.
+         `name` is deliberately EXCLUDED from this aggressive override and
+         kept on the conservative fill-if-empty-only policy: Part 4's own
+         wording for name is "keep talent value IF EQUIVALENT" (unlike the
+         unconditional height example), and unlike height/dob/gender/
+         ethnicity, a submission's name field always carries some value
+         (a person always types a first/last name) — blindly letting it win
+         risks a typo, nickname, or minor formatting difference silently
+         replacing a carefully admin-verified name. An established name is
+         never overwritten by this function.
+      2. Missing top-level identity (`email`/`normalized_email`): filled in
+         if the legacy record had none (Part 17 — identity linking), so the
+         very next submission from this same person is recognized
+         immediately via `resolve_canonical_talent`'s email lookup, without
+         ever needing this phone/instagram candidate path again.
+
+    AUTO_UPDATE_FIELDS (instagram/location-excluded/bio/skills/etc.) and
+    media are deliberately left to the caller's existing, already-tested
+    `merge_talent_profile()` call, triggered by this function returning a
+    doc (the caller treats it exactly like the pre-existing email-collision
+    `recovered=True` race-recovery path) — not duplicated here.
+
+    Returns the updated canonical talent doc, or `None` if the candidate
+    record vanished (race) or the write failed — the caller falls back to a
+    normal insert in that case, exactly as if no candidate had been found.
+    """
+    canonical = await db.talents.find_one({"id": candidate["legacy_talent_id"]}, {"_id": 0})
+    if not canonical:
+        return None
+
+    review_update: Dict[str, Any] = {}
+    old_values: Dict[str, Any] = {}
+    for field in REVIEW_FIELDS:
+        incoming_val = new_talent.get(field)
+        if incoming_val in (None, "", [], {}):
+            continue
+        existing_val = canonical.get(field)
+        if existing_val == incoming_val:
+            continue
+        if field == "name":
+            if existing_val:
+                continue  # established name is never overwritten, see docstring
+        old_values[field] = existing_val
+        review_update[field] = incoming_val
+
+    if "dob" in review_update:
+        age = compute_age(review_update["dob"])
+        if age is not None:
+            review_update["age"] = age
+
+    email_filled = False
+    if not canonical.get("email") and new_talent.get("email"):
+        review_update["email"] = new_talent["email"]
+        review_update["normalized_email"] = new_talent.get("normalized_email") or new_talent["email"]
+        email_filled = True
+
+    if review_update:
+        review_update["updated_at"] = _now()
+        try:
+            await db.talents.update_one({"id": canonical["id"]}, {"$set": review_update})
+        except Exception as e:
+            logger.error(
+                "_auto_link_migration_candidate: field update failed, aborting "
+                "auto-link -- context=%s canonical_talent_id=%s error=%s",
+                context, canonical["id"], e,
+            )
+            return None
+        canonical.update(review_update)
+
+    # The link itself has ALREADY succeeded by this point (or there was
+    # nothing to update, which is still a successful link). Audit recording
+    # is deliberately outside/after the write above and never raises, same
+    # discipline as `insert_talent_or_recover`'s own candidate bookkeeping.
+    try:
+        await db.talent_merges.insert_one({
+            "id": str(uuid.uuid4()),
+            # No losing document was ever created — this IS the fix, not a
+            # cleanup of one. `source_talent_id` stays null; a future bulk
+            # migration merge of two already-existing duplicates (Part 14)
+            # populates it, sharing this same audit collection.
+            "source_talent_id": None,
+            "canonical_talent_id": canonical["id"],
+            "merge_reason": "auto_link_at_submission_no_duplicate_created",
+            "matched_by": candidate["matched_on"],
+            "field_changes": {
+                "old": old_values,
+                "new": {k: v for k, v in review_update.items() if k in old_values},
+            },
+            "email_filled": email_filled,
+            "originating_submission_reference": (new_talent.get("source") or {}).get("reference_id"),
+            "context": context,
+            "timestamp": _now(),
+        })
+    except Exception as e:
+        logger.error(
+            "_auto_link_migration_candidate: audit record failed AFTER a "
+            "successful link -- context=%s canonical_talent_id=%s error=%s",
+            context, canonical["id"], e,
+        )
+
+    return canonical
 
 
 # Phase 1 — Canonical Profile Monotonicity: sentinel distinct from `None` so

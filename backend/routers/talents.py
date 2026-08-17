@@ -369,7 +369,11 @@ def _build_talent_query(
     if status:
         query: Dict[str, Any] = {"status": status}
     else:
-        query = {"status": {"$nin": ["DRAFT", "ARCHIVED"]}}
+        # MERGED (Safe Talent Deduplication, Part 12): a losing duplicate's
+        # status after a merge — never hard-deleted, just excluded from the
+        # roster the same way DRAFT/ARCHIVED already are. Reuses the
+        # existing archival mechanism rather than a competing lifecycle.
+        query = {"status": {"$nin": ["DRAFT", "ARCHIVED", "MERGED"]}}
 
     and_clauses: List[Dict[str, Any]] = []
 

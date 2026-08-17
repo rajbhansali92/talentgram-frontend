@@ -602,11 +602,76 @@ async def test_project_deletion_cascade_pipeline(mock_db):
 import uuid as _uuid
 import core as _core
 
-from core import db as _real_db, normalize_email as _normalize_email
+from core import normalize_email as _normalize_email
 from core import build_minimal_talent_from_form as _build_minimal_talent_from_form
 from core import insert_talent_or_recover as _insert_talent_or_recover
 from core import SubmissionDecisionIn as _SubmissionDecisionIn
 from routers.submissions import set_decision as _set_decision
+
+# Cross-file test pollution guard: several OTHER test modules in this suite
+# (test_apply_location_merge.py, test_canonical_sync.py, test_contact_lists.py,
+# test_direct_uploads.py, test_p0_storage_hardening.py, test_perf_roster_pipeline.py,
+# test_portal_lookup.py, test_upload_lifecycle.py, test_whatsapp_notifications.py --
+# confirmed via direct reproduction, 2026-08-17) do an UNCONDITIONAL, never-restored
+# `core.db = mock_db` at MODULE level, not inside a test function or a `with patch(...)`
+# block. Because pytest collects (imports) every test file before running any test,
+# whichever of those files is collected LAST in the whole session permanently leaves
+# `core.db` pointing at its own MagicMock for the entire remainder of the process --
+# regardless of this file's own position in that order, and regardless of which of
+# THIS file's tests happen to run. A plain `from core import db as _real_db` here
+# would silently bind to whatever `core.db` happened to be at THIS file's own import
+# time, which is not reliable either way.
+#
+# This file's real-DB integration tests need a connection that is provably real,
+# independent of any other file's bookkeeping. Building one directly here (same
+# MONGO_URL/DB_NAME this file already pins at the top) sidesteps the shared,
+# mutable `core.db` attribute entirely for this file's own read/write assertions.
+# A per-test autouse fixture then re-points `core.db` (the attribute other modules'
+# functions read at call time -- `insert_talent_or_recover`, `set_decision`, etc. --
+# all reference the module-global name, not a value captured at their own def time)
+# at this real connection before every test in this file runs, so calling INTO
+# production code from these tests is unaffected by whatever any other file did
+# during collection, in either direction.
+from motor.motor_asyncio import AsyncIOMotorClient as _AsyncIOMotorClient
+import routers.submissions as _routers_submissions
+import routers.casting_pipeline as _routers_casting_pipeline
+
+_real_mongo_client = _AsyncIOMotorClient(os.environ["MONGO_URL"])
+_real_db = _real_mongo_client[os.environ["DB_NAME"]]
+
+
+@pytest.fixture(autouse=True)
+def _restore_real_db_for_this_file():
+    # `core.py`'s own functions (insert_talent_or_recover, merge_talent_profile,
+    # etc.) resolve the bare name `db` via normal module-global lookup at call
+    # time, so reassigning the attribute here is sufficient for them. But
+    # `routers/submissions.py` and `routers/casting_pipeline.py` (both exercised
+    # via `_set_decision` in these tests) did `from core import db` at THEIR OWN
+    # module-import time -- that creates an independent name binding in each
+    # module's own namespace, unaffected by reassigning `core.db` afterward -- so
+    # each needs its own explicit repoint.
+    #
+    # Teardown restores every one of these to whatever it was before this test
+    # -- this fixture must be a strictly local, this-file-only fix. Leaving the
+    # real connection in place after this file's tests finish was tried and
+    # measured: it silently broke three unrelated, later-collected files'
+    # tests (test_portal_lookup.py, test_profile_configs.py,
+    # test_whatsapp_notifications.py) that rely on `core.db`/etc. still being
+    # a MagicMock by the time THEIR tests run. This file must fix its own
+    # pollution problem without creating a new one for anyone collected after it.
+    prior_core_db = _core.db
+    prior_submissions_db = _routers_submissions.db
+    prior_casting_pipeline_db = _routers_casting_pipeline.db
+    _core.db = _real_db
+    _routers_submissions.db = _real_db
+    _routers_casting_pipeline.db = _real_db
+    try:
+        yield
+    finally:
+        _core.db = prior_core_db
+        _routers_submissions.db = prior_submissions_db
+        _routers_casting_pipeline.db = prior_casting_pipeline_db
+
 
 _IDTAG = "TEST_IDHARDEN_"
 
@@ -724,7 +789,13 @@ async def test_insert_talent_or_recover_non_email_collision_surfaces_not_silent(
          admin record (never merge, never overwrite, never link).
       2. Leave the admin record completely untouched.
       3. Be visible -- logged as an error -- instead of vanishing with zero
-         trace, which was the actual defect."""
+         trace, which was the actual defect.
+    Gives the two records a conflicting DOB: Safe Talent Deduplication's
+    candidate pre-check would otherwise auto-link this exact non-conflicting
+    phone match before ever reaching the DB-level collision this test
+    exists to exercise -- the conflict forces the flow past the pre-check
+    and into the fallback path (insert -> DuplicateKeyError -> unresolvable
+    -> None, False)."""
     index_name = "test_idh_phone_unique_3"
     await _idharden_cleanup(index_name)
     try:
@@ -733,12 +804,14 @@ async def test_insert_talent_or_recover_non_email_collision_surfaces_not_silent(
             partialFilterExpression={"_idharden_marker": {"$eq": "1"}, "phone": {"$type": "string"}},
         )
         admin_doc = _idharden_admin_doc(phone="9199991003", name="Legacy Admin Talent")
+        admin_doc["dob"] = "1980-01-01"
         await _real_db.talents.insert_one(admin_doc)
 
         new_talent = _idharden_new_talent(
             phone="9199991003", email="idh3.authenticated@example.com",
             name="Authenticated Talent", sid="sub-idh-3",
         )
+        new_talent["dob"] = "2000-01-01"
         result, recovered = await _insert_talent_or_recover(
             new_talent, email=_normalize_email("idh3.authenticated@example.com"), context="test",
         )
@@ -759,7 +832,10 @@ async def test_insert_talent_or_recover_non_email_collision_surfaces_not_silent(
 
 async def test_insert_talent_or_recover_non_email_collision_logs_error(caplog):
     """Same scenario as above, asserting the previously-silent failure is
-    now actually logged (the concrete "no longer swallowed" proof)."""
+    now actually logged (the concrete "no longer swallowed" proof). Same
+    conflicting-DOB trick as the sibling test above, to force the flow past
+    Safe Talent Deduplication's auto-link pre-check and into the DB-level
+    collision path this test exercises."""
     import logging
     index_name = "test_idh_phone_unique_4"
     await _idharden_cleanup(index_name)
@@ -769,11 +845,13 @@ async def test_insert_talent_or_recover_non_email_collision_logs_error(caplog):
             partialFilterExpression={"_idharden_marker": {"$eq": "1"}, "phone": {"$type": "string"}},
         )
         admin_doc = _idharden_admin_doc(phone="9199991004", name="Legacy Admin Talent 2")
+        admin_doc["dob"] = "1980-01-01"
         await _real_db.talents.insert_one(admin_doc)
         new_talent = _idharden_new_talent(
             phone="9199991004", email="idh4.authenticated@example.com",
             name="Authenticated Talent 2", sid="sub-idh-4",
         )
+        new_talent["dob"] = "2000-01-01"
         caplog.set_level(logging.ERROR, logger="talentgram")
         result, recovered = await _insert_talent_or_recover(
             new_talent, email=_normalize_email("idh4.authenticated@example.com"), context="test-log-check",
@@ -918,16 +996,20 @@ async def test_authenticated_only_talent_unaffected() -> None:
         await _phone_scope_cleanup()
 
 
-async def test_legacy_and_onboarding_talents_coexist_with_candidate_row_recorded() -> None:
-    """The actual business scenario: a legacy admin-created talent (no
-    email) and a newly authenticated Project Submission talent for the
-    SAME real person, sharing both phone and instagram_handle, must both
-    be creatable and coexist -- no recovery, no merge -- AND a
-    talent_migration_candidates document must be recorded referencing both
-    ids, with confidence 0.95 (both signals matched) and review_status
-    "pending", ready for a reviewer's future action. The Talent documents
-    themselves carry NO relationship field at all, and the legacy talent
-    receives zero writes."""
+async def test_legacy_and_onboarding_talents_auto_link_no_duplicate_created() -> None:
+    """Safe Talent Deduplication (2026-08-17): the actual business scenario
+    -- a legacy admin-created talent (no email) and a newly authenticated
+    Project Submission for the SAME real person, sharing both phone and
+    instagram_handle with no conflicting identifier -- must now AUTO-LINK
+    onto the legacy record instead of coexisting as two roster rows (this
+    exact shape, minus a `source` field, is the real production "Kripa
+    Trivedi appears twice" bug). `insert_talent_or_recover` returns the
+    LEGACY talent with `recovered=True`; no second Talent document is ever
+    inserted; the legacy record's missing email gets filled in (Part 17 --
+    so the next submission from this person is recognized by email alone);
+    and a `talent_merges` audit row is recorded (not a
+    `talent_migration_candidates` row -- that collection is reserved for
+    candidates NOT auto-linked)."""
     await _phone_scope_cleanup()
     await _ensure_admin_scoped_phone_index()
     try:
@@ -946,31 +1028,150 @@ async def test_legacy_and_onboarding_talents_coexist_with_candidate_row_recorded
             onboarding, email=_normalize_email("coexist.repro@example.com"), context="coexist-test",
         )
         assert result is not None
-        assert recovered is False, "must be a genuine new insert, not a collision recovery"
-        assert result["id"] == onboarding["id"]
-        assert "migration_link" not in result
-        assert result["originating_submission_id"] == "sub-coexist"
+        assert recovered is True, "must auto-link onto the existing legacy record, not insert a new one"
+        assert result["id"] == legacy["id"], "the CANONICAL (legacy) talent id must be returned"
+        assert "originating_submission_id" not in result or result.get("originating_submission_id") is None
 
         count = await _real_db.talents.count_documents(
             {"phone": phone, "id": {"$regex": f"^{_IDTAG}"}}
         )
-        assert count == 2, "legacy and onboarding records must both exist"
+        assert count == 1, "no second Talent document may ever be created for a confirmed, non-conflicting match"
 
-        candidate = await _candidate_for(result["id"])
-        assert candidate is not None, "expected a talent_migration_candidates row"
-        assert candidate["legacy_talent_id"] == legacy["id"]
-        assert candidate["authenticated_talent_id"] == result["id"]
-        assert set(candidate["matched_fields"]) == {"phone", "instagram_handle"}
-        assert candidate["confidence_score"] == 0.95
-        assert candidate["review_status"] == "pending"
-        assert candidate["reviewed_by"] is None
-        assert candidate["reviewed_at"] is None
-        assert candidate["reviewer_notes"] is None
-        assert candidate["created_at"] and candidate["updated_at"]
+        assert await _candidate_for(onboarding["id"]) is None, (
+            "a confirmed auto-link is not an unresolved candidate -- no advisory row"
+        )
+
+        merge_row = await _real_db.talent_merges.find_one(
+            {"canonical_talent_id": legacy["id"]}, {"_id": 0}
+        )
+        assert merge_row is not None, "expected a talent_merges audit row"
+        assert merge_row["source_talent_id"] is None, "no losing document was ever created"
+        assert merge_row["merge_reason"] == "auto_link_at_submission_no_duplicate_created"
+        assert set(merge_row["matched_by"]) == {"phone", "instagram_handle"}
+        assert merge_row["email_filled"] is True
+
+        legacy_after = await _real_db.talents.find_one({"id": legacy["id"]}, {"_id": 0})
+        assert legacy_after["email"] == _normalize_email("coexist.repro@example.com"), (
+            "the legacy record's missing email must be filled from the authenticated submission"
+        )
+        assert legacy_after["normalized_email"] == _normalize_email("coexist.repro@example.com")
+        # Everything else about the legacy record is untouched -- only the
+        # fields this scenario actually had reason to change moved at all.
+        for field in ("id", "name", "phone", "instagram_handle", "status", "source"):
+            assert legacy_after[field] == legacy[field]
+    finally:
+        await _phone_scope_cleanup()
+        await _real_db.talent_merges.delete_many({"canonical_talent_id": {"$regex": f"^{_IDTAG}"}})
+
+
+async def test_auto_link_talent_provided_height_overrides_older_admin_value() -> None:
+    """Safe Talent Deduplication, Part 4's explicit worked example: Admin
+    height=5'4", Talent height=5'5" -> the talent's own, freshly-
+    authenticated value wins, even though the admin's value was already
+    populated. Deliberately MORE aggressive than `merge_talent_profile`'s
+    REVIEW_FIELDS policy (fill-if-empty-else-conflict-log) for these same
+    fields -- that policy protects an ALREADY-linked canonical profile from
+    a stale resubmission; this is the one-time reconciliation of two
+    previously-separate records, where Part 4's precedence rule applies
+    instead."""
+    await _phone_scope_cleanup()
+    await _ensure_admin_scoped_phone_index()
+    try:
+        phone = "9199996012"
+        legacy = _idharden_admin_doc(phone=phone, name="Height Precedence Legacy")
+        legacy["height"] = "5'4\""
+        await _real_db.talents.insert_one(legacy)
+
+        onboarding = _idharden_new_talent(
+            phone=phone, email="height.precedence@example.com",
+            name="Height Precedence Legacy", sid="sub-height",
+        )
+        onboarding["height"] = "5'5\""
+        result, recovered = await _insert_talent_or_recover(
+            onboarding, email=_normalize_email("height.precedence@example.com"), context="height-precedence-test",
+        )
+        assert recovered is True
+        assert result["id"] == legacy["id"]
+        assert result["height"] == "5'5\"", "the talent's own value must win over the older admin value"
+
+        legacy_after = await _real_db.talents.find_one({"id": legacy["id"]}, {"_id": 0})
+        assert legacy_after["height"] == "5'5\""
+    finally:
+        await _phone_scope_cleanup()
+        await _real_db.talent_merges.delete_many({"canonical_talent_id": {"$regex": f"^{_IDTAG}"}})
+
+
+async def test_auto_link_fills_missing_field_from_admin_when_talent_omits_it() -> None:
+    """Safe Talent Deduplication, Part 4's missing-field example: when the
+    talent's own submission does NOT provide a REVIEW_FIELDS value (e.g. no
+    DOB entered), the older admin-entered value must survive untouched --
+    Part 4 precedence is "talent wins if provided," not "talent always
+    wins.\""""
+    await _phone_scope_cleanup()
+    await _ensure_admin_scoped_phone_index()
+    try:
+        phone = "9199996013"
+        legacy = _idharden_admin_doc(phone=phone, name="Missing Field Legacy")
+        legacy["dob"] = "2002-11-22"
+        await _real_db.talents.insert_one(legacy)
+
+        onboarding = _idharden_new_talent(
+            phone=phone, email="missing.field@example.com",
+            name="Missing Field Legacy", sid="sub-missing-field",
+        )
+        assert not onboarding.get("dob"), "the fixture's form data must not supply a dob for this case"
+        result, recovered = await _insert_talent_or_recover(
+            onboarding, email=_normalize_email("missing.field@example.com"), context="missing-field-test",
+        )
+        assert recovered is True
+        assert result["dob"] == "2002-11-22", "an admin value with no talent-provided replacement must be preserved"
+    finally:
+        await _phone_scope_cleanup()
+        await _real_db.talent_merges.delete_many({"canonical_talent_id": {"$regex": f"^{_IDTAG}"}})
+
+
+async def test_conflicting_identity_never_auto_merges() -> None:
+    """Safe Talent Deduplication, Part 2's CRITICAL SAFETY RULE: a shared
+    phone number alone is not enough to auto-link when another strong
+    identifier (here, DOB) genuinely conflicts between the two records --
+    they might be two different real people (e.g. household members). Both
+    records must continue to exist, no field on the legacy record may
+    change, and a `talent_migration_candidates` row must be recorded for
+    manual review, naming the conflict."""
+    await _phone_scope_cleanup()
+    await _ensure_admin_scoped_phone_index()
+    try:
+        phone = "9199996014"
+        legacy = _idharden_admin_doc(phone=phone, name="Conflict Test Legacy")
+        legacy["dob"] = "1985-03-10"
+        await _real_db.talents.insert_one(legacy)
+
+        onboarding = _idharden_new_talent(
+            phone=phone, email="conflict.repro@example.com",
+            name="Conflict Test Legacy", sid="sub-conflict",
+        )
+        onboarding["dob"] = "1999-12-25"
+        result, recovered = await _insert_talent_or_recover(
+            onboarding, email=_normalize_email("conflict.repro@example.com"), context="conflict-test",
+        )
+        assert recovered is False, "a conflicting DOB must block auto-link even though phone matched"
+        assert result is not None and result["id"] == onboarding["id"]
+
+        count = await _real_db.talents.count_documents({"phone": phone, "id": {"$regex": f"^{_IDTAG}"}})
+        assert count == 2, "both records must continue to exist -- never risk merging two different people"
 
         legacy_after = await _real_db.talents.find_one({"id": legacy["id"]}, {"_id": 0})
         legacy_before_compare = {k: v for k, v in legacy.items() if k != "_id"}
-        assert legacy_after == legacy_before_compare, "legacy record must receive zero writes"
+        assert legacy_after == legacy_before_compare, "legacy record must receive zero writes on a conflict"
+
+        candidate = await _candidate_for(result["id"])
+        assert candidate is not None
+        assert candidate["conflict_reason"] == "dob"
+        assert candidate["review_status"] == "pending"
+
+        assert await _real_db.talent_merges.count_documents({"canonical_talent_id": legacy["id"]}) == 0, (
+            "a blocked candidate must never appear in the merge audit trail"
+        )
     finally:
         await _phone_scope_cleanup()
 
@@ -979,37 +1180,53 @@ async def test_migration_candidate_confidence_scoring_by_matched_field() -> None
     """Confidence score reflects which fields matched: phone-only and
     instagram-only cases must be distinguishable from a both-match, and
     lower than it -- documents the deliberately conservative, exact-match
-    scoring scheme."""
+    scoring scheme. Since a non-conflicting match now auto-links (Safe
+    Talent Deduplication) rather than only ever being recorded as a
+    pending candidate, each case here gives the pair a deliberately
+    conflicting DOB so Part 2's safety rule blocks the auto-link and the
+    match still lands in `talent_migration_candidates`, exactly where this
+    test's assertions need it."""
     await _phone_scope_cleanup()
     await _ensure_admin_scoped_phone_index()
     try:
-        # Phone-only match.
+        # Phone-only match, DOB conflict forces this into the advisory path.
         legacy_phone = _idharden_admin_doc(phone="9199996009", name="Phone Only Legacy")
+        legacy_phone["dob"] = "1990-01-01"
         await _real_db.talents.insert_one(legacy_phone)
         onboard_phone = _idharden_new_talent(
             phone="9199996009", email="phoneonly@example.com", name="Phone Only Legacy", sid="sub-phone-only",
         )
-        result_phone, _ = await _insert_talent_or_recover(
+        onboard_phone["dob"] = "1995-06-15"
+        result_phone, recovered_phone = await _insert_talent_or_recover(
             onboard_phone, email=_normalize_email("phoneonly@example.com"), context="phone-only-test",
         )
+        assert recovered_phone is False, "a DOB conflict must block auto-link"
         cand_phone = await _candidate_for(result_phone["id"])
         assert cand_phone["matched_fields"] == ["phone"]
         assert cand_phone["confidence_score"] == 0.85
+        assert cand_phone["conflict_reason"] == "dob"
 
-        # Instagram-only match (different phone).
+        # Instagram-only match (different phone), same DOB-conflict trick.
         legacy_insta = _idharden_admin_doc(phone="9199996010", name="Insta Only Legacy")
         legacy_insta["instagram_handle"] = "insta.only.repro"
+        legacy_insta["dob"] = "1990-01-01"
         await _real_db.talents.insert_one(legacy_insta)
         onboard_insta = _idharden_new_talent(
             phone="9199996011", email="instaonly@example.com", name="Insta Only Legacy", sid="sub-insta-only",
         )
         onboard_insta["instagram_handle"] = "insta.only.repro"
-        result_insta, _ = await _insert_talent_or_recover(
+        onboard_insta["dob"] = "1995-06-15"
+        result_insta, recovered_insta = await _insert_talent_or_recover(
             onboard_insta, email=_normalize_email("instaonly@example.com"), context="insta-only-test",
         )
+        assert recovered_insta is False
         cand_insta = await _candidate_for(result_insta["id"])
         assert cand_insta["matched_fields"] == ["instagram_handle"]
         assert cand_insta["confidence_score"] == 0.75
+        # This pair also has two differing, non-empty phone numbers (that's
+        # why the match came in via instagram_handle, not phone) -- Part 2's
+        # conflict check independently flags that too, on top of the DOB.
+        assert cand_insta["conflict_reason"] == "phone,dob"
         assert cand_insta["confidence_score"] < cand_phone["confidence_score"] < 0.95
     finally:
         await _phone_scope_cleanup()
@@ -1131,16 +1348,22 @@ async def test_migration_candidate_recording_failure_never_blocks_talent_creatio
     itself) AFTER the talent insert already succeeded, the talent creation
     must still be reported as successful and the talent must be durably
     persisted -- a bookkeeping row is never allowed to undo or hide an
-    already-completed talent creation."""
+    already-completed talent creation. Uses a conflicting DOB so Part 2's
+    safety rule blocks auto-link and the flow actually reaches the
+    fallback-insert-then-record path this test exists to cover (a
+    non-conflicting match would auto-link instead and never call
+    `_record_migration_candidate` at all)."""
     await _phone_scope_cleanup()
     await _ensure_admin_scoped_phone_index()
     try:
         phone = "9199997102"
         legacy = _idharden_admin_doc(phone=phone, name="Recording Failure Test")
+        legacy["dob"] = "1980-01-01"
         await _real_db.talents.insert_one(legacy)
         onboarding = _idharden_new_talent(
             phone=phone, email="recordfail@example.com", name="Recording Failure Test", sid="sub-recordfail",
         )
+        onboarding["dob"] = "2000-01-01"
         with patch.object(_core, "_record_migration_candidate", side_effect=RuntimeError("simulated write failure")):
             result, recovered = await _insert_talent_or_recover(
                 onboarding, email=_normalize_email("recordfail@example.com"), context="record-fail-test",
@@ -1417,7 +1640,14 @@ async def test_reapproval_with_existing_talent_is_idempotent() -> None:
 
 async def test_reapproval_with_missing_talent_id_retries_creation() -> None:
     """Case C: decision unchanged, talent_id absent, no talent exists by
-    email -> the fallback must now run, create the talent, and link it."""
+    email -> the fallback must now run and resolve.
+
+    Safe Talent Deduplication (2026-08-17): the legacy record here shares
+    the submission's phone with no conflicting identifier, so the fallback
+    must now AUTO-LINK onto it (Part 1's fix) rather than create a second,
+    "audition_submission"-sourced Talent as this test originally expected
+    -- that original expectation was itself an instance of the coexistence
+    bug this feature closes."""
     await _sd_cleanup()
     try:
         pid = await _sd_make_project()
@@ -1435,26 +1665,16 @@ async def test_reapproval_with_missing_talent_id_retries_creation() -> None:
 
         fresh = await _real_db.submissions.find_one({"id": sub["id"]}, {"_id": 0})
         assert fresh.get("talent_id"), "talent_id must now be populated"
+        assert fresh["talent_id"] == legacy["id"], "must resolve onto the existing legacy record, not a new one"
 
-        authenticated = await _real_db.talents.find_one({"email": "retry.creation@example.com"}, {"_id": 0})
+        authenticated = await _real_db.talents.find_one({"id": legacy["id"]}, {"_id": 0})
         assert authenticated is not None
-        assert authenticated["id"] == fresh["talent_id"]
-        assert authenticated["source"]["type"] == "audition_submission"
-        assert authenticated["originating_submission_id"] == sub["id"]
-
-        legacy_after = await _real_db.talents.find_one({"id": legacy["id"]}, {"_id": 0})
-        legacy_before_compare = {k: v for k, v in legacy.items() if k != "_id"}
-        assert legacy_after == legacy_before_compare, "legacy record must be untouched"
-
-        # build_minimal_talent_from_form() mints its own untagged UUID for
-        # the authenticated talent, so match both records by their known
-        # ids directly rather than an id-prefix filter.
-        count = await _real_db.talents.count_documents(
-            {"phone": "9199991002", "id": {"$in": [legacy["id"], authenticated["id"]]}}
-        )
-        assert count == 2, "legacy and newly-created authenticated talent must coexist"
+        assert authenticated["source"]["type"] == "admin", "auto-link never touches source"
+        assert authenticated["email"] == "retry.creation@example.com", "missing email must be filled in"
+        assert await _real_db.talents.count_documents({"phone": "9199991002"}) == 1
     finally:
         await _sd_cleanup()
+        await _real_db.talent_merges.delete_many({"canonical_talent_id": legacy["id"]})
 
 
 async def test_reapproval_with_missing_talent_id_recovers_existing_email() -> None:
@@ -1547,10 +1767,15 @@ async def test_reapproval_reproduces_and_fixes_the_historical_ahana_angela_state
     production for Ahana Pocha and Angela Kumar: decision="approved",
     talent_id absent, legacy admin record shares the submission's phone,
     legacy record has no email and no `source` field at all (the
-    documented ~93.5%-of-production gap). Confirms the retry succeeds
-    despite the legacy record having no `source` field -- source-field
-    absence was proven irrelevant to insertion, only to migration-candidate
-    detection."""
+    documented ~93.5%-of-production gap).
+
+    Safe Talent Deduplication (2026-08-17): this is the SAME shape as the
+    real "Kripa Trivedi appears twice on the roster" bug -- a source-less
+    legacy record sharing a phone with a freshly authenticated submission,
+    no conflicting identifier anywhere. Confirms the fix goes further than
+    the original version of this test (which only proved the retry no
+    longer got silently stuck): the submission must now resolve onto the
+    EXISTING legacy talent, not spawn a second Talent document at all."""
     await _sd_cleanup()
     try:
         pid = await _sd_make_project()
@@ -1574,21 +1799,21 @@ async def test_reapproval_reproduces_and_fixes_the_historical_ahana_angela_state
         fresh = await _real_db.submissions.find_one({"id": sub["id"]}, {"_id": 0})
         assert fresh.get("talent_id"), "the historical stuck state must now resolve"
         assert fresh["decision"] == "approved"
+        assert fresh["talent_id"] == legacy["id"], (
+            "must resolve onto the EXISTING legacy talent -- the whole point of "
+            "the dedup fix -- not create and link a brand-new second record"
+        )
 
-        authenticated = await _real_db.talents.find_one({"id": fresh["talent_id"]}, {"_id": 0})
-        assert authenticated is not None
-        assert authenticated["email"] == "historical.repro@example.com"
-        assert authenticated["source"]["type"] == "audition_submission"
-        assert authenticated["originating_submission_id"] == sub["id"]
+        count = await _real_db.talents.count_documents({"phone": "9199991006"})
+        assert count == 1, "no duplicate Talent may ever be created for this person"
 
         legacy_after = await _real_db.talents.find_one({"id": legacy["id"]}, {"_id": 0})
-        legacy_before_compare = {k: v for k, v in legacy.items() if k != "_id"}
-        assert legacy_after == legacy_before_compare, "legacy record (source-less, exactly like the real cases) must remain untouched"
-
-        count = await _real_db.talents.count_documents(
-            {"phone": "9199991006", "id": {"$in": [legacy["id"], authenticated["id"]]}}
+        assert legacy_after["email"] == "historical.repro@example.com", (
+            "the legacy record's missing email must be filled from the "
+            "authenticated submission (Part 17 identity linking)"
         )
-        assert count == 2, "legacy and authenticated must coexist, matching the intended migration model"
+        assert legacy_after["name"] == legacy["name"], "unrelated fields stay untouched"
     finally:
         await _sd_cleanup()
+        await _real_db.talent_merges.delete_many({"canonical_talent_id": {"$regex": f"^{_SDTAG}"}})
 

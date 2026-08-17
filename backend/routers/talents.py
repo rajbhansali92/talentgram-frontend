@@ -963,6 +963,66 @@ async def bulk_remove_tag(
     return {"ok": True, "modified_count": res.modified_count}
 
 
+class MergePreviewIn(BaseModel):
+    talent_a_id: str = Field(..., min_length=1)
+    talent_b_id: str = Field(..., min_length=1)
+    canonical_id: Optional[str] = None
+
+
+class MergeExecuteIn(BaseModel):
+    canonical_talent_id: str = Field(..., min_length=1)
+    duplicate_talent_id: str = Field(..., min_length=1)
+
+
+@router.post("/talents/merge/preview")
+async def preview_talent_merge(
+    payload: MergePreviewIn,
+    admin: dict = Depends(current_admin),
+):
+    """Read-only. Returns both profiles side-by-side with live-counted
+    relationships and a recommended canonical. When `canonical_id` is also
+    supplied, additionally returns the full computed merge plan (proposed
+    field changes, media union, identity conflicts) for that specific
+    direction -- exactly what the Merge Preview step shows the admin before
+    they may confirm. Never writes anything."""
+    from talent_merge_service import build_merge_preview, MergeError
+    try:
+        return await build_merge_preview(payload.talent_a_id, payload.talent_b_id, payload.canonical_id)
+    except MergeError as e:
+        raise HTTPException(e.status_code, e.message)
+
+
+@router.post("/talents/merge")
+async def merge_talents(
+    payload: MergeExecuteIn,
+    admin: dict = Depends(current_admin),
+):
+    """Admin-only, explicit two-record merge (never bulk, never automatic --
+    see talent_merge_service.py's module docstring for the full safety
+    design). Safe against double-clicks, browser/network retries, and two
+    admins attempting the same merge concurrently."""
+    from talent_merge_service import execute_merge, MergeError
+    logger.info(
+        "MERGE /talents/merge requested by admin=%s canonical=%s duplicate=%s",
+        admin.get("email"), payload.canonical_talent_id, payload.duplicate_talent_id,
+    )
+    try:
+        result = await execute_merge(
+            payload.canonical_talent_id, payload.duplicate_talent_id,
+            operator=admin.get("email") or admin.get("id") or "unknown-admin",
+        )
+    except MergeError as e:
+        logger.warning(
+            "MERGE /talents/merge rejected by admin=%s canonical=%s duplicate=%s: %s",
+            admin.get("email"), payload.canonical_talent_id, payload.duplicate_talent_id, e.message,
+        )
+        raise HTTPException(e.status_code, e.message)
+    logger.info(
+        "MERGE /talents/merge completed by admin=%s canonical=%s duplicate=%s operation_id=%s",
+        admin.get("email"), payload.canonical_talent_id, payload.duplicate_talent_id, result.get("operation_id"),
+    )
+    return result
+
 
 @router.post("/talents/{tid}/media", response_model=TalentOut)
 async def add_media(

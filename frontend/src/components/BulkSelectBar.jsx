@@ -1,5 +1,5 @@
 import React from "react";
-import { Trash2, X, Check, FolderKanban } from "lucide-react";
+import { Trash2, X, Check, FolderKanban, GitMerge } from "lucide-react";
 
 /**
  * Floating action bar rendered at the bottom of the viewport when the user
@@ -27,6 +27,7 @@ export default function BulkSelectBar({
     onRemoveTags,
     onExport,
     onAddToProject,
+    onMerge,
     labelSingular = "item",
     labelPlural = "items",
     testid = "bulk-select-bar",
@@ -98,6 +99,20 @@ export default function BulkSelectBar({
                     data-testid={`${testid}-remove-tags`}
                 >
                     Remove Tags
+                </button>
+            )}
+
+            {onMerge && (
+                <button
+                    type="button"
+                    onClick={count === 2 ? onMerge : undefined}
+                    disabled={count !== 2}
+                    title={count === 2 ? undefined : "Select exactly 2 talents to merge"}
+                    className="text-xs px-3 py-2 border border-border hover:border-foreground/60 rounded-sm text-foreground inline-flex items-center gap-1.5 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
+                    data-testid={`${testid}-merge`}
+                >
+                    <GitMerge className="w-3.5 h-3.5" />
+                    {count === 2 ? "Merge Talents" : "Select exactly 2 to merge"}
                 </button>
             )}
 

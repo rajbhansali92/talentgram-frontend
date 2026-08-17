@@ -10,6 +10,7 @@ import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import TagPopover from "@/components/TagPopover";
 import BulkTagDialog from "@/components/BulkTagDialog";
 import AddToProjectModal from "@/components/AddToProjectModal";
+import MergeTalentsModal from "@/components/MergeTalentsModal";
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
 import { useTalentDirectory } from "@/hooks/useTalentDirectory";
 import FilterPanel from "@/components/talent-directory/FilterPanel";
@@ -625,6 +626,7 @@ export default function TalentList() {
     const [tagPopoverTalent, setTagPopoverTalent] = useState(null);
     const [bulkTagAction, setBulkTagAction] = useState(null); // 'assign' | 'remove' | null
     const [showAddToProject, setShowAddToProject] = useState(false);
+    const [showMergeModal, setShowMergeModal] = useState(false);
 
     const [viewMode, setViewMode] = useState(() => {
         try {
@@ -1014,6 +1016,7 @@ export default function TalentList() {
                     onRemoveTags={() => setBulkTagAction("remove")}
                     onExport={handleExport}
                     onAddToProject={() => setShowAddToProject(true)}
+                    onMerge={() => setShowMergeModal(true)}
                     labelSingular="talent"
                     labelPlural="talents"
                     testid="talents-bulk-bar"
@@ -1026,6 +1029,20 @@ export default function TalentList() {
                     talentIds={Array.from(selected)}
                     onClose={() => setShowAddToProject(false)}
                     onSuccess={clear}
+                />
+            )}
+
+            {showMergeModal && selected.size === 2 && (
+                <MergeTalentsModal
+                    open={showMergeModal}
+                    talentAId={Array.from(selected)[0]}
+                    talentBId={Array.from(selected)[1]}
+                    onClose={() => setShowMergeModal(false)}
+                    onSuccess={() => {
+                        Array.from(selected).forEach((id) => talentPreviewCache.invalidateTalent(id));
+                        clear();
+                        refetch();
+                    }}
                 />
             )}
 

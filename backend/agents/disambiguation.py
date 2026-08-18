@@ -55,7 +55,16 @@ COLLECTION = "whatsapp_agent_disambiguation"
 # renamed in between) is worse than just asking them to start over.
 DEFAULT_TTL_MINUTES = 10
 
-MAX_CANDIDATES = 10
+# Simplified Command Language (2026-08-17) — raised from 10. This was
+# SILENTLY dropping candidates beyond the cap before the user ever saw
+# them (not a "show more" prompt — they were just gone), which is exactly
+# what "never paginate the ambiguous list, show the complete list" rules
+# out. format_prompt's numbering already handles beyond-10 candidates
+# (circled digits ①-⑩, then plain "11)"/"12)"...), so raising this is
+# purely a storage-limit fix, not a rendering change. Same bound as
+# casting_pipeline_nlu._MAX_AMBIGUOUS_CANDIDATES — a safety rail against
+# one pathological tie, not a realistic page size.
+MAX_CANDIDATES = 40
 
 _ENTITY_LABELS = {
     "project": "projects",

@@ -513,6 +513,18 @@ _NAME_FUZZY_CUTOFF = 0.72          # worth suggesting at all
 _NAME_AUTOCORRECT_CUTOFF = 0.85    # confident enough to auto-resolve without asking
 _NAME_AMBIGUITY_MARGIN = 0.05      # top-2 candidates scoring this close => ask, never guess
 
+# Simplified Command Language (2026-08-17) — how many tied candidates an
+# ambiguous match is allowed to show the user, shared by both talent and
+# project ambiguity below. This is a DISPLAY bound, not a matching-
+# precision knob (that's _NAME_AMBIGUITY_MARGIN/_PROJECT_AMBIGUITY_MARGIN
+# above/below) — it exists only so one pathological tie (a candidate list
+# that's actually huge) can't blow up a single WhatsApp message, and is
+# set generously high enough that it never trims a REALISTIC ambiguity
+# list (a shared first name is rarely more than a handful to a few dozen
+# people) — "never paginate, show the complete list" is the product
+# requirement; this cap is a safety rail, not a page size.
+_MAX_AMBIGUOUS_CANDIDATES = 40
+
 _NAME_PUNCT_RE = re.compile(r"[^a-z0-9\s]")
 # A trailing possessive ("Ahaan's") must become its own clean token
 # ("ahaan"), not merge into "ahaans" — deleting the apostrophe outright (the
@@ -742,7 +754,7 @@ def resolve_against_candidates(selector: SelectorResult, candidates: List[Candid
                 ok=True, talent_ids=[top_c.id], talent_labels=[top_c.label],
                 resolved_project_id=top_c.project_id, resolved_project_label=top_c.project_label,
             ))
-        close_enough = [c for c, s in scored if (top_s - s) <= _NAME_AMBIGUITY_MARGIN][:8]
+        close_enough = [c for c, s in scored if (top_s - s) <= _NAME_AMBIGUITY_MARGIN][:_MAX_AMBIGUOUS_CANDIDATES]
         timing["ranking"] = round((time.monotonic() - t0) * 1000, 3)
         return _finish(ResolvedTalents(
             ok=False,
@@ -760,7 +772,7 @@ def _format_ambiguous_matches(matches: List[Candidate], query: str) -> str:
     every line otherwise), and their current stage."""
     multi_project = len({c.project_id for c in matches if c.project_id}) > 1
     options: List[List[str]] = []
-    for c in matches[:8]:
+    for c in matches[:_MAX_AMBIGUOUS_CANDIDATES]:
         details = [c.label]
         if multi_project and c.project_label:
             details.append(c.project_label)
@@ -837,6 +849,42 @@ def resolve_option_reply(reply: str, options: List[Dict[str, str]]) -> Optional[
     labels = [opt.get("label") or "" for opt in options]
     idx0 = _match_label_tiers(stripped, labels)
     return (idx0 + 1) if idx0 is not None else None
+
+
+def _split_multi_reply(text: str) -> List[str]:
+    cleaned = _AND_SEP_RE.sub(",", text or "")
+    return [p.strip() for p in cleaned.split(",") if p.strip()]
+
+
+def resolve_option_reply_multi(reply: str, options: List[Dict[str, str]]) -> Optional[List[int]]:
+    """Multi-pick sibling of resolve_option_reply (Simplified Command
+    Language, 2026-08-17) — "1 and 3" / "1,3,5" / "Ayushi Thakur and
+    Ayushi Singh" picks MULTIPLE options from the same numbered
+    disambiguation list in one reply. Each fragment resolves independently
+    through the EXACT SAME single-pick resolution resolve_option_reply
+    already uses — no separate matching logic. A single-fragment reply
+    (no "and"/comma) falls straight through to resolve_option_reply, so
+    this is a strict superset — safe for a caller to try as a fallback
+    after resolve_option_reply already failed. Returns 1-based indices,
+    deduplicated, order-preserving; None if ANY fragment fails to resolve
+    to exactly one option (never silently drops an unresolvable pick)."""
+    raw = (reply or "").strip()
+    if not raw or not options:
+        return None
+    fragments = _split_multi_reply(raw)
+    if len(fragments) <= 1:
+        idx = resolve_option_reply(raw, options)
+        return [idx] if idx is not None else None
+    picked: List[int] = []
+    seen: set = set()
+    for frag in fragments:
+        idx = resolve_option_reply(frag, options)
+        if idx is None:
+            return None
+        if idx not in seen:
+            seen.add(idx)
+            picked.append(idx)
+    return picked or None
 
 
 def _normalize_project_label(s: str) -> str:
@@ -983,14 +1031,43 @@ def split_actions(text: str) -> List[str]:
          The compact one-name-per-line form ("Add\\nName\\nProject") never
          repeats a trigger word on a later line, so it always stays one
          chunk under this rule.
-      2. If rule 1 found only one chunk, " and <verb>" chaining within
-         that single chunk ("Add X to Y and move to Approved") -> a
-         chained chunk. The new chunk's own talent selector is left
-         implicit (whatever's left after its own verb) — the existing
-         PRONOUN_LAST_MARKER/session.last_talent_id fallback already
-         resolves "whoever we just discussed" for exactly this shape, so
-         no new resolution logic is needed for the implicit continuation.
+      2. " and <verb>" chaining within a chunk ("Add X to Y and move to
+         Approved") -> a chained chunk. The new chunk's own talent
+         selector is left implicit (whatever's left after its own verb) —
+         the existing PRONOUN_LAST_MARKER/session.last_talent_id fallback
+         (or, within one plan, the touched_pairs fan-out) already resolves
+         "whoever we just discussed" for exactly this shape, so no new
+         resolution logic is needed for the implicit continuation. Applied
+         to EVERY chunk rule 1 produced, not just when there's exactly
+         one — a multi-command message (rule 1 finds several chunks) can
+         still have and-chaining INSIDE any one of its own commands, e.g.
+         "Add A to X and move to Follow Up\\n\\nAdd B to Y" must still
+         split the first line's own chain, not swallow "and move to
+         Follow Up" whole as if it were part of the (single-project) Add
+         command's own project/recipient text (2026-08-17 — this exact
+         combination went unexercised before the Simplified Command
+         Language's multi-command translator started producing it, but
+         the gap was already latent for natural language too).
     """
+    return [chunk for _group, chunk in split_actions_grouped(text)]
+
+
+def split_actions_grouped(text: str) -> "List[Tuple[int, str]]":
+    """Same splitting as split_actions, but tags each returned chunk with
+    the index of the TOP-LEVEL (rule 1: blank-line/independent-trigger-
+    line) group it came from — 0 for the first independent command in the
+    message, 1 for the second, etc. A chained ("and move to X") sub-chunk
+    shares its parent command's group index, since it's semantically part
+    of that SAME command, not a new one.
+
+    This exists so a caller can tell "these two chunks came from the same
+    user-typed command" apart from "these two chunks are independent
+    commands that merely happen to be adjacent" — needed by the plan
+    engine's touched_pairs fan-out (casting_pipeline.py's _execute_plan/
+    _build_plan_confirmation), which must reset between independent
+    commands: "Add A to X and move to Follow Up\\n\\nAdd B to Y and move
+    to Shortlisted" must never let the second command's implicit trailing
+    move fan out across the FIRST command's talents too."""
     all_triggers = sorted({t.lower() for t in (MOVE_TRIGGERS + ADD_TRIGGERS)}, key=len, reverse=True)
     lines = (text or "").split("\n")
 
@@ -1007,12 +1084,17 @@ def split_actions(text: str) -> List[str]:
             chunks[-1].append(line)
     chunks = [c for c in chunks if c]
 
-    if len(chunks) > 1:
-        return ["\n".join(c) for c in chunks]
+    if not chunks:
+        and_chained = _split_and_chained((text or "").strip(), all_triggers)
+        return [(0, c) for c in (and_chained if and_chained else [text or ""])]
 
-    whole = chunks[0][0] if chunks and len(chunks[0]) == 1 else (text or "").strip()
-    and_chained = _split_and_chained(whole, all_triggers)
-    return and_chained if and_chained else [text or ""]
+    result: List[Tuple[int, str]] = []
+    for group_idx, c in enumerate(chunks):
+        joined = "\n".join(c)
+        and_chained = _split_and_chained(joined, all_triggers)
+        for sub in (and_chained if and_chained else [joined]):
+            result.append((group_idx, sub))
+    return result
 
 
 def _split_and_chained(text: str, all_triggers: List[str]) -> List[str]:
@@ -1033,6 +1115,18 @@ def preprocess_command(text: str) -> "Tuple[List[str], bool]":
     normalized = normalize_compact_text(text)
     stripped, auto_confirm = strip_and_confirm(normalized)
     chunks = split_actions(stripped)
+    return chunks, auto_confirm
+
+
+def preprocess_command_grouped(text: str) -> "Tuple[List[Tuple[int, str]], bool]":
+    """Grouped-chunk counterpart of preprocess_command — used only where
+    a caller needs group boundaries (see split_actions_grouped), i.e. the
+    plan-step-building code in casting_pipeline.py's _extract_add_fields/
+    _extract_move_fields. Every other existing caller keeps using the
+    plain preprocess_command, unaffected."""
+    normalized = normalize_compact_text(text)
+    stripped, auto_confirm = strip_and_confirm(normalized)
+    chunks = split_actions_grouped(stripped)
     return chunks, auto_confirm
 
 
@@ -1265,7 +1359,176 @@ def extract_move_fields(text: str, stage_order: List[str]) -> Dict[str, str]:
 #   to
 #   Toyota Glanza
 # ---------------------------------------------------------------------------
-ADD_TRIGGERS = ["add", "attach"]  # "attach" added for Phase 2's "Attach selected to X" synonym.
+ADD_TRIGGERS = [
+    "add", "attach",  # "attach" added for Phase 2's "Attach selected to X" synonym.
+    # Simplified Command Language (2026-08-17) — "Add,Move - Talent -
+    # Project - Pipeline" (combined action: add to the pipeline THEN move
+    # to the named stage in one step) routes through the ADD intent, same
+    # as the natural-language "Add X to Y and move to Z" chain it
+    # translates into — see translate_simple_command_to_natural_language.
+    "add,move", "add, move", "add,  move",
+]
+
+# ---------------------------------------------------------------------------
+# Simplified Command Language (2026-08-17) — "Action - Talent(s) -
+# Project(s) - Pipeline" as the PREFERRED syntax, sitting entirely on top
+# of the existing natural-language extraction below: a recognized simple
+# command is translated into the EQUIVALENT natural-language sentence
+# (e.g. "Add A,B - Project A - Follow Up" -> "Add A,B to Project A and
+# move to Follow Up"), then handed to the SAME extract_add_fields/
+# extract_move_fields + plan engine every natural-language command already
+# uses — zero duplicated resolution/cross-product/confirmation logic. A
+# line that doesn't cleanly match this shape returns None so the caller
+# falls straight through to natural-language parsing, unaffected.
+# ---------------------------------------------------------------------------
+_SIMPLE_ACTION_RE = re.compile(
+    r"^\s*(add\s*,\s*move|move\s*,\s*add|add|move)\s*$", re.IGNORECASE,
+)
+# "Follow Up to Rejected" / "Follow Up → Rejected" -> only the target
+# (after "to"/"→") matters for the actual write — _split_by_current_
+# stage already re-checks each talent's live CURRENT stage server-side, so
+# the "from" stage named here is purely descriptive, never validated
+# against reality. A bare "Follow Up" (no "to"/"→" at all) passes
+# through unchanged as the direct target — both shapes the spec asks for.
+_PIPELINE_TARGET_RE = re.compile(r"\bto\b|→", re.IGNORECASE)
+
+
+def _extract_simple_pipeline_target(pipeline_part: str) -> str:
+    # Last match, not first — "Ask To Test" (a real stage label) contains
+    # its own standalone "To", so "Ask To Test to Approved" would otherwise
+    # split right after that inner "To" and leave "Test to Approved" as
+    # the (wrong) target.
+    matches = list(_PIPELINE_TARGET_RE.finditer(pipeline_part or ""))
+    if matches:
+        return pipeline_part[matches[-1].end():].strip(" .")
+    return (pipeline_part or "").strip()
+
+
+def parse_simple_add_move_command(
+    line: str, stage_order: Optional[List[str]] = None,
+) -> Optional[Dict[str, str]]:
+    """Parses ONE line of the "Action - Talent(s) - Project(s) - Pipeline"
+    grammar. Returns {"action": "add"|"move"|"add_move", "talent_part":
+    ..., "project_part": ..., "pipeline_part": ...} (all still RAW,
+    possibly comma-multi-value text — splitting into individual
+    talents/projects is the existing extract_add_fields/extract_move_
+    fields + cross-product machinery's job, unchanged), or None when the
+    line has no recognized action word first, or doesn't resolve to a
+    plausible 4-field structure — never a partial/guessed match, so the
+    caller can safely fall back to natural-language parsing without
+    needing to "undo" anything.
+
+    Missing-hyphen recovery: when exactly 3 fields are found (one "-"
+    omitted somewhere) AND the trailing field contains a recognizable
+    stage phrase ("Project A Follow Up", forgotten hyphen before the
+    stage), the stage is peeled off using the EXISTING stage matcher
+    (extract_stage_phrase — the same small, closed, DB-free vocabulary
+    every stage lookup on this platform already uses) and the remainder
+    becomes the project field. This never GUESSES by character position —
+    it only recovers when the known stage vocabulary confirms the split.
+    A missing hyphen between the TALENT and PROJECT fields instead (the
+    other place one could be dropped) needs live project data to locate
+    safely, which this synchronous parsing layer doesn't have access to —
+    that shape falls through to natural-language parsing, which already
+    gives a clear, non-guessing error rather than silently misreading
+    someone's name as part of a project."""
+    parts = [p.strip() for p in (line or "").split(" - ")]
+    if not parts:
+        return None
+    action_m = _SIMPLE_ACTION_RE.match(parts[0])
+    if not action_m:
+        return None
+    action_raw = re.sub(r"\s*,\s*", ",", action_m.group(1).lower())
+    action = "add_move" if "," in action_raw else action_raw
+
+    if len(parts) == 4:
+        talent_part, project_part, pipeline_part = parts[1], parts[2], parts[3]
+        if not talent_part or not project_part or not pipeline_part:
+            return None
+        return {
+            "action": action, "talent_part": talent_part,
+            "project_part": project_part, "pipeline_part": pipeline_part,
+        }
+
+    if len(parts) == 3 and stage_order:
+        talent_part = parts[1]
+        stage_key, ambiguous, rest = extract_stage_phrase(parts[2], stage_order)
+        rest = (rest or "").strip(" ,")
+        if talent_part and stage_key and not ambiguous and rest:
+            return {
+                "action": action, "talent_part": talent_part,
+                "project_part": rest, "pipeline_part": stage_label(stage_key),
+            }
+
+    return None
+
+
+def translate_simple_command_to_natural_language(parsed: Dict[str, str]) -> str:
+    """The one place a parsed simple command becomes the natural-language
+    sentence extract_add_fields/extract_move_fields already know how to
+    read — see this section's module comment for why this is a
+    translation layer, not a second extraction implementation.
+
+    The Pipeline field is ALWAYS meaningful, regardless of which action
+    word opened the command — the spec's own three worked examples
+    ("Add"/"Move"/"Add,Move") all pair "Talent A - Project A - Follow Up"
+    with the identical Follow Up target, and the core principle is
+    ACTION -> WHO -> WHAT PROJECT -> WHERE/PIPELINE, i.e. WHERE is never
+    optional or silently discarded. Concretely: "add" and "add_move" are
+    therefore the SAME operation — ensure the talent is in the project's
+    pipeline AND at the named stage — chained via the existing plan
+    engine's "Add X to Y and move to Z" fan-out (_resolve_one_plan_
+    segment already applies that trailing move to every touched
+    (talent, project) pair, cross-product included, so this needs no new
+    execution logic). Only "move" stays a pure stage transition, for
+    someone already in the pipeline."""
+    action = parsed["action"]
+    talent = parsed["talent_part"]
+    project = parsed["project_part"]
+    target = _extract_simple_pipeline_target(parsed["pipeline_part"])
+    if action == "move":
+        return f"Move {talent} to {target} in {project}"
+    return f"Add {talent} to {project} and move to {target}"
+
+
+def translate_simple_commands_in_text(text: str, stage_order: Optional[List[str]] = None) -> str:
+    """Applied to a whole (possibly multi-line, possibly multi-command)
+    inbound message BEFORE any existing extraction runs — translates
+    every line that matches the simple "Action - Talent(s) - Project(s) -
+    Pipeline" grammar into its natural-language equivalent in place,
+    leaves every other line (blank lines, "and confirm", genuine natural-
+    language commands) completely untouched. Since the translated line
+    still starts with the same "Add"/"Move" trigger word natural language
+    already uses, the EXISTING split_actions chunk-boundary detection
+    (a later line starting with a recognized trigger begins a new chunk)
+    keeps working unmodified for multi-command messages — including the
+    "user forgot the blank line between commands" case, since chunking
+    only ever depended on the trigger word, never on blank lines being
+    present. `stage_order` (the live PIPELINE_STAGE_ORDER, passed in
+    rather than imported — this module stays DB/router-agnostic, same
+    convention extract_move_fields already follows) enables missing-
+    hyphen recovery; omitted, every line still parses, just without that
+    recovery."""
+    lines = (text or "").split("\n")
+    out = []
+    for line in lines:
+        # A trailing "and confirm" on the SAME line ("... - Follow Up and
+        # confirm") must be pulled off before grammar-matching — left in
+        # place it becomes part of the pipeline_part field and ends up
+        # embedded mid-sentence in the translated output ("... to Follow
+        # Up and confirm in Project"), no longer at the true end of the
+        # text where strip_and_confirm (run later, on the whole message)
+        # expects to find it. Stripped here and re-appended after
+        # translation, it lands back at the end of the translated line.
+        m = _AND_CONFIRM_RE.search(line)
+        core, suffix = (line[:m.start()], line[m.start():]) if m else (line, "")
+        parsed = parse_simple_add_move_command(core, stage_order)
+        if parsed:
+            out.append(translate_simple_command_to_natural_language(parsed) + suffix)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
 
 _ADD_TRIGGER_RE = re.compile(r"^\s*(?:add|attach)\b[\s:]*", re.IGNORECASE)
 # Tolerant of a comma (from the newline-join below) OR plain whitespace on
@@ -1345,6 +1608,13 @@ QUERY_TRIGGERS = [
     # test_stage_first_commands. "testing"/"follow up" have no such
     # collision.
     "testing", "follow up", "followup",
+    # Simplified Command Language (2026-08-17) — "testing? - Talent(s) -
+    # Project(s)" glues the "?" directly onto the trigger word with no
+    # space, which detect_trigger's normal "starts with trigger + space"
+    # check doesn't match on its own (a bare "testing" trigger needs a
+    # following space or ":"). Listed explicitly rather than loosening
+    # detect_trigger itself, which is shared by every agent/intent.
+    "testing?",
     # Conversational Talent Search (Phase 1, 2026-08-10) — "find"/"search"
     # cover natural variants of the roster-search examples that don't
     # start with "show" ("Find actors in Mumbai"). Checked against
@@ -1426,6 +1696,15 @@ class QueryIntent:
     search_unsupported: Optional[List[str]] = None
     # Only set for "talent_search_page" — "next" | "previous" | "all".
     search_page_action: Optional[str] = None
+    # Simplified Command Language (2026-08-17) — RAW (possibly comma-
+    # multi-value) text, split into individual projects/stages by the
+    # handler itself, not here (same "classification stays a pure text
+    # transform, resolution does the DB-backed matching" split every
+    # other deferred-value field on this platform already follows).
+    # "testing_check" reuses project_name_query above for its (possibly
+    # multi-project) project text; "pipeline_multi" uses BOTH
+    # project_name_query (multi-project) and this field (multi-stage).
+    stage_key_multi: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1640,7 +1919,38 @@ def extract_bare_pipeline_candidate(
     return stage_key, ambiguous, project
 
 
+# ---------------------------------------------------------------------------
+# Simplified Command Language (2026-08-17) — the query-side commands:
+# "pending test - Talent(s)", "testing? - Talent(s) - Project(s)", and
+# "show - Project(s) - Pipeline(s)". Detected FIRST, before any
+# natural-language pattern in classify_query below — a message that
+# doesn't match one of these three exact shapes returns None and falls
+# straight through to natural-language classification, unaffected.
+# ---------------------------------------------------------------------------
+_PENDING_TEST_ACTION_RE = re.compile(r"^\s*pending\s*test\s*$", re.IGNORECASE)
+_TESTING_CHECK_ACTION_RE = re.compile(r"^\s*testing\s*\??\s*$", re.IGNORECASE)
+_SHOW_ACTION_RE = re.compile(r"^\s*show\s*$", re.IGNORECASE)
+
+
+def parse_simple_query_command(text: str) -> Optional["QueryIntent"]:
+    parts = [p.strip() for p in (text or "").strip().split(" - ")]
+
+    if len(parts) == 2 and _PENDING_TEST_ACTION_RE.match(parts[0]) and parts[1]:
+        return QueryIntent(kind="pending_tests", talent_query=parts[1])
+
+    if len(parts) == 3 and _TESTING_CHECK_ACTION_RE.match(parts[0]) and parts[1] and parts[2]:
+        return QueryIntent(kind="testing_check", talent_query=parts[1], project_name_query=parts[2])
+
+    if len(parts) == 3 and _SHOW_ACTION_RE.match(parts[0]) and parts[1] and parts[2]:
+        return QueryIntent(kind="pipeline_multi", project_name_query=parts[1], stage_key_multi=parts[2])
+
+    return None
+
+
 def classify_query(text: str, stage_order: List[str]) -> QueryIntent:
+    simple = parse_simple_query_command(text)
+    if simple is not None:
+        return simple
     stripped = (text or "").strip()
     if _REPLAY_RE.match(stripped):
         return QueryIntent(kind="replay")
@@ -2204,7 +2514,7 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     if len(exact) == 1:
         return ProjectNameMatch(project=projects[exact[0]])
     if len(exact) > 1:
-        return ProjectNameMatch(ambiguous=_as_dicts(exact[:8]))
+        return ProjectNameMatch(ambiguous=_as_dicts(exact[:_MAX_AMBIGUOUS_CANDIDATES]))
 
     # Tier 2: normalized exact — case/punctuation/hyphen/whitespace-
     # insensitive ("Bajaj Pulsar Main Guy" == "Bajaj Pulsar - Main Guy").
@@ -2214,7 +2524,7 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     if len(nexact) == 1:
         return ProjectNameMatch(project=projects[nexact[0]])
     if len(nexact) > 1:
-        return ProjectNameMatch(ambiguous=_as_dicts(nexact[:8]))
+        return ProjectNameMatch(ambiguous=_as_dicts(nexact[:_MAX_AMBIGUOUS_CANDIDATES]))
 
     # Tier 3: normalized substring (either direction).
     contains = [
@@ -2223,7 +2533,7 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     if len(contains) == 1:
         return ProjectNameMatch(project=projects[contains[0]])
     if len(contains) > 1:
-        return ProjectNameMatch(ambiguous=_as_dicts(contains[:8]))
+        return ProjectNameMatch(ambiguous=_as_dicts(contains[:_MAX_AMBIGUOUS_CANDIDATES]))
 
     # Tier 4: order-independent token-subset — every normalized query token
     # present somewhere in the candidate's tokens, regardless of order or
@@ -2239,7 +2549,7 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     if len(subset_idxs) == 1:
         return ProjectNameMatch(project=projects[subset_idxs[0]])
     if len(subset_idxs) > 1:
-        return ProjectNameMatch(ambiguous=_as_dicts(subset_idxs[:8]))
+        return ProjectNameMatch(ambiguous=_as_dicts(subset_idxs[:_MAX_AMBIGUOUS_CANDIDATES]))
 
     # Tier 5: character-level fuzzy / partial token overlap. Started as a
     # mirror of talent matching's own fuzzy tier; hotfix (2026-08-05) adds
@@ -2273,5 +2583,5 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     if top_s >= _PROJECT_AUTOCORRECT_CUTOFF and (top_s - second_s) > _PROJECT_AMBIGUITY_MARGIN:
         return ProjectNameMatch(project=projects[top_i])
 
-    close_enough = [i for i, s in scored if (top_s - s) <= _PROJECT_AMBIGUITY_MARGIN][:8]
+    close_enough = [i for i, s in scored if (top_s - s) <= _PROJECT_AMBIGUITY_MARGIN][:_MAX_AMBIGUOUS_CANDIDATES]
     return ProjectNameMatch(suggestions=_as_dicts(close_enough))

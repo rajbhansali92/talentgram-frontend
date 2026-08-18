@@ -447,6 +447,60 @@ def _find_quote_span(remainder: str) -> Optional["tuple[int, int, int, int]"]:
     return first.start(), first.end(), last.start(), last.end()
 
 
+# ---------------------------------------------------------------------------
+# Bulk Multi-Command Sends (2026-08-17) — "send X\\n\\nsend Y\\n\\nsend
+# Z\\n\\nand confirm" as several fully independent commands in one
+# message, sharing one confirmation/one "and confirm". Splitting mirrors
+# casting-agent's split_actions rule 1 (a blank line, OR a later line
+# independently starting with a recognized SEND trigger, each start a new
+# chunk) — there is no rule-2 "and"-chaining equivalent here, since
+# campaign sends never chain into each other the way casting's Add/Move
+# do. QUOTE/PAREN-AWARE: a custom message's own body may span multiple
+# lines and, in principle, could contain a line that happens to start
+# with a trigger word ("Send this today, please") — tracked via a
+# running open/close parity so a mid-quote line is NEVER mistaken for a
+# new command boundary, which would otherwise corrupt the message body
+# (a correctness requirement, not just tidiness — the whole message must
+# reach create_batch verbatim).
+# ---------------------------------------------------------------------------
+def _starts_with_any_send_trigger(line: str, triggers: List[str]) -> bool:
+    low = line.strip().lower()
+    return any(low == t or low.startswith(t + " ") or low.startswith(t + ":") for t in triggers)
+
+
+def _split_send_commands(text: str) -> List[str]:
+    """Splits a message into independent send commands.
+
+    Unlike casting-agent's Add/Move grammar (always one line per command),
+    a single custom-message command legitimately spans multiple
+    blank-line-separated sections: trigger line, blank, quoted body,
+    blank lines between paragraphs INSIDE the quote, blank line, then a
+    trailing "to X, Y, Z" recipient clause. A bare blank line is therefore
+    NEVER treated as a boundary on its own — only a line that itself
+    starts with a recognized SEND trigger word (and isn't inside an open
+    quote/paren span) begins a new command.
+    """
+    all_triggers = sorted({t.lower() for t in SEND_TRIGGERS}, key=len, reverse=True)
+    lines = (text or "").split("\n")
+    chunks: List[List[str]] = [[]]
+    quote_parity = 0
+    paren_depth = 0
+    for raw_line in lines:
+        line = raw_line.strip()
+        inside_open_span = (quote_parity % 2 == 1) or paren_depth > 0
+        if not line:
+            if chunks[-1]:
+                chunks[-1].append(raw_line)
+        elif chunks[-1] and not inside_open_span and _starts_with_any_send_trigger(line, all_triggers):
+            chunks.append([line])
+        else:
+            chunks[-1].append(line)
+        quote_parity += len(_QUOTE_CHAR_RE.findall(raw_line))
+        paren_depth = max(0, paren_depth + raw_line.count("(") - raw_line.count(")"))
+    chunks = [c for c in chunks if c]
+    return ["\n".join(c).strip("\n") for c in chunks] if chunks else [text or ""]
+
+
 def _detect_send_mode(remainder: str) -> str:
     if _INSTAGRAM_KEYWORD_RE.search(remainder):
         return "instagram"
@@ -591,28 +645,127 @@ def _extract_instagram_fields(remainder: str) -> Dict[str, str]:
     return out
 
 
-def extract_send_requirement_fields(text: str) -> Dict[str, str]:
-    # "...and confirm" — stripped FIRST, before mode detection/trigger
-    # parsing, exactly like casting-agent's preprocess_command does, so it
-    # works identically across every send_mode (requirement/custom_message/
-    # instagram) without each mode's own extraction needing to know about
-    # it. Reuses casting_pipeline_nlu's implementation verbatim — no
-    # second "and confirm" recognizer.
-    raw_text, auto_confirm = nlu.strip_and_confirm(text or "")
-    remainder = _strip_leading_trigger_preserve_newlines(raw_text, SEND_TRIGGERS)
+# ---------------------------------------------------------------------------
+# Simplified Command Language (2026-08-17) — "send - Talent(s) - Template -
+# Project(s)" / "send - Template - Project(s) - Pipeline(s)" / "send custom
+# message "..." - ..." / "send instagram - Talent(s) - Recipient" as the
+# PREFERRED syntax, detected on the already-trigger-stripped remainder
+# BEFORE any natural-language mode detection runs. Returns the SAME
+# collected-field shape the natural-language tiers below already produce
+# (source_query/recipient_query/project_query/stage_query/send_mode) —
+# zero new resolution logic; _resolve_recipient_multi_aware's existing
+# routing (project_query+recipient_query -> talents-narrowed-by-project;
+# stage_query set -> project x stage union; recipient_query alone -> its
+# own project-vs-talent detection) already handles every shape this
+# produces. Returns None for anything that doesn't match one of the exact
+# shapes below, falling straight through to natural-language parsing.
+# ---------------------------------------------------------------------------
+_SIMPLE_INSTAGRAM_RE = re.compile(r"^\s*insta(?:gram)?\b(?:\s+link)?\s*", re.IGNORECASE)
+
+
+def _simple_field_looks_like_stages(text: str) -> Optional[str]:
+    """Does this hyphen-grammar field name a stage (or comma/"and"-
+    separated list of stages), as opposed to a project reference?
+    Checked on the FIRST split fragment only — stage names never
+    genuinely contain "and"/comma themselves, so one representative
+    fragment is enough to tell "Follow Up,Approved" (all stages) apart
+    from a project name that happens to be multi-valued too. Returns the
+    ORIGINAL raw text (still comma/and-joined — _resolve_pipeline_stages/
+    _resolve_project_stage_union do the actual per-fragment splitting) on
+    a match, else None."""
+    fragments = nlu.split_multi_names(text) or [text]
+    stage_match = nlu.match_stage_phrase(fragments[0], PIPELINE_STAGE_ORDER)
+    return text if stage_match.key else None
+
+
+def parse_simple_send_command(remainder: str) -> Optional[Dict[str, str]]:
+    stripped = (remainder or "").strip()
+
+    # Custom message — quote/paren span reused verbatim from the existing
+    # extraction (same "commas inside the message are never separators"
+    # guarantee), followed by " - Talent(s)" or " - Project(s) - Pipeline(s)".
+    span = _find_quote_span(stripped) or _find_paren_span(stripped)
+    is_custom_phrase = bool(_CUSTOM_MESSAGE_PHRASE_RE.match(stripped))
+    if span or is_custom_phrase:
+        if not span:
+            return None  # bare "custom message" phrase, no quote at all -> let natural language ask what to send
+        open_start, open_end, close_start, close_end = span
+        message_text = stripped[open_end:close_start]
+        after = stripped[close_end:].lstrip()
+        if not after.startswith("-"):
+            return None
+        rest = after[1:].strip()
+        parts = [p.strip() for p in rest.split(" - ")]
+        if len(parts) == 1 and parts[0]:
+            return {"send_mode": "custom_message", "source_query": message_text, "recipient_query": parts[0]}
+        if len(parts) == 2 and all(parts):
+            stage_field = _simple_field_looks_like_stages(parts[1])
+            if stage_field:
+                return {
+                    "send_mode": "custom_message", "source_query": message_text,
+                    "project_query": parts[0], "stage_query": stage_field,
+                    "recipient_query": _ALL_PROJECTS_SENTINEL,
+                }
+        return None
+
+    # Instagram — "instagram|insta(gram)?( link)? - Talent(s) - Recipient".
+    insta_m = _SIMPLE_INSTAGRAM_RE.match(stripped)
+    if insta_m:
+        rest = stripped[insta_m.end():].strip()
+        if rest.startswith("-"):
+            rest = rest[1:].strip()
+        elif rest:
+            # "instagram of X" / "instagram X" natural phrasing, not the
+            # hyphen grammar at all -> let the existing Instagram
+            # extraction (which already handles those) take it instead.
+            return None
+        parts = [p.strip() for p in rest.split(" - ")] if rest else []
+        if len(parts) == 2 and all(parts):
+            return {"send_mode": "instagram", "source_query": parts[0], "recipient_query": parts[1]}
+        if len(parts) == 1 and parts[0]:
+            return {"send_mode": "instagram", "source_query": parts[0], "recipient_query": _REPLY_IN_CHAT_SENTINEL}
+        return None
+
+    # Saved template — "Talent(s) - Template - Project(s)" (template
+    # optional: "Talent(s) - Project(s)" leaves source_query unset, so the
+    # existing generic "What should I send?" question asks for it, same
+    # as any other missing-field case — no new default-template system)
+    # or "Template - Project(s) - Pipeline(s)".
+    parts = [p.strip() for p in stripped.split(" - ")]
+    if len(parts) == 2 and all(parts):
+        return {"recipient_query": parts[0], "project_query": parts[1]}
+    if len(parts) == 3 and all(parts):
+        stage_field = _simple_field_looks_like_stages(parts[2])
+        if stage_field:
+            return {
+                "source_query": parts[0], "project_query": parts[1],
+                "stage_query": stage_field, "recipient_query": _ALL_PROJECTS_SENTINEL,
+            }
+        return {"recipient_query": parts[0], "source_query": parts[1], "project_query": parts[2]}
+    return None
+
+
+def _extract_one_send_command_fields(chunk_text: str) -> Dict[str, str]:
+    """Extraction for ONE independent send command's raw text — the
+    Simplified Command Language grammar first, then the full natural-
+    language tier cascade, unchanged from before Bulk Multi-Command Sends
+    existed. Never touches "and confirm" — that's stripped once, globally,
+    by the caller (extract_send_requirement_fields), before the message is
+    even split into per-command chunks."""
+    remainder = _strip_leading_trigger_preserve_newlines(chunk_text, SEND_TRIGGERS)
+
+    simple = parse_simple_send_command(remainder)
+    if simple is not None:
+        return simple
 
     send_mode = _detect_send_mode(remainder)
     if send_mode == "instagram":
         out = _extract_instagram_fields(remainder)
         out["send_mode"] = "instagram"
-        if auto_confirm:
-            out[AUTO_CONFIRM_FIELD.key] = "1"
         return out
     if send_mode == "custom_message":
         out = _extract_custom_message_fields(remainder)
         out["send_mode"] = "custom_message"
-        if auto_confirm:
-            out[AUTO_CONFIRM_FIELD.key] = "1"
         return out
 
     out: Dict[str, str] = {}
@@ -634,8 +787,6 @@ def extract_send_requirement_fields(text: str) -> Dict[str, str]:
                 stage_key, _ambig, _rest = nlu.extract_stage_phrase(head, PIPELINE_STAGE_ORDER)
                 if stage_key:
                     out["stage_query"] = stage_key
-            if auto_confirm:
-                out[AUTO_CONFIRM_FIELD.key] = "1"
             return out
 
     # Tier 2: "<verb> <recipient> the <source>" inverted shape — only when
@@ -648,8 +799,6 @@ def extract_send_requirement_fields(text: str) -> Dict[str, str]:
             if recipient_part and source_part:
                 out["recipient_query"] = recipient_part
                 out["source_query"] = source_part
-                if auto_confirm:
-                    out[AUTO_CONFIRM_FIELD.key] = "1"
                 return out
 
     # Tier 3: generic "<source> to|with <recipient>" shape.
@@ -670,6 +819,42 @@ def extract_send_requirement_fields(text: str) -> Dict[str, str]:
         if source_part:
             out["source_query"] = source_part
 
+    return out
+
+
+def extract_send_requirement_fields(text: str) -> Dict[str, str]:
+    # "...and confirm" — stripped FIRST, before mode detection/trigger
+    # parsing/multi-command splitting, exactly like casting-agent's
+    # preprocess_command does, so it applies ONCE, globally, to every
+    # command in the message rather than needing to be repeated per
+    # command. Reuses casting_pipeline_nlu's implementation verbatim — no
+    # second "and confirm" recognizer.
+    raw_text, auto_confirm = nlu.strip_and_confirm(text or "")
+
+    chunks = _split_send_commands(raw_text)
+    if len(chunks) > 1:
+        # Bulk Multi-Command Sends (2026-08-17) — each chunk is a fully
+        # independent send (its own template/message, its own recipients);
+        # unlike casting-agent's plan engine there is no cross-command
+        # fan-out/dedup concern here (see _execute_send_plan), so a plan
+        # step is just that command's own already-existing extraction
+        # output, unmodified.
+        steps = [_extract_one_send_command_fields(c) for c in chunks]
+        out: Dict[str, str] = {
+            PLAN_FIELD.key: json.dumps(steps),
+            # Required fields must be non-empty for the generic engine's
+            # missing-field check to ever reach build_confirmation/
+            # try_auto_execute at all — the real per-command values live
+            # inside the plan JSON above, exactly like casting-agent's own
+            # _PLAN_PLACEHOLDER convention.
+            SOURCE_QUERY_FIELD.key: _PLAN_PLACEHOLDER,
+            RECIPIENT_QUERY_FIELD.key: _PLAN_PLACEHOLDER,
+        }
+        if auto_confirm:
+            out[AUTO_CONFIRM_FIELD.key] = "1"
+        return out
+
+    out = _extract_one_send_command_fields(chunks[0] if chunks else raw_text)
     if auto_confirm:
         out[AUTO_CONFIRM_FIELD.key] = "1"
     return out
@@ -743,6 +928,17 @@ AUTO_CONFIRM_FIELD = FieldSpec(
     key="_auto_confirm", label="AutoConfirm", question="",
     validate=_validate_query_text, required=False,
 )
+# Bulk Multi-Command Sends (2026-08-17) — a JSON list of independent
+# per-command extraction-field dicts (see extract_send_requirement_fields'
+# multi-chunk branch), mirroring casting-agent's own PLAN_FIELD. Never
+# required/asked about; absent means "not a multi-command message" — the
+# single-command path (100% of existing behaviour) is completely
+# unaffected by this field's mere existence.
+PLAN_FIELD = FieldSpec(
+    key="_plan", label="Plan", question="",
+    validate=_validate_query_text, required=False,
+)
+_PLAN_PLACEHOLDER = "__plan__"
 
 
 # ---------------------------------------------------------------------------
@@ -2373,7 +2569,108 @@ async def _resume_pending_recipient_edit(collected: dict, ctx: ExecContext) -> d
     return new_collected
 
 
+def _deserialize_send_plan(raw: Optional[str]) -> List[Dict[str, str]]:
+    try:
+        steps = json.loads(raw or "[]")
+        return steps if isinstance(steps, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+def _describe_send_target(step_fields: Dict[str, str], target: "_SendTarget") -> str:
+    mode = step_fields.get("send_mode") or "requirement"
+    if mode == "custom_message":
+        return _truncate(target.literal_message or "", 60)
+    if mode == "instagram":
+        return f"Instagram profile(s): {target.subject_label}"
+    return (target.template.get("name") or target.template.get("slug") or "") if target.template else ""
+
+
+async def _build_send_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
+    """Bulk Multi-Command Sends (2026-08-17) — preview for several
+    independent send commands sharing one approval. Mirrors casting-
+    agent's plan-preview convention exactly: an ambiguous or unresolvable
+    command is shown INLINE as an error line rather than opening an
+    interactive disambiguation round WITHIN the plan (casting-agent's own
+    plan engine has the same limitation — resend that one command alone
+    to disambiguate it). Every command is re-resolved fresh here (same
+    "no stale resolution" rule the single-command path already follows)."""
+    steps = _deserialize_send_plan(collected.get(PLAN_FIELD.key))
+    lines = ["You are about to run this plan:", ""]
+    for i, step_fields in enumerate(steps, start=1):
+        target = await _resolve_send_target(step_fields)
+        if target.ok and target.reply_in_chat:
+            lines.append(f"{i}. Instagram profile(s) for {target.subject_label} — answered inline, nothing queued")
+            continue
+        if not target.ok:
+            if target.ambiguous:
+                lines.append(
+                    f"{i}. Multiple matches found for this command — resend it alone to pick one."
+                )
+            else:
+                lines.append(f"{i}. {target.error}")
+            continue
+        desc = _describe_send_target(step_fields, target)
+        lines.append(f"{i}. {desc} → {target.recipient_label}")
+    lines.append("")
+    lines.append("Reply:")
+    lines.append("1 → Approve")
+    lines.append("2 → Edit")
+    lines.append("3 → Cancel")
+    return "\n".join(lines)
+
+
+async def _execute_send_plan(collected: dict, ctx: ExecContext) -> ExecResult:
+    """Runs every command SEQUENTIALLY — each wrapped in its own try/
+    except so one failing/ambiguous command never aborts the rest (same
+    partial-failure tolerance casting-agent's _execute_plan already
+    guarantees). No cross-command dedup: unlike casting's talent/project
+    fan-out, two independent sends are never meant to merge into one —
+    each keeps its own template/message and its own create_batch call."""
+    steps = _deserialize_send_plan(collected.get(PLAN_FIELD.key))
+    summary_lines = ["Completed", ""]
+    any_success = False
+    admin = await _service_admin()
+
+    for i, step_fields in enumerate(steps, start=1):
+        try:
+            target = await _resolve_send_target(step_fields)
+        except Exception:
+            logger.exception("send plan step resolution failed index=%s", i)
+            summary_lines += [f"✗ Command {i}", "", "Something went wrong resolving this command.", ""]
+            continue
+        if target.ok and target.reply_in_chat:
+            summary_lines += [f"✓ Command {i}", "", target.literal_message or "", ""]
+            any_success = True
+            continue
+        if not target.ok:
+            summary_lines += [f"✗ Command {i}", "", target.error or "Could not resolve this command.", ""]
+            continue
+        try:
+            result = await create_batch(
+                await _build_batch_in(target, step_fields, is_dry_run=False), admin=admin,
+            )
+        except HTTPException as exc:
+            summary_lines += [f"✗ Command {i}", "", f"Couldn't send that: {exc.detail}", ""]
+            continue
+        except Exception:
+            logger.exception("send plan step execution failed index=%s", i)
+            summary_lines += [f"✗ Command {i}", "", "Something went wrong sending this.", ""]
+            continue
+        queued = len(result["jobs"])
+        desc = _describe_send_target(step_fields, target)
+        summary_lines += [
+            f"✓ Command {i}", "", f"{desc} → {target.recipient_label}",
+            f"Queued {queued} message(s)", "",
+        ]
+        any_success = True
+
+    return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
+
+
 async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext) -> str:
+    if collected.get(PLAN_FIELD.key):
+        return await _build_send_plan_confirmation(collected, ctx)
     collected = await _resume_pending_recipient_edit(collected, ctx)
     collected = await _resume_pending_multi_recipient(collected, ctx)
     collected = await _resume_pending_multi_subject(collected, ctx)
@@ -2507,6 +2804,8 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
 
 
 async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    if collected.get(PLAN_FIELD.key):
+        return await _execute_send_plan(collected, ctx)
     target = await _resolve_send_target(collected)
     if target.ok and target.reply_in_chat:
         # Defensive only — _build_send_requirement_confirmation already
@@ -2568,9 +2867,16 @@ async def _send_requirement_try_auto_execute(collected: dict, ctx: ExecContext) 
     FIELD persists in `collected` across that continuation, so this check
     re-fires and auto-sends once the ambiguity resolves — no extra state
     needed for "keep going automatically after resolving the ambiguity,
-    without asking for a second approval"."""
+    without asking for a second approval". For a multi-command plan, mirrors
+    casting-agent's own plan try_auto_execute: run the plan directly (its
+    own per-command try/except already tolerates a partial failure), no
+    "fully clean" pre-check — the executed summary reports ✗ for whichever
+    individual commands couldn't resolve, exactly like approving one
+    manually would."""
     if not collected.get(AUTO_CONFIRM_FIELD.key):
         return None
+    if collected.get(PLAN_FIELD.key):
+        return await _execute_send_plan(collected, ctx)
     target = await _resolve_send_target(collected)
     if not target.ok or target.reply_in_chat:
         # Still ambiguous/erroring, or an Instagram reply-in-chat (which
@@ -3020,7 +3326,7 @@ SEND_REQUIREMENT_INTENT = IntentDefinition(
     triggers=SEND_TRIGGERS,
     fields=[
         SOURCE_QUERY_FIELD, RECIPIENT_QUERY_FIELD, STAGE_QUERY_FIELD, PROJECT_QUERY_FIELD,
-        SEND_MODE_FIELD, AUTO_CONFIRM_FIELD,
+        SEND_MODE_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD,
     ],
     executor=_send_requirement_executor,
     extract_fields=extract_send_requirement_fields,
@@ -3044,39 +3350,36 @@ UNAUTHORIZED_SENDER_MESSAGE = (
 # _EDIT_REDIRECT_MESSAGE above. Update by hand if a new recipient shape or
 # edit command is added.
 HELP_TEXT = (
-    "Hi!\n\n"
-    "I'm your Talentgram WhatsApp Agent assistant.\n\n"
-    "Here are the things I can currently help you with:\n\n"
+    "Talentgram WhatsApp Agent — Commands\n\n"
+    "Fastest format: Action - Who - What - Where, using \" - \" between fields.\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "📢 Send a Campaign\n\n"
-    "Examples:\n\n"
-    "• Send Diwali Promo to Lakme Campaign\n\n"
-    "• Send Reminder template to Follow Up pipeline of Myntra Campaign\n\n"
-    "• Send Toyota Requirement to Ahana\n\n"
-    "• Send Reminder template to +919876543210\n\n"
-    "• Send Reminder template to Casting Director contacts\n\n"
-    "• Send Reminder template to Selected list\n\n"
+    "• send - Talent A,Talent B - Template Name - Project A\n\n"
+    "• send - Template Name - Project A,Project B - Follow Up\n"
+    "  (targets everyone in that pipeline stage; template can be skipped to use the default)\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "💬 Send a Custom Message\n\n"
-    "Examples:\n\n"
-    "• Send custom message \"Hi, your profile has been shortlisted.\" to Riya\n\n"
-    "• Message Raj and Karan:\n"
-    "Tomorrow's call time is 9 AM.\n\n"
+    "• send custom message \"Hi, your profile has been shortlisted.\" - Talent A,Talent B\n\n"
+    "• send custom message \"Reminder about tomorrow's call.\" - Project A - Follow Up\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "📸 Send an Instagram Profile\n\n"
-    "Examples:\n\n"
-    "• Send instagram profile of Riya to Raj\n\n"
-    "• Share Pankuri's instagram\n\n"
+    "• send instagram - Talent A - Raj\n\n"
+    "• send insta link - Talent A - Casting WhatsApp group\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "🔗 Multiple Commands in One Message\n\n"
+    "Put each command on its own line (a blank line between them is fine but not required), "
+    "then add \"and confirm\" once at the very end to send everything immediately "
+    "without a preview for each one:\n\n"
+    "send - Talent A - Template A - Project A\n"
+    "send - Talent B - Template B - Project B\n"
+    "and confirm\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "✏️ Edit Before Sending\n\n"
-    "Examples:\n\n"
-    "• Exclude Ahana\n\n"
-    "• Exclude 5\n\n"
-    "• Include 7\n\n"
-    "• Change template to Reminder\n\n"
-    "• Preview\n\n"
+    "• Exclude Ahana   • Exclude 5   • Include 7\n\n"
+    "• Change template to Reminder   • Preview\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "That's everything I can currently help you with."
+    "Plain natural-language sentences (e.g. \"Send Reminder template to Follow Up pipeline "
+    "of Myntra Campaign\") still work too."
 )
 
 CAMPAIGN_AGENT = AgentDefinition(

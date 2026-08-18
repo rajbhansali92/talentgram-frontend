@@ -153,14 +153,27 @@ async def test_each_agent_has_distinct_help_text():
     assert "Talent Search" not in CRM_HELP_TEXT
     assert "Send a Campaign" not in CRM_HELP_TEXT
 
-    assert "Talentgram Casting Pipeline" in CASTING_HELP_TEXT
-    assert "Talent Search" in CASTING_HELP_TEXT
-    assert "Move Talent" in CASTING_HELP_TEXT
+    # Simplified Command Language (2026-08-17) — the help text now leads
+    # with the concise "Action - Talent - Project - Pipeline" grammar
+    # rather than the old per-feature walkthrough; these checks confirm
+    # it's still distinctly casting-flavored and still mentions the
+    # older natural-language features (talent search, selection, undo)
+    # remain available, without requiring the old verbose phrasing.
+    assert "Talentgram Casting Commands" in CASTING_HELP_TEXT
+    assert "Action - Talent - Project - Pipeline" in CASTING_HELP_TEXT
+    assert "pending test" in CASTING_HELP_TEXT
+    assert "testing?" in CASTING_HELP_TEXT
+    assert "talent search" in CASTING_HELP_TEXT.lower()
+    assert "Move" in CASTING_HELP_TEXT
     assert "Save a Contact" not in CASTING_HELP_TEXT
     assert "Send a Campaign" not in CASTING_HELP_TEXT
 
     assert "Talentgram WhatsApp Agent" in CAMPAIGN_HELP_TEXT
     assert "Send a Campaign" in CAMPAIGN_HELP_TEXT
+    assert "Action - Who - What - Where" in CAMPAIGN_HELP_TEXT
+    assert "and confirm" in CAMPAIGN_HELP_TEXT
+    assert "custom message" in CAMPAIGN_HELP_TEXT.lower()
+    assert "instagram" in CAMPAIGN_HELP_TEXT.lower()
     assert "Save a Contact" not in CAMPAIGN_HELP_TEXT
     assert "Talent Search" not in CAMPAIGN_HELP_TEXT
 

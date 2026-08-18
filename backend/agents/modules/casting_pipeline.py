@@ -550,6 +550,63 @@ async def _handle_replay(ctx: ExecContext, session: Optional[dict]) -> ExecResul
     return await _handle_list_projects(ctx, nlu.QueryIntent(kind="list_projects"))
 
 
+async def _handle_pipeline_multi(ctx: ExecContext, raw_project_ref: str, raw_stage_ref: str) -> ExecResult:
+    """"show - Project(s) - Pipeline(s)" (Simplified Command Language,
+    2026-08-17) — one-or-many projects x one-or-many stages, one grouped
+    listing block per (project, stage) pair. Reuses the exact candidate
+    fetch (_fetch_stage_candidates) and project/stage matchers
+    _handle_pipeline_query's own single-project/single-stage path already
+    uses — this only adds the loop over multiple resolved projects/stages,
+    never a parallel listing implementation."""
+    project_queries = nlu.split_multi_names(raw_project_ref) or [(raw_project_ref or "").strip()]
+    stage_queries = nlu.split_multi_names(raw_stage_ref) or [(raw_stage_ref or "").strip()]
+
+    projects = await _fetch_ongoing_projects()
+    resolved_projects: List[Tuple[str, str]] = []
+    errors: List[str] = []
+    for pq in project_queries:
+        with request_scope.stage("fuzzy"):
+            match = nlu.resolve_project_by_name(pq, projects)
+        if match.project:
+            resolved_projects.append((match.project["id"], match.project["label"]))
+        elif match.ambiguous:
+            errors.append(f'"{pq}" — multiple matching projects found.')
+        else:
+            errors.append(f'"{pq}" — no matching project.')
+
+    resolved_stages: List[str] = []
+    for sq in stage_queries:
+        stage_match = nlu.match_stage_phrase(sq, list(PIPELINE_STAGE_ORDER))
+        if stage_match.key:
+            if stage_match.key not in resolved_stages:
+                resolved_stages.append(stage_match.key)
+        elif stage_match.ambiguous:
+            errors.append(f'"{sq}" — multiple matching pipelines: {", ".join(stage_match.ambiguous)}.')
+        else:
+            errors.append(f'"{sq}" — unrecognized pipeline.')
+
+    if not resolved_projects or not resolved_stages:
+        return ExecResult(
+            ok=False, error="pipeline_multi_unresolved", message="\n".join(errors) or "Nothing to show.",
+        )
+
+    blocks: List[str] = []
+    for pid, plabel in resolved_projects:
+        for stage in resolved_stages:
+            candidates = await _fetch_stage_candidates(pid, stage)
+            with request_scope.stage("response_formatting"):
+                sorted_c = sorted(candidates, key=lambda c: (c.label or "").strip().lower())
+            header = f"{plabel} — {nlu.stage_label(stage)}"
+            if not sorted_c:
+                blocks.append(f"{header}\n(none)")
+                continue
+            lines = [header] + [f"{i + 1}. {c.label}" for i, c in enumerate(sorted_c)]
+            blocks.append("\n".join(lines))
+    if errors:
+        blocks.append("\n".join(errors))
+    return ExecResult(ok=True, message="\n\n".join(blocks))
+
+
 async def _handle_pipeline_query(
     ctx: ExecContext, session: Optional[dict], classification: nlu.QueryIntent
 ) -> ExecResult:
@@ -772,6 +829,53 @@ async def _handle_talent_projects_multi(ctx: ExecContext, name_queries: List[str
     return ExecResult(ok=any_found, message="\n\n".join(blocks))
 
 
+def _render_pending_tests(talent_label: str, pending_projects: List[str]) -> str:
+    n = len(pending_projects)
+    if n == 0:
+        return f"{talent_label} — No pending tests"
+    lines = [f"{talent_label} — {n} pending test{'' if n == 1 else 's'}"]
+    lines += [f"• {p}" for p in pending_projects]
+    return "\n".join(lines)
+
+
+async def _handle_pending_tests(ctx: ExecContext, raw_talent_ref: str) -> ExecResult:
+    """"pending test - Talent(s)" (Simplified Command Language, 2026-08-17)
+    — one-or-many talents, reusing the exact resolution/candidate-fetch
+    _handle_talent_projects_multi already uses, filtered to the "ask_to_
+    test" stage specifically (the pipeline's own "hasn't tested yet"
+    signal — see _fetch_talent_active_memberships) rather than every
+    active membership regardless of stage. Same per-name independent
+    resolution / inline-ambiguity-note pattern as every other bulk
+    talent-name query on this platform — a name that's ambiguous or
+    unmatched is reported alongside the others, never blocking them."""
+    selector = nlu.parse_talent_selector(raw_talent_ref)
+    name_queries = selector.name_queries if (selector.ok and selector.name_queries) else (
+        [selector.name_query] if (selector.ok and selector.name_query) else [(raw_talent_ref or "").strip()]
+    )
+    candidates = await _fetch_all_talent_candidates()
+    if not candidates:
+        return ExecResult(ok=False, error="no_talents", message="No talents found.")
+
+    blocks: List[str] = []
+    any_found = False
+    for name_query in name_queries:
+        talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target_by_name(
+            name_query, candidates
+        )
+        if err:
+            if ambiguous:
+                blocks.append(f'"{name_query}" — multiple matching talents found. Ask about them one at a time to pick.')
+            else:
+                blocks.append(f'"{name_query}" — no matching talent.')
+            continue
+        any_found = True
+        memberships = await _fetch_talent_active_memberships(talent_id)
+        pending = [m["project_label"] for m in memberships if m["stage"] == "ask_to_test"]
+        with request_scope.stage("response_formatting"):
+            blocks.append(_render_pending_tests(talent_label, pending))
+    return ExecResult(ok=any_found, message="\n\n".join(blocks))
+
+
 async def _handle_talent_projects(ctx: ExecContext, raw_talent_ref: str) -> ExecResult:
     selector = nlu.parse_talent_selector(raw_talent_ref)
     if selector.ok and selector.name_queries:
@@ -816,6 +920,90 @@ async def _render_talent_stage_boolean(
     else:
         message = f"No.\n\n{talent_label} is not part of {project['label']}."
     return ExecResult(ok=True, message=message)
+
+
+def _render_testing_check(talent_label: str, project_statuses: List[Tuple[str, str]]) -> str:
+    lines = [talent_label]
+    lines += [f"• {p} — {s}" for p, s in project_statuses]
+    return "\n".join(lines)
+
+
+async def _handle_testing_check(ctx: ExecContext, raw_talent_ref: str, raw_project_ref: str) -> ExecResult:
+    """"testing? - Talent(s) - Project(s)" (Simplified Command Language,
+    2026-08-17) — one-or-many talents x one-or-many projects, grouped per
+    talent. Reuses the existing status model directly from
+    casting_pipeline (stage == "ask_to_test" -> a test was requested but
+    not yet submitted; "already_tested" -> submitted; anything else that
+    still has a real pipeline row -> a test WAS submitted at some point
+    and the pipeline has since progressed past it, reusing that stage's
+    own existing label rather than inventing a parallel status
+    vocabulary; no row at all -> never tested for that project) — no new
+    testing-status system, per spec."""
+    talent_selector = nlu.parse_talent_selector(raw_talent_ref)
+    talent_queries = talent_selector.name_queries if (talent_selector.ok and talent_selector.name_queries) else (
+        [talent_selector.name_query] if (talent_selector.ok and talent_selector.name_query)
+        else [(raw_talent_ref or "").strip()]
+    )
+    project_queries = nlu.split_multi_names(raw_project_ref) or [(raw_project_ref or "").strip()]
+
+    candidates = await _fetch_all_talent_candidates()
+    if not candidates:
+        return ExecResult(ok=False, error="no_talents", message="No talents found.")
+    projects = await _fetch_ongoing_projects()
+
+    resolved_projects: List[Tuple[str, str]] = []
+    project_errors: List[str] = []
+    for pq in project_queries:
+        with request_scope.stage("fuzzy"):
+            match = nlu.resolve_project_by_name(pq, projects)
+        if match.project:
+            resolved_projects.append((match.project["id"], match.project["label"]))
+        elif match.ambiguous:
+            project_errors.append(f'"{pq}" — multiple matching projects found. Ask about it separately to pick.')
+        else:
+            project_errors.append(f'"{pq}" — no matching project.')
+
+    if not resolved_projects:
+        return ExecResult(
+            ok=False, error="no_projects", message="\n".join(project_errors) or "No matching projects.",
+        )
+
+    project_ids = [pid for pid, _label in resolved_projects]
+    blocks: List[str] = []
+    any_found = False
+    for tq in talent_queries:
+        talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target_by_name(tq, candidates)
+        if err:
+            if ambiguous:
+                blocks.append(f'"{tq}" — multiple matching talents found. Ask about them one at a time to pick.')
+            else:
+                blocks.append(f'"{tq}" — no matching talent.')
+            continue
+        any_found = True
+        rows = await _timed_talent_lookup(
+            db.casting_pipeline.find(
+                {"talent_id": talent_id, "project_id": {"$in": project_ids}},
+                {"_id": 0, "project_id": 1, "stage": 1},
+            ).to_list(len(project_ids)),
+            collection="casting_pipeline", name="testing_check_lookup",
+        )
+        stage_by_project = {r["project_id"]: (_normalise_stage(r.get("stage")) or r.get("stage")) for r in rows}
+        statuses: List[Tuple[str, str]] = []
+        for pid, plabel in resolved_projects:
+            stage = stage_by_project.get(pid)
+            if stage is None:
+                statuses.append((plabel, "Not tested"))
+            elif stage == "already_tested":
+                statuses.append((plabel, "Tested"))
+            elif stage == "ask_to_test":
+                statuses.append((plabel, "Test pending"))
+            else:
+                statuses.append((plabel, f"Tested — {nlu.stage_label(stage)}"))
+        with request_scope.stage("response_formatting"):
+            blocks.append(_render_testing_check(talent_label, statuses))
+    if project_errors:
+        blocks.append("\n".join(project_errors))
+    return ExecResult(ok=any_found, message="\n\n".join(blocks))
 
 
 async def _handle_talent_stage_query(
@@ -1449,6 +1637,16 @@ async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         return await _handle_pipeline_query(ctx, session, classification)
     if classification.kind == "talent_projects":
         return await _handle_talent_projects(ctx, classification.talent_query or "")
+    if classification.kind == "pending_tests":
+        return await _handle_pending_tests(ctx, classification.talent_query or "")
+    if classification.kind == "testing_check":
+        return await _handle_testing_check(
+            ctx, classification.talent_query or "", classification.project_name_query or "",
+        )
+    if classification.kind == "pipeline_multi":
+        return await _handle_pipeline_multi(
+            ctx, classification.project_name_query or "", classification.stage_key_multi or "",
+        )
     if classification.kind == "talent_stage_query":
         return await _handle_talent_stage_query(ctx, session, classification, classification.talent_query or "")
     if classification.kind == "talent_search":
@@ -1609,6 +1807,14 @@ _SELECT_TRIGGER_RE = re.compile(r"^\s*select\s+(.+)$", re.IGNORECASE | re.DOTALL
 
 
 def _extract_move_fields(text: str) -> Dict[str, str]:
+    # Simplified Command Language (2026-08-17) — translates every
+    # "Action - Talent(s) - Project(s) - Pipeline" line into its natural-
+    # language equivalent BEFORE any of the existing extraction below
+    # runs; a line that doesn't match the grammar (including any genuine
+    # natural-language command, and the pure "select" shorthand checked
+    # right below) passes through byte-for-byte unchanged.
+    text = nlu.translate_simple_commands_in_text(text, list(PIPELINE_STAGE_ORDER))
+
     # Phase 2 (Talent Selection & Add to Project, 2026-08-10) — "select" is
     # already a live casting.move trigger word, so "Select 1,3,5" reaches
     # HERE via the normal move-trigger path. Intercept ONLY the pure
@@ -1627,11 +1833,12 @@ def _extract_move_fields(text: str) -> Dict[str, str]:
             }
 
     with request_scope.stage("nlu"):
-        chunks, auto_confirm = nlu.preprocess_command(text)
+        chunks, auto_confirm = nlu.preprocess_command_grouped(text)
         out: Dict[str, str] = {}
 
         if len(chunks) == 1:
-            fields = nlu.extract_move_fields(chunks[0], list(PIPELINE_STAGE_ORDER))
+            group0, raw0 = chunks[0]
+            fields = nlu.extract_move_fields(raw0, list(PIPELINE_STAGE_ORDER))
             project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
             if len(project_names) <= 1:
                 # The overwhelmingly common case — a normal single-action
@@ -1647,9 +1854,12 @@ def _extract_move_fields(text: str) -> Dict[str, str]:
             # ever targets one project_id), so it always becomes a 1-step
             # plan; _resolve_one_plan_step cross-product-expands it against
             # however many talent names were also given.
-            chunks = [chunks[0]]
+            chunks = [(group0, raw0)]
 
-        steps = [{"intent_id": nlu.classify_chunk_intent(c) or "casting.move", "raw_text": c} for c in chunks]
+        steps = [
+            {"intent_id": nlu.classify_chunk_intent(c) or "casting.move", "raw_text": c, "group": g}
+            for g, c in chunks
+        ]
         out[PLAN_FIELD.key] = json.dumps(steps)
         out["talent_selector"] = _PLAN_PLACEHOLDER
         out["target_stage"] = _PLAN_PLACEHOLDER
@@ -2138,7 +2348,17 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
     steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
     resolved_steps: List[Dict[str, Any]] = []
     touched_pairs: List[Dict[str, str]] = []
+    last_group: Optional[Any] = None
     for step in steps:
+        group = step.get("group", 0)
+        if last_group is not None and group != last_group:
+            # A new independent, blank-line-separated command begins here
+            # (Simplified Command Language, 2026-08-17) — the touched_pairs
+            # fan-out below must never let one command's implicit trailing
+            # action ("...and move to X") apply to an EARLIER, unrelated
+            # command's talents just because they happen to share one plan.
+            touched_pairs = []
+        last_group = group
         resolved_steps.extend(await _resolve_one_plan_step(step, ctx, touched_pairs))
 
     lines = ["You are about to run this plan:", ""]
@@ -2168,8 +2388,15 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
     summary_lines = ["Completed", ""]
     any_success = False
     touched_pairs: List[Dict[str, str]] = []
+    last_group: Optional[Any] = None
 
     for step in steps:
+        group = step.get("group", 0)
+        if last_group is not None and group != last_group:
+            # See _build_plan_confirmation's identical reset — must stay
+            # in sync with it (same grouping, same fan-out boundary).
+            touched_pairs = []
+        last_group = group
         try:
             sub_steps = await _resolve_one_plan_step(step, ctx, touched_pairs)
         except Exception:
@@ -2482,6 +2709,23 @@ async def _move_parse_edits_async(
             if idx is not None:
                 await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
                 return {field_key: options[idx - 1]["value"]}
+            if kind == "talent":
+                # Multi-pick fallback ("1 and 3", "Thakur and Singh") —
+                # ONLY for a talent-selector field (the only field shape
+                # that can legitimately hold more than one resolved value)
+                # and only tried after the single-pick resolver above
+                # already failed, so every existing single-pick reply is
+                # unaffected. Substitutes the picked options' plain LABEL
+                # text (not their encoded RESOLVED_TALENT_MARKER "value")
+                # joined by ", " — parse_talent_selector already splits a
+                # comma-separated list into independent name_queries and
+                # exact-matches each on the next pass, so no changes to
+                # the selector grammar itself are needed.
+                multi_idx = nlu.resolve_option_reply_multi(stripped, options)
+                if multi_idx and len(multi_idx) > 1:
+                    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+                    labels = ", ".join(options[i - 1]["label"] for i in multi_idx)
+                    return {field_key: labels}
 
     explicit = parse_edit_instructions(text, fields)
     if explicit:
@@ -2537,12 +2781,18 @@ ADD_PROJECT_QUERY_FIELD = FieldSpec(
 
 
 def _extract_add_fields(text: str) -> Dict[str, str]:
+    # Simplified Command Language (2026-08-17) — see _extract_move_fields'
+    # identical comment; same translation, same "pass through unchanged
+    # when it isn't the simple grammar" guarantee.
+    text = nlu.translate_simple_commands_in_text(text, list(PIPELINE_STAGE_ORDER))
+
     with request_scope.stage("nlu"):
-        chunks, auto_confirm = nlu.preprocess_command(text)
+        chunks, auto_confirm = nlu.preprocess_command_grouped(text)
         out: Dict[str, str] = {}
 
         if len(chunks) == 1:
-            fields = nlu.extract_add_fields(chunks[0])
+            group0, raw0 = chunks[0]
+            fields = nlu.extract_add_fields(raw0)
             project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
             if len(project_names) <= 1:
                 # UX polish (2026-08-10) — "Add 1,3,5 to X"/"Add first 5 to
@@ -2562,9 +2812,12 @@ def _extract_add_fields(text: str) -> Dict[str, str]:
                 if auto_confirm:
                     out[AUTO_CONFIRM_FIELD.key] = "1"
                 return out
-            chunks = [chunks[0]]
+            chunks = [(group0, raw0)]
 
-        steps = [{"intent_id": nlu.classify_chunk_intent(c) or "casting.add", "raw_text": c} for c in chunks]
+        steps = [
+            {"intent_id": nlu.classify_chunk_intent(c) or "casting.add", "raw_text": c, "group": g}
+            for g, c in chunks
+        ]
         out[PLAN_FIELD.key] = json.dumps(steps)
         out["talent_selector"] = _PLAN_PLACEHOLDER
         out["project_query"] = _PLAN_PLACEHOLDER
@@ -3136,61 +3389,32 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
 # and tests/test_casting_agent.py). Update this string by hand alongside any
 # future intent/command change.
 HELP_TEXT = (
-    "Hi!\n\n"
-    "I'm your Talentgram Casting Pipeline assistant.\n\n"
-    "Here are the things I can currently help you with:\n\n"
+    "Talentgram Casting Commands\n\n"
+    "Action - Talent - Project - Pipeline\n\n"
+    "Add - Ayushi - Toyota Glanza - Follow Up\n\n"
+    "Multiple talents/projects:\n\n"
+    "Add - Ayushi,Priya - Toyota,Nykaa - Follow Up\n\n"
+    "Move a stage:\n\n"
+    "Move - Ayushi - Toyota Glanza - Follow Up to Approved\n\n"
+    "Add and move in one step:\n\n"
+    "Add,Move - Ayushi - Toyota Glanza - Follow Up\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "🔎 Talent Search\n\n"
-    "Examples:\n\n"
-    "• Show female models\n\n"
-    "• Show actors from Mumbai\n\n"
-    "• Show female models above 5'7\"\n\n"
-    "• Show actors between 20 and 25\n\n"
+    "Pending tests\n\n"
+    "pending test - Ayushi,Priya\n\n"
+    "Testing?\n\n"
+    "testing? - Ayushi,Priya - Toyota,Nykaa\n\n"
+    "Show pipeline\n\n"
+    "show - Toyota,Nykaa - Follow Up,Approved\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "🎯 Refine Results\n\n"
-    "Examples:\n\n"
-    "• Only Mumbai\n\n"
-    "• Above 5'7\"\n\n"
-    "• Age under 22\n\n"
+    "Multiple commands: put each on its own line (a blank line between "
+    "them is fine but not required).\n\n"
+    "Finish with:\n\n"
+    "and confirm\n\n"
+    "to run every command immediately, no approval step.\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "📄 Browse Results\n\n"
-    "Examples:\n\n"
-    "• Show next 20\n\n"
-    "• Previous 20\n\n"
-    "• Show all\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "✅ Selection\n\n"
-    "Examples:\n\n"
-    "• Select 1\n\n"
-    "• Select 1,3,5\n\n"
-    "• Select first 5\n\n"
-    "• Remove 3\n\n"
-    "• Clear selection\n\n"
-    "• Selection\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "📁 Projects\n\n"
-    "Examples:\n\n"
-    "• Add selected to Lakme Campaign\n\n"
-    "• Add 1,3,5 to Myntra Campaign\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "🗂️ Pipeline Overview\n\n"
-    "Examples:\n\n"
-    "• Show ongoing projects\n\n"
-    "• Show Approved\n\n"
-    "• Show Hold for Toyota Glanza\n\n"
-    "• Show again\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "🔀 Move Talent\n\n"
-    "Examples:\n\n"
-    "• Move Sarah to Approved\n\n"
-    "• Move Sarah to Approved in Toyota Glanza\n\n"
-    "• Move 2 and 5 to Hold\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "↩️ Undo\n\n"
-    "Examples:\n\n"
-    "• Undo\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "That's everything I can currently help you with."
+    "Natural language, talent search, selection (Select 1,3,5), and Undo "
+    "still work exactly as before — the commands above are just the "
+    "fast way in."
 )
 
 CASTING_AGENT = AgentDefinition(

@@ -4543,3 +4543,435 @@ async def test_fuzzy_talent_and_project_matching_reused_in_campaign_agent():
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Simplified Command Language (2026-08-17) — hyphen-delimited grammar.
+# Parser unit tests first (pure functions, no DB), then end-to-end coverage
+# through handle_inbound_message for every shape the spec calls out.
+# ---------------------------------------------------------------------------
+async def test_simple_parse_send_talent_template_project():
+    parsed = wca.parse_simple_send_command("Riya,Karan - Toyota Reminder - Toyota Campaign")
+    assert parsed == {
+        "recipient_query": "Riya,Karan", "source_query": "Toyota Reminder", "project_query": "Toyota Campaign",
+    }
+
+
+async def test_simple_parse_send_talent_project_no_template():
+    parsed = wca.parse_simple_send_command("Riya - Toyota Campaign")
+    assert parsed == {"recipient_query": "Riya", "project_query": "Toyota Campaign"}
+
+
+async def test_simple_parse_send_stage_targeting():
+    parsed = wca.parse_simple_send_command("Reminder - Toyota Campaign - Follow Up")
+    assert parsed["source_query"] == "Reminder"
+    assert parsed["project_query"] == "Toyota Campaign"
+    assert parsed["stage_query"] == "Follow Up"
+    assert parsed["recipient_query"] == wca._ALL_PROJECTS_SENTINEL
+
+
+async def test_simple_parse_send_stage_targeting_multi_project_multi_stage():
+    parsed = wca.parse_simple_send_command("Reminder - Project A,Project B - Follow Up,Approved")
+    assert parsed["project_query"] == "Project A,Project B"
+    assert parsed["stage_query"] == "Follow Up,Approved"
+
+
+async def test_simple_parse_send_custom_message_talent():
+    parsed = wca.parse_simple_send_command('send custom message "Hi, your slot is confirmed." - Riya,Karan')
+    assert parsed == {
+        "send_mode": "custom_message", "source_query": "Hi, your slot is confirmed.",
+        "recipient_query": "Riya,Karan",
+    }
+
+
+async def test_simple_parse_send_custom_message_project_stage():
+    parsed = wca.parse_simple_send_command('send custom message "Reminder!" - Project A - Follow Up')
+    assert parsed["send_mode"] == "custom_message"
+    assert parsed["source_query"] == "Reminder!"
+    assert parsed["project_query"] == "Project A"
+    assert parsed["stage_query"] == "Follow Up"
+
+
+async def test_simple_parse_send_custom_message_preserves_commas_in_quote():
+    parsed = wca.parse_simple_send_command('send custom message "Hi, John, Karan and Riya" - Riya,Karan')
+    assert parsed["source_query"] == "Hi, John, Karan and Riya"
+    assert parsed["recipient_query"] == "Riya,Karan"
+
+
+async def test_simple_parse_send_instagram_with_recipient():
+    parsed = wca.parse_simple_send_command("instagram - Riya - Raj")
+    assert parsed == {"send_mode": "instagram", "source_query": "Riya", "recipient_query": "Raj"}
+
+
+async def test_simple_parse_send_insta_link_reply_in_chat():
+    parsed = wca.parse_simple_send_command("insta link - Riya")
+    assert parsed["send_mode"] == "instagram"
+    assert parsed["source_query"] == "Riya"
+    assert parsed["recipient_query"] == wca._REPLY_IN_CHAT_SENTINEL
+
+
+async def test_simple_parse_send_rejects_natural_language():
+    assert wca.parse_simple_send_command("Send Toyota Reminder to Ahana") is None
+    assert wca.parse_simple_send_command("") is None
+
+
+async def test_simple_split_send_commands_single_message_unaffected():
+    text = 'send custom message "Reminder" - Riya'
+    assert wca._split_send_commands(text) == [text]
+
+
+async def test_simple_split_send_commands_never_splits_on_bare_blank_line():
+    """A custom message's own blank-line-separated sections (trigger,
+    quote body, trailing recipient clause) are ONE command, never several —
+    only a line that itself starts with a recognized send trigger begins a
+    new chunk."""
+    text = (
+        "send this to\n"
+        "Riya\n"
+        "Karan\n"
+        "\n"
+        '"Tomorrow\'s call time is 9 AM."'
+    )
+    assert wca._split_send_commands(text) == [text]
+
+
+async def test_simple_split_send_commands_multiline_quote_with_trailing_recipient():
+    text = (
+        "Send custom message\n"
+        "\n"
+        '"Line one\n'
+        "\n"
+        'Line two"\n'
+        "\n"
+        "to Riya and Karan"
+    )
+    assert wca._split_send_commands(text) == [text]
+
+
+async def test_simple_split_send_commands_splits_on_new_trigger_with_blank_line():
+    text = "send Reminder - Riya - Project A\n\nsend Reminder - Karan - Project B"
+    chunks = wca._split_send_commands(text)
+    assert len(chunks) == 2
+    assert chunks[0] == "send Reminder - Riya - Project A"
+    assert chunks[1] == "send Reminder - Karan - Project B"
+
+
+async def test_simple_split_send_commands_splits_without_blank_line():
+    text = "send Reminder - Riya - Project A\nsend Reminder - Karan - Project B"
+    chunks = wca._split_send_commands(text)
+    assert len(chunks) == 2
+    assert chunks[0] == "send Reminder - Riya - Project A"
+    assert chunks[1] == "send Reminder - Karan - Project B"
+
+
+async def test_simple_send_talent_template_project_and_confirm():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"SimpleSend {tag}"
+    template_id = await _seed_template(template_name)
+    project_id = await _seed_project(f"SimpleSendProj {tag}")
+    t1 = await _seed_talent(f"SimpleSendTalent {tag}", phone="917000300001")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - SimpleSendTalent {tag} - {template_name} - SimpleSendProj {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sent." in r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1}
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_simple_send_talent_project_no_template_asks_for_source():
+    """"send - Talent(s) - Project(s)" (template omitted) leaves
+    source_query unset — falls through to the existing generic "What
+    should I send?" question, same as any other missing-field case; no new
+    default-template system is invented for this."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"NoTemplateProj {tag}")
+    t1 = await _seed_talent(f"NoTemplateTalent {tag}", phone="917000300010")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - NoTemplateTalent {tag} - NoTemplateProj {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "What should I send" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_simple_send_stage_targeting_multi_project_multi_stage_and_confirm():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"StageTarget {tag}"
+    template_id = await _seed_template(template_name)
+    project_a = await _seed_project(f"StageProjA {tag}")
+    project_b = await _seed_project(f"StageProjB {tag}")
+    t1 = await _seed_talent(f"StageTalentA {tag}", phone="917000300020")
+    t2 = await _seed_talent(f"StageTalentB {tag}", phone="917000300021")
+    await _seed_pipeline_row(project_a, t1, "follow_up")
+    await _seed_pipeline_row(project_b, t2, "approved")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"send - {template_name} - StageProjA {tag},StageProjB {tag} - "
+                "Follow Up,Approved and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sent." in r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(
+            phone, project_ids=[project_a, project_b], talent_ids=[t1, t2], template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_simple_send_custom_message_talents_and_confirm_preserves_body():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_talent(f"CustomSimpleT1 {tag}", phone="917000300030")
+    t2 = await _seed_talent(f"CustomSimpleT2 {tag}", phone="917000300031")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f'send custom message "Hi, your profile has been shortlisted." - '
+                f"CustomSimpleT1 {tag},CustomSimpleT2 {tag} and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sent." in r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+        for j in jobs:
+            assert j["message_body"] == "Hi, your profile has been shortlisted."
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_simple_send_custom_message_project_stage_and_confirm():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"CustomStageProj {tag}")
+    t1 = await _seed_talent(f"CustomStageTalent {tag}", phone="917000300040")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f'send custom message "Reminder about tomorrow\'s call." - '
+                f"CustomStageProj {tag} - Follow Up and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sent." in r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1}
+        assert jobs[0]["message_body"] == "Reminder about tomorrow's call."
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_simple_send_instagram_with_recipient_end_to_end():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_talent(f"InstaSimpleTalent {tag}", instagram_handle="insta_simple_handle")
+    t2 = await _seed_talent(f"InstaSimpleRecipient {tag}", phone="917000300080")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram - InstaSimpleTalent {tag} - InstaSimpleRecipient {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sent." in r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        await _cleanup_batch(batch_id)
+    finally:
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_simple_multi_command_two_sends_single_trailing_confirm():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_a = f"MultiSendA {tag}"
+    template_b = f"MultiSendB {tag}"
+    tpl_a_id = await _seed_template(template_a)
+    tpl_b_id = await _seed_template(template_b)
+    project_a = await _seed_project(f"MultiSendProjA {tag}")
+    project_b = await _seed_project(f"MultiSendProjB {tag}")
+    t1 = await _seed_talent(f"MultiSendTalentA {tag}", phone="917000300050")
+    t2 = await _seed_talent(f"MultiSendTalentB {tag}", phone="917000300051")
+    await _seed_pipeline_row(project_a, t1, "follow_up")
+    await _seed_pipeline_row(project_b, t2, "follow_up")
+    batch_ids = []
+    try:
+        text = (
+            f"send - MultiSendTalentA {tag} - {template_a} - MultiSendProjA {tag}\n"
+            "\n"
+            f"send - MultiSendTalentB {tag} - {template_b} - MultiSendProjB {tag}\n"
+            "and confirm"
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "1 Approve" not in r.reply
+        jobs_a = await db.whatsapp_jobs.find({"template_id": tpl_a_id}).to_list(10)
+        jobs_b = await db.whatsapp_jobs.find({"template_id": tpl_b_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs_a} == {t1}
+        assert {j["talent_id"] for j in jobs_b} == {t2}
+        batch_ids = [j["batch_id"] for j in jobs_a] + [j["batch_id"] for j in jobs_b]
+    finally:
+        for bid in set(batch_ids):
+            await _cleanup_batch(bid)
+        await _cleanup(
+            phone, project_ids=[project_a, project_b], talent_ids=[t1, t2],
+            template_ids=[tpl_a_id, tpl_b_id],
+        )
+        await _restore_config(original)
+
+
+async def test_simple_multi_command_no_blank_line_still_splits_correctly():
+    """The parser must not depend exclusively on blank lines — a new
+    "send" trigger on its own line is enough of a boundary."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_a = f"NoBlankSendA {tag}"
+    template_b = f"NoBlankSendB {tag}"
+    tpl_a_id = await _seed_template(template_a)
+    tpl_b_id = await _seed_template(template_b)
+    t1 = await _seed_talent(f"NoBlankSendTalentA {tag}", phone="917000300060")
+    t2 = await _seed_talent(f"NoBlankSendTalentB {tag}", phone="917000300061")
+    batch_ids = []
+    try:
+        text = (
+            f"send {template_a} to NoBlankSendTalentA {tag}\n"
+            f"send {template_b} to NoBlankSendTalentB {tag}\n"
+            "and confirm"
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        jobs_a = await db.whatsapp_jobs.find({"template_id": tpl_a_id}).to_list(10)
+        jobs_b = await db.whatsapp_jobs.find({"template_id": tpl_b_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs_a} == {t1}
+        assert {j["talent_id"] for j in jobs_b} == {t2}
+        batch_ids = [j["batch_id"] for j in jobs_a] + [j["batch_id"] for j in jobs_b]
+    finally:
+        for bid in set(batch_ids):
+            await _cleanup_batch(bid)
+        await _cleanup(phone, talent_ids=[t1, t2], template_ids=[tpl_a_id, tpl_b_id])
+        await _restore_config(original)
+
+
+async def test_simple_send_multi_pick_ambiguity_resume():
+    """Ambiguous talent name inside a hyphen send -> numbered clarification
+    -> a multi-pick reply ("1 and 3") resolves BOTH, resuming the original
+    template send without repeating the command."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"SimpleMultiPick {tag}"
+    template_id = await _seed_template(template_name)
+    project_id = await _seed_project(f"SimpleMultiPickProj {tag}")
+    t1 = await _seed_talent(f"Zayna Kapoor {tag}", phone="917000300070")
+    t2 = await _seed_talent(f"Zayna Mehta {tag}", phone="917000300071")
+    t3 = await _seed_talent(f"Zayna Verma {tag}", phone="917000300072")
+    for tid in (t1, t2, t3):
+        await _seed_pipeline_row(project_id, tid, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - Zayna {tag} - {template_name} - SimpleMultiPickProj {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "I found multiple" in r.reply
+        assert f"Zayna Kapoor {tag}" in r.reply
+        assert f"Zayna Mehta {tag}" in r.reply
+        assert f"Zayna Verma {tag}" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1 and 3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert f"Zayna Kapoor {tag}" in r2.reply
+        assert f"Zayna Verma {tag}" in r2.reply
+        assert f"Zayna Mehta {tag}" not in r2.reply
+        assert "1 Approve" in r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r3.reply
+        batch_id = r3.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t3}
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(
+            phone, project_ids=[project_id], talent_ids=[t1, t2, t3], template_ids=[template_id],
+        )
+        await _restore_config(original)

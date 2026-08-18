@@ -9,8 +9,10 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel
 import cloudinary.api
 import cloudinary.uploader
+import cloudinary.exceptions
 from core import (
     current_team_or_admin,
     require_role,
@@ -23,12 +25,24 @@ from core import (
     _now,
     remove_synced_media_from_global_talent,
     check_cloudinary_health,
-    check_r2_health
+    check_r2_health,
+    LEGACY_TAKE_CATEGORIES,
 )
 
 router = APIRouter(prefix="/api/admin/cloudinary", tags=["cloudinary-admin"])
 
 async def assert_providers_healthy():
+    """Cloudinary is the only provider any current media actually lives on
+    (confirmed: zero submissions/talents/applications reference an R2-backed
+    asset in production — R2 uploads were fully retired 2026-08-09/10), so
+    only a Cloudinary outage blocks a deletion. R2 is checked for visibility/
+    logging only and never blocks: cleanup_media_storage()'s own R2 delete
+    call is already best-effort and never raises, so a real R2 outage cannot
+    leave a Cloudinary deletion half-done. This also fixes a live production
+    bug — the connected Cloudflare account currently returns 403 Forbidden
+    on R2 head_bucket (R2 isn't entitled on the account), which meant every
+    single admin storage-deletion action was unconditionally 503ing before
+    this fix, regardless of Cloudinary's own health."""
     from core import ENABLE_R2_MEDIA_PIPELINE, R2_ENDPOINT_URL
     cld_ok = await check_cloudinary_health()
     if not cld_ok:
@@ -40,11 +54,7 @@ async def assert_providers_healthy():
     if ENABLE_R2_MEDIA_PIPELINE or R2_ENDPOINT_URL:
         r2_ok = await check_r2_health()
         if not r2_ok:
-            logger.error("assert_providers_healthy: Cloudflare R2 is unreachable or misconfigured")
-            raise HTTPException(
-                status_code=503,
-                detail="Storage cleanup aborted. Cloudflare R2 is currently unreachable or misconfigured. No changes have been made."
-            )
+            logger.warning("assert_providers_healthy: Cloudflare R2 is unreachable or misconfigured — proceeding, since no current media is R2-backed")
 logger = logging.getLogger(__name__)
 
 # Quotas and defaults (in bytes)
@@ -141,13 +151,138 @@ def list_cloudinary_physical_resources_sync() -> List[Dict[str, Any]]:
         logger.warning(f"Error in list_cloudinary_physical_resources_sync: {e}")
     return resources
 
+def classify_media_item(m: Dict[str, Any]) -> str:
+    """Bucket a submission/application media item into the same category
+    keys the Storage Console displays. Admin-added media is always bucketed
+    as admin_uploads regardless of its underlying category, matching the
+    prior asset_metadata-based classification's behavior."""
+    if m.get("scope") == "admin_added" or m.get("admin_added"):
+        return "admin_uploads"
+    cat = m.get("category")
+    if cat == "take" or cat in LEGACY_TAKE_CATEGORIES:
+        return "audition_videos"
+    if cat == "intro_video":
+        return "intro_videos"
+    if cat == "indian":
+        return "indian_look_images"
+    if cat == "western":
+        return "western_look_images"
+    return "portfolio_images"
+
+
+def new_category_buckets() -> Dict[str, Dict[str, Any]]:
+    return {
+        "audition_videos": {"size": 0, "count": 0, "label": "Audition Videos"},
+        "intro_videos": {"size": 0, "count": 0, "label": "Introduction Videos"},
+        "portfolio_images": {"size": 0, "count": 0, "label": "Portfolio (General) Images"},
+        "indian_look_images": {"size": 0, "count": 0, "label": "Indian Look Images"},
+        "western_look_images": {"size": 0, "count": 0, "label": "Western Look Images"},
+        "voice_notes": {"size": 0, "count": 0, "label": "Voice Notes"},
+        "admin_uploads": {"size": 0, "count": 0, "label": "Admin Uploads"},
+    }
+
+
+async def compute_category_breakdown() -> Dict[str, Dict[str, Any]]:
+    """Accuracy fix (Phase 5): category sizes now come directly from the
+    `size` field stored on submissions.media[] / applications.media[] at
+    upload time — the same byte count Cloudinary returned in its upload
+    response (see attach_video_media / video_complete / submission_upload
+    in routers/submissions.py). This replaces the previous dependency on
+    db.asset_metadata.file_size, which is never populated for the direct
+    video-upload path (video-signature -> attach_video_media only ever
+    flips upload_status, it never copies over the byte size) — the exact
+    reason Audition Videos / Introduction Videos always rendered as 0 Bytes
+    despite real files existing. Voice notes are tracked separately below
+    since their size *is* written correctly at insert time
+    (routers/feedback.py) and they don't live in submissions.media[]."""
+    categories = new_category_buckets()
+
+    pipeline = [
+        {"$match": {"media": {"$exists": True, "$ne": []}}},
+        {"$unwind": "$media"},
+        {"$project": {"category": "$media.category", "size": {"$ifNull": ["$media.size", 0]},
+                       "scope": "$media.scope", "admin_added": "$media.admin_added"}},
+    ]
+    for coll in (db.submissions, db.applications):
+        try:
+            items = await coll.aggregate(pipeline).to_list(length=200000)
+            for item in items:
+                bucket = classify_media_item(item)
+                categories[bucket]["size"] += item.get("size") or 0
+                categories[bucket]["count"] += 1
+        except Exception as e:
+            logger.error(f"Mongo: media aggregate failed for {coll.name}: {e}")
+
+    # Voice notes: still sourced from asset_metadata, whose file_size *is*
+    # written correctly at insert time by routers/feedback.py.
+    try:
+        vn_cursor = db.asset_metadata.aggregate([
+            {"$match": {"asset_type": "voice_note"}},
+            {"$group": {"_id": None, "total_size": {"$sum": "$file_size"}, "count": {"$sum": 1}}}
+        ])
+        vn_list = await vn_cursor.to_list(length=1)
+        if vn_list:
+            categories["voice_notes"]["size"] = vn_list[0].get("total_size") or 0
+            categories["voice_notes"]["count"] = vn_list[0].get("count") or 0
+    except Exception as e:
+        logger.error(f"Mongo: voice_notes aggregate failed: {e}")
+
+    voice_feedback_count = 0
+    try:
+        voice_feedback_count = await db.feedback.count_documents({"type": "voice"})
+    except Exception as e:
+        logger.error(f"Mongo: feedback count_documents failed: {e}")
+    if categories["voice_notes"]["count"] < voice_feedback_count:
+        # Legacy voice feedback rows predating asset_metadata tracking —
+        # counted, but their size genuinely isn't known without a live
+        # Cloudinary lookup, so we don't fabricate an estimate for them.
+        categories["voice_notes"]["count"] = voice_feedback_count
+
+    return categories
+
+
+@router.get("/summary")
+async def get_storage_summary(admin: dict = Depends(require_role("admin"))):
+    """Fast top-level Cloudinary account usage — a single live Admin API
+    call (~1s measured), no per-object listing. This is what the Storage
+    Console's top cards render on initial load (Phase 6 performance fix);
+    the exhaustive per-object scan formerly fired on every page load lives
+    only behind GET /health now, triggered explicitly by Re-Scan."""
+    cld_live = await run_in_threadpool(fetch_cloudinary_usage_sync)
+    if not cld_live:
+        return {"status": "unavailable", "storage_bytes": 0, "object_count": 0}
+
+    storage_bytes, _ = safe_get_usage(cld_live.get("storage"))
+    object_count, _ = safe_get_usage(cld_live.get("objects"))
+    bandwidth_bytes, _ = safe_get_usage(cld_live.get("bandwidth"))
+    credits = cld_live.get("credits") or {}
+
+    return {
+        "status": "healthy",
+        "plan": cld_live.get("plan"),
+        "last_updated": cld_live.get("last_updated"),
+        "storage_bytes": storage_bytes,
+        "object_count": object_count,
+        "bandwidth_bytes": bandwidth_bytes,
+        "resources": cld_live.get("resources"),
+        "derived_resources": cld_live.get("derived_resources"),
+        # Cloudinary's Pay-As-You-Go plans meter usage in "credits" (storage +
+        # bandwidth + transformations combined), not a flat storage GB cap —
+        # there is no fixed "25 GB limit" to compute a percentage against.
+        # Surface the real credit usage instead of fabricating one.
+        "credits_used": credits.get("usage"),
+        "credits_limit": credits.get("limit"),
+        "credits_used_percent": credits.get("used_percent"),
+    }
+
+
 @router.get("/analytics")
 async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
     """Compute aggregates over tracked assets metadata across Cloudinary and R2."""
     import time
     start_time = time.monotonic()
     op_id = str(uuid.uuid4())
-    
+
     # 1. Cloudinary Usage
     cld_live = {}
     cld_status = "healthy"
@@ -217,172 +352,76 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
     total_quota = cld_quota + r2_quota
     total_objects = cld_count + r2_count
     
-    # Category Breakdowns from asset_metadata + fallback feedback count
-    pipeline = [
-        {
-            "$group": {
-                "_id": {
-                    "asset_type": "$asset_type",
-                    "category": "$category"
-                },
-                "total_size": {"$sum": "$file_size"},
-                "count": {"$sum": 1}
-            }
-        }
-    ]
-    
-    by_category_raw = []
-    try:
-        cursor = db.asset_metadata.aggregate(pipeline)
-        by_category_raw = await cursor.to_list(length=500)
-    except Exception as e:
-        logger.error(f"Mongo: asset_metadata aggregate breakdown failed: {e}")
-        
-    # Organize categories
-    categories = {
-        "audition_videos": {"size": 0, "count": 0, "label": "Audition Videos"},
-        "intro_videos": {"size": 0, "count": 0, "label": "Introduction Videos"},
-        "portfolio_images": {"size": 0, "count": 0, "label": "Portfolio (General) Images"},
-        "indian_look_images": {"size": 0, "count": 0, "label": "Indian Look Images"},
-        "western_look_images": {"size": 0, "count": 0, "label": "Western Look Images"},
-        "voice_notes": {"size": 0, "count": 0, "label": "Voice Notes"},
-        "admin_uploads": {"size": 0, "count": 0, "label": "Admin Uploads"},
-    }
-    
-    if isinstance(by_category_raw, list):
-        for item in by_category_raw:
-            if not isinstance(item, dict):
-                continue
-            grp = item.get("_id") or {}
-            if not isinstance(grp, dict):
-                grp = {}
-            atype = grp.get("asset_type")
-            cat = grp.get("category")
-            size = item.get("total_size") or 0
-            count = item.get("count") or 0
-            
-            if atype == "audition_video" or cat in ("take", "take_1", "take_2", "take_3"):
-                categories["audition_videos"]["size"] += size
-                categories["audition_videos"]["count"] += count
-            elif atype == "intro_video" or cat == "intro_video":
-                categories["intro_videos"]["size"] += size
-                categories["intro_videos"]["count"] += count
-            elif cat == "indian":
-                categories["indian_look_images"]["size"] += size
-                categories["indian_look_images"]["count"] += count
-            elif cat == "western":
-                categories["western_look_images"]["size"] += size
-                categories["western_look_images"]["count"] += count
-            elif cat in ("image", "portfolio") or (atype == "profile_image" and cat not in ("indian", "western")):
-                categories["portfolio_images"]["size"] += size
-                categories["portfolio_images"]["count"] += count
-            elif atype == "voice_note" or cat == "voice":
-                categories["voice_notes"]["size"] += size
-                categories["voice_notes"]["count"] += count
-            elif atype == "admin_upload" or cat == "admin":
-                categories["admin_uploads"]["size"] += size
-                categories["admin_uploads"]["count"] += count
-            else:
-                # default fallback to general portfolio
-                categories["portfolio_images"]["size"] += size
-                categories["portfolio_images"]["count"] += count
+    # Category breakdown — see compute_category_breakdown() docstring for why
+    # this reads submissions/applications.media[].size instead of asset_metadata.
+    categories = await compute_category_breakdown()
 
-    # Add legacy voice notes from feedback collection if not already captured
-    voice_feedback_count = 0
-    try:
-        voice_feedback_count = await db.feedback.count_documents({"type": "voice"})
-    except Exception as e:
-        logger.error(f"Mongo: feedback count_documents failed: {e}")
-        
-    if categories["voice_notes"]["count"] < voice_feedback_count:
-        diff_count = voice_feedback_count - categories["voice_notes"]["count"]
-        # estimate 500KB per legacy audio
-        categories["voice_notes"]["size"] += diff_count * 500 * 1024
-        categories["voice_notes"]["count"] += diff_count
-
-    # Archived project storage
-    pipeline_archived = [
-        {"$match": {"project_status": "archived"}},
-        {"$group": {"_id": None, "total_size": {"$sum": "$file_size"}}}
+    # Per-project totals, sourced the same way (real upload-time byte sizes),
+    # used for both "Top Campaigns" and archived-project storage below.
+    project_totals: Dict[Optional[str], int] = {}
+    proj_pipeline = [
+        {"$match": {"media": {"$exists": True, "$ne": []}}},
+        {"$unwind": "$media"},
+        {"$group": {"_id": "$project_id", "total_size": {"$sum": {"$ifNull": ["$media.size", 0]}}}},
     ]
+    for coll in (db.submissions, db.applications):
+        try:
+            items = await coll.aggregate(proj_pipeline).to_list(length=10000)
+            for item in items:
+                pid = item.get("_id")
+                project_totals[pid] = project_totals.get(pid, 0) + (item.get("total_size") or 0)
+        except Exception as e:
+            logger.error(f"Mongo: project totals aggregate failed for {coll.name}: {e}")
+
     archived_storage = 0
     try:
-        cursor_archived = db.asset_metadata.aggregate(pipeline_archived)
-        archived_list = await cursor_archived.to_list(length=1)
-        if isinstance(archived_list, list) and archived_list:
-            archived_storage = archived_list[0].get("total_size") or 0
+        archived_ids = await db.projects.find({"status": "archived"}, {"id": 1}).to_list(length=10000)
+        archived_storage = sum(project_totals.get(p["id"], 0) for p in archived_ids)
     except Exception as e:
-        logger.error(f"Mongo: archived storage aggregate failed: {e}")
+        logger.error(f"Mongo: archived storage lookup failed: {e}")
 
-    # Top storage consuming projects
-    pipeline_projects = [
-        {"$group": {"_id": "$project_id", "total_size": {"$sum": "$file_size"}}},
-        {"$sort": {"total_size": -1}},
-        {"$limit": 5}
-    ]
-    top_projects = []
-    try:
-        cursor_projects = db.asset_metadata.aggregate(pipeline_projects)
-        top_projects = await cursor_projects.to_list(length=5)
-    except Exception as e:
-        logger.error(f"Mongo: top projects aggregate failed: {e}")
-        
+    top_projects_sorted = sorted(
+        (p for p in project_totals.items() if p[0]), key=lambda kv: kv[1], reverse=True
+    )[:5]
     enriched_top_projects = []
-    if isinstance(top_projects, list):
-        for tp in top_projects:
-            if not isinstance(tp, dict):
-                continue
-            pid = tp.get("_id")
-            size = tp.get("total_size") or 0
-            name = pid or "Permanent / System"
-            if pid:
-                try:
-                    proj = await db.projects.find_one({"id": pid}, {"name": 1, "brand_name": 1})
-                    if isinstance(proj, dict):
-                        name = proj.get("brand_name") or proj.get("name") or pid
-                except Exception:
-                    pass
-            else:
-                name = "Permanent / System"
-            enriched_top_projects.append({
-                "project_id": pid,
-                "name": name,
-                "size": size
-            })
+    for pid, size in top_projects_sorted:
+        name = pid
+        try:
+            proj = await db.projects.find_one({"id": pid}, {"name": 1, "brand_name": 1})
+            if isinstance(proj, dict):
+                name = proj.get("brand_name") or proj.get("name") or pid
+        except Exception:
+            pass
+        enriched_top_projects.append({"project_id": pid, "name": name, "size": size})
 
-    # Top storage consuming talents
-    pipeline_talents = [
-        {"$group": {"_id": "$talent_id", "total_size": {"$sum": "$file_size"}}},
-        {"$sort": {"total_size": -1}},
-        {"$limit": 5}
+    # Top storage consuming talents — same real-byte-size source.
+    talent_totals: Dict[str, int] = {}
+    talent_pipeline = [
+        {"$match": {"media": {"$exists": True, "$ne": []}}},
+        {"$unwind": "$media"},
+        {"$group": {"_id": {"$ifNull": ["$talent_id", "unknown_talent"]}, "total_size": {"$sum": {"$ifNull": ["$media.size", 0]}}}},
     ]
-    top_talents = []
-    try:
-        cursor_talents = db.asset_metadata.aggregate(pipeline_talents)
-        top_talents = await cursor_talents.to_list(length=5)
-    except Exception as e:
-        logger.error(f"Mongo: top talents aggregate failed: {e}")
-        
+    for coll in (db.submissions, db.applications):
+        try:
+            items = await coll.aggregate(talent_pipeline).to_list(length=10000)
+            for item in items:
+                tid = item.get("_id") or "unknown_talent"
+                talent_totals[tid] = talent_totals.get(tid, 0) + (item.get("total_size") or 0)
+        except Exception as e:
+            logger.error(f"Mongo: talent totals aggregate failed for {coll.name}: {e}")
+
+    top_talents_sorted = sorted(talent_totals.items(), key=lambda kv: kv[1], reverse=True)[:5]
     enriched_top_talents = []
-    if isinstance(top_talents, list):
-        for tt in top_talents:
-            if not isinstance(tt, dict):
-                continue
-            tid = tt.get("_id")
-            size = tt.get("total_size") or 0
-            name = tid or "Unnamed / System"
-            if tid:
-                try:
-                    talent = await db.talents.find_one({"id": tid}, {"name": 1})
-                    if isinstance(talent, dict):
-                        name = talent.get("name") or tid
-                except Exception:
-                    pass
-            enriched_top_talents.append({
-                "talent_id": tid,
-                "name": name,
-                "size": size
-            })
+    for tid, size in top_talents_sorted:
+        name = tid
+        if tid != "unknown_talent":
+            try:
+                talent = await db.talents.find_one({"id": tid}, {"name": 1})
+                if isinstance(talent, dict):
+                    name = talent.get("name") or tid
+            except Exception:
+                pass
+        enriched_top_talents.append({"talent_id": tid, "name": name, "size": size})
 
     return {
         "total_storage": total_used,
@@ -422,23 +461,46 @@ async def get_storage_analytics(admin: dict = Depends(require_role("admin"))):
         "total_auditions": categories["audition_videos"]["count"]
     }
 
+async def aggregate_project_talent_totals() -> Dict[str, Dict[str, Any]]:
+    """Per-project: real total bytes (from media[].size, see
+    compute_category_breakdown docstring) + the set of distinct talents with
+    media in that project. Cheap single-pass Mongo aggregation (~0.2s
+    measured against production data) — no live Cloudinary calls."""
+    totals: Dict[str, Dict[str, Any]] = {}
+    pipeline = [
+        {"$match": {"media": {"$exists": True, "$ne": []}}},
+        {"$unwind": "$media"},
+        {"$group": {
+            "_id": "$project_id",
+            "total_size": {"$sum": {"$ifNull": ["$media.size", 0]}},
+            "asset_count": {"$sum": 1},
+            "talent_ids": {"$addToSet": {"$ifNull": ["$talent_id", "unknown_talent"]}},
+        }},
+    ]
+    for coll in (db.submissions, db.applications):
+        try:
+            items = await coll.aggregate(pipeline).to_list(length=10000)
+            for item in items:
+                pid = item.get("_id")
+                if pid not in totals:
+                    totals[pid] = {"total_size": 0, "asset_count": 0, "talent_ids": set()}
+                totals[pid]["total_size"] += item.get("total_size") or 0
+                totals[pid]["asset_count"] += item.get("asset_count") or 0
+                totals[pid]["talent_ids"].update(item.get("talent_ids") or [])
+        except Exception as e:
+            logger.error(f"Mongo: project/talent totals aggregate failed for {coll.name}: {e}")
+    return totals
+
+
 @router.get("/projects")
 async def get_projects_storage(admin: dict = Depends(require_role("admin"))):
-    """Retrieve detailed storage breakdowns for all projects."""
-    pipeline = [
-        {
-            "$group": {
-                "_id": "$project_id",
-                "total_size": {"$sum": "$file_size"},
-                "asset_count": {"$sum": 1}
-            }
-        }
-    ]
-    cursor = db.asset_metadata.aggregate(pipeline)
-    project_sizes = await cursor.to_list(length=1000)
-    sizes_dict = {item["_id"]: item for item in project_sizes if item["_id"]}
+    """Retrieve storage breakdowns for all projects: real total bytes and
+    distinct talent count. Talent/media detail is intentionally NOT included
+    here — it's loaded lazily via GET /projects/{id}/talents only when the
+    admin expands a project (Phase 6 performance fix)."""
+    totals = await aggregate_project_talent_totals()
 
-    cursor_projects = db.projects.find({}, {"id": 1, "name": 1, "status": 1, "created_at": 1})
+    cursor_projects = db.projects.find({}, {"id": 1, "name": 1, "brand_name": 1, "status": 1, "created_at": 1})
     projects = await cursor_projects.to_list(length=1000)
 
     result = []
@@ -447,60 +509,148 @@ async def get_projects_storage(admin: dict = Depends(require_role("admin"))):
     for proj in projects:
         pid = proj["id"]
         found_project_ids.add(pid)
-        size_info = sizes_dict.get(pid, {"total_size": 0, "asset_count": 0})
-        
-        pipeline_subs = [
-            {"$match": {"project_id": pid}},
-            {"$group": {"_id": "$submission_id"}}
-        ]
-        cursor_subs = db.asset_metadata.aggregate(pipeline_subs)
-        subs = await cursor_subs.to_list(length=1000)
-        
-        name = proj.get("name")
+        info = totals.get(pid, {"total_size": 0, "asset_count": 0, "talent_ids": set()})
+
+        name = proj.get("brand_name") or proj.get("name")
         if not name or not name.strip():
             name = "Untitled Project"
-            
+
         result.append({
             "project_id": pid,
             "name": name,
             "status": proj.get("status") or "active",
-            "total_auditions": len(subs),
-            "total_storage": size_info["total_size"],
-            "last_activity": proj.get("created_at")
+            "talent_count": len(info["talent_ids"]),
+            "asset_count": info["asset_count"],
+            "total_storage": info["total_size"],
+            "last_activity": proj.get("created_at"),
         })
 
-    # Include deleted projects that still have storage files
-    for pid, size_info in sizes_dict.items():
-        if pid not in found_project_ids:
-            pipeline_subs = [
-                {"$match": {"project_id": pid}},
-                {"$group": {"_id": "$submission_id"}}
-            ]
-            cursor_subs = db.asset_metadata.aggregate(pipeline_subs)
-            subs = await cursor_subs.to_list(length=1000)
-            
-            # Retrieve latest activity from asset metadata as fallback
-            last_activity = None
-            try:
-                latest_asset = await db.asset_metadata.find_one(
-                    {"project_id": pid},
-                    sort=[("created_at", -1)]
-                )
-                if latest_asset:
-                    last_activity = latest_asset.get("created_at")
-            except Exception:
-                pass
-
+    # Include deleted projects that still have storage files.
+    for pid, info in totals.items():
+        if pid and pid not in found_project_ids:
             result.append({
                 "project_id": pid,
-                "name": f"Deleted Project",
+                "name": "Deleted Project",
                 "status": "deleted",
-                "total_auditions": len(subs),
-                "total_storage": size_info["total_size"],
-                "last_activity": last_activity
+                "talent_count": len(info["talent_ids"]),
+                "asset_count": info["asset_count"],
+                "total_storage": info["total_size"],
+                "last_activity": None,
             })
 
+    result.sort(key=lambda r: r["total_storage"], reverse=True)
     return result
+
+
+@router.get("/projects/{project_id}/talents")
+async def get_project_talent_storage(project_id: str, admin: dict = Depends(require_role("admin"))):
+    """Per-talent storage breakdown within one project — lazily loaded when
+    an admin expands a project row. Category split (audition/intro/images)
+    matches the same real-byte-size source as /analytics."""
+    pipeline = [
+        {"$match": {"project_id": project_id, "media": {"$exists": True, "$ne": []}}},
+        {"$unwind": "$media"},
+        {"$project": {
+            "talent_id": {"$ifNull": ["$talent_id", "unknown_talent"]},
+            "talent_name": 1,
+            "category": "$media.category",
+            "scope": "$media.scope",
+            "admin_added": "$media.admin_added",
+            "size": {"$ifNull": ["$media.size", 0]},
+        }},
+    ]
+    by_talent: Dict[str, Dict[str, Any]] = {}
+    for coll in (db.submissions, db.applications):
+        try:
+            agg_items = await coll.aggregate(pipeline).to_list(length=50000)
+            for item in agg_items:
+                tid = item.get("talent_id") or "unknown_talent"
+                if tid not in by_talent:
+                    by_talent[tid] = {
+                        "talent_id": tid,
+                        "talent_name": item.get("talent_name"),
+                        "total": 0,
+                        "audition_videos": 0,
+                        "intro_videos": 0,
+                        "images": 0,
+                    }
+                bucket = classify_media_item(item)
+                size = item.get("size") or 0
+                by_talent[tid]["total"] += size
+                if bucket == "audition_videos":
+                    by_talent[tid]["audition_videos"] += size
+                elif bucket == "intro_videos":
+                    by_talent[tid]["intro_videos"] += size
+                else:
+                    by_talent[tid]["images"] += size
+                if not by_talent[tid]["talent_name"] and item.get("talent_name"):
+                    by_talent[tid]["talent_name"] = item.get("talent_name")
+        except Exception as e:
+            logger.error(f"Mongo: project talent breakdown failed for {coll.name}: {e}")
+
+    talent_ids = [tid for tid in by_talent if tid != "unknown_talent"]
+    if talent_ids:
+        try:
+            names = await db.talents.find({"id": {"$in": talent_ids}}, {"id": 1, "name": 1}).to_list(length=len(talent_ids))
+            name_map = {t["id"]: t.get("name") for t in names}
+            for tid, row in by_talent.items():
+                if not row["talent_name"] and tid in name_map:
+                    row["talent_name"] = name_map[tid]
+        except Exception as e:
+            logger.error(f"Mongo: talent name lookup failed: {e}")
+
+    rows = list(by_talent.values())
+    for row in rows:
+        row["talent_name"] = row["talent_name"] or "Unnamed Talent"
+    rows.sort(key=lambda r: r["total"], reverse=True)
+    return rows
+
+
+@router.get("/projects/{project_id}/talents/{talent_id}")
+async def get_project_talent_media_detail(project_id: str, talent_id: str, admin: dict = Depends(require_role("admin"))):
+    """Full media list for one talent within one project — the detail view
+    that backs the delete actions. Any item still missing a real byte size
+    (a handful of legacy records — see compute_category_breakdown) gets a
+    targeted live Cloudinary lookup here, where the set is small and bounded,
+    rather than during the bulk project/talent list aggregation."""
+    match: Dict[str, Any] = {"project_id": project_id}
+    match["talent_id"] = None if talent_id == "unknown_talent" else talent_id
+
+    items: List[Dict[str, Any]] = []
+    for coll, scope_label in ((db.submissions, "submission"), (db.applications, "application")):
+        try:
+            docs = await coll.find(match, {"id": 1, "media": 1}).to_list(length=1000)
+        except Exception as e:
+            logger.error(f"Mongo: talent media detail failed for {coll.name}: {e}")
+            continue
+        for doc in docs:
+            for m in doc.get("media", []):
+                bucket = classify_media_item(m)
+                size = m.get("size") or 0
+                if not size and m.get("public_id"):
+                    try:
+                        rtype = m.get("resource_type") or "image"
+                        full_pid = resolve_full_public_id(m)
+                        res = await run_in_threadpool(cloudinary.api.resource, full_pid, resource_type=rtype)
+                        size = res.get("bytes") or 0
+                    except Exception as e:
+                        logger.warning(f"Live Cloudinary size lookup failed for {m.get('public_id')}: {e}")
+                items.append({
+                    "media_id": m.get("id"),
+                    "parent_id": doc.get("id"),
+                    "parent_scope": scope_label,
+                    "public_id": m.get("public_id"),
+                    "resource_type": m.get("resource_type"),
+                    "category": bucket,
+                    "raw_category": m.get("category"),
+                    "size": size,
+                    "url": m.get("url"),
+                    "thumbnail_url": m.get("thumbnail_url"),
+                    "original_filename": m.get("original_filename"),
+                    "created_at": m.get("created_at"),
+                })
+
+    return {"project_id": project_id, "talent_id": talent_id, "media": items}
 
 @router.post("/projects/{project_id}/archive")
 async def archive_project(project_id: str, admin: dict = Depends(require_role("admin"))):
@@ -593,6 +743,167 @@ async def delete_project_assets(project_id: str, admin: dict = Depends(require_r
     await db.projects.update_one({"id": project_id}, {"$set": {"status": "purged"}})
     await log_storage_action(user_id=admin.get("id"), action_type="DELETE", project_id=project_id)
     return {"status": "success", "message": f"Project {project_id} audition takes and voice notes deleted."}
+
+
+def resolve_full_public_id(media_item: Dict[str, Any]) -> Optional[str]:
+    """Live-testing discovery (Phase 9): `submission_sign_upload` returns a
+    bare `public_id` (just the media UUID, no folder) in its response, and
+    `submission_complete_upload` stores that bare value verbatim on
+    `media.public_id` — but Cloudinary actually created the asset at
+    `{folder}/{public_id}` (folder + public_id are signed as separate
+    params, which Cloudinary joins server-side). A destroy() call using the
+    bare id silently no-ops: Cloudinary returns {"result": "not found"} for
+    a non-matching public_id rather than raising, so the delete looked
+    successful while leaving the real asset (and its storage cost) behind.
+    Confirmed empirically: 100% of a freshly-uploaded test submission's
+    media had this bare form stored, while the accompanying `url` always
+    carries the true full path — so the URL is the reliable source here.
+    Existing correctly-full public_ids (already containing '/') pass
+    through untouched."""
+    public_id = media_item.get("public_id")
+    if not public_id:
+        return None
+    if "/" in public_id:
+        return public_id
+    url = media_item.get("url") or ""
+    m = re.search(r"/upload/(?:[^/]+/)*?v\d+/(.+?)\.[a-zA-Z0-9]+(?:\?.*)?$", url)
+    if m:
+        return m.group(1)
+    return public_id
+
+
+async def count_other_references(public_id: str, exclude_scope: str, exclude_parent_id: str) -> int:
+    """Shared/global-asset protection (Phase 4): count how many OTHER
+    submissions/applications/talent records reference this exact Cloudinary
+    public_id, excluding the one record the caller is about to delete from.
+    Media synced to a talent's global profile shares the same public_id with
+    its originating submission (confirmed empirically — 348 of 364 talent
+    media public_ids are also referenced by a submission in production data),
+    and 123 public_ids are referenced by more than one submission via the
+    Media Library reuse feature. A reference count > 0 here means the
+    physical Cloudinary asset must NOT be destroyed — only the one local
+    reference being deleted should be removed."""
+    count = 0
+    for coll, scope in ((db.submissions, "submission"), (db.applications, "application")):
+        query: Dict[str, Any] = {"media.public_id": public_id}
+        if scope == exclude_scope:
+            query["id"] = {"$ne": exclude_parent_id}
+        try:
+            count += await coll.count_documents(query)
+        except Exception as e:
+            logger.error(f"Mongo: reference count failed for {coll.name}: {e}")
+    try:
+        count += await db.talents.count_documents({"media.public_id": public_id})
+    except Exception as e:
+        logger.error(f"Mongo: talent reference count failed: {e}")
+    return count
+
+
+async def delete_one_media_item(parent_coll, parent_id: str, media_item: Dict[str, Any], admin_id: str) -> Dict[str, Any]:
+    """Safely delete a single media item: physically destroy the Cloudinary
+    asset ONLY if no other record references the same public_id, always
+    remove the local reference, and verify both sides afterward. Never
+    raises — mirrors cleanup_media_storage's best-effort contract."""
+    public_id = media_item.get("public_id")
+    category = media_item.get("category")
+    is_audition = category == "take" or category in LEGACY_TAKE_CATEGORIES
+    other_refs = 0
+    if public_id and not is_audition:
+        # Audition takes are architecturally never synced to a global
+        # profile or reused across submissions (REUSABLE_MEDIA_CATEGORIES
+        # excludes them) — skip the reference scan for the common case.
+        other_refs = await count_other_references(public_id, "submission", parent_id)
+
+    physically_deleted = False
+    if public_id and other_refs == 0:
+        full_public_id = resolve_full_public_id(media_item)
+        cleanup_item = dict(media_item)
+        cleanup_item["public_id"] = full_public_id
+        await cleanup_media_storage(cleanup_item, scope="submission", parent_id=parent_id)
+        # cleanup_media_storage() is best-effort and never raises, so a
+        # failed/no-op destroy() call (e.g. Cloudinary returning "not
+        # found" for a mismatched public_id) would otherwise report success
+        # with the asset still live. Verify directly against Cloudinary
+        # (Phase 9 requirement: "Confirm Cloudinary deletion succeeded").
+        rtype = media_item.get("resource_type") or ("video" if is_audition or category == "intro_video" else "image")
+        try:
+            await run_in_threadpool(cloudinary.api.resource, full_public_id, resource_type=rtype)
+            physically_deleted = False
+            logger.error(f"[delete_one_media_item] Cloudinary asset still present after destroy: {full_public_id}")
+        except cloudinary.exceptions.NotFound:
+            physically_deleted = True
+        except Exception as e:
+            # Couldn't confirm either way (e.g. transient network/API error)
+            # — report honestly as unconfirmed rather than claiming success.
+            physically_deleted = False
+            logger.warning(f"[delete_one_media_item] Could not verify deletion of {full_public_id}: {e}")
+
+    await parent_coll.update_one({"id": parent_id}, {"$pull": {"media": {"id": media_item.get("id")}}})
+
+    await log_storage_action(
+        user_id=admin_id,
+        action_type="DELETE_MEDIA_ITEM",
+        details=f"public_id={public_id} physically_deleted={physically_deleted} other_refs={other_refs}",
+    )
+    return {"media_id": media_item.get("id"), "public_id": public_id, "physically_deleted": physically_deleted, "shared_refs_remaining": other_refs}
+
+
+@router.delete("/projects/{project_id}/talents/{talent_id}/auditions")
+async def delete_talent_auditions(project_id: str, talent_id: str, admin: dict = Depends(require_role("admin"))):
+    """Delete all audition takes for ONE talent within ONE project (never
+    the whole project). Audition takes are never shared/global, so this is
+    always safe to physically destroy on Cloudinary."""
+    await assert_providers_healthy()
+    match: Dict[str, Any] = {"project_id": project_id, "talent_id": None if talent_id == "unknown_talent" else talent_id}
+    subs = await db.submissions.find(match).to_list(length=1000)
+    results = []
+    for sub in subs:
+        take_media = [m for m in sub.get("media", []) if m.get("category") == "take" or m.get("category") in LEGACY_TAKE_CATEGORIES]
+        for m in take_media:
+            results.append(await delete_one_media_item(db.submissions, sub["id"], m, admin.get("id")))
+    return {"status": "success", "deleted": results}
+
+
+@router.delete("/projects/{project_id}/talents/{talent_id}/intro-video")
+async def delete_talent_intro_video(project_id: str, talent_id: str, admin: dict = Depends(require_role("admin"))):
+    """Delete the introduction video for ONE talent within ONE project.
+    intro_video IS a reusable/global-syncable category, so this goes through
+    shared-asset protection — it will only pull the local reference (not
+    destroy the Cloudinary asset) if the talent's global profile still uses
+    the same public_id."""
+    await assert_providers_healthy()
+    match: Dict[str, Any] = {"project_id": project_id, "talent_id": None if talent_id == "unknown_talent" else talent_id}
+    subs = await db.submissions.find(match).to_list(length=1000)
+    results = []
+    for sub in subs:
+        intro_media = [m for m in sub.get("media", []) if m.get("category") == "intro_video"]
+        for m in intro_media:
+            results.append(await delete_one_media_item(db.submissions, sub["id"], m, admin.get("id")))
+    return {"status": "success", "deleted": results}
+
+
+class ImageDeleteRequest(BaseModel):
+    media_ids: List[str]
+
+
+@router.post("/projects/{project_id}/talents/{talent_id}/images/delete")
+async def delete_talent_images(project_id: str, talent_id: str, payload: ImageDeleteRequest, admin: dict = Depends(require_role("admin"))):
+    """Delete specific, admin-selected images for ONE talent within ONE
+    project, by exact media id — never by filename/category alone. Each
+    goes through shared-asset protection."""
+    await assert_providers_healthy()
+    if not payload.media_ids:
+        return {"status": "success", "deleted": []}
+    match: Dict[str, Any] = {"project_id": project_id, "talent_id": None if talent_id == "unknown_talent" else talent_id}
+    subs = await db.submissions.find(match).to_list(length=1000)
+    wanted = set(payload.media_ids)
+    results = []
+    for sub in subs:
+        target_media = [m for m in sub.get("media", []) if m.get("id") in wanted]
+        for m in target_media:
+            results.append(await delete_one_media_item(db.submissions, sub["id"], m, admin.get("id")))
+    return {"status": "success", "deleted": results}
+
 
 @router.get("/health")
 async def get_storage_health(admin: dict = Depends(require_role("admin"))):

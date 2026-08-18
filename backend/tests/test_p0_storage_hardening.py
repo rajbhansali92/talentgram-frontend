@@ -18,10 +18,16 @@ from routers.cloudinary_admin import assert_providers_healthy
 
 @pytest.mark.asyncio
 async def test_p0_2_assert_providers_healthy():
-    """Verify that assert_providers_healthy checks health and aborts on outages."""
-    # Temporarily set R2 endpoint to activate the health gate
+    """Verify that assert_providers_healthy aborts only on a Cloudinary
+    outage. R2 is no longer a hard gate (Storage Console rebuild): no
+    current media is R2-backed (uploads were fully retired to Cloudinary
+    2026-08-09/10, and production has zero R2-referencing documents), and
+    the connected Cloudflare account doesn't currently have R2 entitled at
+    all (head_bucket returns 403) — gating every deletion on R2 health made
+    the entire admin delete feature permanently unusable in production."""
+    # Temporarily set R2 endpoint to activate the (now non-blocking) R2 check
     with patch("core.R2_ENDPOINT_URL", "http://localhost"):
-        # Cloudinary down
+        # Cloudinary down -> still aborts
         with patch("routers.cloudinary_admin.check_cloudinary_health", return_value=False), \
              patch("routers.cloudinary_admin.check_r2_health", return_value=True):
             with pytest.raises(HTTPException) as exc_info:
@@ -29,13 +35,10 @@ async def test_p0_2_assert_providers_healthy():
             assert exc_info.value.status_code == 503
             assert "Cloudinary is currently unreachable" in exc_info.value.detail
 
-        # R2 down
+        # R2 down, Cloudinary up -> no longer aborts (logged, not blocking)
         with patch("routers.cloudinary_admin.check_cloudinary_health", return_value=True), \
              patch("routers.cloudinary_admin.check_r2_health", return_value=False):
-            with pytest.raises(HTTPException) as exc_info:
-                await assert_providers_healthy()
-            assert exc_info.value.status_code == 503
-            assert "Cloudflare R2 is currently unreachable" in exc_info.value.detail
+            await assert_providers_healthy()
 
         # Both up
         with patch("routers.cloudinary_admin.check_cloudinary_health", return_value=True), \

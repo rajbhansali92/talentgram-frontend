@@ -88,6 +88,18 @@ export function useUploadActivityModel({ activeUploads = {}, completedCount = 0 
     const [expanded, setExpanded] = useState(false);
     const [justFinished, setJustFinished] = useState(false);
     const prevRef = useRef({ hasActive: false, hasFailed: false });
+    // Tracks whether the talent's LAST explicit action was minimizing the
+    // panel (set in toggleExpanded, below) — distinct from `expanded` itself
+    // because it needs to survive the auto-expand branches below without
+    // being read as "currently expanded." Only the completion branch reads
+    // it: a talent who explicitly minimized must not have the panel pop
+    // back over their form just because the batch they already dismissed
+    // happened to finish (Upload Manager UI fix, 2026-08). Reset whenever
+    // the system itself re-opens the panel (new upload/new failure) or the
+    // talent explicitly reopens it — at that point it's "currently open,"
+    // not "explicitly minimized," so the next completion should behave
+    // normally again.
+    const userMinimizedRef = useRef(false);
 
     // Stable "of N" denominator for the current batch. `entries.length`
     // alone would shrink mid-batch as completed entries get pruned (3s
@@ -112,15 +124,22 @@ export function useUploadActivityModel({ activeUploads = {}, completedCount = 0 
         if (startedNewUpload || justFailed) {
             setExpanded(true);
             setJustFinished(false);
+            userMinimizedRef.current = false;
         } else if (!hasActive && !hasFailed && prev.hasActive) {
-            setJustFinished(true);
-            setExpanded(true);
-            prevRef.current = { hasActive, hasFailed };
-            const t = setTimeout(() => {
+            if (userMinimizedRef.current) {
+                // Talent already minimized this batch — a quiet completion
+                // must not reclaim the screen. Stay collapsed, no flash.
                 setJustFinished(false);
-                setExpanded(false);
-            }, SUCCESS_COLLAPSE_DELAY_MS);
-            return () => clearTimeout(t);
+            } else {
+                setJustFinished(true);
+                setExpanded(true);
+                prevRef.current = { hasActive, hasFailed };
+                const t = setTimeout(() => {
+                    setJustFinished(false);
+                    setExpanded(false);
+                }, SUCCESS_COLLAPSE_DELAY_MS);
+                return () => clearTimeout(t);
+            }
         } else if (!hasActive && !hasFailed) {
             setExpanded(false);
         }
@@ -128,7 +147,13 @@ export function useUploadActivityModel({ activeUploads = {}, completedCount = 0 
         prevRef.current = { hasActive, hasFailed };
     }, [hasActive, hasFailed]);
 
-    const toggleExpanded = useCallback(() => setExpanded((v) => !v), []);
+    const toggleExpanded = useCallback(() => {
+        setExpanded((v) => {
+            const next = !v;
+            userMinimizedRef.current = !next;
+            return next;
+        });
+    }, []);
 
     // Nothing has happened this session yet — the panel shouldn't render at
     // all (Google Photos/Dropbox/iCloud Photos: no idle widget before the

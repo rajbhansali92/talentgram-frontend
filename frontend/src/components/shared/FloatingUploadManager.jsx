@@ -23,19 +23,80 @@ export default function FloatingUploadManager({ activeUploads = {}, completedCou
 
     if (!isVisible) return null;
 
+    // Shared positioning: floats clear of whichever sticky footer is
+    // actually rendered instead of overlapping it. `--tg-sticky-cta-h`
+    // (the Step 4 Submit footer) and `--tg-wizard-nav-h` (the wizard's
+    // Steps 1-3 Back/Next footer, SubmissionPage.jsx) are each published by
+    // useStickyFooterHeightVar and are mutually exclusive — only one is
+    // ever visually mounted at a time, so the hidden one's height is 0 and
+    // summing them always yields just the active footer's height. The
+    // corner (right + z-index) is identical for both render states so
+    // reopening/minimizing never jumps sideways; `bottom` differs per
+    // state (see the minimized branch below) and is applied separately.
+    const anchorCornerClass = "fixed right-4 sm:right-6 z-50";
+    const expandedBottomClass =
+        "bottom-[calc(var(--tg-sticky-cta-h,0px)+var(--tg-wizard-nav-h,0px)+1rem)] sm:bottom-[calc(var(--tg-sticky-cta-h,0px)+var(--tg-wizard-nav-h,0px)+1.5rem)]";
+
+    // Upload Manager UI fix (2026-08): minimized must mean minimized — a
+    // small, fixed-footprint corner control, never a shrunk copy of the
+    // full panel. The previous "collapsed" state still rendered the full
+    // header + progress bar + status line at ~90vw wide on mobile, which is
+    // exactly the "obstructing the submission screen" this fixes. This
+    // control never covers form fields, the Media section, or Back/Next —
+    // it's an 11x11 circle, nothing else — and tapping it is the only way
+    // back to the full panel.
+    //
+    // Its own clearance, NOT the shared `anchorPositionClass` above: that
+    // formula only clears the footer's own measured height, not the
+    // trailing bottom padding the submission content wrapper reserves
+    // below it (`pb-28 sm:pb-10` in SubmissionPage.jsx) — a `position:
+    // sticky` element can never render into that padding, so in practice
+    // the footer sits noticeably higher than "wizard-nav-h + 1rem" above
+    // the viewport edge. The full panel already accepted that same gap as
+    // "close enough" (unchanged here, per "keep current functionality"),
+    // but a precise 44px circle sitting inside that gap reads as directly
+    // on top of Next, not just close to it — so it gets its own larger,
+    // padding-matched clearance instead of inheriting the panel's.
+    if (!expanded) {
+        const minimizedBottomClass =
+            "bottom-[calc(var(--tg-sticky-cta-h,0px)+var(--tg-wizard-nav-h,0px)+7rem)] sm:bottom-[calc(var(--tg-sticky-cta-h,0px)+var(--tg-wizard-nav-h,0px)+3rem)]";
+        // Solid brand-navy fill (not the panel's white/blur treatment) —
+        // at full-panel size a faint white-on-white edge is enough to read
+        // as "a card," but shrunk to a 44px circle it nearly disappeared
+        // against the page's own white background in testing. A solid fill
+        // is the small addition needed to keep a genuinely minimized
+        // control genuinely visible/tappable, not just present in the DOM.
+        return (
+            <button
+                type="button"
+                onClick={toggleExpanded}
+                data-testid="upload-activity-minimized"
+                aria-label={`${headline} — tap to show upload status`}
+                className={`${anchorCornerClass} ${minimizedBottomClass} w-11 h-11 rounded-full bg-[#0c2340] shadow-lg flex items-center justify-center transition-all duration-300 animate-in slide-in-from-bottom-5 active:scale-95`}
+            >
+                <div className="relative">
+                    {justFinished ? (
+                        <Check className="w-4 h-4 text-emerald-300" />
+                    ) : summary.failedCount > 0 ? (
+                        <AlertCircle className="w-4 h-4 text-rose-300" />
+                    ) : (
+                        <Upload className={`w-4 h-4 text-white ${hasActive ? "animate-pulse" : ""}`} />
+                    )}
+                    {hasActive && (
+                        <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white/50 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-white"></span>
+                        </span>
+                    )}
+                </div>
+            </button>
+        );
+    }
+
     return (
         <div
             data-testid="upload-activity-panel"
-            // Floats clear of whichever sticky footer is actually rendered
-            // instead of overlapping it. `--tg-sticky-cta-h` (the Step 4
-            // Submit footer) and `--tg-wizard-nav-h` (the wizard's Steps 1-3
-            // Back/Next footer, SubmissionPage.jsx) are each published by
-            // useStickyFooterHeightVar and are mutually exclusive — only one
-            // is ever visually mounted at a time, so the hidden one's height
-            // is 0 and summing them always yields just the active footer's
-            // height. Falls back to the original fixed gap on pages with
-            // neither (both vars simply unset there).
-            className="fixed bottom-[calc(var(--tg-sticky-cta-h,0px)+var(--tg-wizard-nav-h,0px)+1rem)] right-4 sm:bottom-[calc(var(--tg-sticky-cta-h,0px)+var(--tg-wizard-nav-h,0px)+1.5rem)] sm:right-6 z-50 w-[calc(100vw-2rem)] max-w-xs sm:w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-[#eaeaea]/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5"
+            className={`${anchorCornerClass} ${expandedBottomClass} w-[calc(100vw-2rem)] max-w-xs sm:w-80 bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border border-[#eaeaea]/60 p-4 transition-all duration-300 animate-in slide-in-from-bottom-5`}
         >
             <div className="flex items-center justify-between cursor-pointer" onClick={toggleExpanded}>
                 <div className="flex items-center gap-2 min-w-0">
@@ -66,7 +127,7 @@ export default function FloatingUploadManager({ activeUploads = {}, completedCou
                     data-testid="upload-activity-toggle"
                     className="text-[#333333] hover:text-[#222222] p-1 shrink-0"
                 >
-                    <ChevronDown className={`w-4 h-4 transform transition-transform duration-200 ${!expanded ? "rotate-180" : ""}`} />
+                    <ChevronDown className="w-4 h-4 transform transition-transform duration-200" />
                 </button>
             </div>
 
@@ -97,7 +158,7 @@ export default function FloatingUploadManager({ activeUploads = {}, completedCou
                 )}
             </div>
 
-            {expanded && items.length > 0 && (
+            {items.length > 0 && (
                 <div className="space-y-3 max-h-60 overflow-y-auto pr-1 mt-3 pt-3 border-t border-slate-100">
                     {items.map((item) => (
                         <div key={item.key} className="text-xs bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/80">

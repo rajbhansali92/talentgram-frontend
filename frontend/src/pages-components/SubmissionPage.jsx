@@ -12,6 +12,7 @@ import { REQUIREMENT_TIERS, SUBMIT_BLOCKING_REASONS, CTA_ACTIONS, SECTION_STATUS
 import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
 import { computeRequirementItems } from "@/lib/requirementEngine";
 import { buildRecognizedIdentity, shouldAttemptSilentRecognition, classifyPortalLookupResult, tokenAuthenticatesEmail } from "@/lib/returningTalent";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import { splitPendingConsentByKnownDestination, groupByDestinationDecision } from "@/lib/mediaDestination";
 import { useSwipeStep } from "@/hooks/useSwipeStep";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
@@ -378,6 +379,61 @@ const expandIndianBudgetShorthand = (raw) => {
     const amount = Math.round(num * multiplier);
     return `₹${amount.toLocaleString("en-IN")}`;
 };
+
+// Merges the backend's saved submission.form_data into local `form` state
+// on resume (page reload / reopen). MUST NOT use a blind `{...f, ...fd}`
+// spread: the backend only has whatever the talent's last successful
+// saveForm() PATCH sent, so any field typed locally after that (e.g. Next
+// was blocked by a DIFFERENT field's validation, so saveForm() never ran)
+// is more current than the backend's copy — a raw spread lets that stale/
+// blank backend value silently clobber it. Same "prefer local if it has
+// content, else backend" rule populatePrefillData already uses elsewhere
+// in this file, just covering the full form_data shape (`base` above).
+function mergeResumedFormData(f, fd) {
+    if (!fd) return f;
+    const scalar = (key) => (f[key] || f[key] === 0 ? f[key] : fd[key]);
+    const list = (key) => ((f[key] && f[key].length) ? f[key] : (fd[key] || []));
+    return {
+        ...f,
+        first_name: scalar("first_name"),
+        last_name: scalar("last_name"),
+        email: scalar("email"),
+        phone: scalar("phone"),
+        alternate_contact_number: scalar("alternate_contact_number"),
+        dob: scalar("dob"),
+        age: scalar("age"),
+        overrideAge: f.overrideAge || fd.overrideAge || false,
+        submitted_age_override: scalar("submitted_age_override"),
+        height: scalar("height"),
+        location: list("location"),
+        gender: scalar("gender"),
+        ethnicity: scalar("ethnicity"),
+        instagram_handle: scalar("instagram_handle"),
+        instagram_followers: scalar("instagram_followers"),
+        bio: scalar("bio"),
+        work_links: list("work_links"),
+        skills: list("skills"),
+        has_competitive_brand_experience:
+            f.has_competitive_brand_experience !== null && f.has_competitive_brand_experience !== undefined
+                ? f.has_competitive_brand_experience
+                : (fd.has_competitive_brand_experience ?? null),
+        competitive_brand: scalar("competitive_brand"),
+        commission: scalar("commission"),
+        custom_answers: { ...(fd.custom_answers || {}), ...(f.custom_answers || {}) },
+        availability:
+            f.availability && f.availability.status
+                ? f.availability
+                : (typeof fd.availability === "object" && fd.availability !== null
+                    ? { status: "", note: "", ...fd.availability }
+                    : f.availability),
+        budget:
+            f.budget && f.budget.status
+                ? f.budget
+                : (typeof fd.budget === "object" && fd.budget !== null
+                    ? { status: "", value: "", ...fd.budget }
+                    : f.budget),
+    };
+}
 
 const formatDuration = (sec) => {
     if (!sec) return null;
@@ -912,7 +968,7 @@ function SubmissionPage() {
                                 description: "We've sent a 6-digit code to load your profile.",
                             });
                         } catch (otpErr) {
-                            toast.error(otpErr?.response?.data?.detail || "Verification required to continue.");
+                            toast.error(formatErrorDetail(otpErr, "Verification required to continue."));
                         }
                     }
                     // New talent with ?email= : leave them on the landing email step.
@@ -949,22 +1005,7 @@ function SubmissionPage() {
                 );
                 applySubmissionResponse(data);
                 if (data.form_data) {
-                    setForm((f) => {
-                        const fd = data.form_data;
-                        return {
-                            ...f,
-                            ...fd,
-                            availability:
-                                typeof fd.availability === "object" &&
-                                fd.availability !== null
-                                    ? { status: "", note: "", ...fd.availability }
-                                    : f.availability,
-                            budget:
-                                typeof fd.budget === "object" && fd.budget !== null
-                                    ? { status: "", value: "", ...fd.budget }
-                                    : f.budget,
-                        };
-                    });
+                    setForm((f) => mergeResumedFormData(f, data.form_data));
                 }
             } catch {
                 if (!adminMode) localStorage.removeItem(LS_KEY(slug));
@@ -1005,7 +1046,7 @@ function SubmissionPage() {
             } catch (err) {
                 if (cancelled) return;
                 setAdminBootstrapError(
-                    err?.response?.data?.detail || "Could not start this submission. Please try again."
+                    formatErrorDetail(err, "Could not start this submission. Please try again.")
                 );
             } finally {
                 if (!cancelled) setAdminBootstrapping(false);
@@ -1041,19 +1082,7 @@ function SubmissionPage() {
                     setSaved(next);
                     applySubmissionResponse(data);
                     if (data.form_data) {
-                        const fd = data.form_data;
-                        setForm((f) => ({
-                            ...f,
-                            ...fd,
-                            availability:
-                                typeof fd.availability === "object" && fd.availability !== null
-                                    ? { status: "", note: "", ...fd.availability }
-                                    : f.availability,
-                            budget:
-                                typeof fd.budget === "object" && fd.budget !== null
-                                    ? { status: "", value: "", ...fd.budget }
-                                    : f.budget,
-                        }));
+                        setForm((f) => mergeResumedFormData(f, data.form_data));
                     }
                     // Restore the email into the form so it's visible on
                     // the dashboard header and any validation checks pass.
@@ -1257,13 +1286,12 @@ function SubmissionPage() {
                     });
                 } catch (otpErr) {
                     toast.error(
-                        otpErr?.response?.data?.detail ||
-                            "Please verify your email to continue.",
+                        formatErrorDetail(otpErr, "Please verify your email to continue."),
                     );
                 }
                 return null;
             }
-            toast.error(e?.response?.data?.detail || "Could not save profile");
+            toast.error(formatErrorDetail(e, "Could not save profile"));
             return null;
         } finally {
             setStarting(false);
@@ -1492,7 +1520,7 @@ function SubmissionPage() {
                         description: "We've sent a 6-digit code to pre-fill your profile.",
                     });
                 } catch (otpErr) {
-                    toast.error(otpErr?.response?.data?.detail || "Verification required to pre-fill.");
+                    toast.error(formatErrorDetail(otpErr, "Verification required to pre-fill."));
                     setEmailGateUnlocked(true);
                 }
                 return;
@@ -1632,7 +1660,7 @@ function SubmissionPage() {
             toast.success("Verification code sent!");
         } catch (error) {
             console.error("OTP send error:", error);
-            toast.error(error?.response?.data?.detail || "Failed to send verification code. Please try again.");
+            toast.error(formatErrorDetail(error, "Failed to send verification code. Please try again."));
         } finally {
             setGatewayLoading(false);
         }
@@ -1695,7 +1723,7 @@ function SubmissionPage() {
             onSuccess?.();
         } catch (error) {
             console.error("OTP verify error:", error);
-            toast.error(error?.response?.data?.detail || "Invalid or expired verification code.");
+            toast.error(formatErrorDetail(error, "Invalid or expired verification code."));
         } finally {
             setOtpLoading(false);
         }
@@ -1710,7 +1738,7 @@ function SubmissionPage() {
             toast.success("Verification code resent.");
         } catch (error) {
             console.error("OTP resend error:", error);
-            toast.error(error?.response?.data?.detail || "Failed to resend code. Please try again.");
+            toast.error(formatErrorDetail(error, "Failed to resend code. Please try again."));
         } finally {
             setOtpResending(false);
         }
@@ -1734,7 +1762,7 @@ function SubmissionPage() {
             toast.success("Verification code sent!");
         } catch (error) {
             console.error("OTP send error:", error);
-            toast.error(error?.response?.data?.detail || "Failed to send verification code. Please try again.");
+            toast.error(formatErrorDetail(error, "Failed to send verification code. Please try again."));
         } finally {
             setGatewayLoading(false);
         }
@@ -1760,7 +1788,7 @@ function SubmissionPage() {
             toast.success("Verification code sent!");
         } catch (error) {
             console.error("OTP send error:", error);
-            toast.error(error?.response?.data?.detail || "Failed to send verification code. Please try again.");
+            toast.error(formatErrorDetail(error, "Failed to send verification code. Please try again."));
         } finally {
             setGatewayLoading(false);
         }
@@ -1836,7 +1864,7 @@ function SubmissionPage() {
             setCollapsedSections((prev) => ({ ...prev, uploads: false }));
             toast.success("✓ Details saved successfully. Next step: Upload your introduction video, audition takes and portfolio images.");
         } catch (err) {
-            toast.error(err?.response?.data?.detail || "Failed to start");
+            toast.error(formatErrorDetail(err, "Failed to start"));
         } finally {
             setStarting(false);
         }
@@ -1909,7 +1937,7 @@ function SubmissionPage() {
             );
             applySubmissionResponse(data);
         } catch (err) {
-            toast.error(err?.response?.data?.detail || "Could not rename");
+            toast.error(formatErrorDetail(err, "Could not rename"));
         }
     };
 
@@ -2204,7 +2232,7 @@ function SubmissionPage() {
                 applySubmissionResponse(data);
             }
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Could not update selection");
+            toast.error(formatErrorDetail(e, "Could not update selection"));
         } finally {
             setLibraryBusyId(null);
         }
@@ -2280,7 +2308,7 @@ function SubmissionPage() {
                 );
             }
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Could not save your choice");
+            toast.error(formatErrorDetail(e, "Could not save your choice"));
         } finally {
             setMediaConsentSubmitting(false);
         }
@@ -2448,7 +2476,7 @@ function SubmissionPage() {
             }
         } catch (err) {
             toast.error(
-                err?.response?.data?.detail || "Please complete all required fields",
+                formatErrorDetail(err, "Please complete all required fields"),
             );
         } finally {
             setFinalizing(false);
@@ -2498,13 +2526,32 @@ function SubmissionPage() {
         [isReturningTalent, currentStep],
     );
 
-    // "Update my Profile" disclosure — always defaults open if any field it
-    // hides is actually required-and-unsatisfied for THIS project (never
-    // silently hide something blocking Next), otherwise follows the
-    // returning-vs-first-time rule: collapsed for a recognized talent
-    // (reduce friction — they've filled this in before), expanded for a
-    // brand-new one (nothing to hide yet).
-    const hasKnownProfile = !!prefillSuggestion;
+    // The READY-TO-SUBMIT FOOTER below (Almost Done / Identity Confirmation /
+    // finalize button) must only ever appear on the actual last step of
+    // THIS talent's flow — otherwise `experience.readinessSummary.ready`
+    // alone (which the footer's outer gate also checks) can go true the
+    // moment every requirement happens to already be satisfied, even while
+    // the talent is still sitting on an earlier step (e.g. Media, with
+    // Basic Profile/Skills still ahead, or a project where most fields are
+    // optional) — stacking a second "Next"/Submit control underneath that
+    // step's own WizardStepNav. "Last step of this flow" isn't always the
+    // fixed id 4: wizardDisplaySteps already encodes the same new-talent-
+    // vs-returning-talent variation (Skills vs. Uploads) this footer's own
+    // comment describes, so reusing it here keeps both in agreement.
+    const isOnFinalDisplayedStep =
+        currentStep === Math.max(...wizardDisplaySteps.map((s) => s.id));
+
+    // "Update my Profile" disclosure — one small task per screen (final
+    // spec pass, 2026-08): collapsed by default for EVERY talent, new or
+    // returning, so Basic Profile's default view is just Name/Phone/DOB/
+    // Height and Skills' default view is just the skill chips — not both
+    // of those plus Gender/Ethnicity/Instagram/Bio/Work Links all visible
+    // at once. Still always forced open if any field it hides is actually
+    // required-and-unsatisfied for THIS project (never silently hide
+    // something blocking Next) — that safety net is untouched, only the
+    // old "expanded for a brand-new talent, nothing to hide yet" default
+    // is gone, since "nothing to hide" was true of the DATA but not of the
+    // screen's visual density.
     const isFieldRequiredAndMissing = useCallback((fieldId) => {
         const item = experience.readinessModel.find((i) => i.id === fieldId);
         return !!item && item.requirement === REQUIREMENT_TIERS.REQUIRED && !item.satisfied;
@@ -2517,10 +2564,9 @@ function SubmissionPage() {
         return !!item && item.requirement === REQUIREMENT_TIERS.REQUIRED;
     }, [experience.readinessModel]);
     const identityDisclosureOpen =
-        !hasKnownProfile ||
         ["gender", "ethnicity", "instagram_handle", "instagram_followers"].some(isFieldRequiredAndMissing);
     const skillsDisclosureOpen =
-        !hasKnownProfile || ["bio", "work_links"].some(isFieldRequiredAndMissing);
+        ["bio", "work_links"].some(isFieldRequiredAndMissing);
 
     // The page's `ensureVisible` step for every navigation helper below:
     // makes one more attempt at revealing whatever's hidden and reports
@@ -2632,9 +2678,31 @@ function SubmissionPage() {
     // Phase 1 plan) — reuses startSubmissionDirect() verbatim, since Media
     // (the very next step) needs `saved.id`/`saved.token` to attach uploads
     // to.
+    // WhatsApp/Drive-style upload architecture (2026-08) — "Next" on the
+    // Uploads step must NOT wait for a required file to finish reaching
+    // Cloudinary, only for the talent to have actually selected/started
+    // sending it. `item.satisfied` (Requirement Engine) means "confirmed in
+    // submission.media", which only becomes true after the network transfer
+    // completes — using that alone here would recreate exactly the "select →
+    // wait → watch upload → wait" flow this architecture removes. An item
+    // with a live (non-failed) entry in activeUploads counts as handled for
+    // navigation purposes; Submit still requires true completion (see
+    // SUBMIT_BLOCKING_REASONS.WAITING in the Submission Experience Model,
+    // unchanged) — a failed upload still blocks Next, same as before.
+    const isMediaItemInFlight = useCallback((item) => {
+        const prefix = item.media?.prefix?.replace(/:$/, "");
+        if (!prefix) return false;
+        return Object.values(activeUploads).some((u) => {
+            if (!["queued", "compressing", "uploading", "processing", "retrying"].includes(u.status)) return false;
+            return u.category === prefix || (u.category || "").startsWith(prefix);
+        });
+    }, [activeUploads]);
+
     const handleWizardNext = useCallback(async () => {
         const stepSection = sectionForStep(currentStep);
-        const stepMissing = experience.missingRequirements.filter((item) => item.section === stepSection);
+        const stepMissing = experience.missingRequirements.filter(
+            (item) => item.section === stepSection && !isMediaItemInFlight(item),
+        );
         if (stepMissing.length > 0) {
             const stepFailed = experience.readinessSummary.failed.find((item) => item.section === stepSection);
             focusRequirementItem(stepFailed || stepMissing[0]);
@@ -2662,7 +2730,7 @@ function SubmissionPage() {
         }
         setCurrentStep((s) => Math.min(TOTAL_STEPS, s + 1));
         scrollWizardStepToTop();
-    }, [currentStep, experience.missingRequirements, experience.readinessSummary, focusRequirementItem, saved, adminMode, adminBootstrapping, setCurrentStep, scrollWizardStepToTop]);
+    }, [currentStep, experience.missingRequirements, experience.readinessSummary, isMediaItemInFlight, focusRequirementItem, saved, adminMode, adminBootstrapping, setCurrentStep, scrollWizardStepToTop]);
 
     const handleWizardBack = useCallback(() => {
         setCurrentStep((s) => Math.max(1, s - 1));
@@ -2708,8 +2776,9 @@ function SubmissionPage() {
     // verifying here means "confirm identity AND submit" in one motion, per
     // the spec's "Almost Done" copy. handleVerifyOtp's onSuccess hook fires
     // handleSubmitCtaClick() once emailVerified is committed; safe to call
-    // unconditionally since this card only ever renders when
-    // experience.readinessSummary.ready is already true.
+    // unconditionally regardless of readiness — handleSubmitCtaClick itself
+    // only finalizes when submitCta.buttonAction is SUBMIT (truly ready),
+    // otherwise it just scrolls to the blocking item.
     const handleAlmostDoneVerify = (e) => {
         handleVerifyOtp(e, { onSuccess: () => handleSubmitCtaClick() });
     };
@@ -2991,19 +3060,18 @@ function SubmissionPage() {
     // ---------------------------------------------------------------
     // SUBMITTED / UPDATED / RETEST state — permanent Submission Hub dashboard
     if (isSubmitted && !editMode) {
+        // Simplified-wizard UX (2026-08): the Thank You screen shows ONLY a
+        // confirmation and the two actions that matter next — no project
+        // details, status pill/timestamp, retest banner, client feedback, or
+        // content summary. Those remain fully intact and visible once the
+        // talent is actually back inside their Dashboard/Portal (a
+        // deliberately different, richer surface) — this screen's only job
+        // is to confirm the submission landed and hand off cleanly.
         return (
-            <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden">
+            <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-thank-you">
                 {adminMode && <AdminModeBanner talentName={adminTalentName} />}
                 <div className="absolute inset-0 pointer-events-none opacity-20 blur-3xl bg-[#0c2340]/20" />
-                <div className="absolute top-5 right-5 z-10">
-                    <ThemeToggle />
-                </div>
-                <div className="max-w-xl md:max-w-2xl mx-auto px-4 sm:px-6 py-16 md:py-24 tg-fade-up">
-                    <div className="mb-8">{dashboardLinkEl}</div>
-
-                    {retestBannerEl}
-                    {feedbackSectionEl}
-
+                <div className="max-w-xl mx-auto px-4 sm:px-6 py-16 md:py-24 tg-fade-up">
                     <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-10 border border-[#eaeaea]/60 shadow-[0_20px_40px_-12px_rgba(0,0,0,0.05)] text-center">
                         <div className="relative w-20 h-20 mx-auto mb-8">
                             <div className="absolute inset-0 rounded-full bg-emerald-100/60 blur-xl animate-pulse" />
@@ -3012,30 +3080,21 @@ function SubmissionPage() {
                             </div>
                         </div>
 
-                        <div className="flex flex-col items-center gap-2 mb-6">
-                            <span className={`px-4 py-1.5 rounded-full text-[10px] tracking-[0.1em] uppercase font-mono font-semibold ${statusClass}`} aria-live="polite">
-                                {statusLabel}
-                            </span>
-                            {lastUpdated && (
-                                <p className="text-[10px] font-mono text-[#333333] tracking-wide">
-                                    Last Updated: {lastUpdated}
-                                </p>
-                            )}
-                        </div>
-
-                        <h1 className="font-display text-4xl md:text-5xl tracking-tight text-[#111111] mb-6 leading-[1.05]">
-                            Thank you,{" "}
-                            <span className="text-[#111111]">{form.first_name || submission.talent_name?.split(" ")[0]}</span>.
+                        <h1 className="font-display text-4xl md:text-5xl tracking-tight text-[#111111] mb-4 leading-[1.05]">
+                            Thank You
                         </h1>
-                        <p className="text-[13px] leading-relaxed text-[#333333] mb-10 max-w-md mx-auto">
-                            Your audition for{" "}
-                            <span className="font-medium text-[#111111]">
-                                {project.brand_name}
-                            </span>{" "}
-                            — {statusMessage}
+                        <p className="text-[15px] leading-relaxed text-[#333333] mb-10">
+                            Your submission has been received.
                         </p>
 
-                        <div className="pt-4 border-t border-[#eaeaea]/50">
+                        <div className="flex flex-col gap-3">
+                            <a
+                                href="/portal/home"
+                                data-testid="thank-you-dashboard-link"
+                                className="w-full border border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111] py-3.5 px-6 rounded-full text-xs font-semibold transition-all duration-150 inline-flex items-center justify-center gap-1.5"
+                            >
+                                View My Dashboard
+                            </a>
                             <button
                                 type="button"
                                 onClick={() => setEditMode(true)}
@@ -3046,8 +3105,6 @@ function SubmissionPage() {
                             </button>
                         </div>
                     </div>
-
-                    {contentSummaryEl}
                 </div>
             </main>
         );
@@ -3091,60 +3148,70 @@ function SubmissionPage() {
                 <div className="absolute bottom-0 -right-40 w-80 h-80 rounded-full bg-slate-200/40 mix-blend-multiply animate-blob animation-delay-2000" />
             </div>
 
-            <header className="relative w-full pt-10 pb-8 px-5 border-b border-[#eaeaea]/60 bg-white/40">
-                <div className="absolute top-5 right-5 z-40">
-                    <ThemeToggle size="sm" />
-                </div>
-                {isSubmitted && (
-                    <div className="absolute top-5 left-5 z-40">
-                        {dashboardLinkEl}
+            {/* Marketing/orientation header — Logo, Instagram, trust copy.
+                Only meaningful BEFORE the talent has committed to the
+                wizard (deciding whether to engage at all); once
+                `emailGateUnlocked` is true they're mid-task and this is
+                exactly the "large project header... clutter" the
+                simplified wizard UX explicitly removes so only the
+                progress indicator + current step remain. Not rendered at
+                all in that state, not just visually collapsed. */}
+            {!emailGateUnlocked && (
+                <header className="relative w-full pt-10 pb-8 px-5 border-b border-[#eaeaea]/60 bg-white/40">
+                    <div className="absolute top-5 right-5 z-40">
+                        <ThemeToggle size="sm" />
                     </div>
-                )}
-                <div className="max-w-2xl mx-auto flex flex-col items-center text-center">
-                    {/* Centered Logo — links back to the Dashboard, same as
-                        the Portal's own header (DashboardLayout.jsx) */}
-                    <div className="mb-4">
-                        <a href="/portal/home" data-testid="edit-mode-logo-link">
-                            <Logo size={76} className="mx-auto" />
-                        </a>
-                    </div>
+                    {isSubmitted && (
+                        <div className="absolute top-5 left-5 z-40">
+                            {dashboardLinkEl}
+                        </div>
+                    )}
+                    <div className="max-w-2xl mx-auto flex flex-col items-center text-center">
+                        {/* Centered Logo — links back to the Dashboard, same as
+                            the Portal's own header (DashboardLayout.jsx) */}
+                        <div className="mb-4">
+                            <a href="/portal/home" data-testid="edit-mode-logo-link">
+                                <Logo size={76} className="mx-auto" />
+                            </a>
+                        </div>
 
-                    {/* Clickable Instagram icon */}
-                    <div className="mb-4">
-                        <a
-                            href="https://www.instagram.com/talentgram.agency/"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center justify-center p-2 rounded-full text-[#111111] hover:bg-slate-100 transition-all duration-200 cursor-pointer group"
-                            title="Follow us on Instagram"
-                        >
-                            <svg
-                                className="w-5 h-5 transition-colors duration-200 hover:text-[#E1306C] md:group-hover:text-[#E1306C]"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
+                        {/* Clickable Instagram icon */}
+                        <div className="mb-4">
+                            <a
+                                href="https://www.instagram.com/talentgram.agency/"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center justify-center p-2 rounded-full text-[#111111] hover:bg-slate-100 transition-all duration-200 cursor-pointer group"
+                                title="Follow us on Instagram"
                             >
-                                <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
-                                <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
-                                <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
-                            </svg>
-                        </a>
-                    </div>
+                                <svg
+                                    className="w-5 h-5 transition-colors duration-200 hover:text-[#E1306C] md:group-hover:text-[#E1306C]"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                >
+                                    <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+                                    <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                                    <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                                </svg>
+                            </a>
+                        </div>
 
-                    {/* Trust and Credibility Copy */}
-                    <div className="max-w-md mx-auto">
-                        <p className="text-[13px] font-semibold text-[#111111] tracking-tight leading-relaxed">
-                            Complete your profile and upload your audition materials.
-                        </p>
-                        <p className="text-[11px] text-[#333333] font-medium leading-relaxed mt-1">
-                            Your submission will be reviewed by the Talentgram team.
-                        </p>
+                        {/* Trust and Credibility Copy */}
+                        <div className="max-w-md mx-auto">
+                            <p className="text-[13px] font-semibold text-[#111111] tracking-tight leading-relaxed">
+                                Complete your profile and upload your audition materials.
+                            </p>
+                            <p className="text-[11px] text-[#333333] font-medium leading-relaxed mt-1">
+                                Your submission will be reviewed by the Talentgram team.
+                            </p>
+                        </div>
                     </div>
-                </div>
-            </header>
+                </header>
+            )}
 
             <div data-testid="submission-content" className="max-w-2xl mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-10 pb-28 sm:pb-10" {...wizardSwipeHandlers}>
                 {/* Retest context + client feedback (P0‑1) — the same
@@ -3162,7 +3229,17 @@ function SubmissionPage() {
                     </div>
                 )}
 
-                {/* SECTION 1 — Project Info */}
+                {/* SECTION 1 — Project Info. Only rendered pre-gate: once the
+                    talent has clicked UPLOAD TEST (or been silently
+                    recognized), this whole "large project header, project
+                    information blocks, duplicated project details" card is
+                    exactly the clutter the simplified wizard removes — the
+                    talent has already decided to apply, so Character/Shoot
+                    Dates/Budget/Director/Production House/Additional
+                    Details no longer serve the current task. Not just
+                    visually collapsed — unmounted, so only the progress
+                    indicator + current step remain. */}
+                {!emailGateUnlocked && (
                 <section className="mb-8 bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-4">Audition Brief</p>
                     <div className="mb-8 border-b border-slate-100 pb-4">
@@ -3173,16 +3250,13 @@ function SubmissionPage() {
                                     Talentgram × {project.brand_name}
                                 </h1>
                             </div>
-                            {/* P2 — only claim a draft exists once we actually
-                                know who's looking (email/Google gate passed).
-                                Showing this before identity is confirmed implied
-                                a draft already existed for a stranger. */}
-                            {emailGateUnlocked && (
-                                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/60 border border-emerald-100/50 text-emerald-700 text-[11px] font-mono shadow-[0_1px_2px_rgba(0,0,0,0.02)] self-start sm:self-auto">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                    <span>Draft Auto-Saved</span>
-                                </div>
-                            )}
+                            {/* "Draft Auto-Saved" badge removed (2026-08):
+                                this whole card is now only rendered while
+                                `!emailGateUnlocked` (see the section-level
+                                gate above), so the badge's own
+                                `emailGateUnlocked &&` condition could never
+                                be true — it was dead code once the section
+                                itself became pre-gate-only. */}
                         </div>
                         {hasAuditionMaterial && (
                             <div className="mt-4">
@@ -3253,23 +3327,20 @@ function SubmissionPage() {
                         </div>
                     )}
                 </section>
-
-                {/* SUBMISSION READINESS — config-driven, live-updating checklist.
-                    Replaces the old fixed 3-step tracker (Profile/Questions/
-                    Uploads), which didn't reflect the project's actual
-                    submission_requirements config. `experience.checklist` comes
-                    from the same Submission Experience Model that gates the
-                    Submit button, so this panel can never show something as
-                    complete/missing that disagrees with the actual validation
-                    gate — it's a pure renderer, no derivation happens here. */}
-                {emailGateUnlocked && (
-                    <SubmissionReadinessPanel
-                        items={experience.checklist}
-                        onItemClick={focusRequirementItem}
-                        saveStatus={experience.saveStatus}
-                        progress={experience.overallProgress}
-                    />
                 )}
+
+                {/* Simplified-wizard UX (2026-08): the full multi-item
+                    readiness checklist is no longer shown DURING the active
+                    wizard — it lists every requirement across every step at
+                    once, which is exactly the "overwhelm the talent with
+                    the entire application" this simplification removes.
+                    `WizardProgressBar` (rendered once, sticky, at the very
+                    top of the page) is now the single persistent
+                    status/navigation element; per-field validation still
+                    surfaces inline on whichever single step it belongs to.
+                    The panel component itself is untouched — Admin Mode's
+                    pinned summary above still uses it, a deliberate
+                    power-user carve-out, not a talent-facing screen. */}
 
                 {/* SECTION 2 — TALENT DETAILS FORM. Manual-testing fix: the
                     first project page must show ONLY Project Details +
@@ -3666,8 +3737,8 @@ function SubmissionPage() {
                                         </div>
 
                                         <div data-testid="form-height-field">
-                                            <div className="flex items-center justify-between gap-3">
-                                                <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
+                                            <div className="flex flex-wrap items-center justify-between gap-y-2 gap-x-3">
+                                                <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono whitespace-nowrap">
                                                     Height {isFieldRequired("height") ? "*" : "(optional)"}
                                                 </span>
                                                 {/* Sprint 1 — unit toggle. Stored value is unchanged; only the
@@ -4070,7 +4141,7 @@ function SubmissionPage() {
                                                 <p className="text-[15px] font-medium text-[#333333]">Dates to be confirmed</p>
                                             )}
                                         </div>
-                                        <div className="grid grid-cols-2 gap-3 mb-4">
+                                        <div className="grid grid-cols-3 gap-2 mb-4">
                                             {AVAILABILITY_OPTIONS.map((opt) => {
                                                 const active =
                                                     form.availability.status === opt.key;
@@ -4089,18 +4160,22 @@ function SubmissionPage() {
                                                             setTimeout(saveForm, 0);
                                                         }}
                                                         data-testid={`avail-${opt.key}-btn`}
-                                                        className={`px-4 py-3 rounded-full text-[13px] font-semibold border transition-all duration-200 min-h-[48px] ${
+                                                        className={`px-2 py-3 rounded-full text-[12px] font-semibold border transition-all duration-200 min-h-[48px] leading-tight ${
                                                             active
                                                                 ? "bg-slate-950 text-white border-slate-950 shadow-sm"
                                                                 : "bg-white border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111]"
                                                         }`}
                                                     >
-                                                        {opt.key === "yes" ? "Available" : "Not Available"}
+                                                        {opt.label}
                                                     </button>
                                                 );
                                             })}
                                         </div>
-                                        {form.availability.status === "no" && (
+                                        {/* "partial" asks WHICH days (a positive detail to
+                                            collect); "no" asks WHY/alternate availability (an
+                                            explanation) — same field, different placeholder,
+                                            no separate calendar UI for either. */}
+                                        {(form.availability.status === "partial" || form.availability.status === "no") && (
                                             <textarea
                                                 value={form.availability.note}
                                                 onChange={(e) =>
@@ -4114,7 +4189,11 @@ function SubmissionPage() {
                                                 }
                                                 onBlur={saveForm}
                                                 rows={3}
-                                                placeholder="Please specify reason / alternate availability"
+                                                placeholder={
+                                                    form.availability.status === "partial"
+                                                        ? "Which days are you available?"
+                                                        : "Please specify reason / alternate availability"
+                                                }
                                                 data-testid="availability-note-input"
                                                 className="w-full bg-white/60 rounded-2xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[13px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
                                             />
@@ -4388,19 +4467,6 @@ function SubmissionPage() {
                 </section>
                 )}
 
-                {/* Wizard Back/Next — visible for Steps 1-3; Step 4 keeps its
-                    own existing Submit footer further down, unchanged. */}
-                {emailGateUnlocked && currentStep < 4 && (
-                    <WizardStepNav
-                        showBack={currentStep > 1}
-                        onBack={handleWizardBack}
-                        onNext={handleWizardNext}
-                        nextDisabled={starting}
-                        nextBusy={sectionForStep(currentStep) === "projectQuestions" && starting}
-                        nextLabel={sectionForStep(currentStep) === "projectQuestions" ? "Continue to Uploads" : "Next"}
-                    />
-                )}
-
                 {/* SECTION 3 — UPLOADS (gated on email-first gate) */}
                 {emailGateUnlocked && (
                     <section
@@ -4507,27 +4573,21 @@ function SubmissionPage() {
                                                             <span className="text-[11px] font-mono text-[#0c2340]/70 font-semibold uppercase tracking-wider mr-1">New Take:</span>
                                                             <span className="text-sm font-semibold text-[#111111]">{state.label}</span>
                                                         </div>
-                                                        <span className="text-[10px] font-mono text-[#333333]">
-                                                            {state.status === "uploading" ? `Uploading ${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
+                                                        <span className="text-[10px] font-mono text-[#333333] inline-flex items-center gap-1.5">
+                                                            {state.status !== "failed" && <Loader2 className="w-3 h-3 animate-spin" />}
+                                                            {state.status === "failed" ? "Couldn't send" : "✓ Added"}
                                                         </span>
                                                     </div>
-                                                    {state.status === "failed" ? (
-                                                        <div className="text-xs text-rose-500 font-mono mt-1 bg-rose-50/50 p-2.5 rounded-xl border border-rose-100 flex items-center justify-between gap-2">
-                                                            <span className="truncate">{state.error || "Upload failed"}</span>
+                                                    {state.status === "failed" && (
+                                                        <div className="text-xs text-rose-600 font-mono mt-1 bg-rose-50/50 p-2.5 rounded-xl border border-rose-100 flex items-center justify-between gap-2">
+                                                            <span>Couldn't send this file.</span>
                                                             <button
                                                                 type="button"
                                                                 onClick={() => retryUpload(key)}
                                                                 className="px-3 py-1 bg-white border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 active:scale-[0.97] transition-all duration-150 text-[10px]"
                                                             >
-                                                                Retry
+                                                                Tap to retry
                                                             </button>
-                                                        </div>
-                                                    ) : (
-                                                        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden mt-1">
-                                                            <div
-                                                                className={`h-full bg-[#0c2340] transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`}
-                                                                style={{ width: `${state.pct}%` }}
-                                                            />
                                                         </div>
                                                     )}
                                                 </div>
@@ -4894,23 +4954,23 @@ function SubmissionPage() {
                                                             .filter(([key, state]) => state.category === "image")
                                                             .map(([key, state]) => (
                                                                 <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
-                                                                    <Loader2 className="w-5 h-5 animate-spin text-[#0c2340] mb-1" />
-                                                                    <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
-                                                                    <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">
-                                                                        {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
-                                                                    </span>
                                                                     {state.status === "failed" ? (
-                                                                        <button
-                                                                            type="button"
-                                                                            onClick={() => retryUpload(key)}
-                                                                            className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
-                                                                        >
-                                                                            Retry
-                                                                        </button>
+                                                                        <>
+                                                                            <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
+                                                                            <span className="text-[10px] font-mono font-semibold text-rose-600 mt-1">Couldn't send</span>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => retryUpload(key)}
+                                                                                className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
+                                                                            >
+                                                                                Tap to retry
+                                                                            </button>
+                                                                        </>
                                                                     ) : (
-                                                                        <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
-                                                                            <div className={`bg-[#0c2340] h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
-                                                                        </div>
+                                                                        <>
+                                                                            <Loader2 className="w-5 h-5 animate-spin text-[#0c2340] mb-1" />
+                                                                            <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">✓ Added</span>
+                                                                        </>
                                                                     )}
                                                                 </div>
                                                             ))
@@ -4991,6 +5051,33 @@ function SubmissionPage() {
                     </section>
                 )}
 
+                {/* Wizard Back/Next — visible for every step BEFORE the true
+                    final step of THIS talent's flow; anchored here, AFTER
+                    every step-content section (profile/skills/project-
+                    questions/uploads all being CSS-hidden-not-unmounted, see
+                    stepVisibilityClass), so it always renders at the bottom
+                    of whichever one is actually visible rather than in a
+                    single fixed DOM slot that only happened to be "after"
+                    Project Questions and "before" Uploads. The final step
+                    keeps its own existing Submit footer further down instead
+                    (see isOnFinalDisplayedStep's declaration/comment above) —
+                    gating this on the fixed literal `currentStep < 4` doesn't
+                    hold for a returning talent, whose last displayed step is
+                    2 (Uploads), not 4: at step 2 that comparison is still
+                    true, so this nav rendered ALONGSIDE the finalize footer's
+                    own "Next" (continue-to-final-step-btn), a second
+                    competing control on the same screen. */}
+                {emailGateUnlocked && !isOnFinalDisplayedStep && (
+                    <WizardStepNav
+                        showBack={currentStep > 1}
+                        onBack={handleWizardBack}
+                        onNext={handleWizardNext}
+                        nextDisabled={starting}
+                        nextBusy={sectionForStep(currentStep) === "projectQuestions" && starting}
+                        nextLabel="Next"
+                    />
+                )}
+
                 {/* READY-TO-SUBMIT FOOTER — deliberately OUTSIDE every
                     step's stepVisibilityClass-gated wrapper (unlike Phase
                     1, where this lived inside the uploads section, back
@@ -5019,8 +5106,21 @@ function SubmissionPage() {
                     that final page; the plain finalize-submission-btn
                     footer is the fallback when neither applies (project
                     questions/skills already completed OTP earlier, e.g.
-                    the email-typed "Is this you?" path). */}
-                {emailGateUnlocked && experience.readinessSummary.ready && submission?.status !== "submitted" && (
+                    the email-typed "Is this you?" path).
+
+                    Deliberately NOT gated on `experience.readinessSummary.ready`
+                    (WhatsApp/Drive upload architecture, 2026-08): `ready` is
+                    false for the entire time a required upload is still
+                    in-flight — that's precisely the case `blockingReason`
+                    WAITING/FAILED/MISSING below exists to explain. Gating the
+                    whole footer on `ready` made that messaging unreachable: a
+                    talent who reached this, their final step, while a
+                    required file was still uploading saw no Continue button,
+                    no Submit button, and no explanation — a dead end. The
+                    inner branches already fully cover every state (ready,
+                    waiting, failed, missing); this block only needs to know
+                    the talent has arrived at their real last page. */}
+                {emailGateUnlocked && isOnFinalDisplayedStep && submission?.status !== "submitted" && (
                     (finalStepReached || adminMode) ? (
                     <div className="pt-4">
                         {recognizedIdentity && (
@@ -5087,7 +5187,14 @@ function SubmissionPage() {
                             />
                         )}
 
-                        {(recognizedIdentity || emailVerified || adminMode) && (
+                        {/* Excludes recognizedIdentity: that card above already
+                            renders its own complete, dedicated submit action
+                            ("Yes, submit") — showing this generic footer too
+                            would put two competing submit buttons on screen
+                            at once, exactly the "verification screen must not
+                            introduce a competing submit action" rule this
+                            page follows everywhere else. */}
+                        {(!recognizedIdentity && (emailVerified || adminMode)) && (
                         <div ref={stickyFooterRef} data-sticky-footer className="sticky bottom-0 z-30 bg-gradient-to-t from-white via-white/95 to-transparent pt-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pb-safe">
                             <p className="text-[12px] text-[#333333] text-center mb-3 max-w-md mx-auto leading-relaxed" data-testid="submission-accuracy-warning">
                                 Please ensure your details, portfolio and videos are accurate and up to date. Casting decisions are based on the information submitted here.
@@ -5153,7 +5260,7 @@ function SubmissionPage() {
                             data-testid="continue-to-final-step-btn"
                             className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
                         >
-                            Continue
+                            Next
                             <ArrowRight className="w-3.5 h-3.5" />
                         </button>
                     </div>
@@ -5188,19 +5295,12 @@ function SubmissionPage() {
                 </div>
             )}
 
-            {/* Sticky MOBILE-ONLY readiness bar. Hidden ≥sm, respects the bottom
-                safe-area inset. Reads `experience.checklist` — the same
-                Submission Experience Model as the in-page panel above (single
-                source of truth) — tap-to-expand reveals the full checklist.
-                Suppressed once the submission is finalized. */}
-            {emailGateUnlocked && !finalizing && submission?.status !== "submitted" && (
-                <SubmissionReadinessPanel
-                    items={experience.checklist}
-                    onItemClick={focusRequirementItem}
-                    mode="sticky"
-                    progress={experience.overallProgress}
-                />
-            )}
+            {/* Sticky mobile readiness bar removed (2026-08 simplified-wizard
+                UX): `WizardProgressBar` (top, sticky) is now the single
+                persistent status element on every viewport — a second
+                sticky bar at the bottom duplicated that role. Per-field
+                validation still surfaces inline on its own step when NEXT
+                is blocked. */}
 
             {categorizationBatch && (
                 <CategorizationReviewModal
@@ -5586,23 +5686,22 @@ function PremiumPortfolioGroup({
                             .filter(([key, state]) => state.category === category)
                             .map(([key, state]) => (
                                 <div key={key} className="relative aspect-square bg-slate-50 border border-[#eaeaea] rounded-2xl flex flex-col items-center justify-center p-2 shadow-sm text-center">
-                                    <Loader2 className="w-5 h-5 animate-spin text-[#0c2340] mb-1" />
-                                    <span className="text-[9px] font-mono text-[#333333] truncate w-full px-1">{state.fileName}</span>
-                                    <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">
-                                        {state.status === "uploading" ? `${state.pct}%` : state.status === "failed" ? "Failed" : "Processing"}
-                                    </span>
                                     {state.status === "failed" ? (
-                                        <button
-                                            type="button"
-                                            onClick={() => onRetry && onRetry(key)}
-                                            className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
-                                        >
-                                            Retry
-                                        </button>
+                                        <>
+                                            <span className="text-[10px] font-mono text-[#333333] truncate w-full px-1 mb-1">Couldn't send this file.</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => onRetry && onRetry(key)}
+                                                className="mt-1 px-2.5 py-0.5 border border-rose-200 text-rose-600 rounded-full hover:bg-rose-50 text-[9px] font-semibold"
+                                            >
+                                                Tap to retry
+                                            </button>
+                                        </>
                                     ) : (
-                                        <div className="absolute bottom-1 inset-x-2 bg-slate-100 rounded-full h-1 overflow-hidden">
-                                            <div className={`bg-[#0c2340] h-full transition-all duration-300 ${state.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${state.pct}%` }} />
-                                        </div>
+                                        <>
+                                            <Loader2 className="w-5 h-5 animate-spin text-[#0c2340] mb-1" />
+                                            <span className="text-[10px] font-mono font-semibold text-[#111111] mt-1">✓ Added</span>
+                                        </>
                                     )}
                                 </div>
                             ))
@@ -5912,6 +6011,20 @@ function PremiumUploadSlot({
         return isVideo && hasFile && typeof window !== "undefined" && window.innerWidth < 768;
     });
 
+    // WhatsApp/Drive-style upload architecture (2026-08): the talent is never
+    // shown a phase name (Optimizing/Compressing/Processing/Uploading) or a
+    // percentage here — this button only renders BEFORE the media is
+    // confirmed (`hasFile`, below, swaps in a completely different "media
+    // card" branch once it's genuinely attached), so every in-flight status
+    // (queued/compressing/uploading/processing) reads as one minimal
+    // acknowledgment: the file was selected and is being sent in the
+    // background. A failed upload is the one state that DOES need to say
+    // something actionable — see the "Couldn't send this file" retry button
+    // below, not this label.
+    const uploadStatusText = !uploadState || uploadState.status === "failed"
+        ? "Tap to upload"
+        : "✓ Added";
+
     return (
         <div
             className={`${compact ? "mb-4" : "mb-10"} ${
@@ -5986,7 +6099,7 @@ function PremiumUploadSlot({
                             media.status === "processing" ? (
                                 <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex flex-col items-center justify-center p-8 min-h-[160px] w-full animate-fadeIn">
                                     <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin mb-3"></div>
-                                    <p className="text-xs font-mono text-[#eaeaea] animate-pulse">Optimizing video on server...</p>
+                                    <p className="text-xs font-mono text-[#eaeaea] animate-pulse">Finishing up...</p>
                                 </div>
                             ) : (
                                 <div className="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-100 flex items-center justify-center max-h-[240px] animate-fadeIn">
@@ -6015,13 +6128,15 @@ function PremiumUploadSlot({
                         </div>
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                             {isPending ? (
-                                <div className="w-full px-1">
-                                    <div className="flex items-center justify-between text-xs mb-1 font-mono text-[#333333]">
-                                        <span>{uploadState.status === "uploading" ? `Replacing… ${uploadState.pct}%` : uploadState.status === "failed" ? "Failed to replace" : "Processing replacement…"}</span>
-                                    </div>
-                                    <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                                        <div className={`h-full bg-[#0c2340] transition-all duration-300 ${uploadState.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${uploadState.pct}%` }} />
-                                    </div>
+                                <div className="w-full px-1 flex items-center gap-2 text-xs font-mono text-[#333333]">
+                                    {uploadState.status === "failed" ? (
+                                        <span className="text-rose-600">Couldn't send the replacement. Tap to retry.</span>
+                                    ) : (
+                                        <>
+                                            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                                            <span>✓ Added — replacing in the background</span>
+                                        </>
+                                    )}
                                 </div>
                             ) : (
                                 <div className="flex items-center gap-2 w-full">
@@ -6109,13 +6224,11 @@ function PremiumUploadSlot({
                         data-testid={`${testid}-btn`}
                         className={`w-full bg-gradient-to-b from-white to-slate-50/70 border border-[#eaeaea] hover:border-[#0c2340]/30 p-4 text-left min-h-[60px] flex items-center gap-3 transition-all duration-200 relative overflow-hidden rounded-2xl shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-[0_12px_28px_-8px_rgba(0,0,0,0.08)] hover:-translate-y-[1px] ${cameraCapture ? "hidden md:flex" : ""}`}
                     >
-                        {uploadState && uploadState.status !== "failed" && uploadState.pct > 0 && (
-                            <span
-                                aria-hidden
-                                className="absolute inset-y-0 left-0 bg-[#0c2340]/30 transition-[width] duration-300"
-                                style={{ width: `${uploadState.pct}%` }}
-                            />
-                        )}
+                        {/* WhatsApp/Drive-style upload architecture (2026-08): no
+                            percentage-fill progress bar here — a subtle spinner is
+                            "still sending in the background"; the label above it is
+                            the only status the talent needs ("✓ Added"), never a
+                            number they're expected to watch tick up. */}
                         {uploadState && uploadState.status !== "failed" ? (
                             <Loader2 className="w-4 h-4 animate-spin relative text-[#222222]" />
                         ) : (
@@ -6130,12 +6243,12 @@ function PremiumUploadSlot({
                                     )}
                                 </span>
                                 <span className="text-[#333333] text-[11px]">
-                                    {uploadState && uploadState.status === "processing" ? "Processing…" : (uploadState && uploadState.status === "uploading" ? `Uploading… ${uploadState.pct}%` : "Tap to upload")}
+                                    {uploadStatusText}
                                 </span>
                             </span>
                         ) : (
                             <span className="text-[13px] text-[#222222] relative">
-                                {uploadState && uploadState.status === "processing" ? "Processing…" : (uploadState && uploadState.status === "uploading" ? `Uploading… ${uploadState.pct}%` : "Tap to upload")}
+                                {uploadStatusText}
                             </span>
                         )}
                     </button>
@@ -6147,7 +6260,7 @@ function PremiumUploadSlot({
                             className="mt-3 w-full text-[11px] px-4 py-2.5 border border-rose-200 text-rose-600 hover:bg-rose-50 rounded-full inline-flex items-center justify-center gap-2 min-h-[44px] transition-all duration-200"
                         >
                             <Loader2 className="w-3.5 h-3.5" />
-                            Upload failed — Retry
+                            Couldn't send this file. Tap to retry.
                         </button>
                     )}
                 </>
@@ -6269,13 +6382,15 @@ function PremiumTakeRow({ index, media, canRename, onRename, onRemove, onReplace
 
             <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                 {isPending ? (
-                    <div className="w-full px-1">
-                        <div className="flex items-center justify-between text-xs mb-1 font-mono text-[#333333]">
-                            <span>{uploadState.status === "uploading" ? `Replacing… ${uploadState.pct}%` : uploadState.status === "failed" ? "Failed to replace" : "Processing replacement…"}</span>
-                        </div>
-                        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                            <div className={`h-full bg-[#0c2340] transition-all duration-300 ${uploadState.status === "processing" ? "animate-pulse bg-emerald-500" : ""}`} style={{ width: `${uploadState.pct}%` }} />
-                        </div>
+                    <div className="w-full px-1 flex items-center gap-2 text-xs font-mono text-[#333333]">
+                        {uploadState.status === "failed" ? (
+                            <span className="text-rose-600">Couldn't send the replacement. Tap to retry.</span>
+                        ) : (
+                            <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                                <span>✓ Added — replacing in the background</span>
+                            </>
+                        )}
                     </div>
                 ) : (
                     <>

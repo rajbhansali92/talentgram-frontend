@@ -157,7 +157,7 @@ export function UploadManagerProvider({ children }) {
                     (u) => u.status === "compressing"
                 );
                 if (hasActiveCompression) {
-                    toast.warning("Keep this page open while video optimization is running.", {
+                    toast.warning("Keep this page open until the upload finishes.", {
                         id: "visibility-warning", // prevent duplicate toasts
                         duration: 8000
                     });
@@ -279,7 +279,25 @@ export function UploadManagerProvider({ children }) {
             }
         }
 
-        if (file && isVideoSlot && !skipCompression) {
+        // WhatsApp/Drive-style upload architecture (2026-08): submission and
+        // application videos always go through the chunked, resumable,
+        // direct-to-Cloudinary transport (directVideoUpload, below) — that
+        // transport has no single-request size ceiling and Cloudinary can
+        // transcode/optimize server-side after the original bytes land, so
+        // there is no technical reason left to run client-side FFmpeg first.
+        // Compression used to run unconditionally for any video over
+        // COMPRESS_THRESHOLD regardless of transport, which is exactly the
+        // "select file → wait 5 minutes of client-side work → THEN start
+        // sending" pattern this architecture removes: a genuinely large
+        // audition would sit through a multi-minute compression pass (timing
+        // out entirely past ~470MB) before a single byte reached Cloudinary.
+        // Skipping it here means chunked uploads begin immediately on
+        // selection, at the cost of transferring the original (uncompressed)
+        // file — an accepted, explicit tradeoff: real transfer time depends
+        // on the file and the network, but it starts now instead of after a
+        // blocking optimize pass. Compression still runs for any OTHER video
+        // upload path in the app that doesn't use chunked transport.
+        if (file && isVideoSlot && !skipCompression && !isChunkedVideo) {
             // Phase 7 — at most ONE compression job touches the shared
             // FFmpeg singleton at a time (see lib/videoCompress.js and the
             // gate comment above). Everything inside this block — the
@@ -350,9 +368,9 @@ export function UploadManagerProvider({ children }) {
                         console.warn("[FFMPEG TELEMETRY] compression_fallback emit failed (non-fatal):", telemetryErr);
                     }
                     if (err?.code === "TIMEOUT") {
-                        toast.warning("Video optimization is taking longer than expected. Uploading original video.");
+                        toast.warning("Upload preparation is taking longer than expected — uploading the original video instead.");
                     } else {
-                        toast.info("Optimizing video unavailable. Uploading original file.");
+                        toast.info("Uploading the original video file.");
                     }
                     fileToUpload = file;
                 }
@@ -490,7 +508,7 @@ export function UploadManagerProvider({ children }) {
                 uploadGate.release();
                 return;
             } catch (err) {
-                const msg = err?.message || err?.response?.data?.detail || "Upload failed";
+                const msg = formatErrorDetail(err, "Upload failed");
                 setRetryQueue((q) => ({
                     ...q,
                     [slotKey]: { ...(q[slotKey] || {}), failed: true, error: msg },

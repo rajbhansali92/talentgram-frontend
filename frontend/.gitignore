@@ -561,4 +561,8 @@ credentials.json
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Temporary large test assets used for manual real-file upload verification
+# (never real user data, never committed)
+public/__upload_test_assets__/
 >>>>>>> 6fcce45 (initial frontend)

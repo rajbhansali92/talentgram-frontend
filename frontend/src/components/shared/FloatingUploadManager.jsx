@@ -135,23 +135,16 @@ export default function FloatingUploadManager({ activeUploads = {}, completedCou
                                 </div>
                             </div>
 
-                            {item.status === "failed" ? (
+                            {item.status === "failed" && (
                                 <div className="flex items-center justify-between mt-1 gap-2">
-                                    <span className="text-[10px] text-rose-500 truncate max-w-[150px] font-mono">{item.error || "Upload failed"}</span>
+                                    <span className="text-[10px] text-rose-500 truncate max-w-[150px] font-mono">Couldn't send this file.</span>
                                     <button
                                         type="button"
                                         onClick={() => onRetry(item.key)}
                                         className="text-[10px] font-semibold text-rose-600 hover:bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-full bg-white active:scale-95 transition-all"
                                     >
-                                        Retry
+                                        Tap to retry
                                     </button>
-                                </div>
-                            ) : (
-                                <div className="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
-                                    <div
-                                        className={`h-full bg-[#0c2340] transition-all duration-300 ${item.status === "completed" ? "bg-emerald-500" : item.status === "processing" ? "bg-emerald-400 animate-pulse" : item.status === "compressing" ? "bg-blue-500 animate-pulse" : ""}`}
-                                        style={{ width: `${item.pct}%` }}
-                                    />
                                 </div>
                             )}
                         </div>

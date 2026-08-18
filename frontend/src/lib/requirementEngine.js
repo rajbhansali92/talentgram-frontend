@@ -48,11 +48,11 @@ export function computeRequirementItems({ project, form, submission }) {
 
         const avail = form.availability || {};
         const status = (avail.status || "").trim();
-        if (status !== "yes" && status !== "no") {
-            items.push({ id: "availability", label: "Availability (Yes / No)", section: "profile", selector: '[data-testid="availability-block"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: false });
+        if (status !== "yes" && status !== "partial" && status !== "no") {
+            items.push({ id: "availability", label: "Availability", section: "profile", selector: '[data-testid="availability-block"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: false });
         } else {
-            items.push({ id: "availability", label: "Availability (Yes / No)", section: "profile", selector: '[data-testid="availability-block"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: true });
-            if (status === "no") {
+            items.push({ id: "availability", label: "Availability", section: "profile", selector: '[data-testid="availability-block"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: true });
+            if (status === "partial" || status === "no") {
                 items.push({ id: "availability_note", label: "Availability note", section: "profile", selector: '[data-testid="availability-note-input"]', requirement: REQUIREMENT_TIERS.REQUIRED, satisfied: !!(avail.note || "").trim() });
             }
         }
@@ -116,11 +116,11 @@ export function computeRequirementItems({ project, form, submission }) {
         const avail = form.availability || {};
         const status = (avail.status || "").trim();
         const tier = fieldTier("availability");
-        if (status !== "yes" && status !== "no") {
-            items.push({ id: "availability", label: "Availability (Yes / No)", section: "projectQuestions", selector: '[data-testid="availability-block"]', requirement: tier, satisfied: false });
+        if (status !== "yes" && status !== "partial" && status !== "no") {
+            items.push({ id: "availability", label: "Availability", section: "projectQuestions", selector: '[data-testid="availability-block"]', requirement: tier, satisfied: false });
         } else {
-            items.push({ id: "availability", label: "Availability (Yes / No)", section: "projectQuestions", selector: '[data-testid="availability-block"]', requirement: tier, satisfied: true });
-            if (status === "no") {
+            items.push({ id: "availability", label: "Availability", section: "projectQuestions", selector: '[data-testid="availability-block"]', requirement: tier, satisfied: true });
+            if (status === "partial" || status === "no") {
                 items.push({ id: "availability_note", label: "Availability note", section: "projectQuestions", selector: '[data-testid="availability-note-input"]', requirement: tier, satisfied: !!(avail.note || "").trim() });
             }
         }

@@ -140,7 +140,19 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
             res = await api.post(
                 signatureEndpoint,
                 { category, label: label || null, content_type: file.type || null, public_id: publicId || null },
-                { headers: authHeader, key: `video-signature-${category}-${publicId || "fresh"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` }
+                {
+                    headers: authHeader,
+                    key: `video-signature-${category}-${publicId || "fresh"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    // A talent can legitimately have another large chunked
+                    // upload saturating their connection while this fires
+                    // (Section 10: fill the rest of the form while an
+                    // audition uploads in the background) — the default 15s
+                    // request timeout is sized for an idle connection and
+                    // was observed timing out this lightweight JSON call
+                    // under exactly that real contention. This is the only
+                    // request-shape change; the retry policy is unchanged.
+                    timeoutMs: 45_000,
+                }
             );
         } catch (err) {
             const wrapped = new Error("Couldn't start the upload — please check your connection and try again.");
@@ -190,7 +202,7 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
             format: lastResponse.format || null,
             label: label || null,
         },
-        { headers: authHeader }
+        { headers: authHeader, timeoutMs: 45_000 }
     );
     return completeRes.data;
 }

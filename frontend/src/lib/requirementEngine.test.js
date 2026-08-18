@@ -370,6 +370,30 @@ describe("computeRequirementItems — parity with the pre-extraction implementat
         expect(missingRequiredIds(items)).toEqual([]);
     });
 
+    it("legacy fallback: availability = 'partial' without a note → only 'availability_note' missing", () => {
+        const project = { custom_questions: [] };
+        const form = {
+            ...baseForm(),
+            first_name: "A", last_name: "B", height: "5'0\"", location: [{ city: "X" }],
+            availability: { status: "partial", note: "" },
+            budget: { status: "accept", value: "" },
+        };
+        const items = computeRequirementItems({ project, form, submission: null });
+        expect(missingRequiredIds(items)).toEqual(["availability_note"]);
+    });
+
+    it("legacy fallback: availability = 'partial' WITH a note (which days) → fully satisfied", () => {
+        const project = { custom_questions: [] };
+        const form = {
+            ...baseForm(),
+            first_name: "A", last_name: "B", height: "5'0\"", location: [{ city: "X" }],
+            availability: { status: "partial", note: "Weekends only" },
+            budget: { status: "accept", value: "" },
+        };
+        const items = computeRequirementItems({ project, form, submission: null });
+        expect(missingRequiredIds(items)).toEqual([]);
+    });
+
     it("strict mode: budget = 'custom' without a value → only 'budget_value' missing, 'budget' itself satisfied", () => {
         const project = strictProject({ fields: { budget_expectation: "required" } });
         const form = { ...baseForm(), budget: { status: "custom", value: "" } };

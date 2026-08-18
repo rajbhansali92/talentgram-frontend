@@ -23,12 +23,18 @@ import { summarizeUploads, mapUploadManagerStatus, OPERATIONAL_STATES } from "@/
 
 const SUCCESS_COLLAPSE_DELAY_MS = 2500;
 
+// WhatsApp/Drive-style upload architecture (2026-08): this panel is a
+// secondary, glanceable surface — it must never contradict the "✓ Added"
+// the talent already sees on the upload slot itself by naming a technical
+// phase (uploading/retrying/processing) there instead. Every non-terminal
+// state reads the same "✓ Added" as the slot; only completion/failure are
+// distinct, and both are plain English already.
 const FRIENDLY_STATE_LABEL = {
-    [OPERATIONAL_STATES.QUEUED]: "Queued",
-    [OPERATIONAL_STATES.UPLOADING]: "Uploading…",
-    [OPERATIONAL_STATES.RETRYING]: "Retrying…",
-    [OPERATIONAL_STATES.WAITING]: "Waiting for connection…",
-    [OPERATIONAL_STATES.PROCESSING]: "Processing…",
+    [OPERATIONAL_STATES.QUEUED]: "✓ Added",
+    [OPERATIONAL_STATES.UPLOADING]: "✓ Added",
+    [OPERATIONAL_STATES.RETRYING]: "✓ Added",
+    [OPERATIONAL_STATES.WAITING]: "✓ Added",
+    [OPERATIONAL_STATES.PROCESSING]: "✓ Added",
     [OPERATIONAL_STATES.COMPLETED]: "Completed",
     [OPERATIONAL_STATES.FAILED]: "Failed",
 };
@@ -46,15 +52,21 @@ function cleanItemLabel(u) {
 }
 
 // One `activeUploads` entry -> everything its card needs to render, fully
-// resolved. Prefers the engine's own rich, already-friendly live text (e.g.
-// "Optimizing video… (10s remaining)") when it has one; otherwise falls back
-// to the canonical wording map — never a raw engine status word.
+// resolved. Simplified-wizard UX (2026-08): always uses the canonical
+// wording map now, never the engine's own raw `statusText` — that text
+// includes phase-specific language ("Optimizing video…", "Preparing
+// video…") the talent shouldn't need to understand (transcoding/compression
+// is an implementation detail of large-file handling, not a distinct step
+// from their point of view). "compressing" and "uploading" both map to the
+// same OPERATIONAL_STATES.UPLOADING canonical state (see
+// lib/readinessStatus.js), so this reads as one continuous "Uploading…"
+// regardless of which phase is actually running underneath.
 function toItemViewModel([key, upload]) {
     const canonicalState = mapUploadManagerStatus(upload.status) || OPERATIONAL_STATES.UPLOADING;
     return {
         key,
         label: cleanItemLabel(upload),
-        displayText: upload.statusText || FRIENDLY_STATE_LABEL[canonicalState],
+        displayText: FRIENDLY_STATE_LABEL[canonicalState],
         textClass: STATE_TEXT_CLASS[canonicalState] || "text-[#0c2340]",
         pct: upload.pct || 0,
         status: upload.status,

@@ -104,9 +104,13 @@ export const PORTFOLIO_LOOK_CATEGORIES = ["indian", "western", "image"];
 // dashboard ALL consume from here.
 // ────────────────────────────────────────────────────────────────────────
 
-// Yes/No availability gate on the audition form.
+// Availability gate on the audition form. "partial" (added for the
+// simplified-wizard UX) means available on SOME of the shoot dates, not
+// none — the note field asks "which days" rather than "why not", unlike
+// the existing "no" note.
 export const AVAILABILITY_OPTIONS = [
-    { key: "yes", label: "Yes, available" },
+    { key: "yes", label: "Available" },
+    { key: "partial", label: "Available only some days" },
     { key: "no", label: "Not available" },
 ];
 

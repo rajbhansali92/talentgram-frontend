@@ -1948,10 +1948,13 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             if isinstance(avail, str):
                 avail = {"status": "yes" if avail else "", "note": avail}
             status = (avail.get("status") or "").strip()
-            if status not in {"yes", "no"}:
+            # "partial" (simplified-wizard UX, 2026-08): available on some but
+            # not all shoot dates. Same note-required contract as "no", just a
+            # different question ("which days" vs. "why not / alternates").
+            if status not in {"yes", "partial", "no"}:
                 raise HTTPException(400, "Please confirm your availability")
-            if status == "no" and not (avail.get("note") or "").strip():
-                raise HTTPException(400, "Please share your alternate availability")
+            if status in ("partial", "no") and not (avail.get("note") or "").strip():
+                raise HTTPException(400, "Please share your availability details")
 
         if fields_config.get("budget_expectation") == "required":
             budget = form.get("budget") or {}
@@ -2068,10 +2071,10 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
         if isinstance(avail, str):
             avail = {"status": "yes" if avail else "", "note": avail}
         status = (avail.get("status") or "").strip()
-        if status not in {"yes", "no"}:
+        if status not in {"yes", "partial", "no"}:
             raise HTTPException(400, "Please confirm your availability")
-        if status == "no" and not (avail.get("note") or "").strip():
-            raise HTTPException(400, "Please share your alternate availability")
+        if status in ("partial", "no") and not (avail.get("note") or "").strip():
+            raise HTTPException(400, "Please share your availability details")
         budget = form.get("budget") or {}
         if isinstance(budget, str):
             budget = {"status": "accept" if budget else "", "value": budget}

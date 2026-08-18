@@ -30,6 +30,7 @@ import {
 import { AVAILABILITY_OPTIONS, BUDGET_OPTIONS } from "@/lib/talentSchema";
 import LocationSelector from "@/components/LocationSelector";
 import { formatLocation } from "@/lib/sanitize";
+import AdminAddSubmissionModal from "@/components/submission/AdminAddSubmissionModal";
 
 function formatRelativeTime(ts) {
     if (!ts) return "—";
@@ -256,6 +257,7 @@ function ReviewImageCategorySection({
     label,
     images,
     isPreviewMode,
+    isRequired,
     setMediaList,
     setMediaVisibility,
     moveMediaItem,
@@ -263,9 +265,14 @@ function ReviewImageCategorySection({
     replaceSubmissionMedia,
     handleRemoveMedia,
     addSubmissionMedia,
+    onImageClick,
 }) {
     const addInputRef = useRef(null);
-    if (isPreviewMode && images.length === 0) return null;
+    // Phase 3 — an empty, non-required category is dead weight (the
+    // "SELFIE IMAGES (0)" clutter): skip it entirely in both Recruiter and
+    // Client view. A project that explicitly requires this category still
+    // gets the empty prompt in Recruiter view so there's something to act on.
+    if (images.length === 0 && !(isRequired && !isPreviewMode)) return null;
 
     return (
         <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
@@ -327,7 +334,13 @@ function ReviewImageCategorySection({
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                     {images.map((m, idx) => (
                         <div key={m.id} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                            <PremiumImage src={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" />
+                            <PremiumImage
+                                src={m.thumbnail_url || IMAGE_URL(m)}
+                                fallbackSrc={IMAGE_URL(m)}
+                                alt=""
+                                className="w-full h-full object-cover"
+                                onClick={onImageClick ? () => onImageClick(IMAGE_URL(m)) : undefined}
+                            />
                             {(m.client_visible === false || m.internal_only) && (
                                 <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
                                     Hidden
@@ -335,16 +348,21 @@ function ReviewImageCategorySection({
                             )}
                             {!isPreviewMode && (
                                 <>
-                                    <div className="absolute bottom-1 left-1 z-10">
-                                        <MediaVisControls media={m} onChange={setMediaVisibility} />
-                                    </div>
                                     <div className="absolute top-1 left-1 z-10 flex gap-0.5">
                                         <button type="button" disabled={idx === 0} onClick={() => moveMediaItem(m.id, category, -1)} className="w-4 h-4 flex items-center justify-center bg-white/90 rounded text-[10px] disabled:opacity-30">‹</button>
                                         <button type="button" disabled={idx === images.length - 1} onClick={() => moveMediaItem(m.id, category, 1)} className="w-4 h-4 flex items-center justify-center bg-white/90 rounded text-[10px] disabled:opacity-30">›</button>
                                     </div>
-                                    <div className="absolute bottom-1 right-1 z-10 flex gap-1">
-                                        <QuickReplaceButton accept="image/*" busy={quickEditBusyId === m.id} onReplace={(file) => replaceSubmissionMedia(m, file)} />
-                                        <button type="button" onClick={() => handleRemoveMedia(m.id)} className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border border-red-200 bg-white/90 text-red-600 hover:bg-red-50">Del</button>
+                                    {/* Phase 4 — bottom-left (visibility toggle) and bottom-right
+                                        (replace/delete) used to be two independently absolutely-
+                                        positioned corners; on a narrow 2-column mobile grid tile
+                                        they had no room and visibly overlapped. One flex-wrap row
+                                        lets the second group drop to its own line instead. */}
+                                    <div className="absolute bottom-1 inset-x-1 z-10 flex flex-wrap items-center justify-between gap-1">
+                                        <MediaVisControls media={m} onChange={setMediaVisibility} />
+                                        <div className="flex gap-1">
+                                            <QuickReplaceButton accept="image/*" busy={quickEditBusyId === m.id} onReplace={(file) => replaceSubmissionMedia(m, file)} />
+                                            <button type="button" onClick={() => handleRemoveMedia(m.id)} className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border border-red-200 bg-white/90 text-red-600 hover:bg-red-50">Del</button>
+                                        </div>
                                     </div>
                                 </>
                             )}
@@ -396,21 +414,75 @@ function EditableTextarea({ initialValue, onChange, placeholder, className, rows
     );
 }
 
-function PremiumImage({ src, alt, className }) {
+function PremiumImage({ src, fallbackSrc, alt, className, onClick }) {
     const [loaded, setLoaded] = useState(false);
+    const [currentSrc, setCurrentSrc] = useState(src);
+    const [triedFallback, setTriedFallback] = useState(false);
+    useEffect(() => {
+        setCurrentSrc(src);
+        setTriedFallback(false);
+        setLoaded(false);
+    }, [src]);
     return (
-        <div className="relative w-full h-full bg-neutral-100 overflow-hidden">
+        <div
+            className={`relative w-full h-full bg-neutral-100 overflow-hidden ${onClick ? "cursor-zoom-in" : ""}`}
+            onClick={onClick}
+        >
             {!loaded && (
                 <div className="absolute inset-0 animate-pulse bg-neutral-200" />
             )}
             <img
-                src={src}
+                src={currentSrc}
                 alt={alt}
                 loading="lazy"
                 decoding="async"
                 onLoad={() => setLoaded(true)}
+                onError={() => {
+                    // Phase 3 — grids load the small `thumbnail_url` transform;
+                    // if that specific derived asset is missing/broken (seen on
+                    // some pre-existing records), fall back once to the full
+                    // image rather than leaving the tile permanently blank.
+                    if (!triedFallback && fallbackSrc && fallbackSrc !== currentSrc) {
+                        setTriedFallback(true);
+                        setCurrentSrc(fallbackSrc);
+                    }
+                }}
                 className={`transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"} ${className}`}
             />
+        </div>
+    );
+}
+
+// Phase 3 — thumbnails intentionally load the small `thumbnail_url` transform
+// instead of the full original (see PremiumImage call sites below); this
+// lightbox is the "click/open can load a larger version" escape hatch so
+// nothing is lost by defaulting grids to the small transform.
+function ImageLightbox({ src, onClose }) {
+    useEffect(() => {
+        const onKey = (e) => { if (e.key === "Escape") onClose(); };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [onClose]);
+    if (!src) return null;
+    return (
+        <div
+            className="fixed inset-0 z-[200] bg-black/85 backdrop-blur-sm flex items-center justify-center p-6 cursor-zoom-out"
+            onClick={onClose}
+        >
+            <img
+                src={src}
+                alt=""
+                className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+            />
+            <button
+                type="button"
+                onClick={onClose}
+                className="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center backdrop-blur-md border border-white/20"
+                aria-label="Close"
+            >
+                <XCircle className="w-5 h-5" />
+            </button>
         </div>
     );
 }
@@ -590,6 +662,14 @@ export default function SubmissionReviewCenter() {
     const adminMediaInputRef = useRef(null);
     const [adminMediaUploading, setAdminMediaUploading] = useState(false);
     const [adminMediaCategory, setAdminMediaCategory] = useState("image");
+
+    // Admin "Add Submission" modal (Phase 1) — manual submission creation for
+    // a talent who couldn't submit themselves, without leaving this page.
+    const [showAddSubmissionModal, setShowAddSubmissionModal] = useState(false);
+
+    // Phase 3 — image grids render the small `thumbnail_url` transform, not
+    // the original; this is the full-resolution URL to show on click/open.
+    const [activeLightboxImage, setActiveLightboxImage] = useState(null);
 
     // Normalize utility
     const normalize = (fd) => ({
@@ -1073,7 +1153,39 @@ export default function SubmissionReviewCenter() {
         const pos = order.findIndex((s) => s.id === actedId);
         const nextItem = pos >= 0 && pos < order.length - 1 ? order[pos + 1] : null;
 
+        // Phase 3 — optimistic decision: apply the UI change (badge, detail
+        // panel, advance to next item) immediately, then persist in the
+        // background. Correctness is unchanged — the curation flush still
+        // happens before the decision POST (same Hide -> Approve race
+        // guarantee as before), it just no longer blocks what the recruiter
+        // sees. A failed persist rolls every optimistic change back and
+        // surfaces a concise error instead of silently drifting from the
+        // server's actual state.
+        const prevDecision = detail?.decision;
+        const prevSelectedId = selectedId;
+        const prevIsEndOfList = isEndOfList;
+
         setSaving(true);
+        setSubmissions((prev) => prev.map((s) => (s.id === actedId ? { ...s, decision } : s)));
+        // Also patch the open detail panel — the fetch effect below only
+        // re-runs when `selectedId` changes, which it won't if the next
+        // navigation (e.g. the end-of-list "Review Approved" shortcut)
+        // re-selects this same submission. Without this, the badge shows
+        // the pre-decision status until some other id is selected first.
+        setDetail((prev) => (prev && prev.id === actedId ? { ...prev, decision } : prev));
+        if (nextItem) {
+            setSelectedId(nextItem.id);
+            setIsEndOfList(false);
+        } else {
+            setIsEndOfList(true);
+        }
+        const toastMessages = {
+            approved: "Approved and moved to next submission",
+            hold: "Held and moved to next submission",
+            rejected: "Rejected and moved to next submission",
+        };
+        const toastId = toast.success(toastMessages[decision] || `${decision} registered`);
+
         try {
             // Guarantee the exact curation the recruiter sees is persisted
             // BEFORE the decision publishes it to the client link. First flush
@@ -1093,36 +1205,17 @@ export default function SubmissionReviewCenter() {
                 decision,
                 note: decisionNote,
             });
-
-            const toastMessages = {
-                approved: "Approved and moved to next submission",
-                hold: "Held and moved to next submission",
-                rejected: "Rejected and moved to next submission",
-            };
-            toast.success(toastMessages[decision] || `${decision} registered`);
-
-            // Update status locally (functional update — no stale closure).
-            setSubmissions((prev) => prev.map((s) => (s.id === actedId ? { ...s, decision } : s)));
-            // Also patch the open detail panel — the fetch effect below only
-            // re-runs when `selectedId` changes, which it won't if the next
-            // navigation (e.g. the end-of-list "Review Approved" shortcut)
-            // re-selects this same submission. Without this, the badge shows
-            // the pre-decision status until some other id is selected first.
-            setDetail((prev) => (prev && prev.id === actedId ? { ...prev, decision } : prev));
-
-            // Advance to the next item in the order the recruiter was viewing.
-            if (nextItem) {
-                setSelectedId(nextItem.id);
-                setIsEndOfList(false);
-            } else {
-                setIsEndOfList(true);
-            }
         } catch (e) {
-            toast.error("Failed to register decision");
+            toast.dismiss(toastId);
+            toast.error("Failed to register decision — reverted");
+            setSubmissions((prev) => prev.map((s) => (s.id === actedId ? { ...s, decision: prevDecision } : s)));
+            setDetail((prev) => (prev && prev.id === actedId ? { ...prev, decision: prevDecision } : prev));
+            setSelectedId(prevSelectedId);
+            setIsEndOfList(prevIsEndOfList);
         } finally {
             setSaving(false);
         }
-    }, [selectedId, saving, id, decisionNote, filteredSubmissions, setIsEndOfList, setSelectedId, setSubmissions, setSaving, mediaList, talentPortfolioMedia, fv, buildCurationPayload]);
+    }, [selectedId, saving, id, decisionNote, filteredSubmissions, isEndOfList, detail, setIsEndOfList, setSelectedId, setSubmissions, setSaving, mediaList, talentPortfolioMedia, fv, buildCurationPayload]);
 
     // Issue #5: prevent accidental decision changes. A first-time decision is
     // one click; CHANGING an already-registered decision (approved/hold/
@@ -1160,6 +1253,20 @@ export default function SubmissionReviewCenter() {
 
     const introVideo = getCuratedMedia("video")[0];
     const takes = getCuratedMedia("takes");
+
+    // Phase 3 — mirrors the Requirement Engine's own portfolio visibility
+    // keys (lib/requirementEngine.js) so an empty category still shows its
+    // "add here" prompt when the project has explicitly asked for it. Only
+    // image/indian/western have a requirement-engine config surface at all —
+    // every other category (selfie/profiles/full_length/side_profile/ethnic/
+    // additional_portfolio) is admin-only and never "required" by a project,
+    // so it only ever appears when media actually exists.
+    const isPortfolioCategoryRequired = (category) => {
+        const reqs = project?.submission_requirements;
+        if (!reqs || reqs.strictness !== "strict") return false;
+        const visKey = category === "image" ? "portfolio_image_visibility" : `portfolio_${category}_visibility`;
+        return reqs[visKey] === "required";
+    };
 
     // Talent-level portfolio media (fetched from db.talents). Visibility is
     // controlled per-submission; in client preview, hidden/internal disappear —
@@ -1199,6 +1306,16 @@ export default function SubmissionReviewCenter() {
     const renderFieldRow = (f) => {
         const isArrayVal = Array.isArray(form[f.key]);
         const displayVal = isArrayVal ? form[f.key].join(", ") : (form[f.key] ?? "");
+        // Phase 4 — competitive_brand is a single free-text field gated by the
+        // separate has_competitive_brand_experience boolean (see
+        // requirementEngine.js / AdminAddSubmissionModal.jsx for the same
+        // convention). Reading `form.competitive_brand` alone can't tell
+        // "explicitly answered None" apart from "never answered" — both are
+        // an empty string — so an unqualified fallback like `|| "None"`
+        // would misreport an unanswered submission as having declared no
+        // competitive-brand experience. This branch is the one place that
+        // needs to know the difference.
+        const isCompetitiveBrandNone = f.key === "competitive_brand" && form.has_competitive_brand_experience === false;
         // Show override indicator when original_form_data exists and value has been changed
         const origVal = detail?.original_form_data?.[f.key];
         const hasOverride = origVal !== undefined && JSON.stringify(origVal) !== JSON.stringify(form[f.key]);
@@ -1224,6 +1341,10 @@ export default function SubmissionReviewCenter() {
                                 testid="form-location"
                             />
                         </div>
+                    ) : isCompetitiveBrandNone ? (
+                        <p className="mt-1 py-1 text-sm text-black/50 italic" data-testid="competitive-brand-none">
+                            None
+                        </p>
                     ) : (
                         <EditableInput
                             type={f.type || "text"}
@@ -1291,25 +1412,42 @@ export default function SubmissionReviewCenter() {
     return (
         <div className="flex flex-col h-screen bg-[#fafaf9] text-neutral-800 overflow-hidden font-sans">
             {/* Top Bar Navigation */}
-            <header className="px-6 py-4 bg-white border-b border-black/[0.08] flex items-center justify-between shrink-0 shadow-sm">
-                <div className="flex items-center gap-4">
+            <header className="px-6 py-4 bg-white border-b border-black/[0.08] flex items-center justify-between gap-4 shrink-0 shadow-sm">
+                <div className="flex items-center gap-4 min-w-0">
                     <button
                         onClick={() => navigate(`/admin/projects/${id}`)}
-                        className="p-2 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-full text-black/60 hover:text-black transition-colors"
+                        className="p-2 border border-black/[0.08] hover:border-black/[0.16] hover:bg-black/[0.02] rounded-full text-black/60 hover:text-black transition-colors shrink-0"
                         title="Back to Project Edit"
                     >
                         <ArrowLeft className="w-4 h-4" />
                     </button>
-                    <div>
+                    <div className="min-w-0">
                         <span className="text-[10px] uppercase tracking-wider text-black/40 font-semibold font-mono">Submission Review Center</span>
-                        <h1 className="text-xl font-display font-semibold tracking-tight text-black/90">
+                        {/* Phase 4 — a long brand_name had no truncation or shrink
+                            guard, so at ~1024px (sidebar eating into available
+                            width) it rendered at full length and visually ran
+                            into the Add Submission button / Reviewing badge next
+                            to it instead of yielding space to them. */}
+                        <h1 className="text-xl font-display font-semibold tracking-tight text-black/90 truncate" title={project?.brand_name || ""}>
                             {project?.brand_name || "Loading Project..."}
                         </h1>
                     </div>
                 </div>
 
                 {/* Progress Indicators */}
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 shrink-0">
+                    {isAdminRole && (
+                        <button
+                            type="button"
+                            onClick={() => setShowAddSubmissionModal(true)}
+                            data-testid="add-submission-btn"
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-black text-white text-xs font-semibold rounded-lg hover:bg-black/85 transition-colors shrink-0"
+                            title="Manually add a submission for a talent"
+                        >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Add Submission</span>
+                        </button>
+                    )}
                     {submissions.length > 0 && (
                         <div className="px-4 py-1.5 bg-black text-white text-xs font-mono font-semibold uppercase tracking-wider rounded-sm shadow-sm animate-pulse-subtle">
                             {isEndOfList
@@ -2172,7 +2310,7 @@ export default function SubmissionReviewCenter() {
                                                                 <FileText className="w-8 h-8 text-black/25" />
                                                             </div>
                                                         ) : (
-                                                            <PremiumImage src={m.thumbnail_url || IMAGE_URL(m)} alt="" className="w-full aspect-video object-cover" />
+                                                            <PremiumImage src={m.thumbnail_url || IMAGE_URL(m)} fallbackSrc={IMAGE_URL(m)} alt="" className="w-full aspect-video object-cover" />
                                                         )}
                                                         <div className="p-2 flex flex-col gap-1.5">
                                                             <p className="text-[9px] text-black/50 font-mono uppercase truncate">{m.label || m.category}</p>
@@ -2344,6 +2482,7 @@ export default function SubmissionReviewCenter() {
                                         label={label}
                                         images={getCuratedMedia(key)}
                                         isPreviewMode={isPreviewMode}
+                                        isRequired={isPortfolioCategoryRequired(key)}
                                         setMediaList={setMediaList}
                                         setMediaVisibility={setMediaVisibility}
                                         moveMediaItem={moveMediaItem}
@@ -2351,11 +2490,14 @@ export default function SubmissionReviewCenter() {
                                         replaceSubmissionMedia={replaceSubmissionMedia}
                                         handleRemoveMedia={handleRemoveMedia}
                                         addSubmissionMedia={addSubmissionMedia}
+                                        onImageClick={setActiveLightboxImage}
                                     />
                                 ))}
 
-                                {/* Section 5: Talent Portfolio Images (from db.talents) */}
-                                {(!isPreviewMode || talentPortfolioImages.length > 0) && (
+                                {/* Section 5: Talent Portfolio Images (from db.talents).
+                                    Phase 3 — library-sourced, so there's no project
+                                    "required" concept here; hide whenever empty. */}
+                                {talentPortfolioImages.length > 0 && (
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
                                         <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
                                             <p className="eyebrow">Portfolio Images ({talentPortfolioImages.length})</p>
@@ -2393,7 +2535,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {talentPortfolioImages.map((m, idx) => (
                                                     <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={IMAGE_URL(m) || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                        <PremiumImage src={m.thumbnail_url || IMAGE_URL(m)} fallbackSrc={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" onClick={() => setActiveLightboxImage(IMAGE_URL(m))} />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
                                                                 {"Hidden"}
@@ -2411,8 +2553,9 @@ export default function SubmissionReviewCenter() {
                                     </section>
                                 )}
 
-                                {/* Section 6: Additional Portfolio (from db.talents) */}
-                                {(!isPreviewMode || talentAdditionalPortfolio.length > 0) && (
+                                {/* Section 6: Additional Portfolio (from db.talents).
+                                    Phase 3 — same as Section 5, hide whenever empty. */}
+                                {talentAdditionalPortfolio.length > 0 && (
                                     <section className="border border-black/[0.08] bg-white rounded-xl p-5 md:p-6 shadow-sm">
                                         <div className="flex items-center justify-between border-b border-black/[0.05] pb-3 mb-4">
                                             <p className="eyebrow">Additional Portfolio ({talentAdditionalPortfolio.length})</p>
@@ -2450,7 +2593,7 @@ export default function SubmissionReviewCenter() {
                                             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                                                 {talentAdditionalPortfolio.map((m, idx) => (
                                                     <div key={m.id || idx} className="relative aspect-square overflow-hidden border border-black/[0.06] rounded-lg bg-[#fafaf9]">
-                                                        <PremiumImage src={IMAGE_URL(m) || m.thumbnail_url} alt="" className="w-full h-full object-cover" />
+                                                        <PremiumImage src={m.thumbnail_url || IMAGE_URL(m)} fallbackSrc={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" onClick={() => setActiveLightboxImage(IMAGE_URL(m))} />
                                                         {(m.client_visible === false || m.internal_only) && (
                                                             <span className="absolute top-1 right-1 text-[8px] bg-black/70 text-white px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10">
                                                                 {"Hidden"}
@@ -2477,7 +2620,13 @@ export default function SubmissionReviewCenter() {
                     {detail && !isPreviewMode && !isOriginalMode && (
                         <footer className="px-6 py-5 bg-white border-t-2 border-black/[0.08] shrink-0 flex flex-col gap-4 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] z-20">
                             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-                                <div className="flex-1">
+                                {/* Phase 4 — this flex item had no min-w-0, so at the
+                                    lg breakpoint (row layout kicks in right around where
+                                    the sidebar + list panel leave the detail column
+                                    narrowest) it couldn't shrink below the input's
+                                    intrinsic width and encroached on the decision
+                                    buttons instead of yielding space to them. */}
+                                <div className="flex-1 min-w-0">
                                     <label className="text-[10px] uppercase font-mono tracking-widest text-black/60 font-semibold mb-1.5 block">Review Decision Note</label>
                                     <input
                                         type="text"
@@ -2566,6 +2715,19 @@ export default function SubmissionReviewCenter() {
                     </div>
                 </div>
             )}
+
+            <AdminAddSubmissionModal
+                open={showAddSubmissionModal}
+                onClose={() => setShowAddSubmissionModal(false)}
+                projectId={id}
+                project={project}
+                onCreated={(newSid) => {
+                    loadSubmissions();
+                    setSelectedId(newSid);
+                }}
+            />
+
+            <ImageLightbox src={activeLightboxImage} onClose={() => setActiveLightboxImage(null)} />
         </div>
     );
 }

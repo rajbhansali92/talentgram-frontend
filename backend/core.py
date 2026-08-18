@@ -2642,8 +2642,9 @@ def _public_media(m: dict) -> dict:
     is_video = resource_type == "video" or m.get("category") == "video" or (m.get("content_type") or "").startswith("video/")
 
     # Provider-aware video URL. Cloudflare Stream (HLS .m3u8) and R2 assets keep
-    # their stored delivery URL as-is. Only legacy Cloudinary-hosted videos get the
-    # optimized Cloudinary delivery transform via stream_video_url(public_id).
+    # their stored delivery URL as-is. Only legacy Cloudinary-hosted videos —
+    # records saved before this file learned to store a ready delivery URL —
+    # get a computed Cloudinary delivery transform via stream_video_url(public_id).
     # (Previously this rewrote EVERY video with a public_id to a Cloudinary URL,
     # which replaced the Stream m3u8 with a non-existent Cloudinary .mp4 → client
     # playback failed with "No video with supported format".)
@@ -2658,10 +2659,30 @@ def _public_media(m: dict) -> dict:
         or _url.endswith(".m3u8")
     )
     _is_cloudinary_video = _provider == "cloudinary" or "res.cloudinary.com" in _url
-    # Only rewrite genuine Cloudinary videos, and never a Stream record. R2 and
-    # anything non-Cloudinary keep their stored URL untouched.
-    if is_video and m.get("public_id") and _is_cloudinary_video and not _is_stream:
-        url = stream_video_url(m["public_id"]) or url
+    # Media pipeline fix (2026-08, Phase 2): this used to recompute
+    # stream_video_url(public_id) unconditionally for every Cloudinary video,
+    # discarding whatever was already stored in `url` — even though the
+    # upload path (submission_upload/submission_complete_upload) always
+    # stores an already-ready, already-playable delivery URL (either the
+    # eager-transformed derivative Cloudinary generated during upload, or the
+    # incoming-transformed/original secure_url). stream_video_url() builds a
+    # DIFFERENT, differently-chained transformation string than the one
+    # requested at upload time (confirmed empirically: upload's eager preset
+    # is one combined segment, e.g. "w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+    # while stream_video_url() chains the same params across three separate
+    # transformation steps) — Cloudinary treats these as distinct derived
+    # assets with distinct cache keys, so the client link was ALWAYS forcing
+    # a brand-new, never-before-requested on-demand transformation, cold,
+    # on the very first client view. For a real (large/long) audition video
+    # that cold-generation can take long enough for the player (which has no
+    # retry) to give up — exactly the "first upload doesn't play, re-upload
+    # fixes it" bug: a second upload doesn't fix anything architecturally, it
+    # just buys enough wall-clock time for that once-off cold transform to
+    # finish. Now: use the already-stored, already-verified-working `url`
+    # whenever one exists, and only fall back to computing stream_video_url()
+    # for the genuinely legacy case where no url was ever stored.
+    if is_video and m.get("public_id") and _is_cloudinary_video and not _is_stream and not url:
+        url = stream_video_url(m["public_id"])
 
     out = {
         "id": m.get("id"),

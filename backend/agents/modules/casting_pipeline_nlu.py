@@ -1186,6 +1186,11 @@ MOVE_TRIGGERS = [
     "select", "shortlist", "restore", "not available", "not interested",
     "put",  # "Put Arya into Approved for Pantaloons"
     "hold", "lock",  # "Hold Sarah" / "Lock Rahul" — stage-first shorthand
+    # Combined Casting Pipeline + WhatsApp Automation (2026-08-19) —
+    # "move,send" (no "add") routes through the MOVE intent, matching how
+    # bare "move" already does — see ADD_TRIGGERS' identical "add,send"/
+    # "add,move,send" entries below for the combos that include "add".
+    "move,send", "move, send",
 ]
 
 # "to" or "into" both introduce the destination stage ("Move X to Approved",
@@ -1367,6 +1372,12 @@ ADD_TRIGGERS = [
     # as the natural-language "Add X to Y and move to Z" chain it
     # translates into — see translate_simple_command_to_natural_language.
     "add,move", "add, move", "add,  move",
+    # Combined Casting Pipeline + WhatsApp Automation (2026-08-19) — any
+    # action word that includes "add" (with or without "move") plus
+    # "send" routes through the ADD intent too, same reasoning as
+    # "add,move" above (the pipeline op always runs first regardless).
+    "add,move,send", "add, move, send",
+    "add,send", "add, send",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1381,9 +1392,50 @@ ADD_TRIGGERS = [
 # line that doesn't cleanly match this shape returns None so the caller
 # falls straight through to natural-language parsing, unaffected.
 # ---------------------------------------------------------------------------
-_SIMPLE_ACTION_RE = re.compile(
-    r"^\s*(add\s*,\s*move|move\s*,\s*add|add|move)\s*$", re.IGNORECASE,
-)
+# Recognized action words: "add", "move", or any comma-combination of them
+# (e.g. "add,move"/"move,add") — see _parse_combined_action_words just below,
+# which is now the ONE place this is parsed. Combined Casting Pipeline +
+# WhatsApp Automation (2026-08-19) — the action word may now ALSO include
+# "send" alongside add/move, in any order/combination ("add,move,send",
+# "move,send", "add,send", "send,add", ...).
+# A bare "send" with no add/move at all is deliberately NOT matched here —
+# that stays the WhatsApp Campaign Agent's own existing bare-send grammar,
+# completely untouched; this only recognizes combinations that ALSO name a
+# pipeline operation, since "send" alone has no talent/project resolution
+# of its own to hang off in THIS agent.
+_ACTION_WORD_RE = re.compile(r"^(add|move|send)$", re.IGNORECASE)
+
+
+def _parse_combined_action_words(action_text: str) -> Optional[Tuple[bool, bool, bool]]:
+    """Parses a comma-separated action-word list (1-3 of add/move/send, any
+    order, no repeats) into (has_add, has_move, has_send). Returns None for
+    anything else — including a bare "send" (no add/move present at all),
+    which is out of scope for this grammar (see module comment above)."""
+    parts = [p.strip().lower() for p in (action_text or "").split(",")]
+    if not parts or any(not _ACTION_WORD_RE.match(p) for p in parts):
+        return None
+    words = set(parts)
+    if len(words) != len(parts):
+        return None
+    has_add, has_move, has_send = "add" in words, "move" in words, "send" in words
+    if not (has_add or has_move):
+        return None
+    return has_add, has_move, has_send
+
+
+# NUL-delimited — never appears in real user text — sentinel marking where
+# a translated add/move sentence carries a pending WhatsApp template send
+# (Combined Casting Pipeline + WhatsApp Automation, 2026-08-19). Embedded
+# directly in the translated NATURAL-LANGUAGE text (rather than threaded
+# as a separate parallel value) so it automatically survives every
+# existing text-only step already between here and the plan-step builder
+# — and-confirm suffix handling, and-chain splitting, blank-line grouping
+# — without any of them needing to know it exists. The one place that DOES
+# know about it, casting_pipeline.py's _extract_add_fields/_extract_move_
+# fields, strips it back out of each chunk before any real NLU regex ever
+# sees it, recording which GROUP it belonged to.
+SEND_TEMPLATE_MARKER = "\x00SEND_TEMPLATE\x00"
+
 # "Follow Up to Rejected" / "Follow Up → Rejected" -> only the target
 # (after "to"/"→") matters for the actual write — _split_by_current_
 # stage already re-checks each talent's live CURRENT stage server-side, so
@@ -1408,15 +1460,18 @@ def parse_simple_add_move_command(
     line: str, stage_order: Optional[List[str]] = None,
 ) -> Optional[Dict[str, str]]:
     """Parses ONE line of the "Action - Talent(s) - Project(s) - Pipeline"
-    grammar. Returns {"action": "add"|"move"|"add_move", "talent_part":
-    ..., "project_part": ..., "pipeline_part": ...} (all still RAW,
-    possibly comma-multi-value text — splitting into individual
-    talents/projects is the existing extract_add_fields/extract_move_
-    fields + cross-product machinery's job, unchanged), or None when the
-    line has no recognized action word first, or doesn't resolve to a
-    plausible 4-field structure — never a partial/guessed match, so the
-    caller can safely fall back to natural-language parsing without
-    needing to "undo" anything.
+    grammar (or, when the action word includes "send", the 5-field
+    "Action - Talent(s) - Template - Project(s) - Pipeline" combined
+    grammar — see _parse_combined_action_words). Returns {"action":
+    "add"|"move"|"add_move", "talent_part": ..., "project_part": ...,
+    "pipeline_part": ..., "template_part": <only when send was present>}
+    (all still RAW, possibly comma-multi-value text — splitting into
+    individual talents/projects is the existing extract_add_fields/
+    extract_move_fields + cross-product machinery's job, unchanged), or
+    None when the line has no recognized action word first, or doesn't
+    resolve to a plausible field structure — never a partial/guessed
+    match, so the caller can safely fall back to natural-language parsing
+    without needing to "undo" anything.
 
     Missing-hyphen recovery: when exactly 3 fields are found (one "-"
     omitted somewhere) AND the trailing field contains a recognizable
@@ -1431,15 +1486,29 @@ def parse_simple_add_move_command(
     safely, which this synchronous parsing layer doesn't have access to —
     that shape falls through to natural-language parsing, which already
     gives a clear, non-guessing error rather than silently misreading
-    someone's name as part of a project."""
+    someone's name as part of a project. Missing-hyphen recovery is not
+    attempted for the 5-field combined (send-inclusive) grammar — only
+    the exact 5-hyphen form is supported there, kept simple/safe."""
     parts = [p.strip() for p in (line or "").split(" - ")]
     if not parts:
         return None
-    action_m = _SIMPLE_ACTION_RE.match(parts[0])
-    if not action_m:
+    combined = _parse_combined_action_words(parts[0])
+    if combined is None:
         return None
-    action_raw = re.sub(r"\s*,\s*", ",", action_m.group(1).lower())
-    action = "add_move" if "," in action_raw else action_raw
+    has_add, has_move, has_send = combined
+    action = "add_move" if (has_add and has_move) else ("add" if has_add else "move")
+
+    if has_send:
+        if len(parts) != 5:
+            return None
+        talent_part, template_part, project_part, pipeline_part = parts[1], parts[2], parts[3], parts[4]
+        if not (talent_part and template_part and project_part and pipeline_part):
+            return None
+        return {
+            "action": action, "talent_part": talent_part,
+            "project_part": project_part, "pipeline_part": pipeline_part,
+            "template_part": template_part,
+        }
 
     if len(parts) == 4:
         talent_part, project_part, pipeline_part = parts[1], parts[2], parts[3]
@@ -1481,14 +1550,28 @@ def translate_simple_command_to_natural_language(parsed: Dict[str, str]) -> str:
     segment already applies that trailing move to every touched
     (talent, project) pair, cross-product included, so this needs no new
     execution logic). Only "move" stays a pure stage transition, for
-    someone already in the pipeline."""
+    someone already in the pipeline.
+
+    Combined Casting Pipeline + WhatsApp Automation (2026-08-19) — when
+    `parsed` carries a "template_part" (the action word included "send"),
+    the SEND_TEMPLATE_MARKER sentinel is appended after the whole
+    translated sentence, carrying the raw template text. See the
+    marker's own module comment for why embedding it in the text itself
+    (rather than as a separate return value) is what lets it survive
+    every existing text-only step between here and the plan-step builder
+    unchanged."""
     action = parsed["action"]
     talent = parsed["talent_part"]
     project = parsed["project_part"]
     target = _extract_simple_pipeline_target(parsed["pipeline_part"])
     if action == "move":
-        return f"Move {talent} to {target} in {project}"
-    return f"Add {talent} to {project} and move to {target}"
+        sentence = f"Move {talent} to {target} in {project}"
+    else:
+        sentence = f"Add {talent} to {project} and move to {target}"
+    template_part = parsed.get("template_part")
+    if template_part:
+        sentence += SEND_TEMPLATE_MARKER + template_part
+    return sentence
 
 
 def translate_simple_commands_in_text(text: str, stage_order: Optional[List[str]] = None) -> str:

@@ -35,6 +35,8 @@ from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from fastapi import HTTPException
+
 from core import db, parse_height_to_inches
 
 from routers.casting_pipeline import (
@@ -48,6 +50,19 @@ from routers.casting_pipeline import (
 )
 
 from routers.talents import _build_talent_query, _LIST_PROJECTION, _enrich_list
+
+# Combined Casting Pipeline + WhatsApp Automation (2026-08-19) — the
+# "add,move,send" family reuses the WhatsApp Engine's OWN, unmodified
+# batch-creation/rendering path (create_batch already renders {{project_
+# name}}/{{shoot_dates}}/{{budget}}/{{submission_link}} etc. correctly for
+# a source_type="PROJECT" send — see routers/whatsapp.py). Safe to import
+# at module level: routers/whatsapp.py has no dependency back on this
+# module. The template-name resolver (agents.modules.whatsapp_campaign_
+# agent._resolve_source) is NOT imported here at module level, though —
+# that module already imports FROM this one (_fetch_ongoing_projects etc.),
+# so importing it back here would be circular; it's imported locally,
+# inside the one function that needs it, instead (see _flush_group_send).
+from routers.whatsapp import BatchIn, SourceParams, create_batch
 
 from agents.models import (
     AgentDefinition,
@@ -1806,6 +1821,38 @@ PROJECT_QUERY_FIELD = FieldSpec(
 _SELECT_TRIGGER_RE = re.compile(r"^\s*select\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
 
+def _strip_send_template_markers(
+    chunks: "List[Tuple[int, str]]",
+) -> "Tuple[List[Tuple[int, str]], Dict[int, str]]":
+    """Combined Casting Pipeline + WhatsApp Automation (2026-08-19) — pulls
+    nlu.SEND_TEMPLATE_MARKER out of each chunk (see that constant's own
+    comment for why it's embedded in the translated text rather than
+    threaded separately), returning the CLEANED chunks — safe to feed into
+    nlu.extract_move_fields/extract_add_fields, neither of which has any
+    idea this marker exists — plus a group_idx -> template_query lookup.
+
+    A marker attached to only ONE sub-chunk of a multi-sub-chunk group
+    (e.g. the "move to X" half of an "Add ... and move to X" chain — see
+    translate_simple_command_to_natural_language) still applies to the
+    WHOLE group: _execute_plan/_build_plan_confirmation only ever read
+    this dict at the group-boundary flush point, never per individual
+    step, so it doesn't matter which specific chunk within a group
+    happened to carry the literal marker text."""
+    group_send_template: Dict[int, str] = {}
+    cleaned: List[Tuple[int, str]] = []
+    for g, c in chunks:
+        if nlu.SEND_TEMPLATE_MARKER in c:
+            core, _, tmpl = c.partition(nlu.SEND_TEMPLATE_MARKER)
+            core = core.rstrip()
+            tmpl = tmpl.strip()
+            if tmpl:
+                group_send_template[g] = tmpl
+            cleaned.append((g, core))
+        else:
+            cleaned.append((g, c))
+    return cleaned, group_send_template
+
+
 def _extract_move_fields(text: str) -> Dict[str, str]:
     # Simplified Command Language (2026-08-17) — translates every
     # "Action - Talent(s) - Project(s) - Pipeline" line into its natural-
@@ -1834,9 +1881,10 @@ def _extract_move_fields(text: str) -> Dict[str, str]:
 
     with request_scope.stage("nlu"):
         chunks, auto_confirm = nlu.preprocess_command_grouped(text)
+        chunks, group_send_template = _strip_send_template_markers(chunks)
         out: Dict[str, str] = {}
 
-        if len(chunks) == 1:
+        if len(chunks) == 1 and not group_send_template:
             group0, raw0 = chunks[0]
             fields = nlu.extract_move_fields(raw0, list(PIPELINE_STAGE_ORDER))
             project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
@@ -1856,8 +1904,17 @@ def _extract_move_fields(text: str) -> Dict[str, str]:
             # however many talent names were also given.
             chunks = [(group0, raw0)]
 
+        # Combined Casting Pipeline + WhatsApp Automation (2026-08-19) —
+        # a pending send_template (present whenever group_send_template
+        # has an entry for that step's group) is carried on EVERY step
+        # dict, redundantly repeated across a group's sub-chunks — harmless,
+        # since it's read only once per group, at _execute_plan/_build_
+        # plan_confirmation's group-boundary flush point.
         steps = [
-            {"intent_id": nlu.classify_chunk_intent(c) or "casting.move", "raw_text": c, "group": g}
+            {
+                "intent_id": nlu.classify_chunk_intent(c) or "casting.move", "raw_text": c, "group": g,
+                "send_template": group_send_template.get(g),
+            }
             for g, c in chunks
         ]
         out[PLAN_FIELD.key] = json.dumps(steps)
@@ -2344,11 +2401,100 @@ async def _resolve_one_plan_segment(
     return out
 
 
+@dataclass
+class _GroupSendBucket:
+    project_label: str
+    talent_ids: List[str] = dataclass_field(default_factory=list)
+    talent_labels: List[str] = dataclass_field(default_factory=list)
+
+
+async def _flush_group_send(
+    summary_lines: List[str], template_query: Optional[str],
+    project_send_data: Dict[str, "_GroupSendBucket"], *, is_dry_run: bool,
+) -> None:
+    """Combined Casting Pipeline + WhatsApp Automation (2026-08-19) — the
+    ONE place a pending group WhatsApp send actually happens (or, for
+    is_dry_run, is just described for the preview card). Called at every
+    group boundary in _execute_plan/_build_plan_confirmation, AFTER that
+    group's add/move resolution has already been accounted for — the
+    pipeline update always comes first, by construction (this is only
+    ever invoked once a group's steps have all been processed).
+    `project_send_data` maps project_id -> the talents that successfully
+    ended this group's MOVE step at the target stage (see _execute_plan's
+    accumulation, right below "Already in that stage." too — an already-
+    satisfied move still counts as success for send purposes). A talent
+    whose pipeline update FAILED never enters this dict at all, so a
+    failed pipeline op can never trigger a send for that talent/project.
+
+    Reuses the EXACT SAME create_batch (routers/whatsapp.py, unmodified)
+    a single-project-narrowed-by-talent_ids WhatsApp Campaign Agent send
+    already uses — same template resolution, same recipient resolution
+    (talent phone/WhatsApp group), same rendering (including the
+    per-project-context rendering fix), same job creation, same existing
+    WhatsApp Worker pickup. No new sender, no new renderer, no new
+    recipient-resolution logic."""
+    if not template_query or not project_send_data:
+        return
+    # Local import — whatsapp_campaign_agent.py already imports FROM this
+    # module at its own top level (_fetch_ongoing_projects etc.), so a
+    # top-level import here would be circular. Deferred to this one call
+    # site, which only ever runs at request time, well after both modules
+    # have finished loading.
+    from agents.modules import whatsapp_campaign_agent as wa
+
+    tmpl_match = await wa._resolve_source(template_query)
+    if not tmpl_match.template:
+        reason = tmpl_match.error or f'Multiple templates match "{template_query}" — please use the exact name.'
+        summary_lines += ["", f"✗ WhatsApp send — {reason}"]
+        return
+    template_label = tmpl_match.template.get("name") or tmpl_match.template.get("slug") or ""
+
+    if is_dry_run:
+        for bucket in project_send_data.values():
+            names = ", ".join(bucket.talent_labels)
+            summary_lines.append(f"→ then send {template_label} to {names} in {bucket.project_label}")
+        return
+
+    admin = await wa._service_admin()
+    total_queued = 0
+    for pid, bucket in project_send_data.items():
+        summary_lines.append("")
+        summary_lines.append(bucket.project_label)
+        try:
+            result = await create_batch(
+                BatchIn(
+                    source_type="PROJECT",
+                    source_params=SourceParams(
+                        project_id=pid, pipeline_stages=list(PIPELINE_STAGE_ORDER),
+                        talent_ids=bucket.talent_ids,
+                    ),
+                    template_id=tmpl_match.template["id"], is_dry_run=False,
+                ),
+                admin=admin,
+            )
+        except HTTPException as exc:
+            for label in bucket.talent_labels:
+                summary_lines.append(f"• {label} — WhatsApp send failed ({exc.detail})")
+            continue
+        sent_ids = {j.get("talent_id") for j in result["jobs"]}
+        for tid, label in zip(bucket.talent_ids, bucket.talent_labels):
+            if tid in sent_ids:
+                summary_lines.append(f"• {label} — {template_label} sent")
+            else:
+                summary_lines.append(f"• {label} — no phone/WhatsApp group on file, not sent")
+        total_queued += len(result["jobs"])
+    summary_lines.append("")
+    summary_lines.append(f"{total_queued} WhatsApp message{'' if total_queued == 1 else 's'} queued.")
+
+
 async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
     steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
     resolved_steps: List[Dict[str, Any]] = []
     touched_pairs: List[Dict[str, str]] = []
     last_group: Optional[Any] = None
+    group_send_template: Optional[str] = None
+    group_send_data: Dict[str, _GroupSendBucket] = {}
+    preview_send_lines: List[str] = []
     for step in steps:
         group = step.get("group", 0)
         if last_group is not None and group != last_group:
@@ -2358,8 +2504,25 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
             # action ("...and move to X") apply to an EARLIER, unrelated
             # command's talents just because they happen to share one plan.
             touched_pairs = []
+            await _flush_group_send(preview_send_lines, group_send_template, group_send_data, is_dry_run=True)
+            group_send_template, group_send_data = None, {}
         last_group = group
-        resolved_steps.extend(await _resolve_one_plan_step(step, ctx, touched_pairs))
+        if step.get("send_template"):
+            group_send_template = step["send_template"]
+        resolved = await _resolve_one_plan_step(step, ctx, touched_pairs)
+        resolved_steps.extend(resolved)
+        if step.get("send_template"):
+            for rs in resolved:
+                r = rs["resolved"]
+                if r is not None and rs["intent_id"] == "casting.move":
+                    bucket = group_send_data.setdefault(
+                        r.project_id, _GroupSendBucket(project_label=r.project_label)
+                    )
+                    for tid, tl in zip(r.talent_ids, r.talent_labels):
+                        if tid not in bucket.talent_ids:
+                            bucket.talent_ids.append(tid)
+                            bucket.talent_labels.append(tl)
+    await _flush_group_send(preview_send_lines, group_send_template, group_send_data, is_dry_run=True)
 
     lines = ["You are about to run this plan:", ""]
     for i, rs in enumerate(resolved_steps, start=1):
@@ -2372,6 +2535,9 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
                 lines.append(f"{i}. Move {names} to {nlu.stage_label(r.target_stage)} in {r.project_label}")
         else:
             lines.append(f"{i}. {rs['raw_text']} — {rs['error']}")
+    if preview_send_lines:
+        lines.append("")
+        lines.extend(preview_send_lines)
     lines.append("")
     lines.append("Reply:")
     lines.append("1 → Approve")
@@ -2383,12 +2549,26 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
 async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
     """Runs every step SEQUENTIALLY — each wrapped in its own try/except
     so one failing/ambiguous step never aborts the rest — and returns one
-    combined summary in the exact ✓/✗ format specified."""
+    combined summary in the exact ✓/✗ format specified.
+
+    Combined Casting Pipeline + WhatsApp Automation (2026-08-19) — a step
+    carrying send_template (see _strip_send_template_markers) accumulates
+    its successful casting.move outcomes into group_send_data as it goes;
+    at each group boundary (and once more after the loop, for the final
+    group) that group's accumulated data is flushed to an actual WhatsApp
+    send via _flush_group_send — always AFTER every add/move write for
+    that group has already been attempted, per the required ordering. A
+    talent/project pair whose move step errored or whose add/move
+    resolution failed is never added to group_send_data, so it can never
+    receive the WhatsApp message for that failed operation (see
+    _flush_group_send's own docstring)."""
     steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
     summary_lines = ["Completed", ""]
     any_success = False
     touched_pairs: List[Dict[str, str]] = []
     last_group: Optional[Any] = None
+    group_send_template: Optional[str] = None
+    group_send_data: Dict[str, _GroupSendBucket] = {}
 
     for step in steps:
         group = step.get("group", 0)
@@ -2396,7 +2576,11 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
             # See _build_plan_confirmation's identical reset — must stay
             # in sync with it (same grouping, same fan-out boundary).
             touched_pairs = []
+            await _flush_group_send(summary_lines, group_send_template, group_send_data, is_dry_run=False)
+            group_send_template, group_send_data = None, {}
         last_group = group
+        if step.get("send_template"):
+            group_send_template = step["send_template"]
         try:
             sub_steps = await _resolve_one_plan_step(step, ctx, touched_pairs)
         except Exception:
@@ -2428,6 +2612,17 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
                     split = await _split_by_current_stage(r)
                     if not split.actionable_ids:
                         summary_lines += [f"✗ {label}", "", "Already in that stage.", ""]
+                        if step.get("send_template"):
+                            # Already at the target stage — the pipeline
+                            # objective IS satisfied, just not by a fresh
+                            # write this turn — still send-eligible.
+                            bucket = group_send_data.setdefault(
+                                r.project_id, _GroupSendBucket(project_label=r.project_label)
+                            )
+                            for tid, tl in zip(r.talent_ids, r.talent_labels):
+                                if tid not in bucket.talent_ids:
+                                    bucket.talent_ids.append(tid)
+                                    bucket.talent_labels.append(tl)
                         continue
                     write_result = await _timed_write(
                         bulk_move_by_talent_ids(r.project_id, split.actionable_ids, r.target_stage)
@@ -2437,10 +2632,19 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
                         f"✓ {label}", "", f"{moved} talent{'' if moved == 1 else 's'} moved", "",
                     ]
                     any_success = True
+                    if step.get("send_template"):
+                        bucket = group_send_data.setdefault(
+                            r.project_id, _GroupSendBucket(project_label=r.project_label)
+                        )
+                        for tid, tl in zip(r.talent_ids, r.talent_labels):
+                            if tid not in bucket.talent_ids:
+                                bucket.talent_ids.append(tid)
+                                bucket.talent_labels.append(tl)
             except Exception:
                 logger.exception("plan step execution failed label=%r", label)
                 summary_lines += [f"✗ {label}", "", "Something went wrong executing this step.", ""]
 
+    await _flush_group_send(summary_lines, group_send_template, group_send_data, is_dry_run=False)
     return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
 
 
@@ -2788,9 +2992,10 @@ def _extract_add_fields(text: str) -> Dict[str, str]:
 
     with request_scope.stage("nlu"):
         chunks, auto_confirm = nlu.preprocess_command_grouped(text)
+        chunks, group_send_template = _strip_send_template_markers(chunks)
         out: Dict[str, str] = {}
 
-        if len(chunks) == 1:
+        if len(chunks) == 1 and not group_send_template:
             group0, raw0 = chunks[0]
             fields = nlu.extract_add_fields(raw0)
             project_names = nlu.split_multi_names(fields.get("project_query") or "") if fields.get("project_query") else []
@@ -2814,8 +3019,12 @@ def _extract_add_fields(text: str) -> Dict[str, str]:
                 return out
             chunks = [(group0, raw0)]
 
+        # See _extract_move_fields' identical comment on send_template.
         steps = [
-            {"intent_id": nlu.classify_chunk_intent(c) or "casting.add", "raw_text": c, "group": g}
+            {
+                "intent_id": nlu.classify_chunk_intent(c) or "casting.add", "raw_text": c, "group": g,
+                "send_template": group_send_template.get(g),
+            }
             for g, c in chunks
         ]
         out[PLAN_FIELD.key] = json.dumps(steps)

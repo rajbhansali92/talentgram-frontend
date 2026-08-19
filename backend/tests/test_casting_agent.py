@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import re
 import uuid
+from typing import Optional
 
 import pytest
 
@@ -83,9 +84,12 @@ async def _seed_project(status: str = "ongoing", brand_name: str = None) -> str:
     return pid
 
 
-async def _seed_talent(name: str) -> str:
+async def _seed_talent(name: str, phone: str = "", whatsapp_group_name: str = "") -> str:
     tid = f"test-cp-tal-{uuid.uuid4().hex[:8]}"
-    await db.talents.insert_one({"id": tid, "name": name, "tags": [], "notes": ""})
+    await db.talents.insert_one({
+        "id": tid, "name": name, "tags": [], "notes": "",
+        "phone": phone or None, "whatsapp_group_name": whatsapp_group_name,
+    })
     return tid
 
 
@@ -98,6 +102,46 @@ async def _seed_pipeline_row(project_id: str, talent_id: str, stage: str) -> Non
         "created_at": _now(),
         "updated_at": _now(),
     })
+
+
+# ---------------------------------------------------------------------------
+# Combined Casting Pipeline + WhatsApp Automation (2026-08-19) helpers —
+# mirror tests/test_whatsapp_campaign_agent.py's own _seed_project (with
+# render-verifiable shoot_dates/budget), _seed_template, _cleanup_batch.
+# ---------------------------------------------------------------------------
+async def _seed_project_with_details(brand_name: str, *, shoot_dates: str, budget: str) -> str:
+    pid = f"test-cp-proj-{uuid.uuid4().hex[:8]}"
+    await db.projects.insert_one({
+        "id": pid, "brand_name": brand_name, "status": "ongoing", "slug": pid,
+        "shoot_dates": shoot_dates, "budget_per_day": budget,
+        "materials": [], "created_at": _now(),
+    })
+    return pid
+
+
+async def _seed_template(name: str, body_text: Optional[str] = None) -> str:
+    tpl_id = f"test-cp-tpl-{uuid.uuid4().hex[:8]}"
+    await db.whatsapp_templates.insert_one({
+        "id": tpl_id, "name": name, "slug": name.lower().replace(" ", "_") + uuid.uuid4().hex[:4],
+        "body_text": body_text or (
+            "Hi {{talent_name}}, about {{project_name}} — Dates {{shoot_dates}} "
+            "Budget {{budget}} Link {{submission_link}}"
+        ),
+        "variables": [], "media_type": "none", "media_url": None, "media_cloudinary_id": None,
+        "is_custom": False, "created_by": "test", "created_at": _now(), "updated_at": _now(),
+    })
+    return tpl_id
+
+
+async def _cleanup_batch(batch_id: str) -> None:
+    await db.whatsapp_batches.delete_one({"id": batch_id})
+    await db.whatsapp_jobs.delete_many({"batch_id": batch_id})
+
+
+async def _cleanup_jobs_for_talents(talent_ids) -> None:
+    jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": list(talent_ids)}}, {"_id": 0, "batch_id": 1}).to_list(200)
+    for j in jobs:
+        await _cleanup_batch(j["batch_id"])
 
 
 async def _cleanup(phone: str, project_ids=(), talent_ids=()) -> None:
@@ -4686,4 +4730,566 @@ async def test_simple_show_multi_project_multi_stage():
         assert f"ShowMultiB Brand {tag} — Follow Up\n(none)" in r.reply
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Combined Casting Pipeline + WhatsApp Automation (2026-08-19) — "add,move,
+# send"/"add,send"/"move,send". Parser unit tests first (pure functions, no
+# DB), then end-to-end coverage: pipeline write -> WhatsApp send ordering,
+# per-project rendering, group isolation, failure safety, fuzzy matching,
+# ambiguity resume, and global confirm.
+# ---------------------------------------------------------------------------
+from unittest.mock import patch  # noqa: E402
+
+
+async def test_ams_parse_action_words():
+    assert _snlu._parse_combined_action_words("add,move,send") == (True, True, True)
+    assert _snlu._parse_combined_action_words("add,send") == (True, False, True)
+    assert _snlu._parse_combined_action_words("move,send") == (False, True, True)
+    assert _snlu._parse_combined_action_words("add,move") == (True, True, False)
+    assert _snlu._parse_combined_action_words("add") == (True, False, False)
+    assert _snlu._parse_combined_action_words("move") == (False, True, False)
+    # A bare "send" (no add/move) is out of scope for this grammar — stays
+    # the WhatsApp Campaign Agent's own bare-send grammar.
+    assert _snlu._parse_combined_action_words("send") is None
+    assert _snlu._parse_combined_action_words("add,add") is None  # duplicate word
+    assert _snlu._parse_combined_action_words("addmove") is None
+    assert _snlu._parse_combined_action_words("") is None
+
+
+async def test_ams_parse_combined_command_five_fields():
+    parsed = _snlu.parse_simple_add_move_command(
+        "add,move,send - Talent A,Talent B - Casting Call - Project A,Project B - Follow Up"
+    )
+    assert parsed == {
+        "action": "add_move", "talent_part": "Talent A,Talent B",
+        "template_part": "Casting Call",
+        "project_part": "Project A,Project B", "pipeline_part": "Follow Up",
+    }
+
+
+async def test_ams_parse_move_send_action():
+    parsed = _snlu.parse_simple_add_move_command(
+        "move,send - Talent A,Talent B - Follow Up Template - Project A - Approved"
+    )
+    assert parsed["action"] == "move"
+    assert parsed["template_part"] == "Follow Up Template"
+
+
+async def test_ams_parse_add_send_action():
+    parsed = _snlu.parse_simple_add_move_command("add,send - A - Template - Project - Follow Up")
+    # "add" alone (no explicit "move") ALSO chains into add+move — the
+    # Pipeline field is always meaningful (see translate_simple_command_
+    # to_natural_language) — so "add" and "add_move" translate identically.
+    assert parsed["action"] == "add"
+    assert parsed["template_part"] == "Template"
+    assert _snlu.translate_simple_command_to_natural_language(parsed) == (
+        "Add A to Project and move to Follow Up" + _snlu.SEND_TEMPLATE_MARKER + "Template"
+    )
+
+
+async def test_ams_parse_requires_exactly_five_fields():
+    # 4 fields (no template) never matches the send-inclusive grammar —
+    # falls through to None (natural language), never guesses which field
+    # is missing.
+    assert _snlu.parse_simple_add_move_command("add,move,send - A - Project A - Follow Up") is None
+
+
+async def test_ams_translate_embeds_marker():
+    parsed = _snlu.parse_simple_add_move_command(
+        "add,move,send - A - Casting Call - Project A - Follow Up"
+    )
+    translated = _snlu.translate_simple_command_to_natural_language(parsed)
+    assert translated == (
+        "Add A to Project A and move to Follow Up" + _snlu.SEND_TEMPLATE_MARKER + "Casting Call"
+    )
+
+    move_parsed = _snlu.parse_simple_add_move_command(
+        "move,send - A - Follow Up Template - Project A - Approved"
+    )
+    move_translated = _snlu.translate_simple_command_to_natural_language(move_parsed)
+    assert move_translated == (
+        "Move A to Approved in Project A" + _snlu.SEND_TEMPLATE_MARKER + "Follow Up Template"
+    )
+
+
+async def test_ams_marker_survives_and_confirm_suffix():
+    text = "add,move,send - A - Casting Call - Project A - Follow Up and confirm"
+    translated = _snlu.translate_simple_commands_in_text(text, list(pipeline_router.PIPELINE_STAGE_ORDER))
+    stripped, auto_confirm = _snlu.strip_and_confirm(translated)
+    assert auto_confirm
+    assert stripped == (
+        "Add A to Project A and move to Follow Up" + _snlu.SEND_TEMPLATE_MARKER + "Casting Call"
+    )
+
+
+async def test_ams_marker_attaches_to_move_subchunk_of_add_move_chain():
+    # The marker ends up on the "move to X" half of an add+move chain
+    # (see translate_simple_command_to_natural_language) — both halves
+    # share the SAME group index, which is all _strip_send_template_
+    # markers actually needs.
+    text = "Add A to Project A and move to Follow Up" + _snlu.SEND_TEMPLATE_MARKER + "Casting Call"
+    grouped = _snlu.split_actions_grouped(text)
+    assert [g for g, _c in grouped] == [0, 0]
+    assert grouped[0][1] == "Add A to Project A"
+    assert grouped[1][1] == "move to Follow Up" + _snlu.SEND_TEMPLATE_MARKER + "Casting Call"
+
+    from agents.modules.casting_pipeline import _strip_send_template_markers
+    cleaned, group_send_template = _strip_send_template_markers(grouped)
+    assert cleaned == [(0, "Add A to Project A"), (0, "move to Follow Up")]
+    assert group_send_template == {0: "Casting Call"}
+
+
+async def test_ams_basic_single_talent_renders_all_variables():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(
+        f"AMSBasicTpl {tag}",
+        "Hi {{talent_name}} ({{full_name}}/{{phone}}), {{project_name}} — Dates {{shoot_dates}} "
+        "Budget {{budget}} Link {{submission_link}}",
+    )
+    project_id = await _seed_project_with_details(
+        f"AMSBasicProj {tag}", shoot_dates="1-2 Jan 2028", budget="Rs 11,111/day",
+    )
+    talent_id = await _seed_talent(f"AMSBasicTalent {tag}", phone="917000600001")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"add,move,send - AMSBasicTalent {tag} - AMSBasicTpl {tag} - AMSBasicProj {tag} - Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "✗" not in r.reply
+        assert "1 WhatsApp message queued." in r.reply
+
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "follow_up"
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 1
+        body = jobs[0]["message_body"]
+        assert "{{" not in body and "}}" not in body
+        assert f"AMSBasicTalent {tag}" in body
+        assert f"AMSBasicProj {tag}" in body
+        assert "1-2 Jan 2028" in body
+        assert "Rs 11,111/day" in body
+        assert f"https://submit.talentgramagency.com/submit/{project_id}" in body
+        assert "917000600001" in body
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_ams_multiple_talents_one_project():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSMultiTalentTpl {tag}")
+    project_id = await _seed_project_with_details(
+        f"AMSMultiTalentProj {tag}", shoot_dates="5 Dec 2026", budget="Rs 10,000/day",
+    )
+    t1 = await _seed_talent(f"AMSMTA {tag}", phone="917000600010")
+    t2 = await _seed_talent(f"AMSMTB {tag}", phone="917000600011")
+    t3 = await _seed_talent(f"AMSMTC {tag}", phone="917000600012")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"add,move,send - AMSMTA {tag},AMSMTB {tag},AMSMTC {tag} - AMSMultiTalentTpl {tag} - "
+                f"AMSMultiTalentProj {tag} - Follow Up and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "✗" not in r.reply
+        assert "3 WhatsApp messages queued." in r.reply
+
+        for tid in (t1, t2, t3):
+            doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert doc is not None and doc["stage"] == "follow_up"
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2, t3]}}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2, t3}
+        for j in jobs:
+            assert "{{" not in j["message_body"]
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2, t3])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2, t3])
+        await _restore_config(original)
+
+
+async def test_ams_one_talent_multiple_projects_own_context_no_cross_contamination():
+    """"add,move,send - Prachi - Casting Call - Amazon,Twamev - Follow Up"
+    must generate TWO messages, each with THAT project's own values —
+    never one project's context reused for the other."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSMultiProjTpl {tag}")
+    proj_a = await _seed_project_with_details(
+        f"AMSAmazon {tag}", shoot_dates="1-3 Oct 2026", budget="Rs 20,000/day",
+    )
+    proj_b = await _seed_project_with_details(
+        f"AMSTwamev {tag}", shoot_dates="10-12 Nov 2026", budget="Rs 35,000/day",
+    )
+    talent_id = await _seed_talent(f"AMSPrachi {tag}", phone="917000600020")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"add,move,send - AMSPrachi {tag} - AMSMultiProjTpl {tag} - "
+                f"AMSAmazon {tag},AMSTwamev {tag} - Follow Up and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "✗" not in r.reply
+        assert "2 WhatsApp messages queued." in r.reply
+
+        doc_a = await db.casting_pipeline.find_one({"project_id": proj_a, "talent_id": talent_id})
+        doc_b = await db.casting_pipeline.find_one({"project_id": proj_b, "talent_id": talent_id})
+        assert doc_a is not None and doc_a["stage"] == "follow_up"
+        assert doc_b is not None and doc_b["stage"] == "follow_up"
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 2
+        bodies = [j["message_body"] for j in jobs]
+        amazon_body = next(b for b in bodies if f"AMSAmazon {tag}" in b)
+        twamev_body = next(b for b in bodies if f"AMSTwamev {tag}" in b)
+        assert "1-3 Oct 2026" in amazon_body and "Rs 20,000/day" in amazon_body
+        assert "10-12 Nov 2026" not in amazon_body and "Rs 35,000/day" not in amazon_body
+        assert "10-12 Nov 2026" in twamev_body and "Rs 35,000/day" in twamev_body
+        assert "1-3 Oct 2026" not in twamev_body and "Rs 20,000/day" not in twamev_body
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_ams_multiple_talents_multiple_projects_matrix():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSMatrixTpl {tag}")
+    proj_a = await _seed_project_with_details(f"AMSMatrixA {tag}", shoot_dates="1 Jan", budget="Rs 100")
+    proj_b = await _seed_project_with_details(f"AMSMatrixB {tag}", shoot_dates="2 Feb", budget="Rs 200")
+    t1 = await _seed_talent(f"AMSMatrixT1 {tag}", phone="917000600030")
+    t2 = await _seed_talent(f"AMSMatrixT2 {tag}", phone="917000600031")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"add,move,send - AMSMatrixT1 {tag},AMSMatrixT2 {tag} - AMSMatrixTpl {tag} - "
+                f"AMSMatrixA {tag},AMSMatrixB {tag} - Follow Up and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "✗" not in r.reply
+        assert "4 WhatsApp messages queued." in r.reply
+
+        for pid in (proj_a, proj_b):
+            for tid in (t1, t2):
+                doc = await db.casting_pipeline.find_one({"project_id": pid, "talent_id": tid})
+                assert doc is not None and doc["stage"] == "follow_up", (pid, tid)
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2]}}).to_list(10)
+        assert len(jobs) == 4
+        for j in jobs:
+            assert "{{" not in j["message_body"]
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_ams_multiple_commands_group_isolation():
+    """Two independent add,move,send commands in one message — each keeps
+    its OWN template/talents/project, and the touched_pairs/send
+    accumulator must never leak from one command into the next (the exact
+    bug already found and fixed once in this grammar)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl1_id = await _seed_template(f"AMSGroupCasting {tag}")
+    tpl2_id = await _seed_template(f"AMSGroupFollow {tag}")
+    proj_a = await _seed_project_with_details(f"AMSGroupAmazon {tag}", shoot_dates="1 Jan", budget="Rs 1")
+    proj_b = await _seed_project_with_details(f"AMSGroupNike {tag}", shoot_dates="2 Feb", budget="Rs 2")
+    ta = await _seed_talent(f"AMSGroupTA {tag}", phone="917000600040")
+    tb = await _seed_talent(f"AMSGroupTB {tag}", phone="917000600041")
+    tc = await _seed_talent(f"AMSGroupTC {tag}", phone="917000600042")
+    td = await _seed_talent(f"AMSGroupTD {tag}", phone="917000600043")
+    try:
+        text = (
+            f"add,move,send - AMSGroupTA {tag},AMSGroupTB {tag} - AMSGroupCasting {tag} - "
+            f"AMSGroupAmazon {tag} - Follow Up\n"
+            "\n"
+            f"add,move,send - AMSGroupTC {tag},AMSGroupTD {tag} - AMSGroupFollow {tag} - "
+            f"AMSGroupNike {tag} - Shortlisted\n"
+            "and confirm"
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "✗" not in r.reply
+
+        for tid in (ta, tb):
+            doc = await db.casting_pipeline.find_one({"project_id": proj_a, "talent_id": tid})
+            assert doc is not None and doc["stage"] == "follow_up"
+        for tid in (tc, td):
+            doc = await db.casting_pipeline.find_one({"project_id": proj_b, "talent_id": tid})
+            assert doc is not None and doc["stage"] == "shortlisted"
+        # No cross-contamination: A/B were never added to Nike, C/D were
+        # never added to Amazon.
+        assert await db.casting_pipeline.find_one({"project_id": proj_b, "talent_id": ta}) is None
+        assert await db.casting_pipeline.find_one({"project_id": proj_a, "talent_id": tc}) is None
+
+        jobs_ab = await db.whatsapp_jobs.find({"talent_id": {"$in": [ta, tb]}}).to_list(10)
+        jobs_cd = await db.whatsapp_jobs.find({"talent_id": {"$in": [tc, td]}}).to_list(10)
+        assert len(jobs_ab) == 2 and all(j["template_id"] == tpl1_id for j in jobs_ab)
+        assert len(jobs_cd) == 2 and all(j["template_id"] == tpl2_id for j in jobs_cd)
+    finally:
+        await _cleanup_jobs_for_talents([ta, tb, tc, td])
+        await db.whatsapp_templates.delete_many({"id": {"$in": [tpl1_id, tpl2_id]}})
+        await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb, tc, td])
+        await _restore_config(original)
+
+
+async def test_ams_pipeline_update_happens_before_whatsapp_send():
+    """Mocks both the pipeline write and the WhatsApp batch creation to
+    record call order — the move write must complete before create_batch
+    is ever called, never the reverse."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSOrderTpl {tag}")
+    project_id = await _seed_project_with_details(f"AMSOrderProj {tag}", shoot_dates="1 Jan", budget="Rs 1")
+    talent_id = await _seed_talent(f"AMSOrderTalent {tag}", phone="917000600050")
+    call_order = []
+    import agents.modules.casting_pipeline as cp_module
+
+    real_bulk_move = cp_module.bulk_move_by_talent_ids
+    real_create_batch = cp_module.create_batch
+
+    async def _tracked_bulk_move(*args, **kwargs):
+        call_order.append("pipeline_move")
+        return await real_bulk_move(*args, **kwargs)
+
+    async def _tracked_create_batch(*args, **kwargs):
+        call_order.append("whatsapp_create_batch")
+        return await real_create_batch(*args, **kwargs)
+
+    try:
+        with patch.object(cp_module, "bulk_move_by_talent_ids", _tracked_bulk_move), \
+             patch.object(cp_module, "create_batch", _tracked_create_batch):
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone,
+                text=f"add,move,send - AMSOrderTalent {tag} - AMSOrderTpl {tag} - AMSOrderProj {tag} - Follow Up and confirm",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+        assert r.handled
+        assert call_order == ["pipeline_move", "whatsapp_create_batch"]
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_ams_pipeline_failure_blocks_whatsapp_send():
+    """If bulk_move_by_talent_ids raises, no WhatsApp job may be created
+    for that talent — the pipeline update must succeed before any send is
+    attempted."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSFailTpl {tag}")
+    project_id = await _seed_project_with_details(f"AMSFailProj {tag}", shoot_dates="1 Jan", budget="Rs 1")
+    talent_id = await _seed_talent(f"AMSFailTalent {tag}", phone="917000600060")
+    import agents.modules.casting_pipeline as cp_module
+
+    async def _raising_bulk_move(*args, **kwargs):
+        raise RuntimeError("simulated pipeline write failure")
+
+    try:
+        with patch.object(cp_module, "bulk_move_by_talent_ids", _raising_bulk_move):
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone,
+                text=f"add,move,send - AMSFailTalent {tag} - AMSFailTpl {tag} - AMSFailProj {tag} - Follow Up and confirm",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+        assert r.handled
+        assert "✗" in r.reply
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert jobs == []
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_ams_global_confirm_no_intermediate_prompts():
+    """"and confirm" must execute the WHOLE combined operation (pipeline +
+    send) without ever asking for a separate confirmation of either half."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSConfirmTpl {tag}")
+    project_id = await _seed_project_with_details(f"AMSConfirmProj {tag}", shoot_dates="1 Jan", budget="Rs 1")
+    talent_id = await _seed_talent(f"AMSConfirmTalent {tag}", phone="917000600070")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"add,move,send - AMSConfirmTalent {tag} - AMSConfirmTpl {tag} - AMSConfirmProj {tag} - Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Reply:" not in r.reply
+        assert "1 → Approve" not in r.reply
+        assert "Completed" in r.reply
+        assert "1 WhatsApp message queued." in r.reply
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_ams_without_confirm_shows_pending_send_in_preview_then_sends_on_approval():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSPreviewTpl {tag}")
+    project_id = await _seed_project_with_details(f"AMSPreviewProj {tag}", shoot_dates="1 Jan", budget="Rs 1")
+    talent_id = await _seed_talent(f"AMSPreviewTalent {tag}", phone="917000600080")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"add,move,send - AMSPreviewTalent {tag} - AMSPreviewTpl {tag} - AMSPreviewProj {tag} - Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "You are about to run this plan:" in r.reply
+        assert f"AMSPreviewTpl {tag}" in r.reply
+        assert "Reply:" in r.reply
+        # Nothing sent yet.
+        assert await db.whatsapp_jobs.find_one({"talent_id": talent_id}) is None
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply
+        assert "1 WhatsApp message queued." in r2.reply
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 1
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_ams_fuzzy_talent_and_project_typo_tolerance():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSFuzzyTpl {tag}")
+    project_id = await _seed_project_with_details(
+        f"Tira Suhana Film {tag}", shoot_dates="1 Jan", budget="Rs 1",
+    )
+    talent_id = await _seed_talent(f"Ayushi Thakur {tag}", phone="917000600090")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"add,move,send - Ayushii Thakur {tag} - AMSFuzzyTpl {tag} - "
+                f"Tira Suhana Project {tag} - Follow Up and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "✗" not in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "follow_up"
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 1
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_ams_ambiguous_talent_shows_full_list_never_sends_prematurely():
+    """"add,move,send" always chains into a 2-step (add+move) PLAN — an
+    ambiguous talent inside a plan step is reported INLINE in the plan
+    preview text (never as an interactive numbered pending_disambiguation
+    round), a PRE-EXISTING limitation of the plan engine shared by every
+    other "Add"-chaining combined command (documented, not introduced by
+    this feature — see the module's own "resend that one command alone to
+    disambiguate it" convention). What this DOES guarantee, and what this
+    test verifies: the FULL candidate list is always shown (never
+    truncated), and — critically for THIS feature specifically — an
+    unresolved ambiguity must never let a WhatsApp message go out."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    tpl_id = await _seed_template(f"AMSAmbigTpl {tag}")
+    project_id = await _seed_project_with_details(f"AMSAmbigProj {tag}", shoot_dates="1 Jan", budget="Rs 1")
+    p1 = await _seed_talent(f"Ayushi Thakur {tag}", phone="917000600100")
+    p2 = await _seed_talent(f"Ayushi Singh {tag}", phone="917000600101")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"add,move,send - Ayushi {tag} - AMSAmbigTpl {tag} - AMSAmbigProj {tag} - Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "I found multiple matching talents." in r.reply
+        assert f"Ayushi Thakur {tag}" in r.reply
+        assert f"Ayushi Singh {tag}" in r.reply
+        assert "WhatsApp message" not in r.reply
+        assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": p1}) is None
+        assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": p2}) is None
+        assert await db.whatsapp_jobs.find_one({"talent_id": {"$in": [p1, p2]}}) is None
+
+        # Resending with the exact, disambiguated name succeeds cleanly.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"add,move,send - Ayushi Thakur {tag} - AMSAmbigTpl {tag} - AMSAmbigProj {tag} - Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply
+        assert "1 WhatsApp message queued." in r2.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": p1})
+        assert doc is not None and doc["stage"] == "follow_up"
+        assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": p2}) is None
+        jobs = await db.whatsapp_jobs.find({"talent_id": p1}).to_list(10)
+        assert len(jobs) == 1
+    finally:
+        await _cleanup_jobs_for_talents([p1, p2])
+        await db.whatsapp_templates.delete_one({"id": tpl_id})
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[p1, p2])
         await _restore_config(original)

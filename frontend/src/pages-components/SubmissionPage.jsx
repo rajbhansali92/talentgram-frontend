@@ -1398,7 +1398,7 @@ function SubmissionPage() {
             work_links: (form.work_links && form.work_links.length) ? form.work_links : (prefillData.work_links || []),
             skills: (form.skills && form.skills.length) ? form.skills : (prefillData.skills || []),
         };
-        const items = computeRequirementItems({ project, form: mergedForm, submission: null });
+        const items = computeRequirementItems({ project, form: mergedForm, submission: null, isReturningTalent: true });
         const earlyMissing = items.find((item) =>
             (item.section === "profile" || item.section === "skills") &&
             item.requirement === REQUIREMENT_TIERS.REQUIRED &&
@@ -2500,6 +2500,7 @@ function SubmissionPage() {
         finalizing,
         saveStatus,
         readyLabel: "Submit Audition",
+        isReturningTalent,
     });
 
     // Submission Wizard — {stepId: SECTION_STATUS.*} for WizardProgressBar,
@@ -2563,8 +2564,13 @@ function SubmissionPage() {
         const item = experience.readinessModel.find((i) => i.id === fieldId);
         return !!item && item.requirement === REQUIREMENT_TIERS.REQUIRED;
     }, [experience.readinessModel]);
-    const identityDisclosureOpen =
-        ["gender", "ethnicity", "instagram_handle", "instagram_followers"].some(isFieldRequiredAndMissing);
+    // For a returning talent, Instagram lives on Project Questions now (see
+    // recurringProfileFields below), not inside this disclosure — so it
+    // shouldn't be a reason to auto-open a disclosure that no longer
+    // contains it.
+    const identityDisclosureOpen = (
+        isReturningTalent ? ["gender", "ethnicity"] : ["gender", "ethnicity", "instagram_handle", "instagram_followers"]
+    ).some(isFieldRequiredAndMissing);
     const skillsDisclosureOpen =
         ["bio", "work_links"].some(isFieldRequiredAndMissing);
 
@@ -3110,6 +3116,264 @@ function SubmissionPage() {
         );
     }
 
+    // Recurring-talent field relocation — DOB/Age/Height/Instagram, plus the
+    // project-specific Age Override, are defined ONCE here (same fields,
+    // same state, same handlers as always) and then rendered in exactly one
+    // place below depending on isReturningTalent: inside "Your Profile" for
+    // a first-time talent (unchanged), or at the top of "Project Questions"
+    // for a returning talent (who never sees "Your Profile" at all, and so
+    // previously had no way to fill these fields when a project required
+    // them). Never both at once, so there is no duplicate field/state.
+    const dobField = (
+        <PremiumFormField
+            // Only the returning-talent (Project Questions) placement grows a
+            // dynamic required marker, matching Height's existing pattern —
+            // new-talent "Your Profile" keeps the exact same static label it
+            // always had.
+            label={isReturningTalent ? `Date of Birth ${isFieldRequired("dob") ? "*" : "(optional)"}` : "Date of Birth"}
+            type="date"
+            value={form.dob}
+            max={new Date().toISOString().split("T")[0]}
+            onChange={(v) =>
+                setForm({ ...form, dob: v, age: "" })
+            }
+            onBlur={saveForm}
+            testid="form-dob"
+            className="[color-scheme:light]"
+            autoComplete="bday"
+            required={isFieldRequired("dob")}
+            hint="Format: DD / MM / YYYY. We automatically calculate age from your date of birth."
+        />
+    );
+
+    const overrideAgeBlock = (
+        <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-[#eaeaea]/50 focus-within:border-[#0c2340]/40 focus-within:ring-4 focus-within:ring-[#0c2340]/5 transition-all duration-300 col-span-1 md:col-span-2">
+            <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
+                <input
+                    type="checkbox"
+                    checked={form.overrideAge || false}
+                    onChange={(e) => {
+                        const active = e.target.checked;
+                        setForm({
+                            ...form,
+                            overrideAge: active,
+                            submitted_age_override: active ? (form.submitted_age_override || String(computedAge || "")) : ""
+                        });
+                        setTimeout(saveForm, 0);
+                    }}
+                    data-testid="form-override-age-checkbox"
+                    className="w-5 h-5 rounded border-[#d4d4d4] text-[#0c2340] focus:ring-[#0c2340] focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
+                />
+                <span className="text-sm font-medium text-[#111111] select-none">
+                    Use different age for this project?
+                </span>
+            </label>
+
+            {form.overrideAge && (
+                <div className="mt-4 animate-fadeIn transition-all duration-300">
+                    <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
+                        Project-Specific Age Override *
+                    </span>
+                    <input
+                        type="number"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={form.submitted_age_override || ""}
+                        onChange={(e) =>
+                            setForm({
+                                ...form,
+                                submitted_age_override: e.target.value,
+                            })
+                        }
+                        onBlur={saveForm}
+                        min={10}
+                        max={80}
+                        placeholder="e.g. 25"
+                        data-testid="form-override-age-input"
+                        className="mt-2 w-full bg-white rounded-xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+                    />
+                    <p className="text-[10px] text-[#333333] font-mono mt-1.5">
+                        Only use this if you wish to be presented as a different age range for this project. This override is isolated to this submission only.
+                    </p>
+                </div>
+            )}
+        </div>
+    );
+
+    const ageDisplayBlock = (
+        <div data-testid="form-age-field">
+            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
+                Age {form.dob ? "(auto calculated)" : isFieldRequired("age") ? "*" : "(optional)"}
+            </span>
+            <input
+                type="number"
+                value={
+                    form.dob
+                        ? (calcAge(form.dob) ?? "")
+                        : form.age
+                }
+                disabled={true}
+                min={10}
+                max={80}
+                data-testid="form-age-input"
+                className="mt-2 w-full bg-slate-100 rounded-2xl border border-[#eaeaea] outline-none py-3 px-4 text-[15px] text-[#333333] shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
+            />
+        </div>
+    );
+
+    const heightBlock = (
+        <div data-testid="form-height-field">
+            <div className="flex flex-wrap items-center justify-between gap-y-2 gap-x-3">
+                <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono whitespace-nowrap">
+                    Height {isFieldRequired("height") ? "*" : "(optional)"}
+                </span>
+                {/* Sprint 1 — unit toggle. Stored value is unchanged; only the
+                    labels switch between feet/inches and centimetres. */}
+                <div
+                    role="radiogroup"
+                    aria-label="Height unit"
+                    data-testid="height-unit-toggle"
+                    className="inline-flex items-center rounded-full border border-[#eaeaea] bg-white p-0.5 shrink-0"
+                >
+                    {[
+                        { key: "ft", label: "Feet/Inches" },
+                        { key: "cm", label: "Centimeters" },
+                    ].map((u) => (
+                        <button
+                            key={u.key}
+                            type="button"
+                            role="radio"
+                            aria-checked={heightUnit === u.key}
+                            onClick={() => setHeightUnit(u.key)}
+                            data-testid={`height-unit-${u.key}`}
+                            className={`px-3 py-1 rounded-full text-[11px] font-mono font-semibold transition-all duration-200 min-h-[28px] ${
+                                heightUnit === u.key
+                                    ? "bg-[#0c2340] text-white"
+                                    : "text-[#333333] hover:text-[#111111]"
+                            }`}
+                        >
+                            {u.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
+            <div className="mt-2">
+                <Select
+                    value={form.height || ""}
+                    onValueChange={(v) => {
+                        setForm({ ...form, height: v });
+                        setTimeout(saveForm, 0);
+                    }}
+                >
+                    <SelectTrigger
+                        data-testid="form-height-trigger"
+                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
+                    >
+                        <SelectValue placeholder="Select height" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
+                        {heightUnit === "cm"
+                            ? HEIGHT_CM_OPTIONS.map((h) => (
+                                <SelectItem key={h.value} value={h.value}>
+                                    {h.cm} cm
+                                </SelectItem>
+                            ))
+                            : HEIGHT_OPTIONS.map((h) => (
+                                <SelectItem key={h} value={h}>
+                                    {h}
+                                </SelectItem>
+                            ))}
+                    </SelectContent>
+                </Select>
+            </div>
+            <span className="block text-[10px] text-[#333333] mt-1 font-mono">
+                Enter your actual height without footwear.
+            </span>
+        </div>
+    );
+
+    const instagramHandleField = (
+        <PremiumFormField
+            label={isReturningTalent ? `Instagram ${isFieldRequired("instagram_handle") ? "*" : "(optional)"}` : "Instagram Handle"}
+            value={form.instagram_handle}
+            onChange={(v) => {
+                let clean = v.trim();
+                if (clean.includes("instagram.com/")) {
+                    const segments = clean.split("instagram.com/");
+                    if (segments[1]) {
+                        clean = segments[1].split(/[?#/]/)[0];
+                    }
+                }
+                if (clean.startsWith("@")) {
+                    clean = clean.substring(1);
+                }
+                clean = clean.replace(/\s+/g, "");
+                setForm({ ...form, instagram_handle: clean });
+            }}
+            onBlur={() => {
+                if (form.instagram_handle) {
+                    setForm((prev) => ({
+                        ...prev,
+                        instagram_handle: normalizeInstagramHandle(form.instagram_handle)
+                    }));
+                }
+                saveForm();
+            }}
+            testid="form-instagram-handle"
+            placeholder="@yourhandle"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            required={isFieldRequired("instagram_handle")}
+            hint={isReturningTalent && isFieldRequired("instagram_handle") ? "Required for this project." : "Optional, but helps casting teams review additional work."}
+        />
+    );
+
+    const instagramFollowersBlock = (
+        <div data-testid="form-instagram-followers-field">
+            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
+                Instagram Followers
+            </span>
+            <div className="mt-2">
+                <Select
+                    value={form.instagram_followers || ""}
+                    onValueChange={(v) => {
+                        setForm({
+                            ...form,
+                            instagram_followers: v,
+                        });
+                        setTimeout(saveForm, 0);
+                    }}
+                >
+                    <SelectTrigger
+                        data-testid="form-instagram-followers-trigger"
+                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
+                    >
+                        <SelectValue placeholder="Select range" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
+                        {FOLLOWER_TIERS.map((tier) => (
+                            <SelectGroup key={tier.label}>
+                                <SelectLabel className="text-[10px] tracking-wide uppercase text-[#333333] font-mono">
+                                    {tier.label}
+                                </SelectLabel>
+                                {tier.items.map((it) => (
+                                    <SelectItem
+                                        key={it}
+                                        value={it}
+                                    >
+                                        {it}
+                                    </SelectItem>
+                                ))}
+                                <SelectSeparator />
+                            </SelectGroup>
+                        ))}
+                    </SelectContent>
+                </Select>
+            </div>
+        </div>
+    );
+
     return (
         <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page">
             {adminMode && <AdminModeBanner talentName={adminTalentName} />}
@@ -3649,161 +3913,18 @@ function SubmissionPage() {
                                             testid="form-alt-phone"
                                             hint="Optional backup contact number."
                                         />
-                                        <PremiumFormField
-                                            label="Date of Birth"
-                                            type="date"
-                                            value={form.dob}
-                                            max={new Date().toISOString().split("T")[0]}
-                                            onChange={(v) =>
-                                                setForm({ ...form, dob: v, age: "" })
-                                            }
-                                            onBlur={saveForm}
-                                            testid="form-dob"
-                                            className="[color-scheme:light]"
-                                            autoComplete="bday"
-                                            hint="Format: DD / MM / YYYY. We automatically calculate age from your date of birth."
-                                        />
-                                        
-                                        {/* Project-specific age override checkbox and input */}
-                                        <div className="mt-4 p-5 rounded-2xl bg-slate-50/50 border border-[#eaeaea]/50 focus-within:border-[#0c2340]/40 focus-within:ring-4 focus-within:ring-[#0c2340]/5 transition-all duration-300 col-span-1 md:col-span-2">
-                                            <label className="flex items-center gap-3 cursor-pointer min-h-[44px]">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={form.overrideAge || false}
-                                                    onChange={(e) => {
-                                                        const active = e.target.checked;
-                                                        setForm({
-                                                            ...form,
-                                                            overrideAge: active,
-                                                            submitted_age_override: active ? (form.submitted_age_override || String(computedAge || "")) : ""
-                                                        });
-                                                        setTimeout(saveForm, 0);
-                                                    }}
-                                                    data-testid="form-override-age-checkbox"
-                                                    className="w-5 h-5 rounded border-[#d4d4d4] text-[#0c2340] focus:ring-[#0c2340] focus:ring-2 cursor-pointer transition duration-150 ease-in-out"
-                                                />
-                                                <span className="text-sm font-medium text-[#111111] select-none">
-                                                    Use different age for this project?
-                                                </span>
-                                            </label>
-                                            
-                                            {form.overrideAge && (
-                                                <div className="mt-4 animate-fadeIn transition-all duration-300">
-                                                    <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                                        Project-Specific Age Override *
-                                                    </span>
-                                                    <input
-                                                        type="number"
-                                                        inputMode="numeric"
-                                                        pattern="[0-9]*"
-                                                        value={form.submitted_age_override || ""}
-                                                        onChange={(e) =>
-                                                            setForm({
-                                                                ...form,
-                                                                submitted_age_override: e.target.value,
-                                                            })
-                                                        }
-                                                        onBlur={saveForm}
-                                                        min={10}
-                                                        max={80}
-                                                        placeholder="e.g. 25"
-                                                        data-testid="form-override-age-input"
-                                                        className="mt-2 w-full bg-white rounded-xl border border-[#eaeaea] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 outline-none py-3 px-4 text-[16px] md:text-[15px] transition-all duration-200 shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                                    />
-                                                    <p className="text-[10px] text-[#333333] font-mono mt-1.5">
-                                                        Only use this if you wish to be presented as a different age range for this project. This override is isolated to this submission only.
-                                                    </p>
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        <div data-testid="form-age-field">
-                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                                Age {form.dob ? "(auto calculated)" : isFieldRequired("age") ? "*" : "(optional)"}
-                                            </span>
-                                            <input
-                                                type="number"
-                                                value={
-                                                    form.dob
-                                                        ? (calcAge(form.dob) ?? "")
-                                                        : form.age
-                                                }
-                                                disabled={true}
-                                                min={10}
-                                                max={80}
-                                                data-testid="form-age-input"
-                                                className="mt-2 w-full bg-slate-100 rounded-2xl border border-[#eaeaea] outline-none py-3 px-4 text-[15px] text-[#333333] shadow-[0_1px_2px_rgba(0,0,0,0.03)]"
-                                            />
-                                        </div>
-
-                                        <div data-testid="form-height-field">
-                                            <div className="flex flex-wrap items-center justify-between gap-y-2 gap-x-3">
-                                                <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono whitespace-nowrap">
-                                                    Height {isFieldRequired("height") ? "*" : "(optional)"}
-                                                </span>
-                                                {/* Sprint 1 — unit toggle. Stored value is unchanged; only the
-                                                    labels switch between feet/inches and centimetres. */}
-                                                <div
-                                                    role="radiogroup"
-                                                    aria-label="Height unit"
-                                                    data-testid="height-unit-toggle"
-                                                    className="inline-flex items-center rounded-full border border-[#eaeaea] bg-white p-0.5 shrink-0"
-                                                >
-                                                    {[
-                                                        { key: "ft", label: "Feet/Inches" },
-                                                        { key: "cm", label: "Centimeters" },
-                                                    ].map((u) => (
-                                                        <button
-                                                            key={u.key}
-                                                            type="button"
-                                                            role="radio"
-                                                            aria-checked={heightUnit === u.key}
-                                                            onClick={() => setHeightUnit(u.key)}
-                                                            data-testid={`height-unit-${u.key}`}
-                                                            className={`px-3 py-1 rounded-full text-[11px] font-mono font-semibold transition-all duration-200 min-h-[28px] ${
-                                                                heightUnit === u.key
-                                                                    ? "bg-[#0c2340] text-white"
-                                                                    : "text-[#333333] hover:text-[#111111]"
-                                                            }`}
-                                                        >
-                                                            {u.label}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                            <div className="mt-2">
-                                                <Select
-                                                    value={form.height || ""}
-                                                    onValueChange={(v) => {
-                                                        setForm({ ...form, height: v });
-                                                        setTimeout(saveForm, 0);
-                                                    }}
-                                                >
-                                                    <SelectTrigger
-                                                        data-testid="form-height-trigger"
-                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
-                                                    >
-                                                        <SelectValue placeholder="Select height" />
-                                                    </SelectTrigger>
-                                                    <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
-                                                        {heightUnit === "cm"
-                                                            ? HEIGHT_CM_OPTIONS.map((h) => (
-                                                                <SelectItem key={h.value} value={h.value}>
-                                                                    {h.cm} cm
-                                                                </SelectItem>
-                                                            ))
-                                                            : HEIGHT_OPTIONS.map((h) => (
-                                                                <SelectItem key={h} value={h}>
-                                                                    {h}
-                                                                </SelectItem>
-                                                            ))}
-                                                    </SelectContent>
-                                                </Select>
-                                            </div>
-                                            <span className="block text-[10px] text-[#333333] mt-1 font-mono">
-                                                Enter your actual height without footwear.
-                                            </span>
-                                        </div>
+                                        {/* Recurring talents see DOB/Age Override/Age/Height on
+                                            Project Questions instead (see recurringProfileFields
+                                            below) — same fields defined once above, never both
+                                            places at once. */}
+                                        {!isReturningTalent && (
+                                        <>
+                                        {dobField}
+                                        {overrideAgeBlock}
+                                        {ageDisplayBlock}
+                                        {heightBlock}
+                                        </>
+                                        )}
                                     </div>
 
                                     {/* Phase 2 — unified identity fields. Wrapped in the
@@ -3883,81 +4004,14 @@ function SubmissionPage() {
                                                 </Select>
                                             </div>
                                         </div>
-                                        <PremiumFormField
-                                            label="Instagram Handle"
-                                            value={form.instagram_handle}
-                                            onChange={(v) => {
-                                                let clean = v.trim();
-                                                if (clean.includes("instagram.com/")) {
-                                                    const segments = clean.split("instagram.com/");
-                                                    if (segments[1]) {
-                                                        clean = segments[1].split(/[?#/]/)[0];
-                                                    }
-                                                }
-                                                if (clean.startsWith("@")) {
-                                                    clean = clean.substring(1);
-                                                }
-                                                clean = clean.replace(/\s+/g, "");
-                                                setForm({ ...form, instagram_handle: clean });
-                                            }}
-                                            onBlur={() => {
-                                                if (form.instagram_handle) {
-                                                    setForm((prev) => ({
-                                                        ...prev,
-                                                        instagram_handle: normalizeInstagramHandle(form.instagram_handle)
-                                                    }));
-                                                }
-                                                saveForm();
-                                            }}
-                                            testid="form-instagram-handle"
-                                            placeholder="@yourhandle"
-                                            autoCapitalize="none"
-                                            autoCorrect="off"
-                                            spellCheck={false}
-                                            hint="Optional, but helps casting teams review additional work."
-                                        />
-                                        <div data-testid="form-instagram-followers-field">
-                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                                Instagram Followers
-                                            </span>
-                                            <div className="mt-2">
-                                                <Select
-                                                    value={form.instagram_followers || ""}
-                                                    onValueChange={(v) => {
-                                                        setForm({
-                                                            ...form,
-                                                            instagram_followers: v,
-                                                        });
-                                                        setTimeout(saveForm, 0);
-                                                    }}
-                                                >
-                                                    <SelectTrigger
-                                                        data-testid="form-instagram-followers-trigger"
-                                                        className="bg-white/60 border border-[#eaeaea] rounded-2xl px-4 py-3 min-h-[44px] focus:ring-4 focus:ring-[#0c2340]/10 focus:border-[#0c2340]/40 shadow-[0_1px_2px_rgba(0,0,0,0.03)] text-[#111111] transition-all duration-200"
-                                                    >
-                                                        <SelectValue placeholder="Select range" />
-                                                    </SelectTrigger>
-                                                    <SelectContent className="max-h-72 bg-white border-[#eaeaea] rounded-2xl">
-                                                        {FOLLOWER_TIERS.map((tier) => (
-                                                            <SelectGroup key={tier.label}>
-                                                                <SelectLabel className="text-[10px] tracking-wide uppercase text-[#333333] font-mono">
-                                                                    {tier.label}
-                                                                </SelectLabel>
-                                                                {tier.items.map((it) => (
-                                                                    <SelectItem
-                                                                        key={it}
-                                                                        value={it}
-                                                                    >
-                                                                        {it}
-                                                                    </SelectItem>
-                                                                ))}
-                                                                <SelectSeparator />
-                                                            </SelectGroup>
-                                                        ))}
-                                                    </SelectContent>
-                                                </Select>
-                                            </div>
-                                        </div>
+                                        {/* Recurring talents see Instagram on Project Questions
+                                            instead (see recurringProfileFields below). */}
+                                        {!isReturningTalent && (
+                                        <>
+                                        {instagramHandleField}
+                                        {instagramFollowersBlock}
+                                        </>
+                                        )}
                                     </div>
                                     </UpdateProfileDisclosure>
                                 </div>
@@ -4093,6 +4147,24 @@ function SubmissionPage() {
 
                             {!collapsedSections.projectQuestions && (
                                 <div className="space-y-8 animate-fadeIn">
+                                    {/* Recurring talents never see "Your Profile" (Personal
+                                        Information), so any project that requires DOB/Age/
+                                        Height/Instagram would otherwise block them with no way
+                                        to fill it in. Same fields/state/handlers defined once
+                                        above (dobField etc.) — rendered here instead of in
+                                        "Your Profile" only for a returning talent, never both. */}
+                                    {isReturningTalent && (
+                                        <div data-testid="recurring-profile-fields" className="mb-6">
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8">
+                                                {dobField}
+                                                {overrideAgeBlock}
+                                                {ageDisplayBlock}
+                                                {heightBlock}
+                                                {instagramHandleField}
+                                                {instagramFollowersBlock}
+                                            </div>
+                                        </div>
+                                    )}
                                     {/* CURRENT LOCATION — project-specific answer only; never
                                         written back to the talent's global profile location. */}
                                     <div

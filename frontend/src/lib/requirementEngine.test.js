@@ -155,6 +155,38 @@ describe("computeRequirementItems — requirement tiers", () => {
         const items = computeRequirementItems({ project, form: baseForm(), submission: null });
         expect(findItem(items, "location").section).toBe("projectQuestions");
     });
+
+    // Recurring talents never see "Your Profile", so DOB/Age/Height/
+    // Instagram are rendered on Project Questions for them instead — the
+    // Requirement Engine's section classification must follow, or
+    // handleWizardNext's per-step gating checks the wrong step.
+    it("classifies dob/age/height/instagram as profile fields by default (new-talent flow unchanged)", () => {
+        const project = strictProject({ fields: { dob: "required", age: "required", height: "required", instagram_handle: "required", instagram_followers: "required" } });
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null });
+        expect(findItem(items, "dob").section).toBe("profile");
+        expect(findItem(items, "age").section).toBe("profile");
+        expect(findItem(items, "height").section).toBe("profile");
+        expect(findItem(items, "instagram_handle").section).toBe("profile");
+        expect(findItem(items, "instagram_followers").section).toBe("profile");
+    });
+
+    it("classifies dob/age/height/instagram as project questions when isReturningTalent is true", () => {
+        const project = strictProject({ fields: { dob: "required", age: "required", height: "required", instagram_handle: "required", instagram_followers: "required" } });
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null, isReturningTalent: true });
+        expect(findItem(items, "dob").section).toBe("projectQuestions");
+        expect(findItem(items, "age").section).toBe("projectQuestions");
+        expect(findItem(items, "height").section).toBe("projectQuestions");
+        expect(findItem(items, "instagram_handle").section).toBe("projectQuestions");
+        expect(findItem(items, "instagram_followers").section).toBe("projectQuestions");
+    });
+
+    it("isReturningTalent does not affect fields unrelated to this fix (name/gender/ethnicity stay 'profile')", () => {
+        const project = strictProject({ fields: { name: "required", gender: "required", ethnicity: "required" } });
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null, isReturningTalent: true });
+        expect(findItem(items, "first_name").section).toBe("profile");
+        expect(findItem(items, "gender").section).toBe("profile");
+        expect(findItem(items, "ethnicity").section).toBe("profile");
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -290,6 +322,15 @@ describe("computeRequirementItems — project configuration variations", () => {
         const project = { custom_questions: [] };
         const items = computeRequirementItems({ project, form: baseForm(), submission: null });
         expect(items.find((i) => i.id === "location").section).toBe("projectQuestions");
+    });
+
+    it("legacy fallback: height stays 'profile' by default and moves to 'projectQuestions' for a returning talent", () => {
+        const project = { custom_questions: [] };
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null });
+        expect(items.find((i) => i.id === "height").section).toBe("profile");
+
+        const returningItems = computeRequirementItems({ project, form: baseForm(), submission: null, isReturningTalent: true });
+        expect(returningItems.find((i) => i.id === "height").section).toBe("projectQuestions");
     });
 
     it("returns an empty item list when submission_requirements exists but strictness isn't 'strict'", () => {

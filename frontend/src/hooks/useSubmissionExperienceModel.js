@@ -56,9 +56,10 @@ export function useSubmissionExperienceModel({
     readyLabel,
     notReadyLabel,
     submittingLabel,
+    isReturningTalent,
 }) {
     return useMemo(() => {
-        const requirementItems = computeRequirementItems({ project, form, submission });
+        const requirementItems = computeRequirementItems({ project, form, submission, isReturningTalent });
 
         const readinessModel = requirementItems.map((item) => ({
             ...item,
@@ -99,5 +100,5 @@ export function useSubmissionExperienceModel({
             overallProgress,
             saveStatus,
         };
-    }, [project, form, submission, activeUploads, finalizing, saveStatus, readyLabel, notReadyLabel, submittingLabel]);
+    }, [project, form, submission, activeUploads, finalizing, saveStatus, readyLabel, notReadyLabel, submittingLabel, isReturningTalent]);
 }

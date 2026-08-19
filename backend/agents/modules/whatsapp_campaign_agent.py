@@ -660,7 +660,15 @@ def _extract_instagram_fields(remainder: str) -> Dict[str, str]:
 # produces. Returns None for anything that doesn't match one of the exact
 # shapes below, falling straight through to natural-language parsing.
 # ---------------------------------------------------------------------------
-_SIMPLE_INSTAGRAM_RE = re.compile(r"^\s*insta(?:gram)?\b(?:\s+link)?\s*", re.IGNORECASE)
+# "talentgram" (2026-08-19) — a new alias for the same Instagram Profile
+# Send action ("send talentgram - Talent - Recipient" == "send instagram -
+# Talent - Recipient"). Safe as a bare alternative here (unlike adding it
+# to _INSTAGRAM_KEYWORD_RE below, which searches anywhere in free-text
+# natural language and could false-trigger on an unrelated sentence that
+# happens to mention the platform by name) because this regex only ever
+# matches the FIRST word right after the "send"/"share"/etc. trigger verb
+# has already been stripped — never a false positive mid-sentence.
+_SIMPLE_INSTAGRAM_RE = re.compile(r"^\s*(?:insta(?:gram)?|talentgram)\b(?:\s+link)?\s*", re.IGNORECASE)
 
 
 def _simple_field_looks_like_stages(text: str) -> Optional[str]:
@@ -1061,6 +1069,28 @@ class _RecipientTarget:
     # _resolve_talents_narrowed_by_projects. None (every existing single-
     # target resolution) means nothing to show, unaffected.
     warning: Optional[str] = None
+    # Production fix (2026-08-19) — set instead of source_type/source_params
+    # when 2+ named projects each contribute real recipients (a named-talent
+    # send across several projects, or a stage-union send across several
+    # projects): [(project_id, project_label, talent_ids)], one entry per
+    # project with at least one match. talent_ids is the specific narrowed
+    # set for a named-talent send, or [] (no narrowing — every talent in the
+    # given stages) for a stage-union send. _create_batch_for_target fans
+    # this out into one source_type="PROJECT" create_batch call PER entry —
+    # each renders THAT project's own {{project_name}}/{{shoot_dates}}/
+    # {{budget}}/{{submission_link}} etc. via the exact same, unmodified
+    # PROJECT-source rendering path create_batch already uses for a single-
+    # project send, instead of collapsing everyone into one MANUAL-source
+    # batch that skips project-variable rendering entirely (the bug this
+    # fixes). None (the overwhelmingly common case — a single project, or
+    # no project at all) means "one ordinary create_batch call," unaffected.
+    multi_project_targets: Optional[List[Tuple[str, str, List[str]]]] = None
+    # Pipeline stages shared by EVERY entry in multi_project_targets — the
+    # explicit stage_list for a stage-union send (_resolve_project_stage_
+    # union), or None for a named-talent send (_resolve_talents_narrowed_
+    # by_projects, which narrows by talent_ids instead and always searches
+    # every stage). Ignored when multi_project_targets is None.
+    multi_project_stage_list: Optional[List[str]] = None
 
 
 _PHONE_RE = re.compile(r"^[\d\s\+\-\(\)]{7,}$")
@@ -1407,6 +1437,19 @@ async def _resolve_project_stage_union(project_query: str, stage_query: str) -> 
             ok=False, error="The built-in custom-message template is missing — please contact an admin.",
         )
 
+    # NOTE (2026-08-19 production-fix audit): this MANUAL-merge path has
+    # the SAME latent rendering gap _resolve_talents_narrowed_by_projects'
+    # fix closes (a MANUAL-source create_batch call never renders
+    # {{project_name}}/{{shoot_dates}}/{{budget}}/{{submission_link}}).
+    # Deliberately left AS-IS here: this function's whole point is ONE
+    # shared message per person across the named projects' matching
+    # stage(s), deduplicated by talent — an existing, intentionally-tested
+    # behavior (test_template_multiple_projects_multiple_stages_dedup: a
+    # talent in the SAME stage across 2 named projects must be queued
+    # exactly once). Fanning this out per-project like the named-talent
+    # fix would either break that dedup guarantee or require inventing a
+    # new "which project wins" policy nobody asked for — out of scope for
+    # a targeted fix to the reported bug. Flagged as a known limitation.
     merged: Dict[str, dict] = {}
     for pid, _plabel in resolved_projects:
         try:
@@ -1500,9 +1543,24 @@ async def _resolve_talents_narrowed_by_projects(recipient_query: str, project_qu
             ok=False, error="The built-in custom-message template is missing — please contact an admin.",
         )
 
+    # Production fix (2026-08-19) — resolved PER PROJECT, never merged into
+    # one deduplicated set. The earlier version deduped by recipient_id
+    # across projects (so a talent named for 2+ projects only ever got ONE
+    # message) AND always finished by collapsing into a single MANUAL-
+    # source create_batch call, which never renders {{project_name}}/
+    # {{shoot_dates}}/{{budget}}/{{submission_link}} at all (those are only
+    # populated for source_type="PROJECT" — see routers/whatsapp.py's
+    # create_batch). Every talent named for project P must get a message
+    # rendered with P's OWN values — never another named project's, and
+    # never unrendered. Keeping one (project_id, project_label, talent_ids)
+    # entry per project with at least one match, and letting
+    # _create_batch_for_target issue one real source_type="PROJECT"
+    # create_batch call per entry, reuses that exact same, unmodified
+    # rendering path — once per project — instead of inventing a second one.
     talent_id_list = list(dict.fromkeys(talents.talent_ids))
-    merged: Dict[str, dict] = {}
-    for pid, _plabel in multi.resolved:
+    per_project: List[Tuple[str, str, List[str]]] = []
+    all_found_ids: set = set()
+    for pid, plabel in multi.resolved:
         try:
             preview = await create_batch(
                 BatchIn(
@@ -1517,11 +1575,13 @@ async def _resolve_talents_narrowed_by_projects(recipient_query: str, project_qu
             )
         except HTTPException:
             continue
-        for job in preview["jobs"]:
-            merged.setdefault(job["recipient_id"], job)
+        found_ids = [j["recipient_id"] for j in preview["jobs"]]
+        if found_ids:
+            per_project.append((pid, plabel, found_ids))
+            all_found_ids.update(found_ids)
 
     project_labels = ", ".join(plabel for _pid, plabel in multi.resolved)
-    missing = [label for tid, label in zip(talents.talent_ids, talents.talent_labels) if tid not in merged]
+    missing = [label for tid, label in zip(talents.talent_ids, talents.talent_labels) if tid not in all_found_ids]
     warning_parts = []
     if talents.warning:
         warning_parts.append(talents.warning)
@@ -1531,24 +1591,29 @@ async def _resolve_talents_narrowed_by_projects(recipient_query: str, project_qu
         warning_parts.append(f"Not part of {project_labels}: {', '.join(missing)}")
     warning = " | ".join(warning_parts) if warning_parts else None
 
-    if not merged:
+    if not per_project:
         return _RecipientTarget(
             ok=False, error=f"None of the named talent(s) are part of {project_labels}'s pipeline.",
         )
 
-    contacts = [
-        ManualContact(
-            name=job.get("talent_name") or "",
-            phone=job["destination"] if job.get("destination_type") == "number" else "",
-            whatsapp_group_name=job["destination"] if job.get("destination_type") == "group" else "",
-            talent_id=job.get("talent_id") or job.get("recipient_id") or "",
+    display_label = ", ".join(dict.fromkeys(talents.talent_labels))
+
+    if len(per_project) == 1:
+        # The common case — every matched talent belongs to (at most) one
+        # of the named projects — stays on a single ordinary
+        # source_type="PROJECT" target, same as _resolve_project_stage_
+        # union's own single-project shortcut: no multi-batch fan-out
+        # needed, one create_batch call, unchanged shape.
+        pid, plabel, tids = per_project[0]
+        return _RecipientTarget(
+            ok=True, source_type="PROJECT",
+            source_params=SourceParams(project_id=pid, pipeline_stages=list(PIPELINE_STAGE_ORDER), talent_ids=tids),
+            display_label=display_label, project_label=plabel, warning=warning,
         )
-        for job in merged.values()
-    ]
+
     return _RecipientTarget(
-        ok=True, source_type="MANUAL", source_params=SourceParams(contacts=contacts),
-        display_label=", ".join(job.get("talent_name") or "" for job in merged.values()),
-        project_label=project_labels, warning=warning,
+        ok=True, display_label=display_label, project_label=project_labels, warning=warning,
+        multi_project_targets=per_project,
     )
 
 
@@ -1945,6 +2010,183 @@ async def _resolve_talent_names(
     return _TalentNamesResolution(ok=False, not_found=True)
 
 
+# ---------------------------------------------------------------------------
+# Dedicated Recipient Resolver (Production fix, 2026-08-19) — a namespace
+# separate from the talent/project resolvers used throughout this file, for
+# a field that names WHO receives a message but is never the campaign's
+# talent AUDIENCE itself — today, only Instagram Profile Send's "share with
+# X" clause ("send instagram - Angela - Akash Castingtree": Angela is the
+# SUBJECT, resolved via _resolve_talent_names exactly as before; "Akash
+# Castingtree" is the RECIPIENT).
+#
+# Root cause this fixes: _resolve_instagram_target used to call the
+# general _resolve_recipient below for its recipient clause too — but that
+# function's tier order tries TALENTS (Tier 3) before it ever tries an
+# individual CRM contact by name (which it never actually did at all —
+# its own Tier 4 only matches a CRM contact-TYPE CATEGORY like "Brand
+# Managers", never a specific person's name). A real CRM contact named
+# "Akash Castingtree" could therefore get silently matched against a
+# similarly-named TALENT instead of ever being recognized as who she
+# actually is.
+#
+# Order here: phone number -> CRM contact (by name) -> saved contact list ->
+# saved group list -> known talent (fallback) -> not found, clearly. CRM/
+# saved-list/phone are tried WITH PRIORITY, ahead of talent, so a genuine
+# CRM contact is never shadowed by a similarly-named talent — but talent
+# stays a valid LAST-RESORT match (spec: "Do not require every recipient
+# to exist in the CRM"), preserving every existing "share with a fellow
+# talent" workflow. A live WhatsApp Web contact/group search (querying the
+# connected WhatsApp session directly, mid-conversation) is NOT wired up in
+# this pass — there is no existing backend<->worker channel for a
+# synchronous search request today (the worker only ever searches WhatsApp
+# Web's own sidebar at actual SEND time, as part of delivering an already-
+# queued job — see whatsapp-worker/sender.py's group-search step). Flagged
+# as a known limitation in the not-found error rather than silently
+# pretending to support it.
+# ---------------------------------------------------------------------------
+async def _fetch_crm_clients_for_matching() -> List[Dict[str, str]]:
+    """Every non-archived, non-deleted CRM contact, name+phone+id only —
+    the candidate pool an individual recipient name is matched against,
+    via the SAME tiered matcher (agents/name_match.py) every other name
+    lookup in this file already uses. Fetched in full and matched in
+    Python, exactly like _fetch_all_talent_candidates already does for
+    talents — CRM contact counts on this platform are in the hundreds,
+    not thousands."""
+    docs = await db.clients.find(
+        {"archived": {"$ne": True}, "deleted": {"$ne": True}},
+        {"name": 1, "phone_number": 1},
+    ).to_list(5000)
+    return [
+        {"id": str(d["_id"]), "name": d.get("name") or "", "phone": d.get("phone_number") or ""}
+        for d in docs if (d.get("name") or "").strip()
+    ]
+
+
+async def _resolve_recipient_only(query: str) -> _RecipientTarget:
+    """See module section comment above — the dedicated RECIPIENT
+    resolver. Never calls any project matcher; talent matching is tried
+    only as a last-resort fallback, well after CRM/saved-list/phone."""
+    q = (query or "").strip()
+    if not q:
+        return _RecipientTarget(ok=False, error="Who should this go to?")
+
+    if _PHONE_RE.match(q):
+        phone = _normalize_phone(q)
+        if phone:
+            return _RecipientTarget(
+                ok=True, source_type="MANUAL",
+                source_params=SourceParams(contacts=[ManualContact(name="", phone=phone)]),
+                display_label=phone,
+            )
+        return _RecipientTarget(ok=False, error=f'"{q}" doesn\'t look like a valid phone number.')
+
+    clients = await _fetch_crm_clients_for_matching()
+    if clients:
+        c_match = name_match.tiered_name_match(
+            q, clients, lambda c: c["name"], id_fn=lambda c: c["id"], what="CRM contact",
+        )
+        if c_match.item:
+            phone = _normalize_phone(c_match.item.get("phone") or "") or ""
+            return _RecipientTarget(
+                ok=True, source_type="MANUAL",
+                source_params=SourceParams(contacts=[ManualContact(name=c_match.item["name"], phone=phone)]),
+                display_label=c_match.item["name"],
+            )
+        if c_match.ambiguous:
+            return _RecipientTarget(
+                ok=False,
+                ambiguous=AmbiguousEntity(
+                    entity_type="crm_contact", field_key="recipient_query",
+                    candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in c_match.ambiguous],
+                ),
+            )
+
+    lists = await _fetch_contact_lists()
+    cl_match = name_match.tiered_name_match(
+        q, lists, lambda it: it.get("name") or "", id_fn=lambda it: it["id"], what="saved list",
+    )
+    if cl_match.item:
+        return _RecipientTarget(
+            ok=True, source_type="SAVED_LISTS",
+            source_params=SourceParams(contact_list_ids=[cl_match.item["id"]]),
+            display_label=cl_match.item["name"],
+        )
+    if cl_match.ambiguous:
+        return _RecipientTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="saved_list", field_key="recipient_query",
+                candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in cl_match.ambiguous],
+            ),
+        )
+
+    glists = await _fetch_group_lists()
+    gl_match = name_match.tiered_name_match(
+        q, glists, lambda it: it.get("name") or "", id_fn=lambda it: it["id"], what="saved group",
+    )
+    if gl_match.item:
+        return _RecipientTarget(
+            ok=True, source_type="SAVED_LISTS",
+            source_params=SourceParams(group_list_ids=[gl_match.item["id"]]),
+            display_label=gl_match.item["name"],
+        )
+    if gl_match.ambiguous:
+        return _RecipientTarget(
+            ok=False,
+            ambiguous=AmbiguousEntity(
+                entity_type="saved_list", field_key="recipient_query",
+                candidates=[disambiguation.Candidate(id=c["id"], label=c["label"]) for c in gl_match.ambiguous],
+            ),
+        )
+
+    # Fallback tier — a known TALENT (has a phone/WhatsApp group on file in
+    # this system already, same as any other stored WhatsApp contact).
+    # Deliberately LAST, not first: CRM/saved-list/phone are tried with
+    # priority above so a genuine CRM contact is never shadowed by a
+    # similarly-named talent (the exact bug this resolver fixes) — but a
+    # recipient still doesn't have to exist in the CRM at all (spec: "Do
+    # not require every recipient to exist in the CRM"), and several
+    # existing workflows already share an Instagram link with a fellow
+    # talent by name, which this preserves. Reuses the SAME shared talent
+    # resolver every other talent-field lookup in this file uses — no
+    # separate matching logic.
+    talents = await _resolve_talent_names(
+        q,
+        single_ambiguous_field_key="recipient_query",
+        multi_pick_field_key=_PENDING_MULTI_RECIPIENT_PICK_KEY,
+        multi_fragments_key=_PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY,
+        multi_index_key=_PENDING_MULTI_RECIPIENT_INDEX_KEY,
+    )
+    if talents.ambiguous:
+        return _RecipientTarget(ok=False, ambiguous=talents.ambiguous)
+    if talents.ok:
+        contacts, no_contact_info = await _build_manual_contacts(
+            list(zip(talents.talent_ids, talents.talent_labels))
+        )
+        if contacts:
+            return _RecipientTarget(
+                ok=True, source_type="MANUAL",
+                source_params=SourceParams(contacts=contacts),
+                display_label=", ".join(talents.talent_labels),
+                warning=talents.warning,
+            )
+        return _RecipientTarget(
+            ok=False,
+            error=f'{" and ".join(no_contact_info)} — no phone number or WhatsApp group on file.',
+        )
+    if talents.error:
+        return _RecipientTarget(ok=False, error=talents.error)
+
+    return _RecipientTarget(
+        ok=False,
+        error=(
+            f'I couldn\'t find "{q}" as a CRM contact, saved list, talent, or phone number. '
+            "If they're a WhatsApp contact not yet saved anywhere, add them as a CRM "
+            "contact or a saved recipient list first, then resend this command."
+        ),
+    )
+
+
 async def _resolve_recipient(recipient_query: str, stage_query: str) -> _RecipientTarget:
     normalized_stage, stage_error = await _resolve_pipeline_stage(stage_query)
     if stage_error:
@@ -2177,6 +2419,10 @@ class _SendTarget:
     subject_label: str = ""
     # See _RecipientTarget.warning — carried through unchanged.
     warning: Optional[str] = None
+    # See _RecipientTarget.multi_project_targets / multi_project_stage_list
+    # — carried through unchanged.
+    multi_project_targets: Optional[List[Tuple[str, str, List[str]]]] = None
+    multi_project_stage_list: Optional[List[str]] = None
 
 
 async def _resolve_send_target(collected: Dict[str, str]) -> _SendTarget:
@@ -2251,7 +2497,8 @@ async def _resolve_requirement_target(collected: Dict[str, str]) -> _SendTarget:
         ok=True, source_type=recipient.source_type, source_params=recipient.source_params,
         recipient_label=recipient.display_label, template=tmpl_match.template,
         project_label=recipient.project_label, pipeline_stage_label=recipient.pipeline_stage_label,
-        warning=recipient.warning,
+        warning=recipient.warning, multi_project_targets=recipient.multi_project_targets,
+        multi_project_stage_list=recipient.multi_project_stage_list,
     )
 
 
@@ -2286,7 +2533,8 @@ async def _resolve_custom_message_target(collected: Dict[str, str]) -> _SendTarg
         recipient_label=recipient.display_label, template=custom_template,
         literal_message=message_text,
         project_label=recipient.project_label, pipeline_stage_label=recipient.pipeline_stage_label,
-        warning=recipient.warning,
+        warning=recipient.warning, multi_project_targets=recipient.multi_project_targets,
+        multi_project_stage_list=recipient.multi_project_stage_list,
     )
 
 
@@ -2365,7 +2613,12 @@ async def _resolve_instagram_target(collected: Dict[str, str]) -> _SendTarget:
             ok=False,
             error="The built-in custom-message template is missing — please contact an admin.",
         )
-    recipient = await _resolve_recipient(recipient_query, "")
+    # Production fix (2026-08-19) — the RECIPIENT here (who receives the
+    # profile link) is never the campaign's talent audience, so it goes
+    # through the dedicated recipient resolver (CRM contact by name ->
+    # saved list -> phone number), never the talent resolver. See that
+    # function's module comment for the exact bug this closes.
+    recipient = await _resolve_recipient_only(recipient_query)
     if not recipient.ok:
         if recipient.ambiguous:
             return _SendTarget(ok=False, ambiguous=recipient.ambiguous)
@@ -2520,6 +2773,84 @@ async def _build_batch_in(target: "_SendTarget", collected: dict, *, is_dry_run:
     )
 
 
+async def _create_batch_for_target(
+    target: "_SendTarget", collected: dict, *, is_dry_run: bool, admin: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """The one place every create_batch() call for a resolved send target
+    is actually made — every existing caller (confirmation-card preview,
+    live executor, plan-step executor, Exclude/Include's recipient lookup)
+    now goes through here instead of calling create_batch directly.
+
+    target.multi_project_targets is None for the overwhelmingly common
+    case (single project, CRM, saved list, phone number, or no project at
+    all) — behaves EXACTLY as before, one create_batch call, unchanged.
+
+    When it's set (2+ named projects each contributed real recipients —
+    see _resolve_talents_narrowed_by_projects / _resolve_project_stage_
+    union), this fans out into one source_type="PROJECT" create_batch call
+    PER project instead. Each call reuses the exact same, unmodified
+    PROJECT-source rendering path (routers/whatsapp.py's create_batch ->
+    _project_variables) a single-project send already uses — so every
+    project's own {{project_name}}/{{shoot_dates}}/{{budget}}/
+    {{submission_link}} (and any other template variable) renders from
+    THAT project's own data, never another named project's, and never left
+    as a raw unrendered placeholder. A project with zero matching
+    recipients (create_batch raises for an empty batch) is simply skipped,
+    exactly like the pre-existing per-project probe already tolerated.
+
+    The resulting jobs are then MERGED under the first sub-call's real
+    `whatsapp_batches` document (its own is deleted) — every existing
+    caller/consumer (this module's own "Batch ID: <id>" reply text, web-UI
+    campaign history, every pre-existing test) still sees exactly ONE
+    batch for one send command, never a new multi-batch concept to know
+    about. Only the per-recipient RENDERING was ever wrong; a "send" is
+    still just "a batch" to everyone outside this function."""
+    admin = admin or await _service_admin()
+    if not target.multi_project_targets:
+        result = await create_batch(await _build_batch_in(target, collected, is_dry_run=is_dry_run), admin=admin)
+        return {"jobs": result["jobs"], "skipped": result["skipped"], "batch_ids": [result["batch"]["id"]]}
+
+    variable_data = {"message": target.literal_message} if target.literal_message is not None else {}
+    excluded_ids = list(collected.get("excluded_ids") or [])
+    stage_list = target.multi_project_stage_list or list(PIPELINE_STAGE_ORDER)
+    jobs: List[dict] = []
+    skipped: List[dict] = []
+    sub_batch_ids: List[str] = []
+    for pid, _plabel, talent_ids in target.multi_project_targets:
+        sub_batch_in = BatchIn(
+            source_type="PROJECT",
+            source_params=SourceParams(
+                project_id=pid, pipeline_stages=stage_list, talent_ids=talent_ids,
+            ),
+            excluded_recipient_ids=excluded_ids,
+            template_id=target.template["id"], is_dry_run=is_dry_run,
+            variable_data=variable_data,
+        )
+        try:
+            result = await create_batch(sub_batch_in, admin=admin)
+        except HTTPException:
+            continue
+        jobs.extend(result["jobs"])
+        skipped.extend(result["skipped"])
+        sub_batch_ids.append(result["batch"]["id"])
+
+    if not sub_batch_ids:
+        return {"jobs": jobs, "skipped": skipped, "batch_ids": []}
+
+    primary_id, extra_ids = sub_batch_ids[0], sub_batch_ids[1:]
+    if extra_ids:
+        await db.whatsapp_jobs.update_many(
+            {"batch_id": {"$in": extra_ids}}, {"$set": {"batch_id": primary_id}},
+        )
+        await db.whatsapp_batches.update_one(
+            {"id": primary_id}, {"$set": {"total_jobs": len(jobs)}},
+        )
+        await db.whatsapp_batches.delete_many({"id": {"$in": extra_ids}})
+        for j in jobs:
+            j["batch_id"] = primary_id
+    return {"jobs": jobs, "skipped": skipped, "batch_ids": [primary_id]}
+
+
 async def _talent_names_by_id(ids: List[str]) -> Dict[str, str]:
     ids = [i for i in dict.fromkeys(ids) if i]
     if not ids:
@@ -2647,9 +2978,7 @@ async def _execute_send_plan(collected: dict, ctx: ExecContext) -> ExecResult:
             summary_lines += [f"✗ Command {i}", "", target.error or "Could not resolve this command.", ""]
             continue
         try:
-            result = await create_batch(
-                await _build_batch_in(target, step_fields, is_dry_run=False), admin=admin,
-            )
+            result = await _create_batch_for_target(target, step_fields, is_dry_run=False, admin=admin)
         except HTTPException as exc:
             summary_lines += [f"✗ Command {i}", "", f"Couldn't send that: {exc.detail}", ""]
             continue
@@ -2709,10 +3038,7 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
         return target.error
 
     try:
-        preview = await create_batch(
-            await _build_batch_in(target, collected, is_dry_run=True),
-            admin=await _service_admin(),
-        )
+        preview = await _create_batch_for_target(target, collected, is_dry_run=True)
     except HTTPException as exc:
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return f"Couldn't prepare that: {exc.detail}"
@@ -2835,17 +3161,14 @@ async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecR
         return ExecResult(ok=False, error="send_requirement_resolution_failed", message=target.error)
 
     try:
-        result = await create_batch(
-            await _build_batch_in(target, collected, is_dry_run=False),
-            admin=await _service_admin(),
-        )
+        result = await _create_batch_for_target(target, collected, is_dry_run=False)
     except HTTPException as exc:
         return ExecResult(
             ok=False, error="send_requirement_launch_failed",
             message=f"Couldn't send that: {exc.detail}",
         )
 
-    batch = result["batch"]
+    batch_ids = result["batch_ids"]
     queued = len(result["jobs"])
     template_label = target.template.get("name") or target.template.get("slug") or ""
     message = (
@@ -2853,9 +3176,9 @@ async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecR
         f"Message Source\n{template_label}\n\n"
         f"Recipients\n{target.recipient_label}\n\n"
         f"Queued {queued} message(s) — delivery happens over the next few minutes.\n\n"
-        f"Batch ID: {batch['id']}"
+        f"Batch ID: {', '.join(batch_ids)}"
     )
-    return ExecResult(ok=True, message=message, data={"batch_id": batch["id"], "queued": queued})
+    return ExecResult(ok=True, message=message, data={"batch_id": batch_ids[0] if batch_ids else None, "queued": queued})
 
 
 async def _send_requirement_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
@@ -2927,9 +3250,7 @@ async def _current_recipient_candidates(
         return None, []
     lookup_collected = collected if apply_exclusions else {k: v for k, v in collected.items() if k != "excluded_ids"}
     try:
-        preview = await create_batch(
-            await _build_batch_in(target, lookup_collected, is_dry_run=True), admin=await _service_admin(),
-        )
+        preview = await _create_batch_for_target(target, lookup_collected, is_dry_run=True)
     except HTTPException:
         return target, []
     return target, preview["jobs"]

@@ -4975,3 +4975,475 @@ async def test_simple_send_multi_pick_ambiguity_resume():
             phone, project_ids=[project_id], talent_ids=[t1, t2, t3], template_ids=[template_id],
         )
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Production fixes (2026-08-19):
+#   1. Named-talent template sends were silently skipping ALL project-
+#      variable rendering ({{project_name}}, {{shoot_dates}}, {{budget}},
+#      {{submission_link}}, ...) because _resolve_talents_narrowed_by_
+#      projects always collapsed into a MANUAL-source create_batch call,
+#      and MANUAL source never adds _project_variables. Multi-project
+#      named-talent sends ALSO deduped by recipient_id, silently dropping
+#      a talent's second project's message entirely.
+#   2. Instagram Profile Send's recipient clause was resolved through the
+#      general _resolve_recipient (talent-first), so a real CRM contact
+#      could get misresolved against a similarly-named talent instead.
+# ---------------------------------------------------------------------------
+async def _seed_project_with_details(brand_name: str, *, shoot_dates: str, budget: str) -> str:
+    pid = f"test-wca-proj-{uuid.uuid4().hex[:8]}"
+    await db.projects.insert_one({
+        "id": pid, "brand_name": brand_name, "status": "ongoing", "slug": pid,
+        "shoot_dates": shoot_dates, "budget_per_day": budget,
+        "materials": [], "created_at": _now(),
+    })
+    return pid
+
+
+async def _seed_full_variable_template(name: str) -> str:
+    """A template body referencing EVERY auto-resolved variable
+    (routers/whatsapp.py's AUTO_RECIPIENT_VARS/AUTO_PROJECT_VARS/
+    AUTO_SENDER_VARS/AUTO_SYSTEM_VARS) plus talent_name — not just the 4
+    project variables the bug report named — so a regression in ANY of
+    them (not only the ones explicitly reported) is caught."""
+    tpl_id = f"test-wca-tpl-{uuid.uuid4().hex[:8]}"
+    await db.whatsapp_templates.insert_one({
+        "id": tpl_id, "name": name, "slug": name.lower().replace(" ", "_") + uuid.uuid4().hex[:4],
+        "body_text": (
+            "Hi {{talent_name}} ({{full_name}} / {{first_name}} / {{phone}}), "
+            "about {{project_name}} — Dates: {{shoot_dates}} Budget: {{budget}} "
+            "Link: {{submission_link}} Sender: {{sender_name}} <{{sender_email}}> "
+            "Today: {{current_date}} {{current_time}}"
+        ),
+        "variables": [], "media_type": "none", "media_url": None,
+        "media_cloudinary_id": None, "is_custom": False,
+        "created_by": "test", "created_at": _now(), "updated_at": _now(),
+    })
+    return tpl_id
+
+
+def _assert_no_raw_placeholders(message_body: str) -> None:
+    assert "{{" not in message_body and "}}" not in message_body, message_body
+
+
+async def test_named_talent_single_project_renders_all_variables():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_id = await _seed_full_variable_template(f"RenderCheck {tag}")
+    project_id = await _seed_project_with_details(
+        f"RenderProj {tag}", shoot_dates="12-15 Sep 2026", budget="₹50,000/day",
+    )
+    t1 = await _seed_talent(f"RenderTalent {tag}", phone="917000400001")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - RenderTalent {tag} - RenderCheck {tag} - RenderProj {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        body = jobs[0]["message_body"]
+        _assert_no_raw_placeholders(body)
+        assert f"RenderTalent {tag}" in body  # talent_name/full_name
+        assert f"RenderProj {tag}" in body    # project_name
+        assert "12-15 Sep 2026" in body       # shoot_dates
+        assert "₹50,000/day" in body          # budget
+        assert f"https://submit.talentgramagency.com/submit/{project_id}" in body  # submission_link
+        assert "917000400001" in body         # phone
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_named_talent_multi_project_each_gets_own_context():
+    """"send - Prachi Darbar - Casting Call - Amazon,Twamev" must generate
+    TWO messages, each with THAT project's own values — never one
+    project's context reused for the other, and never one silently
+    dropped."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_id = await _seed_full_variable_template(f"MultiProjTpl {tag}")
+    proj_a = await _seed_project_with_details(
+        f"Amazon {tag}", shoot_dates="1-3 Oct 2026", budget="₹20,000/day",
+    )
+    proj_b = await _seed_project_with_details(
+        f"Twamev {tag}", shoot_dates="10-12 Nov 2026", budget="₹35,000/day",
+    )
+    t1 = await _seed_talent(f"Prachi Darbar {tag}", phone="917000400010")
+    await _seed_pipeline_row(proj_a, t1, "follow_up")
+    await _seed_pipeline_row(proj_b, t1, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - Prachi Darbar {tag} - MultiProjTpl {tag} - Amazon {tag},Twamev {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_ids = [b.strip() for b in r.reply.split("Batch ID:")[1].strip().split(",")]
+        jobs = await db.whatsapp_jobs.find({"batch_id": {"$in": batch_ids}}).to_list(10)
+        assert len(jobs) == 2
+        for j in jobs:
+            _assert_no_raw_placeholders(j["message_body"])
+        bodies = [j["message_body"] for j in jobs]
+        amazon_body = next(b for b in bodies if f"Amazon {tag}" in b)
+        twamev_body = next(b for b in bodies if f"Twamev {tag}" in b)
+        assert "1-3 Oct 2026" in amazon_body and "₹20,000/day" in amazon_body
+        assert "10-12 Nov 2026" not in amazon_body and "₹35,000/day" not in amazon_body
+        assert "10-12 Nov 2026" in twamev_body and "₹35,000/day" in twamev_body
+        assert "1-3 Oct 2026" not in twamev_body and "₹20,000/day" not in twamev_body
+        assert f"https://submit.talentgramagency.com/submit/{proj_a}" in amazon_body
+        assert f"https://submit.talentgramagency.com/submit/{proj_b}" in twamev_body
+    finally:
+        for j in await db.whatsapp_jobs.find({"talent_id": t1}).to_list(10):
+            await _cleanup_batch(j["batch_id"])
+        await _cleanup(
+            phone, project_ids=[proj_a, proj_b], talent_ids=[t1], template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_multi_talent_single_project_each_renders_correctly():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_id = await _seed_full_variable_template(f"MultiTalentTpl {tag}")
+    project_id = await _seed_project_with_details(
+        f"MultiTalentProj {tag}", shoot_dates="5 Dec 2026", budget="₹10,000/day",
+    )
+    t1 = await _seed_talent(f"MultiTalentA {tag}", phone="917000400020")
+    t2 = await _seed_talent(f"MultiTalentB {tag}", phone="917000400021")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    await _seed_pipeline_row(project_id, t2, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - MultiTalentA {tag},MultiTalentB {tag} - MultiTalentTpl {tag} - MultiTalentProj {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+        for j in jobs:
+            _assert_no_raw_placeholders(j["message_body"])
+            assert f"MultiTalentProj {tag}" in j["message_body"]
+            assert "5 Dec 2026" in j["message_body"]
+            assert "₹10,000/day" in j["message_body"]
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(
+            phone, project_ids=[project_id], talent_ids=[t1, t2], template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_multi_talent_multi_project_no_cross_contamination():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_id = await _seed_full_variable_template(f"FullMatrixTpl {tag}")
+    proj_a = await _seed_project_with_details(
+        f"MatrixProjA {tag}", shoot_dates="1 Jan 2027", budget="₹5,000/day",
+    )
+    proj_b = await _seed_project_with_details(
+        f"MatrixProjB {tag}", shoot_dates="2 Feb 2027", budget="₹6,000/day",
+    )
+    t1 = await _seed_talent(f"MatrixTalentA {tag}", phone="917000400030")
+    t2 = await _seed_talent(f"MatrixTalentB {tag}", phone="917000400031")
+    # A is in BOTH projects; B is only in project A.
+    await _seed_pipeline_row(proj_a, t1, "follow_up")
+    await _seed_pipeline_row(proj_b, t1, "follow_up")
+    await _seed_pipeline_row(proj_a, t2, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"send - MatrixTalentA {tag},MatrixTalentB {tag} - FullMatrixTpl {tag} - "
+                f"MatrixProjA {tag},MatrixProjB {tag} and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_ids = [b.strip() for b in r.reply.split("Batch ID:")[1].strip().split(",")]
+        jobs = await db.whatsapp_jobs.find({"batch_id": {"$in": batch_ids}}).to_list(20)
+        for j in jobs:
+            _assert_no_raw_placeholders(j["message_body"])
+        # A gets 2 messages (one per project); B gets 1 (only in project A).
+        a_jobs = [j for j in jobs if j["talent_id"] == t1]
+        b_jobs = [j for j in jobs if j["talent_id"] == t2]
+        assert len(a_jobs) == 2
+        assert len(b_jobs) == 1
+        a_proj_a = next(j for j in a_jobs if f"MatrixProjA {tag}" in j["message_body"])
+        a_proj_b = next(j for j in a_jobs if f"MatrixProjB {tag}" in j["message_body"])
+        assert "1 Jan 2027" in a_proj_a["message_body"] and "₹5,000/day" in a_proj_a["message_body"]
+        assert "2 Feb 2027" in a_proj_b["message_body"] and "₹6,000/day" in a_proj_b["message_body"]
+        assert f"MatrixProjA {tag}" in b_jobs[0]["message_body"]
+        assert "1 Jan 2027" in b_jobs[0]["message_body"]
+    finally:
+        for j in await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2]}}).to_list(20):
+            await _cleanup_batch(j["batch_id"])
+        await _cleanup(
+            phone, project_ids=[proj_a, proj_b], talent_ids=[t1, t2], template_ids=[template_id],
+        )
+        await _restore_config(original)
+
+
+async def test_single_project_pipeline_stage_send_unchanged():
+    """Existing pipeline-stage template sending (single project) must
+    remain completely unaffected by this fix."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_id = await _seed_full_variable_template(f"UnchangedTpl {tag}")
+    project_id = await _seed_project_with_details(
+        f"UnchangedProj {tag}", shoot_dates="9 Sep 2027", budget="₹9,000/day",
+    )
+    t1 = await _seed_talent(f"UnchangedTalent {tag}", phone="917000400050")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send UnchangedTpl {tag} template to Follow Up pipeline of UnchangedProj {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        assert "," not in batch_id  # single project -> single batch, unchanged shape
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        _assert_no_raw_placeholders(jobs[0]["message_body"])
+        assert "9 Sep 2027" in jobs[0]["message_body"]
+        assert "₹9,000/day" in jobs[0]["message_body"]
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_instagram_recipient_resolves_crm_contact_not_talent():
+    """"send talentgram - Angela - Akash Castingtree" — Angela is the
+    subject talent; "Akash Castingtree" is a CRM contact and must NEVER be
+    routed through the talent resolver, even when a similarly-named talent
+    exists (the exact production bug)."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    subject_talent = await _seed_talent(f"Angela {tag}", instagram_handle="angela_official")
+    # A similarly-named TALENT that must NOT be matched as the recipient.
+    decoy_talent = await _seed_talent(f"Akash Castingtree {tag}", phone="917000400060")
+    crm_id = await _seed_crm_client(f"Akash Castingtree {tag}", "917000400061", "Casting Director")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send talentgram - Angela {tag} - Akash Castingtree {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert len(jobs) == 1
+        # Sent to the CRM contact's phone, never the decoy talent's.
+        assert jobs[0]["destination"] == "917000400061"
+        assert jobs[0].get("talent_id") != decoy_talent
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[subject_talent, decoy_talent], client_ids=[crm_id])
+        await _restore_config(original)
+
+
+async def test_instagram_talentgram_alias_equivalent_to_instagram():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    for word in ("instagram", "insta", "instagram link", "insta link", "talentgram"):
+        t1 = await _seed_talent(f"AliasTalent {tag}", instagram_handle="alias_handle")
+        t2 = await _seed_talent(f"AliasRecipient {tag}", phone="917000400070")
+        batch_id = None
+        try:
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone,
+                text=f"send {word} - AliasTalent {tag} - AliasRecipient {tag} and confirm",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled and "Sent." in r.reply, (word, r.reply)
+            batch_id = r.reply.split("Batch ID:")[1].strip()
+        finally:
+            if batch_id:
+                await _cleanup_batch(batch_id)
+            await _cleanup(phone, talent_ids=[t1, t2])
+    await _restore_config(original)
+
+
+async def test_instagram_recipient_ambiguous_crm_contact_shows_full_list_and_resumes():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    subject_talent = await _seed_talent(f"Bella {tag}", instagram_handle="bella_official")
+    c1 = await _seed_crm_client(f"Rohan Mehta {tag}", "917000400080", "Casting Director")
+    c2 = await _seed_crm_client(f"Rohan Sharma {tag}", "917000400081", "Casting Director")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram - Bella {tag} - Rohan {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "I found multiple" in r.reply
+        assert f"Rohan Mehta {tag}" in r.reply
+        assert f"Rohan Sharma {tag}" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Rohan Mehta {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert "1 Approve" in r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Sent." in r3.reply
+        batch_id = r3.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert jobs[0]["destination"] == "917000400080"
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[subject_talent], client_ids=[c1, c2])
+        await _restore_config(original)
+
+
+async def test_instagram_recipient_phone_number():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    subject_talent = await _seed_talent(f"Carla {tag}", instagram_handle="carla_official")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram - Carla {tag} - +917000400090 and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert jobs[0]["destination"] == "+917000400090" or jobs[0]["destination"] == "917000400090"
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[subject_talent])
+        await _restore_config(original)
+
+
+async def test_instagram_recipient_genuinely_not_found_reports_clearly():
+    """A recipient that isn't a CRM contact, saved list, known talent, or
+    phone number (and isn't reachable via a live WhatsApp lookup — a known
+    limitation, see _resolve_recipient_only's module comment) must report
+    clearly rather than crash or silently do nothing."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    subject_talent = await _seed_talent(f"Diya {tag}", instagram_handle="diya_official")
+    try:
+        # Deliberately no shared substring/tag with the seeded talent —
+        # sharing the random tag would coincidentally fuzzy-match the
+        # talent-fallback tier via the shared random suffix alone.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram - Diya {tag} - Zzzargled Nonexistent Recipient Xyzzy Quux",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "couldn't find" in r.reply.lower()
+        assert "Sent." not in r.reply
+    finally:
+        await _cleanup(phone, talent_ids=[subject_talent])
+        await _restore_config(original)
+
+
+async def test_instagram_recipient_crm_contact_takes_priority_over_similarly_named_talent():
+    """A genuine CRM contact must resolve at CRM priority even when a
+    similarly-named TALENT also exists — never the reverse (the exact
+    production bug: CRM contact "Akash Castingtree" was previously
+    shadowed by "similarly named talents")."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    subject_talent = await _seed_talent(f"Elena {tag}", instagram_handle="elena_official")
+    similarly_named_talent = await _seed_talent(f"Farhan Qureshi {tag}", phone="917000400200")
+    crm_id = await _seed_crm_client(f"Farhan Qureshi {tag}", "917000400201", "Casting Director")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram - Elena {tag} - Farhan Qureshi {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert jobs[0]["destination"] == "917000400201"  # the CRM contact's phone
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[subject_talent, similarly_named_talent], client_ids=[crm_id])
+        await _restore_config(original)
+
+
+async def test_instagram_recipient_falls_back_to_talent_when_no_crm_match():
+    """No CRM contact, no saved list — a known talent by name still
+    resolves as the recipient (spec: "Do not require every recipient to
+    exist in the CRM"), preserving the pre-existing "share with a fellow
+    talent" workflow."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    subject_talent = await _seed_talent(f"Gita {tag}", instagram_handle="gita_official")
+    recipient_talent = await _seed_talent(f"Harish {tag}", phone="917000400210")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram - Gita {tag} - Harish {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert jobs[0]["destination"] == "917000400210"
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[subject_talent, recipient_talent])
+        await _restore_config(original)

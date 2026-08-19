@@ -71,6 +71,13 @@ _ENTITY_LABELS = {
     "template": "templates",
     "talent": "talents",
     "crm_source": "CRM contacts",
+    # Production fix (2026-08-19) — a dedicated RECIPIENT resolver's
+    # individual-CRM-contact-by-name tier (see whatsapp_campaign_agent.py's
+    # _resolve_recipient_only). Distinct from "crm_source" above, which is
+    # a CRM CONTACT-TYPE CATEGORY ("Brand Managers"), not a specific
+    # person's name — reusing crm_source's singular noun ("category name")
+    # for an individual-name match would show the wrong prompt hint.
+    "crm_contact": "CRM contacts",
     "saved_list": "saved lists",
     "pipeline_stage": "pipeline stages",
 }
@@ -79,6 +86,7 @@ _ENTITY_SINGULAR_NOUN = {
     "template": "template name",
     "talent": "name",
     "crm_source": "category name",
+    "crm_contact": "contact name",
     "saved_list": "list name",
     "pipeline_stage": "stage name",
 }

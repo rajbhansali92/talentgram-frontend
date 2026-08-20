@@ -20,7 +20,7 @@ import LibraryMediaPicker from "@/components/submission/LibraryMediaPicker";
 import WizardProgressBar from "@/components/submission/WizardProgressBar";
 import WizardStepNav from "@/components/submission/WizardStepNav";
 import UpdateProfileDisclosure from "@/components/submission/UpdateProfileDisclosure";
-import { WIZARD_STEPS, TOTAL_STEPS, stepForSection, sectionForStep, readStep, writeStep, clearStep, wizardStepsForDisplay } from "@/lib/wizardSteps";
+import { WIZARD_STEPS, TOTAL_STEPS, stepForSection, sectionForStep, readStep, writeStep, clearStep, wizardStepsForDisplay, readFinalStepReached, writeFinalStepReached, clearFinalStepReached } from "@/lib/wizardSteps";
 import MaterialModal from "@/components/MaterialModal";
 import Logo from "@/components/Logo";
 import SkillsSelector from "@/components/SkillsSelector";
@@ -751,7 +751,10 @@ function SubmissionPage() {
     // in its place while false. Admin Mode bypasses it (see the ternary at
     // the footer itself) — an admin submitting on a talent's behalf has no
     // "second-last page" concept to protect.
-    const [finalStepReached, setFinalStepReached] = useState(false);
+    const [finalStepReached, setFinalStepReached] = useState(() => {
+        if (adminMode) return false;
+        return readFinalStepReached(slug);
+    });
 
     const introRef = useRef();
     const take1Ref = useRef();
@@ -1589,6 +1592,7 @@ function SubmissionPage() {
         setRecognizedIdentity(null);
         setIsReturningTalent(false);
         setFinalStepReached(false);
+        clearFinalStepReached(slug);
         toast.info("Please enter your email to proceed.");
     };
 
@@ -2465,6 +2469,7 @@ function SubmissionPage() {
             // canonical state lives on the backend now.
             try { localStorage.removeItem(LS_DRAFT_KEY(slug)); } catch (e) { console.error(e); }
             clearStep(slug);
+            clearFinalStepReached(slug);
             
             if (isResubmission) {
                 toast.success("Your audition has been updated successfully.");
@@ -5328,7 +5333,10 @@ function SubmissionPage() {
                     <div className="pt-4" data-testid="continue-to-final-step">
                         <button
                             type="button"
-                            onClick={() => setFinalStepReached(true)}
+                            onClick={() => {
+                                setFinalStepReached(true);
+                                if (!adminMode) writeFinalStepReached(slug);
+                            }}
                             data-testid="continue-to-final-step-btn"
                             className="w-full bg-slate-900 text-white py-4 rounded-full text-[13px] font-medium hover:bg-slate-800 active:scale-[0.97] inline-flex items-center justify-center gap-2 min-h-[52px] transition-all duration-200"
                         >

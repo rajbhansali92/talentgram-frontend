@@ -88,3 +88,39 @@ export function clearStep(slug) {
         /* best-effort */
     }
 }
+
+// Persisted "reached the final step's auth card" flag — separate from
+// LS_STEP_KEY because the final step's own inner state (plain "Next" button
+// vs. the actual Google/OTP auth card) isn't captured by the step NUMBER
+// alone. Without this, a talent who reaches the auth card, tries Google,
+// and comes back after a failed/abandoned redirect (a full app reload)
+// correctly lands back on the same step number but sees the plain "Next"
+// button again instead of the auth card they were just using.
+export const LS_FINAL_STEP_REACHED_KEY = (slug) => `tg_final_step_reached_${slug}`;
+
+export function readFinalStepReached(slug) {
+    if (typeof window === "undefined") return false;
+    try {
+        return localStorage.getItem(LS_FINAL_STEP_REACHED_KEY(slug)) === "1";
+    } catch {
+        return false;
+    }
+}
+
+export function writeFinalStepReached(slug) {
+    if (typeof window === "undefined") return;
+    try {
+        localStorage.setItem(LS_FINAL_STEP_REACHED_KEY(slug), "1");
+    } catch {
+        /* best-effort — same tolerance as readStep/writeStep */
+    }
+}
+
+export function clearFinalStepReached(slug) {
+    if (typeof window === "undefined") return;
+    try {
+        localStorage.removeItem(LS_FINAL_STEP_REACHED_KEY(slug));
+    } catch {
+        /* best-effort */
+    }
+}

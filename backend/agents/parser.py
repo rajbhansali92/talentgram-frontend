@@ -70,6 +70,16 @@ def detect_trigger(agent: AgentDefinition, text: str) -> Optional[IntentDefiniti
                 first == t
                 or first.startswith(t + " ")
                 or first.startswith(t + ":")
+                # Whitespace-tolerant hyphen grammar (2026-08-20) — trigger
+                # word glued directly to the "-" field separator, no space
+                # ("move-Project-...", "add,move,send-Talent-..."). Generic
+                # (benefits every agent's hyphen-grammar commands, not just
+                # one), and low-risk the same way the glued-digit rule below
+                # already is: this only fires when the trigger is
+                # IMMEDIATELY followed by a literal "-", which is never how
+                # an ordinary English word continues (unlike a digit, which
+                # can't either, but at least "-" is even less ambiguous).
+                or first.startswith(t + "-")
                 # "P5" / "T12"-style shorthand: the trigger literal glued
                 # directly to a number, no separator. Generic (benefits any
                 # agent's short trigger, not just one domain), and safe —

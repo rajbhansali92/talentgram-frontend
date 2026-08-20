@@ -5447,3 +5447,134 @@ async def test_instagram_recipient_falls_back_to_talent_when_no_crm_match():
             await _cleanup_batch(batch_id)
         await _cleanup(phone, talent_ids=[subject_talent, recipient_talent])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Whitespace-tolerant hyphen grammar (2026-08-20) — every simplified send
+# command also parses with no spaces around its "-" separators.
+# ---------------------------------------------------------------------------
+async def test_whitespace_tolerant_parse_simple_send_command_unit():
+    parsed = wca.parse_simple_send_command("Talent-Template-Project")
+    assert parsed == {"recipient_query": "Talent", "source_query": "Template", "project_query": "Project"}
+
+    parsed2 = wca.parse_simple_send_command("Talent - Project")
+    assert parsed2 == {"recipient_query": "Talent", "project_query": "Project"}
+
+    parsed3 = wca.parse_simple_send_command('custom message "Hi there" - Riya,Karan')
+    assert parsed3["send_mode"] == "custom_message"
+    assert parsed3["source_query"] == "Hi there"
+    assert parsed3["recipient_query"] == "Riya,Karan"
+
+    parsed4 = wca.parse_simple_send_command("instagram-Riya-Raj")
+    assert parsed4 == {"send_mode": "instagram", "source_query": "Riya", "recipient_query": "Raj"}
+
+
+async def test_whitespace_tolerant_template_send_end_to_end():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"NoSpaceTpl {tag}"
+    template_id = await _seed_template(template_name)
+    project_id = await _seed_project(f"NoSpaceProj {tag}")
+    t1 = await _seed_talent(f"NoSpaceTalent {tag}", phone="917000900001")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send-NoSpaceTalent {tag}-{template_name}-NoSpaceProj {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1}
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_whitespace_tolerant_instagram_send_end_to_end():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_talent(f"NoSpaceInstaSubj {tag}", instagram_handle="nospace_h")
+    t2 = await _seed_talent(f"NoSpaceInstaRecip {tag}", phone="917000900002")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram-NoSpaceInstaSubj {tag}-NoSpaceInstaRecip {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_whitespace_tolerant_stage_targeting_send_end_to_end():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"NoSpaceStageTpl {tag}"
+    template_id = await _seed_template(template_name)
+    project_id = await _seed_project(f"NoSpaceStageProj {tag}")
+    t1 = await _seed_talent(f"NoSpaceStageTalent {tag}", phone="917000900003")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send-{template_name}-NoSpaceStageProj {tag}-Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1}
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)
+
+
+async def test_whitespace_tolerant_hyphenated_recipient_name_still_resolves():
+    """A talent name with a no-space internal hyphen ("Co-Star Riya")
+    stays correctly un-split when the command's own field separators use
+    the documented " - " form (the strict, spaced split is always tried
+    first and already finds the right field count)."""
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    template_name = f"HyphenRecipTpl {tag}"
+    template_id = await _seed_template(template_name)
+    project_id = await _seed_project(f"HyphenRecipProj {tag}")
+    t1 = await _seed_talent(f"Co-Star Riya {tag}", phone="917000900004")
+    await _seed_pipeline_row(project_id, t1, "follow_up")
+    batch_id = None
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - Co-Star Riya {tag} - {template_name} - HyphenRecipProj {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "Sent." in r.reply, r.reply
+        batch_id = r.reply.split("Batch ID:")[1].strip()
+        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1}
+    finally:
+        if batch_id:
+            await _cleanup_batch(batch_id)
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
+        await _restore_config(original)

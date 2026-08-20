@@ -1854,6 +1854,31 @@ def _strip_send_template_markers(
 
 
 def _extract_move_fields(text: str) -> Dict[str, str]:
+    # Whole-Stage Move (2026-08-20) — "move - Project - StageFrom to
+    # StageTo" (no talent named — moves EVERYONE currently in StageFrom).
+    # Checked FIRST, on the whole (and-confirm-stripped) message: this
+    # shape has no natural-language sentence to translate into (see
+    # nlu.parse_simple_stage_move_command's module comment) — it's
+    # resolved via its own dedicated STAGE_MOVE_MARKER path instead.
+    # Scoped to a single, standalone command for now (not mixed into a
+    # multi-command/blank-line-separated message) — a line that isn't
+    # this exact shape returns None and falls straight through to
+    # everything below, unaffected.
+    stripped_for_stage_move, stage_move_auto_confirm = nlu.strip_and_confirm(text or "")
+    stage_move = nlu.parse_simple_stage_move_command(
+        stripped_for_stage_move.strip(), list(PIPELINE_STAGE_ORDER),
+    )
+    if stage_move is not None:
+        payload = json.dumps({"from_stage": stage_move["from_stage"], "excluded_ids": []})
+        out = {
+            "talent_selector": nlu.STAGE_MOVE_MARKER + payload,
+            "target_stage": nlu.stage_label(stage_move["to_stage"]),
+            "project_query": stage_move["project_part"],
+        }
+        if stage_move_auto_confirm:
+            out[AUTO_CONFIRM_FIELD.key] = "1"
+        return out
+
     # Simplified Command Language (2026-08-17) — translates every
     # "Action - Talent(s) - Project(s) - Pipeline" line into its natural-
     # language equivalent BEFORE any of the existing extraction below
@@ -1935,6 +1960,79 @@ class ResolvedMove:
     talent_labels: List[str]
 
 
+async def _resolve_stage_move_selection(
+    collected: dict, session: Optional[dict]
+) -> Tuple[Optional[ResolvedMove], Optional[str], Optional[Dict[str, Any]]]:
+    """Whole-Stage Move (2026-08-20) resolution — "move - Project -
+    StageFrom to StageTo". Builds a ResolvedMove from EVERY talent
+    currently in StageFrom for the resolved project (minus whatever's
+    been excluded via an "Exclude X" reply on the confirmation card — see
+    _stage_move_handle_confirming_reply below), reusing the exact same
+    project resolution (nlu.resolve_project_by_name) and candidate fetch
+    (_fetch_stage_candidates) every other stage-scoped query in this file
+    already uses. Once a ResolvedMove comes back, EVERYTHING downstream
+    (confirmation-card text, _split_by_current_stage, the actual write,
+    undo) is the exact same, completely unmodified named-talent-move
+    machinery — only how the talent_ids/talent_labels were gathered
+    differs."""
+    target_stage = collected.get("target_stage") or ""
+    if target_stage not in PIPELINE_STAGES:
+        return None, "Pipeline not found.", None
+
+    raw = collected.get("talent_selector") or ""
+    payload_raw = raw[len(nlu.STAGE_MOVE_MARKER):]
+    try:
+        payload = json.loads(payload_raw) if payload_raw else {}
+    except (ValueError, TypeError):
+        payload = {}
+    from_stage = payload.get("from_stage") or ""
+    if from_stage not in PIPELINE_STAGES:
+        return None, "Pipeline not found.", None
+    excluded_ids = set(payload.get("excluded_ids") or [])
+
+    project_query = (collected.get("project_query") or "").strip()
+    if not project_query:
+        return None, 'I don\'t know which project. Send "Project N" first, or name the project.', None
+
+    projects = await _fetch_ongoing_projects()
+    with request_scope.stage("fuzzy"):
+        match = nlu.resolve_project_by_name(project_query, projects)
+    if match.ambiguous:
+        options = [{"label": o["label"], "value": o["label"]} for o in match.ambiguous]
+        msg = nlu.format_numbered_options("I found multiple projects.", [[o["label"]] for o in match.ambiguous])
+        return None, msg, {"kind": "project", "field_key": "project_query", "options": options}
+    if not match.project:
+        if match.suggestions:
+            bullets = "\n".join(f"• {o['label']}" for o in match.suggestions)
+            return None, (
+                f"I couldn't find a project matching:\n\n{project_query}\n\nDid you mean:\n\n{bullets}"
+            ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
+        return None, (
+            match.error or f'I couldn\'t find a project matching "{project_query}".'
+        ), {"kind": "free_text_retry", "field_key": "project_query", "options": []}
+
+    project = match.project
+    if not await _project_exists(project["id"]):
+        return None, "Project doesn't exist.", None
+
+    candidates = await _fetch_stage_candidates(project["id"], from_stage)
+    with request_scope.stage("response_formatting"):
+        sorted_c = sorted(candidates, key=lambda c: (c.label or "").strip().lower())
+    talent_ids = [c.id for c in sorted_c if c.id not in excluded_ids]
+    talent_labels = [c.label for c in sorted_c if c.id not in excluded_ids]
+    if not talent_ids:
+        excluded_note = " (all excluded)" if excluded_ids else ""
+        return None, (
+            f"No one is currently in {nlu.stage_label(from_stage)} for {project['label']}.{excluded_note}"
+        ), None
+
+    resolved = ResolvedMove(
+        project_id=project["id"], project_label=project["label"], target_stage=target_stage,
+        talent_ids=talent_ids, talent_labels=talent_labels,
+    )
+    return resolved, None, None
+
+
 async def _resolve_move_selection(
     collected: dict, session: Optional[dict]
 ) -> Tuple[Optional[ResolvedMove], Optional[str], Optional[Dict[str, Any]]]:
@@ -1973,6 +2071,15 @@ async def _resolve_move_selection(
     stale identity is never trusted, only stale "still needs moving"
     status is re-verified.
     """
+    if (collected.get("talent_selector") or "").startswith(nlu.STAGE_MOVE_MARKER):
+        # Whole-Stage Move (2026-08-20) — delegates entirely to its own
+        # resolver, which builds a ResolvedMove from "everyone currently
+        # in the named FROM stage" instead of a named selector. Every
+        # caller of _resolve_move_selection (confirmation building, the
+        # executor, auto-confirm, undo) is unaffected — they all already
+        # operate generically on whatever ResolvedMove comes back.
+        return await _resolve_stage_move_selection(collected, session)
+
     target_stage = collected.get("target_stage") or ""
     if target_stage not in PIPELINE_STAGES:
         return None, "Pipeline not found.", None
@@ -2941,6 +3048,76 @@ async def _move_parse_edits_async(
     return {}
 
 
+_STAGE_MOVE_EXCLUDE_RE = re.compile(r"^\s*(?:exclude|skip|remove)\s+(.+)$", re.IGNORECASE)
+
+
+async def _stage_move_handle_confirming_reply(
+    raw_text: str, collected: Dict[str, str], ctx: ExecContext,
+) -> Optional[str]:
+    """Whole-Stage Move (2026-08-20) — "Exclude X"/"Skip X" typed directly
+    on top of an already-shown stage-move confirmation card excludes that
+    talent (or comma/"and"-separated list of talents) from the bulk set
+    and re-shows the (now smaller) card, without leaving the "confirming"
+    step — mirrors the WhatsApp Campaign Agent's own Interactive Campaign
+    Editing pattern (Exclude/Include on top of a send preview). Returns
+    None (falls through to the generic "1 Approve / 2 Edit / 3 Cancel"
+    handling) for every other turn, including every ordinary named-talent
+    move confirmation — this only ever fires when a stage-move is the one
+    currently pending."""
+    selector = collected.get("talent_selector") or ""
+    if not selector.startswith(nlu.STAGE_MOVE_MARKER):
+        return None
+    m = _STAGE_MOVE_EXCLUDE_RE.match(raw_text or "")
+    if not m:
+        return None
+
+    payload_raw = selector[len(nlu.STAGE_MOVE_MARKER):]
+    try:
+        payload = json.loads(payload_raw) if payload_raw else {}
+    except (ValueError, TypeError):
+        payload = {}
+    from_stage = payload.get("from_stage") or ""
+    already_excluded = set(payload.get("excluded_ids") or [])
+
+    project_query = (collected.get("project_query") or "").strip()
+    projects = await _fetch_ongoing_projects()
+    with request_scope.stage("fuzzy"):
+        pmatch = nlu.resolve_project_by_name(project_query, projects)
+    if not pmatch.project:
+        return None  # shouldn't happen — the card wouldn't have rendered otherwise
+
+    candidates = await _fetch_stage_candidates(pmatch.project["id"], from_stage)
+    live_candidates = [c for c in candidates if c.id not in already_excluded]
+
+    names = nlu.split_multi_names(m.group(1)) or [m.group(1)]
+    newly_excluded_ids: List[str] = []
+    not_found: List[str] = []
+    for name in names:
+        name = name.strip()
+        if not name:
+            continue
+        with request_scope.stage("fuzzy"):
+            resolved = nlu.resolve_against_candidates(
+                nlu.SelectorResult(ok=True, name_query=name), live_candidates,
+            )
+        if resolved.ok and len(resolved.talent_ids) == 1:
+            newly_excluded_ids.append(resolved.talent_ids[0])
+        else:
+            not_found.append(name)
+
+    if not newly_excluded_ids:
+        return f"Couldn't find {', '.join(not_found)} in this list — reply with the exact name, or 1/2/3."
+
+    payload["excluded_ids"] = list(already_excluded | set(newly_excluded_ids))
+    new_collected = dict(collected)
+    new_collected["talent_selector"] = nlu.STAGE_MOVE_MARKER + json.dumps(payload)
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_collected)
+    card = await _build_move_confirmation(new_collected, ctx)
+    if not_found:
+        card = f"Couldn't find: {', '.join(not_found)}\n\n{card}"
+    return card
+
+
 MOVE_INTENT = IntentDefinition(
     intent_id="casting.move",
     triggers=nlu.MOVE_TRIGGERS,
@@ -2950,6 +3127,7 @@ MOVE_INTENT = IntentDefinition(
     build_confirmation=_build_move_confirmation,
     parse_edits_async=_move_parse_edits_async,
     try_auto_execute=_move_try_auto_execute,
+    handle_confirming_reply=_stage_move_handle_confirming_reply,
     summary_title="You are about to move:",
 )
 

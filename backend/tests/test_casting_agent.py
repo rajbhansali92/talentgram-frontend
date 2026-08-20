@@ -5293,3 +5293,405 @@ async def test_ams_ambiguous_talent_shows_full_list_never_sends_prematurely():
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[p1, p2])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Enhancements (2026-08-20):
+#   1. Whole-Stage Move — "move - Project - StageFrom to StageTo" moves
+#      EVERY talent currently in StageFrom to StageTo, no talent named.
+#   2. Whitespace-tolerant hyphen grammar — every simplified command also
+#      parses with no spaces around its "-" separators.
+# ---------------------------------------------------------------------------
+async def test_stage_move_parser_unit():
+    STAGES = list(pipeline_router.PIPELINE_STAGE_ORDER)
+    parsed = _snlu.parse_simple_stage_move_command(
+        "move - Bajaj Almond Oil - ask to test to follow up", STAGES,
+    )
+    assert parsed == {"project_part": "Bajaj Almond Oil", "from_stage": "ask_to_test", "to_stage": "follow_up"}
+
+    # No spaces at all.
+    parsed2 = _snlu.parse_simple_stage_move_command(
+        "move-Bajaj Almond Oil-ask to test to follow up", STAGES,
+    )
+    assert parsed2 == parsed
+
+    # Must NEVER shadow the named-talent 4-field grammar.
+    assert _snlu.parse_simple_stage_move_command(
+        "Move - Riya Patel - Toyota Campaign - Follow Up", STAGES,
+    ) is None
+    # Not a bare "move" -> None.
+    assert _snlu.parse_simple_stage_move_command(
+        "add,move - Project A - Follow Up to Approved", STAGES,
+    ) is None
+    # No "to" connector between two stages -> None.
+    assert _snlu.parse_simple_stage_move_command("move - Project A - Follow Up", STAGES) is None
+
+
+async def test_stage_move_basic_confirmation_then_approve():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"StageMoveProj {tag}")
+    t1 = await _seed_talent(f"StageMoveT1 {tag}")
+    t2 = await _seed_talent(f"StageMoveT2 {tag}")
+    t3 = await _seed_talent(f"StageMoveT3 {tag}")
+    distractor = await _seed_talent(f"StageMoveDistractor {tag}")
+    try:
+        for tid in (t1, t2, t3):
+            await _seed_pipeline_row(project_id, tid, "ask_to_test")
+        await _seed_pipeline_row(project_id, distractor, "approved")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"move - StageMoveProj {tag} - ask to test to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "You are about to move" in r.reply
+        assert "Ask To Test" in r.reply
+        assert "Follow Up" in r.reply
+        for tid, label in ((t1, f"StageMoveT1 {tag}"), (t2, f"StageMoveT2 {tag}"), (t3, f"StageMoveT3 {tag}")):
+            assert label in r.reply
+        # Nothing written yet.
+        for tid in (t1, t2, t3):
+            doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert doc["stage"] == "ask_to_test"
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r2.reply
+        for tid in (t1, t2, t3):
+            doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert doc["stage"] == "follow_up"
+        # Distractor (a different stage) is completely untouched.
+        doc_d = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": distractor})
+        assert doc_d["stage"] == "approved"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2, t3, distractor])
+        await _restore_config(original)
+
+
+async def test_stage_move_exclude_names_then_approve():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"StageExclProj {tag}")
+    t1 = await _seed_talent(f"StageExclT1 {tag}")
+    t2 = await _seed_talent(f"StageExclT2 {tag}")
+    try:
+        await _seed_pipeline_row(project_id, t1, "ask_to_test")
+        await _seed_pipeline_row(project_id, t2, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"move - StageExclProj {tag} - ask to test to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"StageExclT1 {tag}" in r.reply and f"StageExclT2 {tag}" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"exclude StageExclT1 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"StageExclT1 {tag}" not in r2.reply
+        assert f"StageExclT2 {tag}" in r2.reply
+        assert "Reply:" in r2.reply  # still on the confirmation card, not left the step
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r3.reply
+        doc1 = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1})
+        doc2 = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t2})
+        assert doc1["stage"] == "ask_to_test"  # excluded — never moved
+        assert doc2["stage"] == "follow_up"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_stage_move_and_confirm_executes_immediately_full_set():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"StageConfirmProj {tag}")
+    t1 = await _seed_talent(f"StageConfirmT1 {tag}")
+    t2 = await _seed_talent(f"StageConfirmT2 {tag}")
+    try:
+        await _seed_pipeline_row(project_id, t1, "ask_to_test")
+        await _seed_pipeline_row(project_id, t2, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"move - StageConfirmProj {tag} - ask to test to follow up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Reply:" not in r.reply
+        assert "Done." in r.reply
+        for tid in (t1, t2):
+            doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert doc["stage"] == "follow_up"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_stage_move_cancel_makes_no_changes():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"StageCancelProj {tag}")
+    t1 = await _seed_talent(f"StageCancelT1 {tag}")
+    try:
+        await _seed_pipeline_row(project_id, t1, "ask_to_test")
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"move - StageCancelProj {tag} - ask to test to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1})
+        assert doc["stage"] == "ask_to_test"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_stage_move_no_one_in_from_stage():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"StageEmptyProj {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"move - StageEmptyProj {tag} - ask to test to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "no one" in r.reply.lower() or "not sure" in r.reply.lower() or r.reply
+        assert "Reply:" not in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[])
+        await _restore_config(original)
+
+
+async def test_stage_move_ambiguous_project_disambiguates_and_resumes():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    proj_a = await _seed_project(brand_name=f"StageAmbig Alpha {tag}")
+    proj_b = await _seed_project(brand_name=f"StageAmbig Beta {tag}")
+    label_b = (await db.projects.find_one({"id": proj_b}))["brand_name"]
+    t1 = await _seed_talent(f"StageAmbigT1 {tag}")
+    try:
+        await _seed_pipeline_row(proj_b, t1, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"move - StageAmbig {tag} - ask to test to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple projects." in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=label_b,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to move" in r2.reply
+        assert f"StageAmbigT1 {tag}" in r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r3.reply
+        doc = await db.casting_pipeline.find_one({"project_id": proj_b, "talent_id": t1})
+        assert doc["stage"] == "follow_up"
+    finally:
+        await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_stage_move_never_shadows_named_talent_move():
+    """Regression guard: the existing "Move - Talent - Project - Pipeline"
+    grammar (and its stage-to-stage pipeline field) must keep working
+    completely unchanged."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"NamedMoveProj {tag}")
+    t1 = await _seed_talent(f"NamedMoveT1 {tag}")
+    t2 = await _seed_talent(f"NamedMoveT2 {tag}")  # must stay untouched
+    try:
+        await _seed_pipeline_row(project_id, t1, "ask_to_test")
+        await _seed_pipeline_row(project_id, t2, "ask_to_test")
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move - NamedMoveT1 {tag} - NamedMoveProj {tag} - Ask To Test to Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        doc1 = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1})
+        doc2 = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t2})
+        assert doc1["stage"] == "follow_up"
+        assert doc2["stage"] == "ask_to_test"  # never named -> never moved
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Whitespace-tolerant hyphen grammar (2026-08-20)
+# ---------------------------------------------------------------------------
+async def test_whitespace_tolerant_detect_trigger_unit():
+    from agents import parser as agent_parser
+    from agents.modules.casting_pipeline import MOVE_INTENT, ADD_INTENT
+
+    class _FakeAgent:
+        intents = [MOVE_INTENT, ADD_INTENT]
+
+    assert agent_parser.detect_trigger(_FakeAgent(), "move-Project-Stage") is MOVE_INTENT
+    assert agent_parser.detect_trigger(_FakeAgent(), "move - Project - Stage") is MOVE_INTENT
+    assert agent_parser.detect_trigger(_FakeAgent(), "add-Talent-Project-Stage") is ADD_INTENT
+
+
+async def test_whitespace_tolerant_add_move_no_spaces_end_to_end():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"NoSpaceAddProj {tag}")
+    talent_id = await _seed_talent(f"NoSpaceAddTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add-NoSpaceAddTalent {tag}-NoSpaceAddProj {tag}-Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "✗" not in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "follow_up"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_whitespace_tolerant_missing_hyphen_recovery_still_works():
+    """Regression guard: the EXISTING (spaced) missing-hyphen recovery
+    must keep working unchanged now that the action-word matching was
+    restructured into a prefix-first approach."""
+    parsed = _snlu.parse_simple_add_move_command(
+        "Add - Riya Patel - Toyota Campaign Follow Up",
+        stage_order=list(pipeline_router.PIPELINE_STAGE_ORDER),
+    )
+    assert parsed is not None
+    assert parsed["project_part"] == "Toyota Campaign"
+    assert parsed["pipeline_part"] == "Follow Up"
+
+
+async def test_whitespace_tolerant_hyphenated_name_still_resolves_with_spaced_separators():
+    """A project name that itself contains a no-space hyphen ("Co-Star
+    Casting") must still resolve correctly as long as the command's OWN
+    field separators use the documented " - " form: the strict, spaced
+    split (always tried FIRST) already finds the right field count
+    immediately in that case, so the no-space-tolerant fallback (which
+    could otherwise mis-split "Co-Star" into two fields) is never even
+    reached. (A project name that itself uses SPACED " - " internally,
+    e.g. "Tira - Suhana's Film", is a separate, pre-existing ambiguity —
+    unrelated to this fix — since the field-count itself becomes genuinely
+    unclear regardless of any whitespace tolerance.)"""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"Co-Star Casting {tag}")
+    talent_id = await _seed_talent(f"HyphenNameTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add - HyphenNameTalent {tag} - Co-Star Casting {tag} - Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "follow_up"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_whitespace_tolerant_query_commands_no_spaces():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(status="ongoing", brand_name=f"NoSpaceQueryProj {tag}")
+    talent_id = await _seed_talent(f"NoSpaceQueryTalent {tag}")
+    try:
+        await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"pending test-NoSpaceQueryTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "1 pending test" in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"testing?-NoSpaceQueryTalent {tag}-NoSpaceQueryProj {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled
+        assert f"NoSpaceQueryTalent {tag}" in r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"show-NoSpaceQueryProj {tag}-Ask To Test",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r3.handled
+        assert f"NoSpaceQueryTalent {tag}" in r3.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_whitespace_tolerant_stage_move_end_to_end():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"NoSpaceStageProj {tag}")
+    t1 = await _seed_talent(f"NoSpaceStageT1 {tag}")
+    try:
+        await _seed_pipeline_row(project_id, t1, "ask_to_test")
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"move-NoSpaceStageProj {tag}-ask to test to follow up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Done." in r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1})
+        assert doc["stage"] == "follow_up"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1])
+        await _restore_config(original)

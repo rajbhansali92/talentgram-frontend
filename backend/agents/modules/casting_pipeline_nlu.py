@@ -1215,8 +1215,19 @@ def _strip_leading_trigger(text: str, triggers: List[str]) -> "tuple[Optional[st
         t = trig.lower()
         if lowered == t:
             cand = (len(t), t, "")
-        elif lowered.startswith(t + " ") or lowered.startswith(t + ":"):
-            cand = (len(t), t, working[len(trig):].lstrip(" :"))
+        elif (
+            lowered.startswith(t + " ") or lowered.startswith(t + ":")
+            # Whitespace-tolerant hyphen grammar (2026-08-20) — trigger
+            # glued directly to the "-" field separator, no space
+            # ("move-Project-...", "send-Talent-Template-..."). Mirrors
+            # agents/parser.py::detect_trigger's identical addition —
+            # same low-but-nonzero risk (an ordinary sentence starting
+            # with a hyphenated word like "add-on services..." would also
+            # match), accepted for the same reason: a trigger immediately
+            # followed by "-" is never how normal English continues.
+            or lowered.startswith(t + "-")
+        ):
+            cand = (len(t), t, working[len(trig):].lstrip(" :-"))
         else:
             continue
         if best is None or cand[0] > best[0]:
@@ -1423,6 +1434,58 @@ def _parse_combined_action_words(action_text: str) -> Optional[Tuple[bool, bool,
     return has_add, has_move, has_send
 
 
+# Whitespace-tolerant hyphen-field splitting (2026-08-20) — every simplified
+# command now also parses with NO spaces around its "-" separators
+# ("add,move,send-Talent-Template-Project-Pipeline" alongside the
+# documented "add,move,send - Talent - Template - Project - Pipeline").
+_HYPHEN_SEP_RE = re.compile(r"\s*-\s*")
+
+
+def _split_hyphen_fields(text: str, expected_count: int) -> Optional[List[str]]:
+    """Splits a hyphen-grammar line into exactly `expected_count` fields.
+    Tries the safe, space-delimited " - " split FIRST — unchanged,
+    already-proven-safe behavior — and only falls back to the more
+    permissive \\s*-\\s* split (tolerating a hyphen with no surrounding
+    space on either side) when the strict split doesn't already yield the
+    right field count. The fallback is deliberately not tried first: a
+    field value that itself contains a hyphen with no surrounding space
+    (a hyphenated name like "Well-Known Talent", "co-star") is only at
+    risk of being mis-split in exactly the case where the strict, spaced
+    parse has ALREADY failed to produce this grammar's field count — i.e.
+    the command would otherwise have fallen straight through to natural-
+    language parsing anyway, so this can only help, never regress an
+    already-working spaced command."""
+    parts = [p.strip() for p in (text or "").split(" - ")]
+    if len(parts) == expected_count and all(parts):
+        return parts
+    parts2 = [p.strip() for p in _HYPHEN_SEP_RE.split(text or "")]
+    if len(parts2) == expected_count and all(parts2):
+        return parts2
+    return None
+
+
+def _split_hyphen_fields_auto(text: str) -> List[str]:
+    """For a shape whose field count isn't known in advance (it's
+    genuinely either 1 or 2 fields, decided by content, not by grammar —
+    e.g. parse_simple_send_command's custom_message/instagram branches).
+    _split_hyphen_fields(text, 1) is unsafe for this: an expected_count of
+    1 is a degenerate case that trivially "matches" ANY text with no " - "
+    in it at all, even when the text actually has a BARE, unspaced "-"
+    that should have counted as a real 2-field separator — so a naive
+    "try 1, then 2" would always stop at 1 and never reach the no-space
+    2-field case. This instead splits on " - " if that yields 2+ non-
+    empty parts (preferred, safe, unchanged behavior); otherwise on a
+    bare "-" if THAT yields 2+ non-empty parts; otherwise returns the
+    whole text as a single field."""
+    parts = [p.strip() for p in (text or "").split(" - ")]
+    if len(parts) >= 2 and all(parts):
+        return parts
+    parts2 = [p.strip() for p in _HYPHEN_SEP_RE.split(text or "")]
+    if len(parts2) >= 2 and all(parts2):
+        return parts2
+    return [(text or "").strip()]
+
+
 # NUL-delimited — never appears in real user text — sentinel marking where
 # a translated add/move sentence carries a pending WhatsApp template send
 # (Combined Casting Pipeline + WhatsApp Automation, 2026-08-19). Embedded
@@ -1454,6 +1517,76 @@ def _extract_simple_pipeline_target(pipeline_part: str) -> str:
     if matches:
         return pipeline_part[matches[-1].end():].strip(" .")
     return (pipeline_part or "").strip()
+
+
+# Matches the action word(s) at the very start of a line and the single
+# "-" separator right after it, tolerating a hyphen with or without
+# surrounding spaces ("Add - " / "Add- " / "Add -" / "Add-"). Used as the
+# entry point for both parse_simple_add_move_command and
+# parse_simple_stage_move_command, below.
+_ACTION_PREFIX_RE = re.compile(
+    r"^\s*((?:add|move|send)(?:\s*,\s*(?:add|move|send)){0,2})\s*-\s*", re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Whole-Stage Move (2026-08-20) — "move - Project - StageFrom to StageTo"
+# moves EVERY talent currently in StageFrom to StageTo for that project, no
+# talent named at all. Distinguished from the named-talent grammar by
+# shape, not by a different trigger word: exactly 2 fields after the
+# action ("move"), and field 2 is a "StageA to StageB" transition where
+# BOTH sides resolve to a full, unambiguous, EXACT stage phrase (nothing
+# left over on either side) — a named-talent move's own trailing pipeline
+# field never has this shape (it's either a bare target stage, or a
+# "StageA to StageB" transition, but its field 1 is always a talent name/
+# selector, never a project). See casting_pipeline.py's
+# _resolve_stage_move_selection for the resolution/execution side — it
+# reuses the existing named-talent move's own ResolvedMove/confirmation/
+# executor/undo machinery unchanged, just built from "everyone currently
+# in StageFrom" instead of a named selector.
+# ---------------------------------------------------------------------------
+STAGE_MOVE_MARKER = "__stage_move__:"
+
+
+def parse_simple_stage_move_command(
+    line: str, stage_order: List[str],
+) -> Optional[Dict[str, str]]:
+    """Returns {"project_part": ..., "from_stage": <key>, "to_stage":
+    <key>}, or None when the line isn't this exact shape — including when
+    it's actually the named-talent grammar, which this must never shadow
+    (see the module comment above for why the shapes don't collide)."""
+    m = _ACTION_PREFIX_RE.match(line or "")
+    if not m:
+        return None
+    combined = _parse_combined_action_words(m.group(1))
+    if combined is None:
+        return None
+    has_add, has_move, has_send = combined
+    if has_add or has_send or not has_move:
+        return None  # "move" alone only — no "add"/"send" combination
+    remainder = (line or "")[m.end():]
+    fields = _split_hyphen_fields(remainder, 2)
+    if fields is None:
+        return None
+    project_part, transition_part = fields
+
+    matches = list(_PIPELINE_TARGET_RE.finditer(transition_part))
+    if not matches:
+        return None
+    tm = matches[-1]
+    from_text = transition_part[:tm.start()].strip(" .")
+    to_text = transition_part[tm.end():].strip(" .")
+    if not from_text or not to_text:
+        return None
+
+    from_key, from_ambiguous, from_rest = extract_stage_phrase(from_text, stage_order)
+    if not from_key or from_ambiguous or (from_rest or "").strip():
+        return None
+    to_key, to_ambiguous, to_rest = extract_stage_phrase(to_text, stage_order)
+    if not to_key or to_ambiguous or (to_rest or "").strip():
+        return None
+
+    return {"project_part": project_part, "from_stage": from_key, "to_stage": to_key}
 
 
 def parse_simple_add_move_command(
@@ -1488,46 +1621,53 @@ def parse_simple_add_move_command(
     gives a clear, non-guessing error rather than silently misreading
     someone's name as part of a project. Missing-hyphen recovery is not
     attempted for the 5-field combined (send-inclusive) grammar — only
-    the exact 5-hyphen form is supported there, kept simple/safe."""
-    parts = [p.strip() for p in (line or "").split(" - ")]
-    if not parts:
+    the exact 5-hyphen form is supported there, kept simple/safe.
+
+    The action word is matched as a PREFIX first (2026-08-20), tolerating
+    a hyphen with or without surrounding spaces right after it, and the
+    REMAINDER is then split into the grammar's own field count via
+    _split_hyphen_fields — so "Add-A-Project A-Follow Up" parses
+    identically to "Add - A - Project A - Follow Up"."""
+    m = _ACTION_PREFIX_RE.match(line or "")
+    if not m:
         return None
-    combined = _parse_combined_action_words(parts[0])
+    combined = _parse_combined_action_words(m.group(1))
     if combined is None:
         return None
     has_add, has_move, has_send = combined
     action = "add_move" if (has_add and has_move) else ("add" if has_add else "move")
+    remainder = (line or "")[m.end():]
 
     if has_send:
-        if len(parts) != 5:
+        fields = _split_hyphen_fields(remainder, 4)
+        if fields is None:
             return None
-        talent_part, template_part, project_part, pipeline_part = parts[1], parts[2], parts[3], parts[4]
-        if not (talent_part and template_part and project_part and pipeline_part):
-            return None
+        talent_part, template_part, project_part, pipeline_part = fields
         return {
             "action": action, "talent_part": talent_part,
             "project_part": project_part, "pipeline_part": pipeline_part,
             "template_part": template_part,
         }
 
-    if len(parts) == 4:
-        talent_part, project_part, pipeline_part = parts[1], parts[2], parts[3]
-        if not talent_part or not project_part or not pipeline_part:
-            return None
+    fields = _split_hyphen_fields(remainder, 3)
+    if fields is not None:
+        talent_part, project_part, pipeline_part = fields
         return {
             "action": action, "talent_part": talent_part,
             "project_part": project_part, "pipeline_part": pipeline_part,
         }
 
-    if len(parts) == 3 and stage_order:
-        talent_part = parts[1]
-        stage_key, ambiguous, rest = extract_stage_phrase(parts[2], stage_order)
-        rest = (rest or "").strip(" ,")
-        if talent_part and stage_key and not ambiguous and rest:
-            return {
-                "action": action, "talent_part": talent_part,
-                "project_part": rest, "pipeline_part": stage_label(stage_key),
-            }
+    if stage_order:
+        fields2 = _split_hyphen_fields(remainder, 2)
+        if fields2 is not None:
+            talent_part, tail = fields2
+            stage_key, ambiguous, rest = extract_stage_phrase(tail, stage_order)
+            rest = (rest or "").strip(" ,")
+            if talent_part and stage_key and not ambiguous and rest:
+                return {
+                    "action": action, "talent_part": talent_part,
+                    "project_part": rest, "pipeline_part": stage_label(stage_key),
+                }
 
     return None
 
@@ -2016,16 +2156,22 @@ _SHOW_ACTION_RE = re.compile(r"^\s*show\s*$", re.IGNORECASE)
 
 
 def parse_simple_query_command(text: str) -> Optional["QueryIntent"]:
-    parts = [p.strip() for p in (text or "").strip().split(" - ")]
+    stripped = (text or "").strip()
 
-    if len(parts) == 2 and _PENDING_TEST_ACTION_RE.match(parts[0]) and parts[1]:
-        return QueryIntent(kind="pending_tests", talent_query=parts[1])
+    # Whitespace-tolerant (2026-08-20) — see _split_hyphen_fields: tries
+    # each shape's own expected field count both with and without spaces
+    # around "-", e.g. "pending test-Riya Patel" alongside the documented
+    # "pending test - Riya Patel".
+    parts2 = _split_hyphen_fields(stripped, 2)
+    if parts2 and _PENDING_TEST_ACTION_RE.match(parts2[0]):
+        return QueryIntent(kind="pending_tests", talent_query=parts2[1])
 
-    if len(parts) == 3 and _TESTING_CHECK_ACTION_RE.match(parts[0]) and parts[1] and parts[2]:
-        return QueryIntent(kind="testing_check", talent_query=parts[1], project_name_query=parts[2])
-
-    if len(parts) == 3 and _SHOW_ACTION_RE.match(parts[0]) and parts[1] and parts[2]:
-        return QueryIntent(kind="pipeline_multi", project_name_query=parts[1], stage_key_multi=parts[2])
+    parts3 = _split_hyphen_fields(stripped, 3)
+    if parts3:
+        if _TESTING_CHECK_ACTION_RE.match(parts3[0]):
+            return QueryIntent(kind="testing_check", talent_query=parts3[1], project_name_query=parts3[2])
+        if _SHOW_ACTION_RE.match(parts3[0]):
+            return QueryIntent(kind="pipeline_multi", project_name_query=parts3[1], stage_key_multi=parts3[2])
 
     return None
 

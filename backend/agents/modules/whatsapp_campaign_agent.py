@@ -354,7 +354,12 @@ def _strip_leading_trigger_preserve_newlines(text: str, triggers: List[str]) -> 
     stripped = (text or "").strip()
     if trig is None:
         return stripped
-    return stripped[len(trig):].lstrip(" :\n\t")
+    # "-" added to the strip charset (2026-08-20) alongside the existing
+    # " :\n\t" — nlu._strip_leading_trigger now also recognizes a trigger
+    # glued directly to "-" ("send-Talent-...", no space), and this needs
+    # to strip that same separator off, or it's left dangling at the
+    # front of the remainder (breaking every downstream hyphen-field split).
+    return stripped[len(trig):].lstrip(" :-\n\t")
 
 
 # ---------------------------------------------------------------------------
@@ -703,7 +708,11 @@ def parse_simple_send_command(remainder: str) -> Optional[Dict[str, str]]:
         if not after.startswith("-"):
             return None
         rest = after[1:].strip()
-        parts = [p.strip() for p in rest.split(" - ")]
+        # Whitespace-tolerant (2026-08-20) — this shape is genuinely
+        # either 1 or 2 fields, decided by content, so the count has to
+        # be auto-detected (see nlu._split_hyphen_fields_auto's docstring
+        # for why a naive "try 1, then 2" would be unsafe here).
+        parts = nlu._split_hyphen_fields_auto(rest)
         if len(parts) == 1 and parts[0]:
             return {"send_mode": "custom_message", "source_query": message_text, "recipient_query": parts[0]}
         if len(parts) == 2 and all(parts):
@@ -727,10 +736,10 @@ def parse_simple_send_command(remainder: str) -> Optional[Dict[str, str]]:
             # hyphen grammar at all -> let the existing Instagram
             # extraction (which already handles those) take it instead.
             return None
-        parts = [p.strip() for p in rest.split(" - ")] if rest else []
-        if len(parts) == 2 and all(parts):
+        parts = nlu._split_hyphen_fields_auto(rest) if rest else []
+        if parts and len(parts) == 2 and all(parts):
             return {"send_mode": "instagram", "source_query": parts[0], "recipient_query": parts[1]}
-        if len(parts) == 1 and parts[0]:
+        if parts and len(parts) == 1 and parts[0]:
             return {"send_mode": "instagram", "source_query": parts[0], "recipient_query": _REPLY_IN_CHAT_SENTINEL}
         return None
 
@@ -739,10 +748,10 @@ def parse_simple_send_command(remainder: str) -> Optional[Dict[str, str]]:
     # existing generic "What should I send?" question asks for it, same
     # as any other missing-field case — no new default-template system)
     # or "Template - Project(s) - Pipeline(s)".
-    parts = [p.strip() for p in stripped.split(" - ")]
-    if len(parts) == 2 and all(parts):
+    parts = nlu._split_hyphen_fields(stripped, 2) or nlu._split_hyphen_fields(stripped, 3)
+    if parts and len(parts) == 2 and all(parts):
         return {"recipient_query": parts[0], "project_query": parts[1]}
-    if len(parts) == 3 and all(parts):
+    if parts and len(parts) == 3 and all(parts):
         stage_field = _simple_field_looks_like_stages(parts[2])
         if stage_field:
             return {

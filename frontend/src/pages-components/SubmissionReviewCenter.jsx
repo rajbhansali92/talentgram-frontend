@@ -25,11 +25,13 @@ import {
     Mail,
     Upload,
     Trash2,
-    Plus
+    Plus,
+    Copy
 } from "lucide-react";
 import { AVAILABILITY_OPTIONS, BUDGET_OPTIONS } from "@/lib/talentSchema";
 import LocationSelector from "@/components/LocationSelector";
 import { formatLocation } from "@/lib/sanitize";
+import { instagramProfileUrl } from "@/lib/mediaUtils";
 import AdminAddSubmissionModal from "@/components/submission/AdminAddSubmissionModal";
 
 function formatRelativeTime(ts) {
@@ -1409,6 +1411,80 @@ export default function SubmissionReviewCenter() {
         pending: "bg-amber-50 text-amber-700 border-amber-200",
     };
 
+    // Talent Submission tab — "Copy Form". Reads the SAME submission-level
+    // source the read-only tab above renders from (original_form_data, or
+    // form_data as a fallback for pre-edit submissions), never the global
+    // talent profile — so project-specific overrides (age, height, budget,
+    // etc.) come through correctly for a recurring talent.
+    const handleCopyForm = () => {
+        try {
+            const od = normalize(detail?.original_form_data ?? detail?.form_data ?? {});
+            const lines = [];
+            lines.push(`Talentgram x ${project?.brand_name || ""} - Form`);
+            lines.push("");
+
+            const lastInitial = od.last_name ? od.last_name.trim().charAt(0) : "";
+            lines.push(lastInitial ? `${od.first_name || ""} - ${lastInitial}` : (od.first_name || ""));
+
+            const age = detail?.effective_age ?? od.age;
+            if (age !== undefined && age !== null && String(age).trim() !== "") lines.push(`Age - ${age}`);
+            if (od.height) lines.push(`Height - ${od.height}`);
+            const locationText = formatLocation(od.location);
+            if (locationText) lines.push(`Current Location - ${locationText}`);
+
+            if (od.availability?.status) {
+                const availText = `${od.availability.status === "yes" ? "Available" : "Unavailable"}${od.availability.note ? ` — ${od.availability.note}` : ""}`;
+                lines.push(`Availability - ${availText}`);
+            }
+            if (od.competitive_brand) lines.push(`Competitive Brand - ${od.competitive_brand}`);
+
+            (project?.custom_questions || []).forEach((q) => {
+                const answer = (od.custom_answers || {})[q.id];
+                if (answer !== undefined && answer !== null && String(answer).trim() !== "") {
+                    lines.push(`${q.question} - ${answer}`);
+                }
+            });
+
+            const igUrl = instagramProfileUrl(od.instagram_handle);
+            if (igUrl) lines.push(`Instagram link - ${igUrl}`);
+
+            if (od.budget?.status) {
+                const budgetText = `${od.budget.status === "accept" ? "Accepts Day Rate" : "Expected Day Rate"}${od.budget.value ? ` — ${od.budget.value}` : ""}`;
+                lines.push(`Budget - ${budgetText}`);
+            }
+
+            const textToCopy = lines.join("\n");
+            if (navigator.clipboard?.writeText) {
+                navigator.clipboard.writeText(textToCopy).catch(() => copyFormFallback(textToCopy));
+            } else {
+                copyFormFallback(textToCopy);
+            }
+            toast.success("Form copied to clipboard!");
+        } catch (err) {
+            console.error("Failed to copy form:", err);
+            toast.error("Failed to copy form. Please try again.");
+        }
+    };
+
+    // Fallback for browsers/contexts where the async Clipboard API is
+    // unavailable or rejects (e.g. non-secure context) — still lets the
+    // admin copy without any modal.
+    const copyFormFallback = (text) => {
+        try {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+        } catch (err) {
+            console.error("Copy fallback failed:", err);
+        }
+    };
+
     return (
         <div className="flex flex-col h-screen bg-[#fafaf9] text-neutral-800 overflow-hidden font-sans">
             {/* Top Bar Navigation */}
@@ -1435,7 +1511,19 @@ export default function SubmissionReviewCenter() {
                 </div>
 
                 {/* Progress Indicators */}
-                <div className="flex items-center gap-3 shrink-0">
+                <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 shrink-0">
+                    {isOriginalMode && (
+                        <button
+                            type="button"
+                            onClick={handleCopyForm}
+                            data-testid="copy-form-btn"
+                            className="flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.12] hover:border-black/[0.24] hover:bg-black/[0.02] text-black/80 text-xs font-semibold rounded-lg transition-colors shrink-0"
+                            title="Copy this talent's submitted form as text"
+                        >
+                            <Copy className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Copy Form</span>
+                        </button>
+                    )}
                     {isAdminRole && (
                         <button
                             type="button"

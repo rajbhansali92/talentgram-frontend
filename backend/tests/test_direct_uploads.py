@@ -61,16 +61,19 @@ def test_submission_sign_upload_success(mock_decode):
         "talent_email": "test@test.com",
         "media": []
     })
-    
+    mock_db.projects.find_one = AsyncMock(return_value={
+        "submission_requirements": {"audition_takes_visibility": "optional"}
+    })
+
     with patch("cloudinary.utils.api_sign_request") as mock_sign:
         mock_sign.return_value = "mocked_sig"
-        
+
         response = client.post(
             "/api/public/submissions/sid123/upload/sign",
             json={"category": "take", "filename": "video.mp4"},
             headers={"Authorization": "Bearer dummy_token"}
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         assert data["signature"] == "mocked_sig"
@@ -121,6 +124,93 @@ def test_submission_complete_upload(mock_sync, mock_decode):
 
 
 @patch("routers.submissions.decode_submitter")
+def test_video_signature_rejects_take_when_project_hides_audition_takes(mock_decode):
+    """Server-side enforcement: video-signature must reject a 'take' sign
+    request when the project's audition_takes_visibility is 'hidden', even
+    though the frontend already hides the upload UI for this case — the
+    backend must not rely on that UI gate alone."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123",
+        "project_id": "pid123",
+        "talent_id": "t123",
+        "talent_name": "Test Talent",
+        "talent_email": "test@test.com",
+        "media": []
+    })
+    mock_db.projects.find_one = AsyncMock(return_value={
+        "submission_requirements": {"audition_takes_visibility": "hidden"}
+    })
+
+    response = client.post(
+        "/api/public/submissions/sid123/video-signature",
+        json={"category": "take", "label": "Take 1", "content_type": "video/mp4"},
+        headers={"Authorization": "Bearer dummy_token"}
+    )
+
+    assert response.status_code == 403
+    assert "not enabled" in response.json()["detail"]
+
+
+@patch("routers.submissions.decode_submitter")
+def test_video_signature_allows_intro_video_when_takes_hidden(mock_decode):
+    """The hidden-audition-takes check must be scoped to take/take_1/2/3
+    only — other categories (e.g. intro_video) are unaffected."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123",
+        "project_id": "pid123",
+        "talent_id": "t123",
+        "talent_name": "Test Talent",
+        "talent_email": "test@test.com",
+        "media": []
+    })
+    mock_db.asset_metadata.update_one = AsyncMock()
+    mock_db.projects.find_one = AsyncMock(return_value={
+        "submission_requirements": {"audition_takes_visibility": "hidden"}
+    })
+
+    with patch("cloudinary.utils.api_sign_request") as mock_sign:
+        mock_sign.return_value = "mocked_sig"
+        response = client.post(
+            "/api/public/submissions/sid123/video-signature",
+            json={"category": "intro_video", "content_type": "video/mp4"},
+            headers={"Authorization": "Bearer dummy_token"}
+        )
+
+    assert response.status_code == 200
+
+
+@patch("routers.submissions.decode_submitter")
+def test_legacy_upload_sign_rejects_take_when_project_hides_audition_takes(mock_decode):
+    """Same server-side enforcement on the older /upload/sign endpoint —
+    still routable even though the current frontend no longer calls it for
+    videos, so it must not remain an unguarded bypass of the same rule."""
+    mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
+
+    mock_db.submissions.find_one = AsyncMock(return_value={
+        "id": "sid123",
+        "project_id": "pid123",
+        "talent_email": "test@test.com",
+        "media": []
+    })
+    mock_db.projects.find_one = AsyncMock(return_value={
+        "submission_requirements": {"audition_takes_visibility": "hidden"}
+    })
+
+    response = client.post(
+        "/api/public/submissions/sid123/upload/sign",
+        json={"category": "take", "filename": "video.mp4"},
+        headers={"Authorization": "Bearer dummy_token"}
+    )
+
+    assert response.status_code == 403
+    assert "not enabled" in response.json()["detail"]
+
+
+@patch("routers.submissions.decode_submitter")
 def test_video_signature_label_encoding(mock_decode):
     """Verify that video-signature endpoint URL-encodes labels with spaces in context."""
     mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
@@ -134,16 +224,19 @@ def test_video_signature_label_encoding(mock_decode):
         "media": []
     })
     mock_db.asset_metadata.update_one = AsyncMock()
-    
+    mock_db.projects.find_one = AsyncMock(return_value={
+        "submission_requirements": {"audition_takes_visibility": "optional"}
+    })
+
     with patch("cloudinary.utils.api_sign_request") as mock_sign:
         mock_sign.return_value = "mocked_sig"
-        
+
         response = client.post(
             "/api/public/submissions/sid123/video-signature",
             json={"category": "take", "label": "Take 1", "content_type": "video/mp4"},
             headers={"Authorization": "Bearer dummy_token"}
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         assert data["params"]["context"] == "category=take|label=Take%201"
@@ -206,6 +299,9 @@ def test_video_signature_public_id_is_leaf_only_take(mock_decode):
         "media": []
     })
     mock_db.asset_metadata.update_one = AsyncMock()
+    mock_db.projects.find_one = AsyncMock(return_value={
+        "submission_requirements": {"audition_takes_visibility": "optional"}
+    })
 
     with patch("cloudinary.utils.api_sign_request") as mock_sign:
         mock_sign.return_value = "mocked_sig"
@@ -273,20 +369,23 @@ def test_video_signature_asynchronous_transformations(mock_decode):
         "media": []
     })
     mock_db.asset_metadata.update_one = AsyncMock()
-    
+    mock_db.projects.find_one = AsyncMock(return_value={
+        "submission_requirements": {"audition_takes_visibility": "optional"}
+    })
+
     with patch("cloudinary.utils.api_sign_request") as mock_sign:
         mock_sign.return_value = "mocked_sig"
-        
+
         response = client.post(
             "/api/public/submissions/sid123/video-signature",
             json={"category": "take", "label": "Take 1", "content_type": "video/mp4"},
             headers={"Authorization": "Bearer dummy_token"}
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         params = data["params"]
-        
+
         # Verify eager and eager_async parameters are present
         assert "eager" in params
         assert "eager_async" in params
@@ -431,6 +530,9 @@ def test_submission_video_complete_ownership_failure_reproduction(mock_decode):
         "media": []
     })
     mock_db.asset_metadata.update_one = AsyncMock()
+    mock_db.projects.find_one = AsyncMock(return_value={
+        "submission_requirements": {"audition_takes_visibility": "optional"}
+    })
 
     # 1. Get the signature / folder
     with patch("cloudinary.utils.api_sign_request") as mock_sign:

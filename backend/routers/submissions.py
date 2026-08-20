@@ -803,9 +803,17 @@ async def submission_sign_upload(
         if existing >= MAX_IMAGES_PER_CATEGORY:
             raise HTTPException(400, f"Limit reached")
             
+    if category == "take" or category in LEGACY_TAKE_CATEGORIES:
+        proj = await db.projects.find_one(
+            {"id": sub.get("project_id")}, {"_id": 0, "submission_requirements": 1}
+        )
+        takes_vis = (proj or {}).get("submission_requirements", {}).get("audition_takes_visibility")
+        if takes_vis == "hidden":
+            raise HTTPException(403, "Audition takes are not enabled for this project")
+
     if category == "take":
         existing_takes = sum(
-            1 for m in sub.get("media", []) 
+            1 for m in sub.get("media", [])
             if m["category"] == "take" or m["category"] in LEGACY_TAKE_CATEGORIES
         )
         if existing_takes >= MAX_SUBMISSION_TAKES:
@@ -1505,6 +1513,20 @@ async def video_signature(
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
+
+    # Server-side enforcement of the project's audition-takes visibility —
+    # the frontend already hides the whole takes UI when this is "hidden",
+    # but that's a UI convenience only; without this check any client that
+    # still sends a sign request (a stale tab loaded before an admin
+    # tightened the setting, a direct API call, etc.) gets a valid signed
+    # upload regardless of project config.
+    if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
+        proj = await db.projects.find_one(
+            {"id": sub.get("project_id")}, {"_id": 0, "submission_requirements": 1}
+        )
+        takes_vis = (proj or {}).get("submission_requirements", {}).get("audition_takes_visibility")
+        if takes_vis == "hidden":
+            raise HTTPException(403, "Audition takes are not enabled for this project")
 
     tid, tname = await _resolve_submission_talent(sub)
     folder = audition_submission_folder(tid, tname, sub.get("project_id"), sid)

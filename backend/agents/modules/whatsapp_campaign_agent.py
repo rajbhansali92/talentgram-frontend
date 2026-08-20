@@ -1917,6 +1917,7 @@ async def _resolve_talent_names(
     multi_pick_field_key: str,
     multi_fragments_key: str,
     multi_index_key: str,
+    strict_ambiguous_safety_gate: bool = False,
 ) -> _TalentNamesResolution:
     """Resolves `q` — one name, or 2+ comma/newline/"and"/"&"-separated
     names — against the SAME global talent pool ADD_INTENT/every other
@@ -1928,7 +1929,22 @@ async def _resolve_talent_names(
     pending-state markers a caller's OWN resume function uses for the
     2+-name ambiguity round trip (see _resume_pending_multi_recipient /
     _resume_pending_multi_subject — mirrors of each other, one per caller,
-    since the shared engine writes into whichever field_key it's given)."""
+    since the shared engine writes into whichever field_key it's given).
+
+    `strict_ambiguous_safety_gate` (2026-08-20 production fix) — off by
+    default, preserving every existing caller's behavior byte-for-byte
+    (this function's field is genuinely a talent name for those callers,
+    where a tie between two typo/first-name-tolerant fuzzy matches is a
+    real, wanted disambiguation — see
+    test_disambiguation_talent_ambiguity_resolved_via_exact_name). Passed
+    True ONLY by _resolve_recipient_only's talent-fallback tier, where `q`
+    is a free-text RECIPIENT identifier tried against talents merely as a
+    last resort after CRM/saved-list/saved-group all miss — there, a tie
+    on pure single-token character overlap with no real relationship to
+    either candidate (e.g. "Mixxi App x Talentgram Agency" tying a
+    "...Dubai Talent"-suffixed name against a "Nancy..." one purely via
+    "talentgram"~"talent"/"agency"~"nancy") is noise, not a genuine
+    choice, and must not be surfaced as one."""
     selector = nlu.parse_talent_selector(q)
     if not (selector.ok and not selector.everyone and not selector.ordinals):
         return _TalentNamesResolution(ok=False, not_found=True)
@@ -2006,13 +2022,30 @@ async def _resolve_talent_names(
             )
         return _TalentNamesResolution(ok=True, talent_ids=resolved.talent_ids, talent_labels=resolved.talent_labels)
     if resolved.ambiguous_candidates:
+        if strict_ambiguous_safety_gate:
+            # See this function's docstring — scoped to the recipient-
+            # fallback caller only, never the callers for whom `q` is
+            # genuinely a talent-name field.
+            safety_fragments = nlu.split_multi_names(q)
+            safe_candidates = [
+                c for c in resolved.ambiguous_candidates
+                if any(_fuzzy_match_is_safe(frag, c.label) for frag in safety_fragments)
+            ]
+            if not safe_candidates:
+                return _TalentNamesResolution(ok=False, not_found=True)
+            if len(safe_candidates) == 1:
+                c = safe_candidates[0]
+                return _TalentNamesResolution(ok=True, talent_ids=[c.id], talent_labels=[c.label])
+            resolved_ambiguous_candidates = safe_candidates
+        else:
+            resolved_ambiguous_candidates = resolved.ambiguous_candidates
         return _TalentNamesResolution(
             ok=False,
             ambiguous=AmbiguousEntity(
                 entity_type="talent", field_key=single_ambiguous_field_key,
                 candidates=[
                     disambiguation.Candidate(id=c.id, label=c.label)
-                    for c in resolved.ambiguous_candidates
+                    for c in resolved_ambiguous_candidates
                 ],
             ),
         )
@@ -2165,6 +2198,7 @@ async def _resolve_recipient_only(query: str) -> _RecipientTarget:
         multi_pick_field_key=_PENDING_MULTI_RECIPIENT_PICK_KEY,
         multi_fragments_key=_PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY,
         multi_index_key=_PENDING_MULTI_RECIPIENT_INDEX_KEY,
+        strict_ambiguous_safety_gate=True,
     )
     if talents.ambiguous:
         return _RecipientTarget(ok=False, ambiguous=talents.ambiguous)

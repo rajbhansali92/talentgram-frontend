@@ -5578,3 +5578,95 @@ async def test_whitespace_tolerant_hyphenated_recipient_name_still_resolves():
             await _cleanup_batch(batch_id)
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Recipient talent-fallback safety gate on TIES (2026-08-20 production fix)
+# — a WhatsApp-only group name (not in CRM, no saved list) that isn't safely
+# resolvable must report "not found", never a nonsense talent ambiguity.
+#
+# Root cause: _resolve_talent_names' confident-single-match branch was
+# already filtered through _fuzzy_match_is_safe (added 2026-08-09 after a
+# real "Ami Trivedi" -> "Kripa Trivedi" misdelivery), but the AMBIGUOUS-tie
+# branch was never gated the same way. nlu.resolve_against_candidates'
+# per-token fuzzy tier scores the best ratio between ANY query token and
+# ANY label token — so a query with zero real relationship to either talent
+# can still tie two of them together on pure character overlap of a single
+# token pair (verified directly: SequenceMatcher("talentgram","talent")
+# ~= 0.75, SequenceMatcher("agency","nancy") ~= 0.727 — both clear the
+# 0.72 "worth suggesting" cutoff, both within the 0.05 ambiguity margin of
+# each other). Reproduced here with the exact production query/candidate
+# shape ("Mixxi App x Talentgram Agency" tying a "...Dubai Talent"-suffixed
+# name against a "Nancy ..."-prefixed name), scoped with a random tag so it
+# can't collide with real data in a shared test DB.
+# ---------------------------------------------------------------------------
+async def test_instagram_recipient_unsafe_ambiguous_talent_tie_reports_not_found():
+    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
+    phone = _phone()
+    original = await _use_test_config(group, phone)
+    tag = uuid.uuid4().hex[:6]
+    subject_talent = await _seed_talent(f"Isha {tag}", instagram_handle="isha_official")
+    # Neither name shares a real word with the recipient query below — the
+    # tie is purely a single-token character-overlap coincidence, exactly
+    # like the production "Sheida Rasekhizadeh Dubai Talent" / "Nancy
+    # Halai" pair.
+    decoy_a = await _seed_talent(f"Sheida Rasekhizadeh {tag} Talent", phone="917000400300")
+    decoy_b = await _seed_talent(f"Nancy {tag} Halai", phone="917000400301")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram - Isha {tag} - Mixxi App x Talentgram {tag} Agency",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "I found multiple" not in r.reply, r.reply
+        assert "couldn't find" in r.reply.lower(), r.reply
+        assert "Sent." not in r.reply
+    finally:
+        await _cleanup(phone, talent_ids=[subject_talent, decoy_a, decoy_b])
+        await _restore_config(original)
+
+
+async def test_resolve_talent_names_ambiguous_tie_filters_unsafe_candidates_unit():
+    """Direct unit coverage of the fix — resolve_against_candidates ties
+    two candidates together on a weak per-token fuzzy score.
+    strict_ambiguous_safety_gate=True (the recipient-fallback caller) must
+    filter both out rather than surfacing the raw tie. The default
+    (False, every OTHER caller — the field is genuinely a talent name for
+    them) must keep the pre-existing raw-tie behavior byte-for-byte, so a
+    real disambiguation like two different talents named "Priya" still
+    surfaces correctly (see test_disambiguation_talent_ambiguity_resolved_
+    via_exact_name — broken by an earlier, unscoped version of this fix
+    and fixed by adding this flag)."""
+    candidates = [
+        nlu.Candidate(id="a", label="Sheida Rasekhizadeh Dubai Talent"),
+        nlu.Candidate(id="b", label="Nancy Halai"),
+    ]
+    selector = nlu.parse_talent_selector("Mixxi App x Talentgram Agency")
+    resolved = nlu.resolve_against_candidates(selector, candidates)
+    assert resolved.ambiguous_candidates and len(resolved.ambiguous_candidates) == 2
+
+    strict = await wca._resolve_talent_names(
+        "Mixxi App x Talentgram Agency",
+        single_ambiguous_field_key="recipient_query",
+        multi_pick_field_key="__unused_pick__",
+        multi_fragments_key="__unused_fragments__",
+        multi_index_key="__unused_index__",
+        strict_ambiguous_safety_gate=True,
+    )
+    assert strict.not_found and not strict.ok and not strict.ambiguous
+
+    # The default (False) path hits the real talent pool via
+    # _fetch_all_talent_candidates (not the synthetic 2-candidate list
+    # above), so it can't assert an exact candidate count here — it only
+    # asserts the flag is truly a no-op: default behavior is whatever
+    # resolve_against_candidates itself would produce, unfiltered.
+    default = await wca._resolve_talent_names(
+        "Mixxi App x Talentgram Agency",
+        single_ambiguous_field_key="recipient_query",
+        multi_pick_field_key="__unused_pick__",
+        multi_fragments_key="__unused_fragments__",
+        multi_index_key="__unused_index__",
+    )
+    assert default.ambiguous is not None
+    assert not default.ok

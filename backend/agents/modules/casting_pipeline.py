@@ -76,6 +76,7 @@ from agents.registry import register_agent
 from agents import conversation, request_scope, session_context, undo_store
 from agents.parser import parse_confirmation_reply, parse_edit_instructions
 from agents.modules import casting_pipeline_nlu as nlu
+from agents.modules import media_assignment
 
 AGENT_ID = "casting-agent"
 UNDO_WINDOW_MINUTES = 5
@@ -3579,6 +3580,128 @@ ADD_INTENT = IntentDefinition(
 
 
 # ---------------------------------------------------------------------------
+# casting.upload — "upload - Talent - Project" (Media-Assignment Phase 1,
+# 2026-08-22). Resolves talent + project (STOP on ambiguity, same
+# principle as MOVE/ADD — never guess), then hands off to the bounded,
+# on-demand Media-Assignment mechanism (agents/modules/media_assignment.py
+# + services/media_assignment_worker.py + whatsapp-worker/mark_scan.py).
+#
+# auto_confirm=True, but unlike QUERY this is NOT a read-only intent — the
+# executor's return message is only an ACK ("Scanning..."), not the final
+# result. The actual scan -> validate -> download -> upload sequence runs
+# entirely outside this request/response cycle (it can take well over a
+# minute for a real video download), driven by the backend orchestrator
+# loop; the final UPLOAD COMPLETE/FAILED report is posted back into this
+# same casting-agent group later via the normal create_batch() outbound
+# path, not as a reply to this specific message. No confirmation gate is
+# needed here because nothing is written to WhatsApp or to a submission
+# until the orchestrator's own validation (identity, project match,
+# ambiguity, resolution-failure checks) passes — see media_assignment.py.
+#
+# Talent ambiguity/project ambiguity here are a flat STOP with a clear
+# message, not an interactive numbered-disambiguation resume (unlike MOVE/
+# ADD) — a deliberate Phase 1 simplification: re-issuing "upload - <fuller
+# name> - project" is trivial, and building the full disambiguation-resume
+# plumbing for a command that's supposed to be rare/on-demand wasn't
+# judged worth the complexity for this first cut.
+# ---------------------------------------------------------------------------
+UPLOAD_TALENT_FIELD = FieldSpec(
+    key="talent_selector", label="Talent",
+    question="Who should I upload media for?",
+    validate=_validate_selector, aliases=["talent", "who"],
+)
+
+UPLOAD_PROJECT_FIELD = FieldSpec(
+    key="project_query", label="Project",
+    question="Which project?",
+    validate=_validate_project_query, aliases=["project", "for"],
+)
+
+
+def _extract_upload_fields(text: str) -> Dict[str, str]:
+    """"upload - Talent - Project" — a standalone two-field hyphen
+    command, its own trigger ("upload"), needing zero changes to the
+    add/move-only _ACTION_PREFIX_RE in casting_pipeline_nlu.py (confirmed
+    during planning: that regex is private to parse_simple_add_move_command,
+    not a generic hook)."""
+    _, remainder = nlu._strip_leading_trigger(text or "", ["upload"])
+    fields = nlu._split_hyphen_fields(remainder, 2)
+    if not fields:
+        return {}
+    talent_part, project_part = fields
+    return {"talent_selector": talent_part, "project_query": project_part}
+
+
+async def _upload_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    talent_selector = collected.get("talent_selector") or ""
+    project_query = collected.get("project_query") or ""
+
+    talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(talent_selector)
+    if ambiguous:
+        options = "\n".join(f"{i + 1}. {c.label}" for i, c in enumerate(ambiguous))
+        return ExecResult(
+            ok=False, error="ambiguous_talent",
+            message=f"I found multiple talents.\n\n{options}\n\nPlease re-run with the exact full name.",
+        )
+    if not talent_id:
+        return ExecResult(ok=False, error="talent_not_found", message=err or "No matching talent found.")
+
+    projects = await _fetch_ongoing_projects()
+    with request_scope.stage("fuzzy"):
+        match = nlu.resolve_project_by_name(project_query, projects)
+    if match.ambiguous:
+        options = "\n".join(f"{i + 1}. {o['label']}" for i, o in enumerate(match.ambiguous))
+        return ExecResult(
+            ok=False, error="ambiguous_project",
+            message=f"I found multiple projects.\n\n{options}\n\nPlease re-run with the exact project name.",
+        )
+    if not match.project:
+        return ExecResult(
+            ok=False, error="project_not_found",
+            message=f'I couldn\'t find a project matching "{project_query}".',
+        )
+    project = match.project
+
+    talent_doc = await db.talents.find_one({"id": talent_id})
+    group_name = ((talent_doc or {}).get("whatsapp_group_name") or "").strip()
+    if not group_name:
+        return ExecResult(
+            ok=False, error="no_whatsapp_group",
+            message=f"{talent_label} has no WhatsApp group configured — the mark-based upload "
+                    "workflow requires one. Add it in Talentgram first.",
+        )
+
+    identity = await media_assignment.get_gunwanti_identity()
+    if not identity or not identity.get("lid"):
+        return ExecResult(
+            ok=False, error="identity_not_configured",
+            message="The Gunwanti agent identity (WhatsApp LID) is not configured yet — "
+                    "contact an admin before using upload.",
+        )
+
+    await media_assignment.create_scan_request(
+        talent_id=talent_id, talent_label=talent_label,
+        project_id=project["id"], project_label=project["label"],
+        group_name=group_name,
+    )
+    return ExecResult(
+        ok=True,
+        message=f"Scanning {talent_label}'s WhatsApp group for {project['label']} media…\n\n"
+                "I'll report back here once it's done.",
+    )
+
+
+UPLOAD_INTENT = IntentDefinition(
+    intent_id="casting.upload",
+    triggers=["upload"],
+    fields=[UPLOAD_TALENT_FIELD, UPLOAD_PROJECT_FIELD],
+    executor=_upload_executor,
+    extract_fields=_extract_upload_fields,
+    auto_confirm=True,
+)
+
+
+# ---------------------------------------------------------------------------
 # casting.undo — restore the last move within its window. auto_confirm:
 # there's nothing to approve here (the approval already happened for the
 # original move) — UNDO is itself the confirmed action, a fixed 5-minute-
@@ -3808,7 +3931,7 @@ CASTING_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="Talentgram Casting Pipeline",
     module="casting_pipeline",
-    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UNDO_INTENT],
+    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, UNDO_INTENT],
     resolve_bare_reply=_resolve_bare_reply,
     # Concurrent Task Engine (2026-08-05) — casting-agent is the first (and
     # so far only) agent to opt into independently-addressable, concurrent

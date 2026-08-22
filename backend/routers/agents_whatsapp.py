@@ -16,14 +16,24 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import List, Optional
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from core import current_admin, db
+from core import (
+    create_or_resume_submission_doc,
+    cloudinary_upload,
+    current_admin,
+    db,
+    media_url,
+    video_poster_url,
+)
 from agents import registry, tasks
 from agents.dispatcher import handle_inbound_message
+from agents.modules import media_assignment
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +166,233 @@ async def task_sent(
         raise HTTPException(status_code=401, detail="Unauthorized")
     await tasks.set_confirmation_message_id(payload.agent_id, payload.operation_id, payload.message_id)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Media-Assignment (Phase 1, 2026-08-22) — bounded, on-demand bridge between
+# the backend orchestrator (services/media_assignment_worker.py) and the
+# WhatsApp Worker (whatsapp-worker/mark_scan.py). The worker is a dumb
+# WhatsApp I/O layer here: it claims a request, does exactly what the
+# request's `mode` says, and reports back — it never decides identity,
+# project matching, or ambiguity; that all lives in agents/modules/
+# media_assignment.py, on the backend side. See the "ticklish-cuddling-
+# willow" plan for the full design and the module docstrings on both sides
+# for the exact state machine.
+# ---------------------------------------------------------------------------
+class ScanResultIn(BaseModel):
+    candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class DownloadResultIn(BaseModel):
+    results: List[Dict[str, Any]] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+@router.get("/gunwanti-identity")
+async def gunwanti_identity(x_internal_secret: Optional[str] = Header(default=None)):
+    """Worker-side identity config lookup (not currently used by the
+    worker for validation — the worker never checks identity, see module
+    docstring above — but exposed for diagnostics/parity with
+    /known-groups)."""
+    if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    identity = await media_assignment.get_gunwanti_identity()
+    return identity or {}
+
+
+@router.post("/scan-requests/claim")
+async def claim_scan_request(x_internal_secret: Optional[str] = Header(default=None)):
+    """Atomic claim of the oldest pending scan OR download request — same
+    find_one_and_update claim pattern worker.py's poll_and_process_jobs
+    already uses for send jobs. Returns {} (no request body-less 204, to
+    keep the worker's polling loop simple) when nothing is pending."""
+    if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    now = datetime.now(timezone.utc)
+    doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one_and_update(
+        {"status": {"$in": [media_assignment.SCAN_STATUS_PENDING, media_assignment.DOWNLOAD_STATUS_PENDING]}},
+        {"$set": {"status": "processing", "claimed_at": now}},
+        sort=[("created_at", 1)],
+        return_document=True,
+    )
+    if not doc:
+        return {}
+    doc.pop("_id", None)
+    return doc
+
+
+@router.post("/scan-requests/{request_id}/scan-result")
+async def report_scan_result(
+    request_id: str, payload: ScanResultIn,
+    x_internal_secret: Optional[str] = Header(default=None),
+):
+    """Worker reports the raw candidate list after a bounded scan (see
+    mark_scan.py) — no filtering/interpretation done here beyond storing
+    it; agents/modules/media_assignment.py's validate_candidates (run by
+    the backend orchestrator loop) owns everything downstream of this."""
+    if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    status = media_assignment.SCAN_STATUS_FAILED if payload.error else media_assignment.SCAN_STATUS_DONE
+    res = await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+        {"id": request_id},
+        {"$set": {
+            "status": status, "candidates": payload.candidates, "scan_error": payload.error,
+            "updated_at": datetime.now(timezone.utc),
+        }},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Unknown scan request")
+    return {"ok": True}
+
+
+@router.post("/scan-requests/{request_id}/download-result")
+async def report_download_result(
+    request_id: str, payload: DownloadResultIn,
+    x_internal_secret: Optional[str] = Header(default=None),
+):
+    """Worker reports per-item download/handoff outcomes after a
+    `mode="download"` request — the actual media bytes for each
+    successfully-downloaded item were already POSTed individually to
+    /media-upload; this just marks the overall request finished so the
+    backend orchestrator can compose the final report."""
+    if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    status = media_assignment.DOWNLOAD_STATUS_FAILED if payload.error else media_assignment.DOWNLOAD_STATUS_DONE
+    res = await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+        {"id": request_id},
+        {"$set": {
+            "status": status, "download_results": payload.results, "download_error": payload.error,
+            "updated_at": datetime.now(timezone.utc),
+        }},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Unknown scan request")
+    return {"ok": True}
+
+
+@router.post("/media-upload")
+async def media_upload(
+    file: UploadFile = File(...),
+    talent_id: str = Form(...),
+    project_id: str = Form(...),
+    media_role: str = Form(...),
+    take_number: Optional[str] = Form(None),
+    original_label: str = Form(...),
+    source_message_id: str = Form(...),
+    source_thumbnail_hash: str = Form(...),
+    source_media_type: str = Form(...),
+    source_group_id: Optional[str] = Form(None),
+    source_group_name: Optional[str] = Form(None),
+    source_sender: Optional[str] = Form(None),
+    source_timestamp: Optional[str] = Form(None),
+    mark_reply_message_id: Optional[str] = Form(None),
+    mark_reply_text: Optional[str] = Form(None),
+    mark_target_phone: Optional[str] = Form(None),
+    mark_target_contact_id: Optional[str] = Form(None),
+    x_internal_secret: Optional[str] = Header(default=None),
+):
+    """Worker hands off ONE downloaded WhatsApp media file here, to attach
+    to the correct Talentgram submission — the only place actual media
+    bytes cross the worker->backend boundary (scan/download-result above
+    carry metadata only). Mirrors routers/submissions.py's admin_add_media
+    two-step shape (upload bytes, then $push onto submission.media[]),
+    just server-resolved by (talent_id, project_id) instead of an
+    admin-authenticated (project_id, submission_id) pair, and additionally
+    upserts the media_assignments audit row this feature's idempotency
+    depends on.
+
+    Talent must have an email on file — create_or_resume_submission_doc
+    (like every other submission-creation path in this app) keys a
+    submission by (project_id, talent_email). A WhatsApp-sourced talent
+    with no email cannot get a submission created here; this is reported
+    back to the caller (the backend orchestrator), never silently worked
+    around with a synthesized email."""
+    if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    project = await db.projects.find_one({"id": project_id})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    talent = await db.talents.find_one({"id": talent_id})
+    if not talent:
+        raise HTTPException(status_code=404, detail="Talent not found")
+    email = (talent.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{talent.get('name') or talent_id} has no email on file — required before a "
+                    "submission can be created. Add one in Talentgram first.",
+        )
+
+    sub_result = await create_or_resume_submission_doc(
+        project, email, talent.get("name") or "", talent.get("phone"), None, None,
+        created_by="whatsapp-agent", created_from="whatsapp_media_assignment", talent_id=talent_id,
+    )
+    sid = sub_result["id"]
+
+    data = await file.read()
+    is_video = source_media_type == "video" or (file.content_type or "").startswith("video/")
+    rt = "video" if is_video else "image"
+    media_id = f"wa_{uuid.uuid4().hex[:8]}"
+    folder = f"talentgram/projects/{project_id}/auditions/{talent_id}/whatsapp_media"
+
+    result = cloudinary_upload(
+        data, folder=folder, public_id=media_id, resource_type=rt,
+        content_type=file.content_type, keep_original=False,
+    )
+
+    take_number_int: Optional[int] = None
+    if take_number:
+        try:
+            take_number_int = int(take_number)
+        except ValueError:
+            take_number_int = None
+
+    media_obj: Dict[str, Any] = {
+        "id": media_id,
+        "category": "take" if media_role == "take" else media_role,
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "content_type": file.content_type or "application/octet-stream",
+        "original_filename": file.filename,
+        "size": result.get("bytes") or len(data),
+        "created_at": datetime.now(timezone.utc),
+        "scope": "whatsapp_media_assignment",
+        "submission_id": sid,
+        "project_id": project_id,
+        "admin_added": True,
+        "admin_added_by": "whatsapp-agent",
+        "label": original_label,
+        "client_visible": True,
+        "duration": result.get("duration"),
+        "poster_url": video_poster_url(result["public_id"]) if rt == "video" else None,
+        "thumbnail_url": (
+            media_url(result["public_id"], preset="thumb", resource_type=rt) if rt == "image" else None
+        ),
+        "origin": "whatsapp",
+        # Media-Assignment provenance — never present on any other media
+        # item, kept here (in addition to the media_assignments collection)
+        # so a submission's media list is independently auditable without a
+        # join.
+        "source_message_id": source_message_id,
+        "source_thumbnail_hash": source_thumbnail_hash,
+    }
+    await db.submissions.update_one({"id": sid}, {"$push": {"media": media_obj}})
+
+    await media_assignment.mark_assignment_status(
+        talent_id, project_id, source_message_id, media_assignment.ASSIGN_STATUS_UPLOADED,
+        submission_id=sid, submission_media_id=media_id,
+    )
+
+    # Verify — never trust the write alone (matches this codebase's
+    # existing "don't claim success on HTTP 200 alone" principle).
+    fresh = await db.submissions.find_one({"id": sid, "media.id": media_id}, {"_id": 0, "id": 1})
+    if not fresh:
+        raise HTTPException(status_code=500, detail="Upload succeeded but could not be verified on the submission")
+
+    return {"submission_id": sid, "media_id": media_id, "url": result["url"]}
 
 
 class AgentConfigUpdate(BaseModel):

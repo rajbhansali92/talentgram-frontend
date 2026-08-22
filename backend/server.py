@@ -12,6 +12,7 @@ from starlette.middleware.cors import CORSMiddleware
 from core import db, mongo_client, seed_admin, update_talent_cover_cache, validate_talent_fields_classification
 from drive_backup import attach_db, drive_enabled, start_drive_worker
 from services.import_worker import start_import_worker
+from services.media_assignment_worker import start_media_assignment_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
 from request_context import generate_request_id, reset_request_id, set_request_id
 from routers import (
@@ -591,6 +592,13 @@ async def on_startup():
 
         # Start persistent Ingestion Data Center Worker queue
         start_import_worker()
+
+        # Media-Assignment orchestrator (Phase 1, 2026-08-22) — see
+        # agents/modules/media_assignment.py and services/
+        # media_assignment_worker.py module docstrings.
+        from agents.modules import media_assignment as _media_assignment
+        await _media_assignment.ensure_indexes()
+        start_media_assignment_worker()
 
         logger.info("Backend startup completed successfully")
 

@@ -564,6 +564,20 @@ async def main() -> None:
     except Exception as e:
         logger.warning("worker: inbound listener failed to start (non-fatal, outbound sending unaffected): %s", e)
 
+    # Media-Assignment (Phase 1, 2026-08-22) — bounded, on-demand scan/
+    # download for the `@Gunwanti + mark` mechanism (see mark_scan.py). A
+    # failure to start this must never take down inbound/outbound, same
+    # guard as the inbound listener above.
+    mark_scan_task = None
+    try:
+        import httpx as _httpx
+        import mark_scan
+        mark_scan_task = asyncio.create_task(
+            mark_scan.mark_scan_loop(session, _httpx.AsyncClient())
+        )
+    except Exception as e:
+        logger.warning("worker: media-assignment scan loop failed to start (non-fatal): %s", e)
+
     # Startup DOM health check — log which registry selectors resolve on the live
     # WhatsApp DOM so verification selector drift is visible immediately.
     try:
@@ -610,6 +624,8 @@ async def main() -> None:
         heartbeat_task.cancel()
         if inbound_task is not None:
             inbound_task.cancel()
+        if mark_scan_task is not None:
+            mark_scan_task.cancel()
         await session.stop()
 
 

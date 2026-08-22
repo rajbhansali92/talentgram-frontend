@@ -51,7 +51,7 @@ SPIKE_COLLECTION = "whatsapp_media_spike_diagnostics"
 _captured_keys: set[str] = set()
 
 _MAX_MESSAGES_SCANNED = 20
-_HTML_TRUNCATE = 20000
+_HTML_TRUNCATE = 60000
 
 # Tier 1: is WhatsApp Web's internal webpack module registry reachable at
 # all, and can a Store.Msg-shaped module be found among its modules? Tier 2

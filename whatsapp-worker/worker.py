@@ -19,6 +19,7 @@ from db import init_db, get_db
 from session import WhatsAppSession
 from sender import send_whatsapp_message
 import config
+import spike_diagnostics
 
 # Configure logging
 logging.basicConfig(
@@ -517,6 +518,13 @@ async def main() -> None:
     logger.info("worker: initializing database connection...")
     await init_db()
     await _ensure_dom_snapshot_ttl_index()
+    if config.MEDIA_SPIKE_DIAGNOSTICS_ENABLED and config.MEDIA_SPIKE_GROUP_NAME:
+        logger.warning(
+            "worker: MEDIA SPIKE DIAGNOSTICS ENABLED for group=%r — temporary, "
+            "read-only investigation only (see spike_diagnostics.py)",
+            config.MEDIA_SPIKE_GROUP_NAME,
+        )
+        await spike_diagnostics.ensure_spike_ttl_index()
 
     # Honor a pending admin reset before touching the browser/session.
     await _maybe_reset_session()

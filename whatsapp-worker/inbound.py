@@ -46,6 +46,7 @@ import httpx
 
 import config
 import sender
+import spike_diagnostics
 from db import get_db
 
 logger = logging.getLogger(__name__)
@@ -975,6 +976,14 @@ async def poll_once(
         await _rearm_for_new_generation(session, groups_cache, participants_cache)
 
     groups = await groups_cache.get()
+    # Media-Assignment Reply-Identity Spike (2026-08-22, TEMPORARY) — see
+    # spike_diagnostics.py's module docstring. This is the one deliberate,
+    # explicitly-flagged exception to "a group name is NEVER hardcoded here"
+    # (module docstring above): a local copy only, never written back into
+    # groups_cache, so the spike group is never treated as agent-known.
+    if config.MEDIA_SPIKE_DIAGNOSTICS_ENABLED and config.MEDIA_SPIKE_GROUP_NAME:
+        if config.MEDIA_SPIKE_GROUP_NAME not in groups:
+            groups = list(groups) + [config.MEDIA_SPIKE_GROUP_NAME]
     if not groups:
         return
 
@@ -1023,6 +1032,15 @@ async def poll_once(
                 # Flagged in the DB, but it opened this time — the operator
                 # fixed the mapping or restored the group. Auto-recover.
                 await _clear_invalid_configuration(group_name)
+
+            if (
+                config.MEDIA_SPIKE_DIAGNOSTICS_ENABLED
+                and group_name == config.MEDIA_SPIKE_GROUP_NAME
+            ):
+                # Diagnostic-only — runs in addition to, not instead of, the
+                # normal scan below (which will harmlessly find no mapped
+                # agent for this group and dispatch nothing).
+                await spike_diagnostics.capture_group_diagnostics(page, group_name)
 
             try:
                 new_messages, dom_detection_sec, message_extraction_sec = await _scan_group_for_new_messages(

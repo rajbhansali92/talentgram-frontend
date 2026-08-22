@@ -100,3 +100,15 @@ REAUTH_GRACE_SEC: int = int(os.environ.get("WA_REAUTH_GRACE_SEC", "60"))
 # keeps working) — an emergency kill switch that needs no redeploy of the
 # Agent Platform or Marketing module, just a worker restart.
 INBOUND_LISTENER_ENABLED: bool = os.environ.get("WA_INBOUND_LISTENER_ENABLED", "true").lower() not in ("false", "0", "no")
+
+# Media-Assignment Reply-Identity Spike (2026-08-22) — TEMPORARY, off by
+# default. Every group this worker watches normally comes from the backend's
+# Agent Registry (see inbound.py's module docstring — "a group name is NEVER
+# hardcoded here"); this is a deliberate, explicitly-flagged exception so one
+# named DISPOSABLE test group can be scanned for diagnostic capture only
+# (see spike_diagnostics.py), never for real command dispatch. Both must be
+# set for anything to happen; leaving either unset keeps this fully inert.
+MEDIA_SPIKE_DIAGNOSTICS_ENABLED: bool = os.environ.get("WA_MEDIA_SPIKE_DIAGNOSTICS", "false").lower() in ("1", "true", "yes")
+MEDIA_SPIKE_GROUP_NAME: str = os.environ.get("WA_MEDIA_SPIKE_GROUP_NAME", "")
+# Short retention — this collection exists only for the duration of the spike.
+MEDIA_SPIKE_TTL_SEC: int = int(os.environ.get("WA_MEDIA_SPIKE_TTL_SEC", str(3 * 24 * 3600)))

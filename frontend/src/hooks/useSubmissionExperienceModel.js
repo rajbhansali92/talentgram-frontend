@@ -66,7 +66,16 @@ export function useSubmissionExperienceModel({
             operational: deriveOperationalStatus({ satisfied: item.satisfied, media: item.media, activeUploads }),
         }));
 
-        const checklist = readinessModel.filter((item) => item.requirement === REQUIREMENT_TIERS.REQUIRED);
+        // Media (section: "uploads") is excluded from the submit-blocking
+        // checklist — project submission no longer collects media at all
+        // (see SubmissionPage.jsx's disabled uploads-section), so nothing in
+        // that section can ever legitimately block Submit. `readinessModel`
+        // itself is left untouched (ProjectDetail.jsx's own pre-submission
+        // Requirements Checklist reads that directly, unfiltered, and stays
+        // exactly as it was — this only changes what can gate Submit).
+        const checklist = readinessModel.filter(
+            (item) => item.requirement === REQUIREMENT_TIERS.REQUIRED && item.section !== "uploads",
+        );
         const missingRequirements = checklist.filter((item) => !item.satisfied);
 
         const readinessSummary = summarizeReadiness(checklist);

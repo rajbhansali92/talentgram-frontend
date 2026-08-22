@@ -1,9 +1,9 @@
 """Auth, file upload, file serving."""
 import logging
 import uuid
-from typing import Dict
+from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, EmailStr
 
 from core import (
@@ -23,6 +23,7 @@ from core import (
     compute_age,
     normalize_email,
     check_rate_limit,
+    grant_trusted_device,
 )
 
 # Alias for readability inside login()
@@ -32,7 +33,7 @@ router = APIRouter(prefix="/api", tags=["auth"])
 logger = logging.getLogger(__name__)
 
 
-async def _grant_portal_session(talent: dict) -> str:
+async def _grant_portal_session(talent: dict, response: Optional[Response] = None) -> str:
     """Mint a portal session token for an ownership-verified talent and persist
     it on the record so the session is revocable. Returns the token.
 
@@ -40,6 +41,10 @@ async def _grant_portal_session(talent: dict) -> str:
     otherwise-successful OTP/Google login (the portal token is not required by
     any active submit/apply flow). On write failure we log and still return the
     minted token, mirroring the best-effort `last_login` write in `login()`.
+
+    Also grants a trusted-device cookie (when `response` is provided) — every
+    path that proves email ownership via OTP/Google is exactly the moment a
+    device should become trusted for silent project-submission recognition.
     """
     email = talent.get("email") or talent.get("normalized_email")
     token = mint_portal_token(email)
@@ -50,6 +55,7 @@ async def _grant_portal_session(talent: dict) -> str:
         )
     except Exception as e:
         logger.warning(f"portal token persistence failed for talent {talent.get('id')}: {e}")
+    await grant_trusted_device(response, talent.get("id"))
     return token
 
 # Prefill/Auth IP sliding window storage bucket
@@ -63,7 +69,7 @@ class GoogleAuthIn(BaseModel):
 
 
 @router.post("/auth/google")
-async def google_auth(payload: GoogleAuthIn, request: Request):
+async def google_auth(payload: GoogleAuthIn, request: Request, response: Response):
     import os
     import requests
     import jwt
@@ -156,7 +162,7 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
                 "application_id": application["id"],
                 "status": application.get("status", "draft"),
                 "talent": (await _get_talent_profile_response(talent)) if talent else None,
-                "portal_token": (await _grant_portal_session(talent)) if talent else None,
+                "portal_token": (await _grant_portal_session(talent, response)) if talent else None,
             }
 
     talent = await db.talents.find_one({
@@ -190,7 +196,7 @@ async def google_auth(payload: GoogleAuthIn, request: Request):
             "picture": picture
         }
 
-    portal_token = await _grant_portal_session(talent)
+    portal_token = await _grant_portal_session(talent, response)
 
     project = await db.projects.find_one({"slug": payload.slug})
     if not project:
@@ -679,7 +685,7 @@ async def send_otp(payload: OtpSendIn, request: Request):
     return {"message": "Verification code sent successfully."}
 
 @router.post("/auth/otp/verify")
-async def verify_otp(payload: OtpVerifyIn, request: Request):
+async def verify_otp(payload: OtpVerifyIn, request: Request, response: Response):
     email = normalize_email(payload.email)
     otp = payload.otp.strip()
     slug = payload.slug.strip()
@@ -777,14 +783,14 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 # restore identity from the draft before falling back to an
                 # empty value.
                 "application": {"form_data": application.get("form_data") or {}},
-                "portal_token": (await _grant_portal_session(talent)) if talent else None,
+                "portal_token": (await _grant_portal_session(talent, response)) if talent else None,
             }
         elif talent:
             return {
                 "existing": True,
                 "email": email,
                 "talent": await _get_talent_profile_response(talent),
-                "portal_token": await _grant_portal_session(talent),
+                "portal_token": await _grant_portal_session(talent, response),
             }
     elif slug == "portal":
         # Standalone Dashboard login (no project context — see
@@ -816,7 +822,7 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
                 "submission_id": submission["id"],
                 "status": submission.get("status", "draft"),
                 "talent": (await _get_talent_profile_response(talent)) if talent else None,
-                "portal_token": (await _grant_portal_session(talent)) if talent else None,
+                "portal_token": (await _grant_portal_session(talent, response)) if talent else None,
             }
 
     talent = await db.talents.find_one({
@@ -830,7 +836,7 @@ async def verify_otp(payload: OtpVerifyIn, request: Request):
             "existing": True,
             "email": email,
             "talent": await _get_talent_profile_response(talent),
-            "portal_token": await _grant_portal_session(talent),
+            "portal_token": await _grant_portal_session(talent, response),
         }
 
     # STEP 3: Store a temporary submission draft instead of creating a Talent record.

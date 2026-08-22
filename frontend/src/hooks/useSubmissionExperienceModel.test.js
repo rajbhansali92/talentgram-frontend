@@ -102,7 +102,7 @@ describe("useSubmissionExperienceModel — correct aggregation", () => {
         expect(result.current.submitCta.disabled).toBe(false);
     });
 
-    it("a failed required upload propagates all the way to blockingReason and submitCta", () => {
+    it("a failed/required upload does NOT block submit — media is excluded from the checklist entirely (project submission no longer collects media)", () => {
         const inputs = baseInputs({
             project: strictProject({ intro_video: "required" }),
             form: filledForm(),
@@ -110,10 +110,15 @@ describe("useSubmissionExperienceModel — correct aggregation", () => {
             activeUploads: { intro_video: { status: "failed" } },
         });
         const { result } = renderHook(() => useSubmissionExperienceModel(inputs));
-        expect(result.current.readinessSummary.failed).toHaveLength(1);
-        expect(result.current.blockingReason).toBe("failed");
-        expect(result.current.submitCta.buttonAction).toBe("scroll_to_missing");
-        expect(result.current.submitCta.scrollTarget.id).toBe("intro_video");
+        expect(result.current.checklist.some((item) => item.section === "uploads")).toBe(false);
+        expect(result.current.readinessSummary.failed).toHaveLength(0);
+        expect(result.current.blockingReason).toBeNull();
+        expect(result.current.submitCta.disabled).toBe(false);
+        // requirementItems (the raw, unfiltered engine output) still labels
+        // intro_video correctly — only the derived submit-blocking checklist
+        // excludes it, so any other consumer (e.g. ProjectDetail.jsx's own
+        // pre-submission summary) is unaffected.
+        expect(result.current.requirementItems.find((i) => i.id === "intro_video").requirement).toBe(REQUIREMENT_TIERS.REQUIRED);
     });
 });
 

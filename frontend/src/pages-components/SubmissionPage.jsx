@@ -495,6 +495,13 @@ function SubmissionPage() {
     const [reloadNonce, setReloadNonce] = useState(0);  // bumped by the Retry button
     const [saved, setSaved] = useState(() => (adminMode ? null : readSaved(slug)));
     const [showMaterial, setShowMaterial] = useState(false);
+    // Project details must stay reachable at every point in the flow, not
+    // just pre-auth — expanded by default before the email gate unlocks
+    // (this is the first thing a talent reads), collapsed behind a "View
+    // Project Details" toggle once they're actively filling in the form or
+    // have already submitted, so it doesn't visually compete with the form
+    // itself.
+    const [showProjectDetails, setShowProjectDetails] = useState(false);
     const [activeLightboxImage, setActiveLightboxImage] = useState(null);
     // Admin Mode bootstrap state — populated by the admin-start effect
     // further down, once `project` has loaded (admin-start needs `pid`,
@@ -1491,15 +1498,50 @@ function SubmissionPage() {
         }
     }, [adminMode, emailGateUnlocked, computeReturningTalentStartStep]);
 
+    // Trusted-device recognition — the cookie-based analog of
+    // attemptSilentRecognition above. Tried FIRST: unlike the portal token
+    // (localStorage, matched against a client-supplied candidate email), the
+    // trusted-device cookie is HttpOnly (never touched by this file's JS)
+    // and proves identity on its own, so it works the moment the talent
+    // opens ANY project link on a device that's already trusted — no email
+    // typing, no per-project state to keep in sync. Falls through to the
+    // existing portal-token path on any failure (missing/expired/revoked
+    // cookie, or admin mode where this is skipped entirely).
+    const attemptTrustedDeviceRecognition = useCallback(async () => {
+        if (adminMode || emailGateUnlocked) return false;
+        try {
+            const { data } = await axios.get("/public/trusted-device/recognize");
+            if (!data || !data.first_name) return false;
+            populatePrefillData(data);
+            setPrefillSuggestion({ data });
+            setPrefillTried(true);
+            setRecognizedIdentity(buildRecognizedIdentity(data));
+            setEmailGateUnlocked(true);
+            setEmailVerified(true);
+            setIsReturningTalent(true);
+            setForm((f) => ({ ...f, email: f.email || data.email || "" }));
+            if (data.email) setPrefillEmail(data.email);
+            setCurrentStep(computeReturningTalentStartStep(data, data.email));
+            toast.success(`Welcome back, ${data.first_name}!`);
+            return true;
+        } catch (error) {
+            // 401 (no/invalid/expired cookie) is the expected, silent case —
+            // any other failure just means recognition didn't work.
+            return false;
+        }
+    }, [adminMode, emailGateUnlocked, computeReturningTalentStartStep]);
+
     const handleUploadTestClick = useCallback(async () => {
         setRecognizing(true);
         try {
+            const trusted = await attemptTrustedDeviceRecognition();
+            if (trusted) return;
             const ok = await attemptSilentRecognition();
             if (!ok) revealAndScrollToTalentDetails();
         } finally {
             setRecognizing(false);
         }
-    }, [attemptSilentRecognition]);
+    }, [attemptTrustedDeviceRecognition, attemptSilentRecognition]);
 
     const tryPrefill = async () => {
         if (saved) return; // submission already started — too late
@@ -1547,6 +1589,11 @@ function SubmissionPage() {
     };
 
     const handleUseAnotherEmail = () => {
+        // Revoke THIS device's trusted-device cookie only — other devices
+        // already trusted for this talent are untouched. Best-effort/fire-
+        // and-forget: the rest of this reset must not wait on or fail
+        // because of a network hiccup.
+        axios.post("/public/trusted-device/forget").catch(() => {});
         localStorage.removeItem("talentgram_portal_email");
         localStorage.removeItem("talentgram_google_email");
         localStorage.removeItem("talentgram_google_first_name");
@@ -3071,13 +3118,12 @@ function SubmissionPage() {
     // ---------------------------------------------------------------
     // SUBMITTED / UPDATED / RETEST state — permanent Submission Hub dashboard
     if (isSubmitted && !editMode) {
-        // Simplified-wizard UX (2026-08): the Thank You screen shows ONLY a
-        // confirmation and the two actions that matter next — no project
-        // details, status pill/timestamp, retest banner, client feedback, or
-        // content summary. Those remain fully intact and visible once the
-        // talent is actually back inside their Dashboard/Portal (a
-        // deliberately different, richer surface) — this screen's only job
-        // is to confirm the submission landed and hand off cleanly.
+        // Thank You screen — confirmation + the actions that matter next.
+        // Project details stay reachable here too (via the same "View
+        // Project Details" toggle used during the form) rather than
+        // disappearing the moment a submission lands; portfolio/media
+        // management is explicitly NOT this screen's job — "Update
+        // Portfolio" hands off to the existing talent dashboard for that.
         return (
             <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-thank-you">
                 {adminMode && <AdminModeBanner talentName={adminTalentName} />}
@@ -3094,23 +3140,62 @@ function SubmissionPage() {
                         <h1 className="font-display text-4xl md:text-5xl tracking-tight text-[#111111] mb-4 leading-[1.05]">
                             Thank You
                         </h1>
-                        <p className="text-[15px] leading-relaxed text-[#333333] mb-10">
+                        <p className="text-[15px] leading-relaxed text-[#333333] mb-6">
                             Your submission has been received.
                         </p>
+
+                        <button
+                            type="button"
+                            onClick={() => setShowProjectDetails((s) => !s)}
+                            data-testid="thank-you-view-project-details-btn"
+                            className="inline-flex items-center gap-1.5 mx-auto mb-6 px-4 py-2 rounded-full border border-[#eaeaea] hover:border-[#d4d4d4] text-[12px] font-semibold text-[#111111] transition-all duration-150"
+                        >
+                            {showProjectDetails ? "Hide" : "View"} Project Details
+                            <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showProjectDetails ? "rotate-180" : ""}`} />
+                        </button>
+
+                        {showProjectDetails && (
+                            <div className="text-left mb-8 p-5 rounded-2xl bg-slate-50/70 border border-[#eaeaea]/60">
+                                <h2 className="font-display text-xl tracking-tight text-[#111111] mb-4">
+                                    Talentgram × {project.brand_name}
+                                </h2>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
+                                    <Info label="Character" value={project.character} />
+                                    <Info label="Shoot Dates" value={project.shoot_dates} />
+                                    {project.budget_per_day && (
+                                        <Info label="Budget Per Day" value={project.budget_per_day} />
+                                    )}
+                                    <Info label="Director" value={project.director} />
+                                    <Info label="Production House" value={project.production_house} />
+                                    <Info label="Commission" value={project.commission_percent} />
+                                    <Info label="Medium / Usage" value={project.medium_usage} wide />
+                                </div>
+                                {project.additional_details && (
+                                    <div className="mt-4 pt-4 border-t border-slate-200">
+                                        <p className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono mb-2">
+                                            Additional Details
+                                        </p>
+                                        <p className="text-[13px] leading-relaxed text-[#222222] whitespace-pre-line">
+                                            {project.additional_details}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         <div className="flex flex-col gap-3">
                             <a
                                 href="/portal/home"
                                 data-testid="thank-you-dashboard-link"
-                                className="w-full border border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111] py-3.5 px-6 rounded-full text-xs font-semibold transition-all duration-150 inline-flex items-center justify-center gap-1.5"
+                                className="w-full bg-slate-900 text-white py-3.5 px-6 rounded-full text-xs font-semibold hover:bg-slate-800 hover:-translate-y-[1px] active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 shadow-sm"
                             >
-                                View My Dashboard
+                                Update Portfolio
                             </a>
                             <button
                                 type="button"
                                 onClick={() => setEditMode(true)}
                                 data-testid="update-submission-hub-btn"
-                                className="w-full bg-slate-900 text-white py-3.5 px-6 rounded-full text-xs font-semibold hover:bg-slate-800 hover:-translate-y-[1px] active:scale-[0.98] transition-all duration-150 inline-flex items-center justify-center gap-1.5 shadow-sm"
+                                className="w-full border border-[#eaeaea] hover:border-[#d4d4d4] text-[#111111] py-3.5 px-6 rounded-full text-xs font-semibold transition-all duration-150 inline-flex items-center justify-center gap-1.5"
                             >
                                 Update Submission
                             </button>
@@ -3379,6 +3464,27 @@ function SubmissionPage() {
         </div>
     );
 
+    // Same field/state/handler as the "Skills & Attributes" step's own copy
+    // below — defined once here so a returning talent's one-page form (see
+    // recurringProfileFields) can show it inline with the project questions
+    // instead of on a separate step they never visit, with zero duplicate
+    // state.
+    const workLinksBlock = requirements.work_links_visibility !== REQUIREMENT_TIERS.HIDDEN && (
+        <div className="md:col-span-2" data-testid="form-work-links-field">
+            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
+                Work Links (optional)
+            </span>
+            <p className="text-[12px] text-[#666] mt-1 mb-2 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
+            <WorkLinksEditor
+                links={form.work_links || []}
+                onChange={(arr) => {
+                    setForm({ ...form, work_links: arr });
+                    setTimeout(saveForm, 0);
+                }}
+            />
+        </div>
+    );
+
     return (
         <main className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-slate-50/30 text-[#111111] relative overflow-hidden" data-testid="submission-page">
             {adminMode && <AdminModeBanner talentName={adminTalentName} />}
@@ -3508,10 +3614,18 @@ function SubmissionPage() {
                     Details no longer serve the current task. Not just
                     visually collapsed — unmounted, so only the progress
                     indicator + current step remain. */}
-                {!emailGateUnlocked && (
+                {/* Project details are ALWAYS reachable — before auth (fully
+                    expanded, first thing a talent reads), during the form
+                    (collapsed behind "View Project Details" so it doesn't
+                    compete with the fields), and on the Thank You screen
+                    (same collapsed toggle, see the isSubmitted branch below).
+                    Previously this whole section unmounted the instant
+                    `emailGateUnlocked` became true — that's the exact
+                    "project details disappear after submission" complaint
+                    this fixes. */}
                 <section className="mb-8 bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/60 shadow-[0_4px_20px_rgba(15,23,42,0.04)]" data-testid="project-info-section" data-step="1">
                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-4">Audition Brief</p>
-                    <div className="mb-8 border-b border-slate-100 pb-4">
+                    <div className={emailGateUnlocked ? "" : "mb-8 border-b border-slate-100 pb-4"}>
                         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                             <div className="flex flex-col gap-1">
                                 <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#333333]">PROJECT</p>
@@ -3519,15 +3633,19 @@ function SubmissionPage() {
                                     Talentgram × {project.brand_name}
                                 </h1>
                             </div>
-                            {/* "Draft Auto-Saved" badge removed (2026-08):
-                                this whole card is now only rendered while
-                                `!emailGateUnlocked` (see the section-level
-                                gate above), so the badge's own
-                                `emailGateUnlocked &&` condition could never
-                                be true — it was dead code once the section
-                                itself became pre-gate-only. */}
+                            {emailGateUnlocked && (
+                                <button
+                                    type="button"
+                                    onClick={() => setShowProjectDetails((s) => !s)}
+                                    data-testid="view-project-details-btn"
+                                    className="shrink-0 inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-[#eaeaea] hover:border-[#d4d4d4] text-[12px] font-semibold text-[#111111] transition-all duration-150"
+                                >
+                                    {showProjectDetails ? "Hide" : "View"} Project Details
+                                    <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${showProjectDetails ? "rotate-180" : ""}`} />
+                                </button>
+                            )}
                         </div>
-                        {hasAuditionMaterial && (
+                        {!emailGateUnlocked && hasAuditionMaterial && (
                             <div className="mt-4">
                                 <button
                                     onClick={() => setShowMaterial(true)}
@@ -3544,7 +3662,9 @@ function SubmissionPage() {
                             </div>
                         )}
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5 border-t border-[#eaeaea]/50 pt-6">
+                    {(!emailGateUnlocked || showProjectDetails) && (
+                    <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5 border-t border-[#eaeaea]/50 pt-6 mt-6">
                         <Info label="Character" value={project.character} />
                         <Info label="Shoot Dates" value={project.shoot_dates} />
                         {project.budget_per_day && (
@@ -3571,11 +3691,30 @@ function SubmissionPage() {
                             </p>
                         </div>
                     )}
-                    {/* Dominant CTA — clicking silently recognizes a returning
-                        talent via their portal session (no OTP, no retyped
-                        profile) and jumps straight to Project Questions; a
-                        new/unrecognized talent is scrolled to the existing
-                        email/OTP entry below. See handleUploadTestClick. */}
+                    {emailGateUnlocked && hasAuditionMaterial && (
+                        <div className="mt-6 pt-4 border-t border-slate-100">
+                            <button
+                                onClick={() => setShowMaterial(true)}
+                                data-testid="view-audition-material-btn"
+                                className="inline-flex items-center gap-2 px-5 py-2.5 border border-[#0c2340] hover:border-[#0c2340] hover:bg-[#0c2340]/[0.08] active:scale-[0.98] rounded-full text-[13px] text-[#0c2340] font-semibold transition-all hover:shadow-md hover:-translate-y-[1px] bg-[#0c2340]/[0.04]"
+                            >
+                                <FolderOpen className="w-4 h-4 text-[#0c2340]" /> View Audition Material
+                            </button>
+                            {auditionMaterialSummary && (
+                                <p className="mt-2 ml-1 text-[11px] text-[#666666] tracking-wide">
+                                    {auditionMaterialSummary}
+                                </p>
+                            )}
+                        </div>
+                    )}
+                    </>
+                    )}
+                    {/* Dominant CTA — clicking recognizes a returning talent
+                        (trusted device first, then portal token — no OTP, no
+                        retyped profile) and jumps straight to the project
+                        form; a new/unrecognized talent is scrolled to the
+                        existing email/OTP entry below. See
+                        handleUploadTestClick. */}
                     {!emailGateUnlocked && (
                         <div className="mt-8 pt-6 border-t border-slate-100">
                             <button
@@ -3590,13 +3729,12 @@ function SubmissionPage() {
                                         <Loader2 className="w-4 h-4 animate-spin" /> Recognizing you…
                                     </>
                                 ) : (
-                                    <>UPLOAD TEST</>
+                                    <>SUBMIT FORM</>
                                 )}
                             </button>
                         </div>
                     )}
                 </section>
-                )}
 
                 {/* Simplified-wizard UX (2026-08): the full multi-item
                     readiness checklist is no longer shown DURING the active
@@ -3838,7 +3976,7 @@ function SubmissionPage() {
                         {emailGateUnlocked && (
                         <>
                         {/* Section 1: Your Profile */}
-                        <div data-testid="profile-section" data-wizard-step="3" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(3)}`}>
+                        <div data-testid="profile-section" data-wizard-step="2" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(2)}`}>
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Talent Profile</p>
@@ -4029,7 +4167,7 @@ function SubmissionPage() {
                             all one step's content. Purely a JSX relocation: same
                             fields, same handlers, same testids — nothing about what
                             they do or how they validate changed. */}
-                        <div data-testid="skills-section" data-wizard-step="4" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(4)}`}>
+                        <div data-testid="skills-section" data-wizard-step="2" className={`bg-white rounded-3xl p-5 sm:p-7 border border-[#eaeaea]/70 shadow-[0_4px_20px_rgba(15,23,42,0.04)] mb-8 ${stepVisibilityClass(2)}`}>
                             <div className="flex items-center justify-between mb-4 pb-2 border-b border-[#eaeaea]/30">
                                 <div>
                                     <p className="uppercase tracking-[0.2em] text-[10px] font-mono text-[#0c2340] mb-1">Talent Profile</p>
@@ -4099,21 +4237,7 @@ function SubmissionPage() {
                                                 placeholder="A short note about you (max 600 chars)"
                                             />
                                         </label>
-                                        {requirements.work_links_visibility !== REQUIREMENT_TIERS.HIDDEN && (
-                                            <div className="md:col-span-2" data-testid="form-work-links-field">
-                                                <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
-                                                    Work Links (optional)
-                                                </span>
-                                                <p className="text-[12px] text-[#666] mt-1 mb-2 leading-relaxed">Add links to your professional websites or reels to showcase your previous work.</p>
-                                                <WorkLinksEditor
-                                                    links={form.work_links || []}
-                                                    onChange={(arr) => {
-                                                        setForm({ ...form, work_links: arr });
-                                                        setTimeout(saveForm, 0);
-                                                    }}
-                                                />
-                                            </div>
-                                        )}
+                                        {!isReturningTalent && workLinksBlock}
                                     </div>
                                     </UpdateProfileDisclosure>
                                 </div>
@@ -4160,6 +4284,23 @@ function SubmissionPage() {
                                         "Your Profile" only for a returning talent, never both. */}
                                     {isReturningTalent && (
                                         <div data-testid="recurring-profile-fields" className="mb-6">
+                                            {/* Read-only identity — from the recognized global
+                                                talent record; never re-entered here. */}
+                                            <div
+                                                data-testid="recurring-talent-identity"
+                                                className="mb-6 flex items-center gap-3 p-4 rounded-2xl bg-slate-50/70 border border-[#eaeaea]/60"
+                                            >
+                                                <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center shrink-0">
+                                                    <User className="w-4 h-4 text-[#333333]" />
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-[#333333]">Talent</p>
+                                                    <p className="text-sm font-semibold text-[#111111] truncate">
+                                                        {[form.first_name, form.last_name].filter(Boolean).join(" ")}
+                                                    </p>
+                                                    <p className="text-xs text-[#666] truncate">{form.email}</p>
+                                                </div>
+                                            </div>
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8">
                                                 {dobField}
                                                 {overrideAgeBlock}
@@ -4167,6 +4308,7 @@ function SubmissionPage() {
                                                 {heightBlock}
                                                 {instagramHandleField}
                                                 {instagramFollowersBlock}
+                                                {workLinksBlock}
                                             </div>
                                         </div>
                                     )}
@@ -4544,8 +4686,19 @@ function SubmissionPage() {
                 </section>
                 )}
 
-                {/* SECTION 3 — UPLOADS (gated on email-first gate) */}
-                {emailGateUnlocked && (
+                {/* SECTION 3 — UPLOADS. Media (intro video / audition takes /
+                    portfolio images) has been removed from project submission
+                    entirely — portfolio management now lives exclusively in
+                    the talent dashboard (see the "Update Portfolio" link on
+                    the Thank You screen). This section's JSX/components are
+                    deliberately left in place — nothing deleted, existing
+                    upload infrastructure is untouched — just never rendered
+                    here. `stepVisibilityClass(2)` below is now stale (step 2
+                    is Basic Profile after the uploads-step removal from
+                    WIZARD_STEPS) — harmless since the whole section is
+                    unreachable, kept only so this block still parses if ever
+                    re-enabled. */}
+                {false && emailGateUnlocked && (
                     <section
                         ref={uploadsSectionRef}
                         className={`pt-4 ${stepVisibilityClass(2)}`}

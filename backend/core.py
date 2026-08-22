@@ -4,9 +4,11 @@ Everything that multiple routers need lives here to keep router modules pure of 
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
+import secrets
 import uuid
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -16,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import bcrypt
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -370,14 +372,18 @@ def mint_portal_token(email: str) -> str:
     return make_token({"role": "portal", "email": email}, days=30)
 
 
-async def verify_email_ownership(authorization: Optional[str], email: str) -> bool:
+async def verify_email_ownership(
+    authorization: Optional[str],
+    email: str,
+    request: Optional[Request] = None,
+) -> bool:
     """Return True only if the caller has *proven ownership* of ``email``.
 
     This is the gate that protects the otherwise-public start/prefill flows
     (`/public/apply`, `/public/projects/{slug}/submission`, `/public/prefill`)
     against anonymous PII disclosure, draft hijack and destructive resets.
 
-    Three accepted, revocation-aware credential forms — all of which can only
+    Four accepted, revocation-aware credential forms — all of which can only
     exist *after* a real ownership proof (OTP / Google) or a prior verified
     session:
 
@@ -388,34 +394,170 @@ async def verify_email_ownership(authorization: Optional[str], email: str) -> bo
     2. A valid **submitter** credential (JWT or opaque ``access_token``) already
        bound to an application/submission whose ``talent_email`` matches. This
        preserves legitimate cross-device "resume" without re-OTP.
+    3. A valid **trusted-device cookie** (see the trusted-device section below)
+       whose bound talent's email matches. This is a read-only check — it does
+       NOT rotate the cookie (rotation only happens at the dedicated
+       `/public/trusted-device/recognize` endpoint and at auth-grant sites),
+       so calling this can never invalidate a cookie the caller still has.
 
     A completely anonymous caller (no/invalid token) returns ``False``.
     """
     target = normalize_email(email)
     if not target:
         return False
-    if not authorization or not authorization.lower().startswith("bearer "):
-        return False
-    token = authorization.split(" ", 1)[1]
 
-    # --- Form 1: portal token (pure JWT check, no DB) ----------------------
-    data = decode_token(token)
-    if data and data.get("role") == "portal":
-        if normalize_email(data.get("email")) == target:
-            return True
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1]
 
-    # --- Form 2: existing submitter credential bound to this email ---------
-    submitter = await decode_submitter(authorization)
-    if submitter:
-        sid = submitter.get("sid")
-        if submitter.get("kind") == "application":
-            doc = await db.applications.find_one({"id": sid}, {"talent_email": 1})
-        else:
-            doc = await db.submissions.find_one({"id": sid}, {"talent_email": 1})
-        if doc and normalize_email(doc.get("talent_email")) == target:
-            return True
+        # --- Form 1: portal token (pure JWT check, no DB) -------------------
+        data = decode_token(token)
+        if data and data.get("role") == "portal":
+            if normalize_email(data.get("email")) == target:
+                return True
+
+        # --- Form 2: existing submitter credential bound to this email -----
+        submitter = await decode_submitter(authorization)
+        if submitter:
+            sid = submitter.get("sid")
+            if submitter.get("kind") == "application":
+                doc = await db.applications.find_one({"id": sid}, {"talent_email": 1})
+            else:
+                doc = await db.submissions.find_one({"id": sid}, {"talent_email": 1})
+            if doc and normalize_email(doc.get("talent_email")) == target:
+                return True
+
+    # --- Form 3: trusted-device cookie (read-only, never rotates) ----------
+    if request is not None:
+        raw = request.cookies.get(TRUSTED_DEVICE_COOKIE)
+        talent = await peek_trusted_device_talent(raw)
+        if talent:
+            talent_emails = {normalize_email(talent.get("email")), normalize_email(talent.get("normalized_email"))}
+            if target in talent_emails:
+                return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Trusted-device authentication — a new, additive credential type used ONLY
+# to silently recognize a returning talent on project-submission links, so
+# they aren't asked to re-authenticate on every project. Deliberately
+# separate from the portal token (which stays exactly as-is for the
+# dashboard): each device gets its OWN row in `db.trusted_devices`, so
+# authenticating on a second browser does not invalidate a first browser's
+# trust — the single-field `portal_access_token` design can't do that.
+# HttpOnly cookie (never readable by JS, never sent to any third party),
+# opaque random token (only the sha256 hash is ever persisted), rotated on
+# every successful use, individually revocable.
+# ---------------------------------------------------------------------------
+TRUSTED_DEVICE_COOKIE = "tg_trusted_device"
+TRUSTED_DEVICE_TTL_DAYS = 30
+
+
+async def mint_trusted_device(talent_id: str) -> str:
+    """Issue a new trusted-device credential for a talent. Only the sha256
+    hash is persisted; the raw token is returned once and never stored."""
+    raw = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw.encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+    await db.trusted_devices.insert_one({
+        "id": str(uuid.uuid4()),
+        "talent_id": talent_id,
+        "token_hash": token_hash,
+        "created_at": now,
+        "last_used_at": now,
+        "expires_at": now + timedelta(days=TRUSTED_DEVICE_TTL_DAYS),
+        "revoked": False,
+    })
+    return raw
+
+
+def set_trusted_device_cookie(response: Response, raw_token: str) -> None:
+    response.set_cookie(
+        key=TRUSTED_DEVICE_COOKIE,
+        value=raw_token,
+        max_age=TRUSTED_DEVICE_TTL_DAYS * 24 * 3600,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_trusted_device_cookie(response: Response) -> None:
+    response.delete_cookie(key=TRUSTED_DEVICE_COOKIE, path="/")
+
+
+async def grant_trusted_device(response: Optional[Response], talent_id: Optional[str]) -> None:
+    """Best-effort: mint a new trusted-device credential and set it as a
+    cookie on `response`. Never raises — a persistence hiccup here must not
+    fail an otherwise-successful authentication."""
+    if response is None or not talent_id:
+        return
+    try:
+        raw = await mint_trusted_device(talent_id)
+        set_trusted_device_cookie(response, raw)
+    except Exception as e:
+        logger.warning(f"trusted-device mint failed for talent {talent_id}: {e}")
+
+
+async def _find_valid_trusted_device_row(raw_token: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Shared lookup: an unrevoked, unexpired row for this raw cookie value,
+    or None. No mutation — safe to call from read-only paths."""
+    if not raw_token:
+        return None
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    row = await db.trusted_devices.find_one({"token_hash": token_hash, "revoked": False})
+    if not row:
+        return None
+    expires_at = row["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
+        return None
+    return row
+
+
+async def peek_trusted_device_talent(raw_token: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Read-only trusted-device validation — resolves the cookie to its
+    talent without rotating or touching the row. Used by
+    verify_email_ownership as a secondary ownership proof; rotation stays
+    exclusive to resolve_trusted_device (the dedicated recognize endpoint and
+    auth-grant sites) so a caller's cookie is never invalidated as a side
+    effect of an unrelated ownership check."""
+    row = await _find_valid_trusted_device_row(raw_token)
+    if not row:
+        return None
+    return await db.talents.find_one({"id": row["talent_id"]})
+
+
+async def resolve_trusted_device(raw_token: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Validate a trusted-device cookie value. On success, ROTATES it
+    (sliding-window: the matched row is revoked and a fresh one minted for
+    the same talent) and returns {"talent": <doc>, "new_raw_token": <str>}.
+    Returns None if the cookie is missing, unknown, expired, or revoked."""
+    row = await _find_valid_trusted_device_row(raw_token)
+    if not row:
+        return None
+    talent = await db.talents.find_one({"id": row["talent_id"]})
+    if not talent:
+        return None
+    await db.trusted_devices.update_one(
+        {"id": row["id"]}, {"$set": {"revoked": True, "last_used_at": datetime.now(timezone.utc)}}
+    )
+    new_raw = await mint_trusted_device(row["talent_id"])
+    return {"talent": talent, "new_raw_token": new_raw}
+
+
+async def revoke_trusted_device(raw_token: Optional[str]) -> None:
+    """Revoke exactly the device holding this cookie (used by "Not you? Sign
+    in as someone else") — does not touch any other device's trust."""
+    if not raw_token:
+        return
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    await db.trusted_devices.update_one(
+        {"token_hash": token_hash}, {"$set": {"revoked": True}}
+    )
 
 
 # --------------------------------------------------------------------------

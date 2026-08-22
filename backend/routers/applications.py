@@ -442,7 +442,7 @@ async def start_application(
     # Brand-new emails (no existing record => no PII to leak / nothing to
     # reset) keep the friction-free first-time apply flow.
     if existing or talent:
-        owns = await verify_email_ownership(authorization, email)
+        owns = await verify_email_ownership(authorization, email, request)
         if not owns:
             raise HTTPException(
                 403,

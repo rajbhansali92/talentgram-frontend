@@ -493,6 +493,15 @@ async def on_startup():
         except Exception as _e:
             logger.warning("OTP indexes creation failed: %s", _e)
 
+        # Trusted-device auth indexes
+        try:
+            await db.trusted_devices.create_index("token_hash", unique=True)
+            await db.trusted_devices.create_index([("talent_id", 1), ("revoked", 1)])
+            await db.trusted_devices.create_index("expires_at", expireAfterSeconds=0)
+            logger.info("Trusted-device indexes ready")
+        except Exception as _e:
+            logger.warning("Trusted-device indexes creation failed: %s", _e)
+
         await db.feedback.create_index([("submission_id", 1), ("status", 1)])
         await db.feedback.create_index([("project_id", 1), ("status", 1)])
         await db.feedback.create_index([("created_at", -1)])

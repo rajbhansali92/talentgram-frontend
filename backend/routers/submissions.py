@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 
 import time
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, BackgroundTasks
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, Response, UploadFile, BackgroundTasks
 from pydantic import BaseModel, Field
 import cloudinary
 from core import (
@@ -65,6 +65,12 @@ from core import (
     build_minimal_talent_from_form,
     REUSABLE_MEDIA_CATEGORIES,
     mark_reusable_media_pending,
+    TRUSTED_DEVICE_COOKIE,
+    grant_trusted_device,
+    resolve_trusted_device,
+    revoke_trusted_device,
+    set_trusted_device_cookie,
+    clear_trusted_device_cookie,
 )
 from drive_backup import (
     drive_enabled,
@@ -286,6 +292,43 @@ async def public_project(slug: str):
     return project
 
 
+_PREFILL_TALENT_PROJECTION = {
+    "_id": 0, "id": 1, "name": 1, "age": 1, "dob": 1, "height": 1,
+    "phone": 1, "location": 1, "ethnicity": 1, "gender": 1, "bio": 1,
+    "instagram_handle": 1, "instagram_followers": 1, "work_links": 1,
+    "media": 1, "cover_media_id": 1, "skills": 1,
+}
+
+
+async def _build_prefill_response(talent: dict, email: str) -> dict:
+    """The one canonical "recognized talent" payload shape — shared by
+    `/public/prefill` (portal-token path) and `/public/trusted-device/recognize`
+    (cookie path) so both recognition mechanisms feed the frontend identically."""
+    name = talent.get("name") or ""
+    parts = name.split(" ", 1)
+    first = parts[0] if parts else ""
+    last = parts[1] if len(parts) > 1 else ""
+    prefill_media = await build_prefill_media(talent, email=email)
+    return {
+        "first_name": first,
+        "last_name": last,
+        "age": talent.get("age") if talent.get("age") is not None else (compute_age(talent.get("dob")) if talent.get("dob") else None),
+        "dob": talent.get("dob"),
+        "phone": talent.get("phone"),
+        "height": talent.get("height"),
+        "location": talent.get("location"),
+        "ethnicity": talent.get("ethnicity"),
+        "gender": talent.get("gender"),
+        "bio": talent.get("bio"),
+        "instagram_handle": talent.get("instagram_handle"),
+        "instagram_followers": talent.get("instagram_followers"),
+        "work_links": talent.get("work_links") or [],
+        "skills": talent.get("skills") or [],
+        "image_url": _resolve_cover_url(talent),
+        "prefill_media": prefill_media,
+    }
+
+
 @router.get("/public/prefill")
 async def prefill_for_email(
     email: str,
@@ -305,7 +348,7 @@ async def prefill_for_email(
     # this email (see verify_email_ownership). This is the same gate used by
     # the apply/submission start flows, so the frontend only needs to present
     # the portal token it already holds after verification.
-    if not await verify_email_ownership(authorization, email):
+    if not await verify_email_ownership(authorization, email, request):
         # Prevent anonymous PII leak, but allow frontend to prompt verification
         # if the email already exists in the system.
         talent_exists = await db.talents.find_one(
@@ -330,41 +373,42 @@ async def prefill_for_email(
             {"email": email},
             {"source.talent_email": email}
         ]},
-        {
-            "_id": 0, "name": 1, "age": 1, "dob": 1, "height": 1,
-            "phone": 1, "location": 1, "ethnicity": 1, "gender": 1, "bio": 1,
-            "instagram_handle": 1, "instagram_followers": 1, "work_links": 1,
-            "media": 1, "cover_media_id": 1, "skills": 1,
-        },
+        _PREFILL_TALENT_PROJECTION,
     )
     if not talent:
         return {}
-    name = talent.get("name") or ""
-    parts = name.split(" ", 1)
-    first = parts[0] if parts else ""
-    last = parts[1] if len(parts) > 1 else ""
+    return await _build_prefill_response(talent, email)
 
-    # Media Library Foundation (Phase 4 item 1): the one canonical prefill
-    # builder, shared with `start_submission` and `_get_talent_profile_response`.
-    prefill_media = await build_prefill_media(talent, email=email)
-    return {
-        "first_name": first,
-        "last_name": last,
-        "age": talent.get("age") if talent.get("age") is not None else (compute_age(talent.get("dob")) if talent.get("dob") else None),
-        "dob": talent.get("dob"),
-        "phone": talent.get("phone"),
-        "height": talent.get("height"),
-        "location": talent.get("location"),
-        "ethnicity": talent.get("ethnicity"),
-        "gender": talent.get("gender"),
-        "bio": talent.get("bio"),
-        "instagram_handle": talent.get("instagram_handle"),
-        "instagram_followers": talent.get("instagram_followers"),
-        "work_links": talent.get("work_links") or [],
-        "skills": talent.get("skills") or [],
-        "image_url": _resolve_cover_url(talent),
-        "prefill_media": prefill_media,
-    }
+
+@router.get("/public/trusted-device/recognize")
+async def trusted_device_recognize(request: Request, response: Response):
+    """Cookie-based silent recognition for project submission — the trusted-
+    device analog of `/public/prefill`, but proves identity from an HttpOnly
+    cookie instead of a client-supplied email + Bearer token. No email param:
+    the cookie itself is the proof. Rotates the cookie on every successful use.
+    """
+    if not _prefill_rate_limit_ok(request):
+        raise HTTPException(429, "Too many lookups — please slow down")
+    raw = request.cookies.get(TRUSTED_DEVICE_COOKIE)
+    resolved = await resolve_trusted_device(raw)
+    if not resolved:
+        raise HTTPException(401, "No trusted device recognized")
+    talent = resolved["talent"]
+    set_trusted_device_cookie(response, resolved["new_raw_token"])
+    email = normalize_email(talent.get("email") or talent.get("normalized_email") or "")
+    payload = await _build_prefill_response(talent, email)
+    payload["email"] = email
+    return payload
+
+
+@router.post("/public/trusted-device/forget")
+async def trusted_device_forget(request: Request, response: Response):
+    """"Not you? Sign in as someone else" — revokes exactly the device
+    presenting this cookie. Does not touch any other device's trust."""
+    raw = request.cookies.get(TRUSTED_DEVICE_COOKIE)
+    await revoke_trusted_device(raw)
+    clear_trusted_device_cookie(response)
+    return {"ok": True}
 
 
 
@@ -442,7 +486,7 @@ async def start_submission(
         {"_id": 1},
     )
     if existing or talent_exists:
-        owns = await verify_email_ownership(authorization, email)
+        owns = await verify_email_ownership(authorization, email, request)
         if not owns:
             raise HTTPException(
                 403,
@@ -1876,7 +1920,7 @@ def enqueue_internal_whatsapp_notification(submission: dict, event_type: str, de
 
 
 @router.post("/public/submissions/{sid}/finalize")
-async def submission_finalize(sid: str, authorization: Optional[str] = Header(None)):
+async def submission_finalize(sid: str, response: Response, authorization: Optional[str] = Header(None)):
     submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
@@ -2001,37 +2045,13 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 if not str(custom_answers.get(qid) or "").strip():
                     raise HTTPException(400, f"Question '{cq.get('question')}' is required")
 
-        # 3. Media
-        media_list = sub.get("media") or []
-        intro_req = requirements.get("intro_video")
-        if intro_req == "required":
-            has_intro = any(m.get("category") == "intro_video" for m in media_list)
-            if not has_intro:
-                raise HTTPException(400, "Introduction Video is required")
-
-        min_takes = int(requirements.get("min_audition_takes") or 0)
-        takes_vis = requirements.get("audition_takes_visibility")
-        if not takes_vis:
-            takes_vis = "required" if min_takes > 0 else "optional"
-        if takes_vis == "required":
-            takes_count = sum(1 for m in media_list if m.get("category") in {"take", "take_1", "take_2", "take_3"})
-            if takes_count < min_takes:
-                raise HTTPException(400, f"Please upload at least {min_takes} audition take(s)")
-
-        portfolio_reqs = requirements.get("portfolio") or {}
-        for category, label_name, vis_key in [
-            ("image", "Portfolio (General)", "portfolio_image_visibility"),
-            ("indian", "Indian Look", "portfolio_indian_visibility"),
-            ("western", "Western Look", "portfolio_western_visibility")
-        ]:
-            min_count = int(portfolio_reqs.get(category) or 0)
-            p_vis = requirements.get(vis_key)
-            if not p_vis:
-                p_vis = "required" if min_count > 0 else "optional"
-            if p_vis == "required":
-                count = sum(1 for m in media_list if m.get("category") == category)
-                if count < min_count:
-                    raise HTTPException(400, f"{label_name} requires at least {min_count} image(s)")
+        # 3. Media — intentionally NOT enforced. Project submission no longer
+        # collects or requires media (intro video / audition takes /
+        # portfolio images); portfolio management lives exclusively in the
+        # talent dashboard now. Requirement config (intro_video,
+        # audition_takes_visibility, portfolio.*) is left in the project
+        # schema untouched — it's informational only at this point, not a
+        # finalize gate.
 
         # 4. Work Links
         min_links = int(requirements.get("min_work_links") or 0)
@@ -2062,22 +2082,9 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
                 if not any(s in valid_skills for s in user_skills):
                     raise HTTPException(400, f"At least one skill from category '{cat}' is required")
 
-        # 6. Conditional Rules
-        conditional_rules = requirements.get("conditional_rules") or []
-        for rule in conditional_rules:
-            qid = rule.get("question_id")
-            trigger = rule.get("trigger_value")
-            video_label = rule.get("video_label")
-            if qid and trigger and video_label:
-                ans = str(custom_answers.get(qid) or "").strip().lower()
-                if ans == str(trigger).strip().lower():
-                    has_cond_video = any(
-                        m.get("category") in {"take", "intro_video", "take_1", "take_2", "take_3"}
-                        and str(m.get("label") or "").strip().lower() == video_label.strip().lower()
-                        for m in media_list
-                    )
-                    if not has_cond_video:
-                        raise HTTPException(400, f"Conditional requirement '{video_label}' is missing")
+        # 6. Conditional Rules — also media-only (a conditional video
+        # requirement), so also intentionally not enforced; see note at "3.
+        # Media" above.
     else:
         # Fallback legacy validation rules
         for field in ("first_name", "last_name", "height"):
@@ -2249,6 +2256,10 @@ async def submission_finalize(sid: str, authorization: Optional[str] = Header(No
             await update_talent_cover_cache(talent_doc["id"])
     if talent_doc:
         patch["talent_id"] = talent_doc["id"]
+        # A first-time submission is the earliest point a brand-new talent's
+        # record exists — grant device trust here too, not just at OTP/Google
+        # verify, so recognition works on their very next project link.
+        await grant_trusted_device(response, talent_doc["id"])
 
     await db.submissions.update_one({"id": sid}, {"$set": patch})
 

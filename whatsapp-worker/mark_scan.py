@@ -353,92 +353,29 @@ async ([sel, idx]) => {
 """
 
 
-_VIEWER_TESTID_HINTS = (
-    '[data-testid="media-viewer"]', '[data-animate-media-viewer-modal]',
-    '[data-testid="mv-container"]', '[role="dialog"]',
-)
-
-_WAIT_AND_EXTRACT_VIEWER_JS = """
-async ([expectVideo, viewerHints]) => {
-  // TEMPORARY diagnostic (2026-08-23) — a plain JS .click() on a tile
-  // (previous attempt) never opened WhatsApp's real viewer at all; every
-  // blob: element found afterward turned out to be an unrelated photo
-  // thumbnail already in the message list (ancestor testid
-  // "image-thumb", not a viewer). Scoping the search to a likely viewer
-  // container FIRST (falling back to document-wide only if none of the
-  // hints match) plus a real Playwright-driven click (done by the
-  // caller, not here) should find the actual opened media this time.
-  let scope = document;
-  for (const hint of viewerHints) {
-    const found = document.querySelector(hint);
-    if (found) { scope = found; break; }
-  }
-  // TEMPORARY diagnostic (2026-08-23) — a lightbox/viewer is often
-  // appended as its own top-level overlay directly under <body>, outside
-  // #app entirely. Dump every direct body child with its testid/role/
-  // class/computed z-index/position so a genuine new overlay (vs. the
-  // pre-existing app root) is identifiable even if none of the hint
-  // selectors above matched it.
-  const bodyChildren = Array.from(document.body.children).map(c => {
-    const cs = window.getComputedStyle(c);
-    return {
-      tag: c.tagName, id: c.id || null,
-      testid: c.getAttribute('data-testid'), role: c.getAttribute('role'),
-      classSample: (c.className || '').toString().slice(0, 80),
-      position: cs.position, zIndex: cs.zIndex,
-      childCount: c.children.length,
-    };
-  });
-  const blobEls = Array.from(document.querySelectorAll('img[src^="blob:"], video[src^="blob:"]')).map(e => {
-    let anc = e; let testids = [];
-    for (let d = 0; d < 6 && anc; d++) {
-      const t = anc.getAttribute && anc.getAttribute('data-testid');
-      if (t) testids.push(t);
-      anc = anc.parentElement;
-    }
-    return {
-      tag: e.tagName, src: e.src.slice(0, 60),
-      naturalWidth: e.naturalWidth || null, naturalHeight: e.naturalHeight || null,
-      videoWidth: e.videoWidth || null, videoHeight: e.videoHeight || null,
-      ancestorTestids: testids, inScope: scope.contains(e),
-    };
-  });
-  let srcEl = null;
-  const deadlineMs = 6000;
-  const start = Date.now();
-  while (Date.now() - start < deadlineMs) {
-    await new Promise(r => setTimeout(r, 200));
-    const video = scope.querySelector('video[src^="blob:"]');
-    if (video) { srcEl = video; break; }
-    if (!expectVideo) {
-      const img = scope.querySelector('img[src^="blob:"]');
-      if (img) { srcEl = img; break; }
-    }
-  }
-  if (!srcEl) {
-    srcEl = scope.querySelector('video[src^="blob:"]') || scope.querySelector('img[src^="blob:"]');
-  }
-  if (!srcEl) {
-    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    return {ok: false, reason: "no viewer media element with blob: src appeared after click", blobEls, scopeFound: scope !== document, bodyChildren};
-  }
-  const isVideo = srcEl.tagName === 'VIDEO';
-  try {
-    const resp = await fetch(srcEl.src);
-    const buf = await resp.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    let binary = '';
-    const chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
-    }
-    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    await new Promise(r => setTimeout(r, 300));
-    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo, byteLength: bytes.length, blobEls, scopeFound: scope !== document, bodyChildren};
-  } catch (e) {
-    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    return {ok: false, reason: String(e && e.message || e), blobEls, bodyChildren};
-  }
+# ---------------------------------------------------------------------------
+# Album-tile download via WhatsApp Web's native right-click "Download"
+# (2026-08-23) — replaces the media-viewer/blob: approach above for album
+# tiles specifically, after three attempts proved that approach was
+# clicking a tile without ever opening any viewer (evidence: the "blob:"
+# elements found afterward were unrelated pre-existing photo thumbnails,
+# and dumping every direct <body> child showed nothing new was ever
+# mounted). Diagnostic-first: always dump the context menu's actual
+# structure, whether or not the Download click succeeds, so a failure is
+# reported with real evidence, never another blind guess.
+# ---------------------------------------------------------------------------
+_CONTEXT_MENU_DUMP_JS = """
+() => {
+  const menus = Array.from(document.querySelectorAll(
+    '[role="menu"], [role="listbox"], ul[data-testid], div[data-animate-dropdown]'
+  ));
+  return menus.map(m => ({
+    tag: m.tagName, role: m.getAttribute('role'), testid: m.getAttribute('data-testid'),
+    items: Array.from(m.querySelectorAll('li, [role="menuitem"], div[role="button"]')).map(i => ({
+      text: (i.innerText || '').trim().slice(0, 60),
+      testid: i.getAttribute('data-testid'), role: i.getAttribute('role'),
+    })),
+  }));
 }
 """
 
@@ -457,6 +394,65 @@ async def _find_message_index_by_data_id(page, group_name: str, data_id: str) ->
         if testid == f"conv-msg-{data_id}":
             return i
     return None
+
+
+async def _download_album_tile_via_context_menu(page, full_sel: str, idx: int, tile_index: int) -> Dict[str, Any]:
+    """Right-click the specific tile, dump the resulting context menu
+    (always — evidence either way), and if a "Download" item is found,
+    click it inside page.expect_download() to capture WhatsApp Web's own
+    native download rather than reverse-engineering a viewer/blob: URL.
+    Returns {ok, data (raw bytes), suggested_filename, menu_dump, reason}."""
+    tile_locator = (
+        page.locator(full_sel).nth(idx)
+        .locator('[data-testid="video-content"], [data-testid="image-content"]')
+        .nth(tile_index)
+    )
+    try:
+        await tile_locator.click(button="right", timeout=10000)
+    except Exception as exc:
+        return {"ok": False, "reason": f"right-click failed: {exc}", "menu_dump": None}
+
+    await page.wait_for_timeout(500)
+    try:
+        menu_dump = await page.evaluate(_CONTEXT_MENU_DUMP_JS)
+    except Exception:
+        menu_dump = None
+
+    download_item = page.locator(
+        '[role="menu"] :text-matches("download", "i"), '
+        '[role="menuitem"]:has-text("Download"), '
+        'li:has-text("Download"), '
+        'div[role="button"]:has-text("Download")'
+    ).first
+
+    try:
+        visible = await download_item.is_visible(timeout=3000)
+    except Exception:
+        visible = False
+    if not visible:
+        await page.keyboard.press("Escape")
+        return {"ok": False, "reason": "no visible 'Download' menu item found after right-click", "menu_dump": menu_dump}
+
+    try:
+        async with page.expect_download(timeout=15000) as download_info:
+            await download_item.click(timeout=5000)
+        download = await download_info.value
+        path = await download.path()
+        if not path:
+            return {"ok": False, "reason": "download event fired but no file path available", "menu_dump": menu_dump}
+        with open(path, "rb") as f:
+            data = f.read()
+        return {
+            "ok": True, "data": data, "suggested_filename": download.suggested_filename(),
+            "menu_dump": menu_dump,
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": f"download did not complete: {exc}", "menu_dump": menu_dump}
+    finally:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
 
 
 async def _upload_one(http: httpx.AsyncClient, target: Dict[str, Any], base64_data: str, content_type: str) -> Dict[str, Any]:
@@ -505,41 +501,44 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
             continue
         scope = await sender._resolve_scope(page)
         full_sel = f"{scope} [data-testid^='conv-msg-']"
+        if target.get("album_tile_index") is not None:
+            # Right-click -> native "Download" (2026-08-23) — replaces the
+            # media-viewer/blob: approach, which proved to never actually
+            # open a viewer for an album tile (see module comment above
+            # _CONTEXT_MENU_DUMP_JS). Authoritative identity stays
+            # (album data_id, tile's own thumbnail hash) — tile_index here
+            # is only used to locate/click the right element.
+            dl = await _download_album_tile_via_context_menu(page, full_sel, idx, target["album_tile_index"])
+            if not dl.get("ok"):
+                results.append({
+                    "ok": False, "source_message_id": target["source_message_id"], "error": dl.get("reason"),
+                    "menu_dump": dl.get("menu_dump"),
+                })
+                continue
+            raw = dl["data"]
+            if not raw:
+                results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
+                continue
+            b64 = b64mod.b64encode(raw).decode()
+            upload_result = await _upload_one(http, target, b64, "")
+            upload_result["byte_length"] = len(raw)
+            upload_result["suggested_filename"] = dl.get("suggested_filename")
+            results.append(upload_result)
+            continue
+
         try:
-            if target.get("album_tile_index") is not None:
-                # A plain JS .click() (previous attempt) never opened
-                # WhatsApp's real viewer — switched to a genuine
-                # Playwright-driven click (real trusted browser event)
-                # on the specific tile locator.
-                tile_locator = (
-                    page.locator(full_sel).nth(idx)
-                    .locator('[data-testid="video-content"], [data-testid="image-content"]')
-                    .nth(target["album_tile_index"])
-                )
-                await tile_locator.click(timeout=10000)
-                expect_video = target.get("source_media_type") == "video"
-                fetched = await page.evaluate(
-                    _WAIT_AND_EXTRACT_VIEWER_JS, [expect_video, list(_VIEWER_TESTID_HINTS)]
-                )
-            else:
-                fetched = await page.evaluate(_DOWNLOAD_JS, [full_sel, idx])
+            fetched = await page.evaluate(_DOWNLOAD_JS, [full_sel, idx])
         except Exception as exc:
             results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"download failed: {exc}"})
             continue
         if not fetched.get("ok"):
-            results.append({
-                "ok": False, "source_message_id": target["source_message_id"], "error": fetched.get("reason"),
-                "blob_els": fetched.get("blobEls"), "body_children": fetched.get("bodyChildren"),
-            })
+            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": fetched.get("reason")})
             continue
         if not fetched.get("base64"):
             results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
             continue
         upload_result = await _upload_one(http, target, fetched["base64"], fetched.get("contentType", ""))
-        upload_result["blob_els"] = fetched.get("blobEls")
-        upload_result["body_children"] = fetched.get("bodyChildren")
         upload_result["byte_length"] = fetched.get("byteLength")
-        upload_result["is_video"] = fetched.get("isVideo")
         results.append(upload_result)
 
     return {"results": results}

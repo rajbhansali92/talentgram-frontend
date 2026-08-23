@@ -208,6 +208,12 @@ class WhatsAppSession:
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=config.SESSION_DIR,
             headless=True,
+            # Media-Assignment album-tile download (2026-08-23) — needed so
+            # page.expect_download() can capture WhatsApp Web's native
+            # right-click "Download" action; explicit rather than relying
+            # on Playwright's own default, which has varied across
+            # versions. No effect on anything else this session does.
+            accept_downloads=True,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",

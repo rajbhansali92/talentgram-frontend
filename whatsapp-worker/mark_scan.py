@@ -131,7 +131,18 @@ _SUMMARY_QUOTE_RE = re.compile(r"\b(\d+)\s+(videos?|photos?|images?)\b", re.IGNO
 # so every tile in the jumped-to album gets expanded with that one role.
 # The backend's own parser is still the authority on whether the resulting
 # per-tile "mark <project> photos" text is valid.
-_SINGLE_PHOTOS_RE = re.compile(r"^\s*mark\s+(.+?)\s+photos?\s*$", re.IGNORECASE)
+_SINGLE_PHOTOS_RE = re.compile(
+    r"^\s*mark\s+(.+?)\s+photos?\s*(?:\d{1,2}:\d{2}\s*[ap]m\b.*)?$", re.IGNORECASE | re.DOTALL,
+)
+# _mark_text() greedily captures everything after "mark" (DOTALL), which
+# includes WhatsApp's own rendered timestamp text trailing the message
+# body in the DOM — harmless for a single mark (the fuzzy project matcher
+# already tolerates it), but for a comma-split batch list it lands
+# entirely on the LAST item only (2026-08-23: "intro" arrived as
+# "intro     1:57 pm         1:57 pm"), which would then become part of
+# THAT tile's own synthesized project_fragment once "intro" is stripped
+# out downstream. Stripped from every split item before use.
+_TRAILING_TIMESTAMP_RE = re.compile(r"\s+\d{1,2}:\d{2}\s*[ap]m\b.*$", re.IGNORECASE | re.DOTALL)
 
 
 def _parse_batch_role_list(mark_text: str) -> Optional[tuple]:
@@ -143,7 +154,12 @@ def _parse_batch_role_list(mark_text: str) -> Optional[tuple]:
     if not m:
         return None
     project_fragment = m.group(1).strip()
-    items = [i.strip() for i in m.group(2).split(",") if i.strip()]
+    raw_items = m.group(2).split(",")
+    items = []
+    for i in raw_items:
+        cleaned = _TRAILING_TIMESTAMP_RE.sub("", i).strip()
+        if cleaned:
+            items.append(cleaned)
     if len(items) < 2:
         return None
     return project_fragment, items

@@ -149,6 +149,17 @@ def main():
     assert not mark_scan._SINGLE_PHOTOS_RE.match("mark google take 1")
     print("13. single-photos detection       -> 'mark <project> photos' recognized, takes are not")
 
+    # 2026-08-23 real-test bug: _mark_text() greedily captures WhatsApp's
+    # own rendered timestamp trailing the message body — for a batch list
+    # this lands entirely on the LAST item ("intro     1:57 pm  1:57 pm"),
+    # which would otherwise pollute that tile's synthesized project name.
+    assert mark_scan._parse_batch_role_list(
+        "mark google: take 1, take 2, take 3, intro     1:57 pm         1:57 pm"
+    ) == ("google", ["take 1", "take 2", "take 3", "intro"])
+    m = mark_scan._SINGLE_PHOTOS_RE.match("mark google photos     1:57 pm         1:57 pm")
+    assert m and m.group(1).strip() == "google"
+    print("13b. trailing-timestamp tolerance -> real WhatsApp DOM timestamp text stripped, not baked into project name")
+
     WHOLE_ALBUM_QUOTE_HTML = (
         '<div data-testid="quoted-message"><span data-testid="author">Raj Talentgram</span>'
         '<div data-testid="chat-msg-symbol"></div>'

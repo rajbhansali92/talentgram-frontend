@@ -55,6 +55,21 @@ def _auth_headers() -> dict:
     return headers
 
 
+async def _evaluate(page, js: str, arg: Any = None, timeout: float = 10.0) -> Any:
+    """page.evaluate() has NO built-in timeout in Playwright — unlike
+    click()/etc. — so a single stalled call can hang indefinitely. Real
+    evidence of this (2026-08-23): a claimed download_probe request sat in
+    "processing" for 2h43m despite an outer asyncio.wait_for(timeout=150);
+    the worker process itself stayed healthy and kept servicing other
+    WhatsApp traffic throughout, so the hang was isolated to one stuck
+    await inside that request's handling that resisted the outer
+    cancellation. Every evaluate() call in this module should go through
+    this wrapper so a stall becomes an ordinary catchable TimeoutError
+    instead of an unbounded hang."""
+    coro = page.evaluate(js, arg) if arg is not None else page.evaluate(js)
+    return await asyncio.wait_for(coro, timeout=timeout)
+
+
 # ---------------------------------------------------------------------------
 # DOM extraction — same shape proven in the Phase 0 spike
 # (spike_diagnostics.py), consolidated here as production code. Every
@@ -208,7 +223,7 @@ async def _ensure_history_loaded(page, full_sel: str, max_messages: int, max_ste
     never past `max_messages` — this loads MORE of a small, fixed history
     window reliably, it does not turn the scan into an unbounded one."""
     try:
-        return await page.evaluate(_LOAD_HISTORY_JS, [full_sel, max_messages, max_steps])
+        return await _evaluate(page, _LOAD_HISTORY_JS, [full_sel, max_messages, max_steps])
     except Exception:
         logger.exception("mark_scan: history-load scroll failed (continuing with whatever is rendered)")
         return 0
@@ -224,7 +239,7 @@ async def _dump_window(page, group_name: str, max_messages: int) -> List[Dict[st
     out = []
     for i in range(start, n):
         try:
-            dump = await page.evaluate(_DOM_DUMP_JS, [full_sel, i])
+            dump = await _evaluate(page, _DOM_DUMP_JS, [full_sel, i])
         except Exception:
             logger.exception("mark_scan: DOM dump failed group=%r index=%d", group_name, i)
             continue
@@ -491,7 +506,7 @@ async def _wait_for_video_readiness(page, min_ready_state: int = 3, timeout_s: f
     last_state = None
     while elapsed < timeout_s:
         try:
-            last_state = await page.evaluate(_VIDEO_STATE_JS)
+            last_state = await _evaluate(page, _VIDEO_STATE_JS)
         except Exception:
             last_state = None
         if last_state and last_state.get("readyState", 0) >= min_ready_state:
@@ -514,7 +529,7 @@ async def _open_tile_viewer_and_download(page, message_locator, tile_index: int)
     except Exception:
         pass
     try:
-        await page.evaluate(_EVENT_CAPTURE_INSTALL_JS)
+        await _evaluate(page, _EVENT_CAPTURE_INSTALL_JS)
     except Exception:
         pass
     try:
@@ -536,13 +551,13 @@ async def _open_tile_viewer_and_download(page, message_locator, tile_index: int)
         elapsed += 0.5
 
     try:
-        click_event_log = await page.evaluate(_EVENT_CAPTURE_READ_JS)
+        click_event_log = await _evaluate(page, _EVENT_CAPTURE_READ_JS)
     except Exception:
         click_event_log = None
 
     if not video_mounted:
         try:
-            body_snapshot = await page.evaluate(_BODY_SNAPSHOT_JS)
+            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
         except Exception:
             body_snapshot = None
         return {
@@ -553,7 +568,7 @@ async def _open_tile_viewer_and_download(page, message_locator, tile_index: int)
     readiness = await _wait_for_video_readiness(page)
 
     try:
-        viewer_buttons = await page.evaluate(_VIEWER_BUTTONS_JS)
+        viewer_buttons = await _evaluate(page, _VIEWER_BUTTONS_JS)
     except Exception:
         viewer_buttons = {"rootFound": False, "buttons": []}
 
@@ -590,12 +605,12 @@ async def _open_tile_viewer_and_download(page, message_locator, tile_index: int)
 
     await page.wait_for_timeout(600)
     try:
-        menu_dump = await page.evaluate(_CONTEXT_MENU_DUMP_JS)
+        menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
     except Exception:
         menu_dump = None
     if not menu_dump:
         try:
-            body_snapshot = await page.evaluate(_BODY_SNAPSHOT_JS)
+            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
         except Exception:
             body_snapshot = None
         try:
@@ -671,7 +686,7 @@ async def _download_album_tile_via_context_menu(page, full_sel: str, idx: int, t
 
     await page.wait_for_timeout(500)
     try:
-        menu_dump = await page.evaluate(_CONTEXT_MENU_DUMP_JS)
+        menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
     except Exception:
         menu_dump = None
 
@@ -682,7 +697,7 @@ async def _download_album_tile_via_context_menu(page, full_sel: str, idx: int, t
         # after the right-click, so a failure carries real evidence of
         # "no menu opened at all" vs. "opened with an unrecognized shape".
         try:
-            body_snapshot = await page.evaluate(_BODY_SNAPSHOT_JS)
+            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
         except Exception:
             body_snapshot = None
 
@@ -919,7 +934,7 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
         # manually-observed menu; "Download all" itself is still missing
         # from it — see the session write-up for the current theory.
         try:
-            await page.evaluate(_EVENT_CAPTURE_INSTALL_JS)
+            await _evaluate(page, _EVENT_CAPTURE_INSTALL_JS)
         except Exception:
             pass
 
@@ -932,17 +947,17 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
 
         await page.wait_for_timeout(600)
         try:
-            event_log = await page.evaluate(_EVENT_CAPTURE_READ_JS)
+            event_log = await _evaluate(page, _EVENT_CAPTURE_READ_JS)
         except Exception:
             event_log = None
         try:
-            menu_dump = await page.evaluate(_CONTEXT_MENU_DUMP_JS)
+            menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
         except Exception:
             menu_dump = None
         body_snapshot = None
         if not menu_dump:
             try:
-                body_snapshot = await page.evaluate(_BODY_SNAPSHOT_JS)
+                body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
             except Exception:
                 body_snapshot = None
             try:
@@ -1138,7 +1153,7 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
             continue
 
         try:
-            fetched = await page.evaluate(_DOWNLOAD_JS, [full_sel, idx])
+            fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
         except Exception as exc:
             results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"download failed: {exc}"})
             continue

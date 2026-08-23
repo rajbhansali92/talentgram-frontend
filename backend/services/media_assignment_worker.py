@@ -291,10 +291,49 @@ async def _process_download_done() -> bool:
     return True
 
 
+# A worker-side asyncio.wait_for around a claimed request only protects
+# against an in-process hang — it cannot help if the worker PROCESS itself
+# dies mid-request (crash, OOM, Railway's own restart policy) and comes
+# back up with no memory of the claim. Real evidence of exactly this
+# (2026-08-23): a download_probe claim sat in "processing" for 2h43m while
+# the worker process was otherwise healthy and actively servicing other
+# WhatsApp traffic the whole time — the claim was simply orphaned. This
+# reaper is the backend-side backstop: anything still "processing" well
+# past any plausible worker-side bound gets forced to a terminal failed
+# state so it can never block a queue or wait forever.
+STUCK_CLAIM_TIMEOUT_S = 360
+_REAP_INTERVAL_S = 60.0
+_last_reap = 0.0
+
+
+async def _reap_stuck_claims() -> None:
+    global _last_reap
+    now_ts = asyncio.get_event_loop().time()
+    if now_ts - _last_reap < _REAP_INTERVAL_S:
+        return
+    _last_reap = now_ts
+    cutoff = _now().timestamp() - STUCK_CLAIM_TIMEOUT_S
+    cutoff_dt = datetime.fromtimestamp(cutoff, tz=timezone.utc)
+    stuck = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find(
+        {"status": "processing", "claimed_at": {"$lt": cutoff_dt}}
+    ).to_list(50)
+    for doc in stuck:
+        is_scan = doc.get("mode") == "scan"
+        next_status = media_assignment.SCAN_STATUS_FAILED if is_scan else media_assignment.DOWNLOAD_STATUS_FAILED
+        error_field = "scan_error" if is_scan else "download_error"
+        error_msg = f"worker claim orphaned — stuck in 'processing' for over {STUCK_CLAIM_TIMEOUT_S}s, reaped by backend orchestrator"
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": doc["id"], "status": "processing"},
+            {"$set": {"status": next_status, error_field: error_msg, "updated_at": _now()}},
+        )
+        logger.warning("media_assignment_worker: reaped orphaned claim %r (mode=%r)", doc["id"], doc.get("mode"))
+
+
 async def _worker_loop() -> None:
     logger.info("media_assignment_worker: starting persistent orchestrator loop...")
     while True:
         try:
+            await _reap_stuck_claims()
             did_work = await _process_scan_done()
             did_work = await _process_download_done() or did_work
         except Exception:

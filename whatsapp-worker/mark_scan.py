@@ -656,6 +656,15 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
             continue
 
         try:
+            # bounding_box() does NOT auto-scroll (unlike locator.click());
+            # without this the target can sit far below the viewport after
+            # history-loading pushed it down, and the coordinates below
+            # would silently click on nothing (2026-08-23 bug: y=3959 on an
+            # ~800px-tall viewport, event target fell through to <html>).
+            await locator.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            pass
+        try:
             box = await locator.bounding_box()
         except Exception as exc:
             box = None

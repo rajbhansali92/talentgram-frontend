@@ -309,10 +309,39 @@ async def _ensure_history_loaded(page, full_sel: str, max_messages: int, max_ste
         return 0
 
 
-async def _dump_window(page, group_name: str, max_messages: int) -> List[Dict[str, Any]]:
+_SCROLL_DIAGNOSTIC_JS = """
+([sel]) => {
+  const els = document.querySelectorAll(sel);
+  if (!els.length) return null;
+  let container = els[0];
+  let maxOverflow = 0;
+  let node = els[0].parentElement;
+  for (let d = 0; d < 8 && node; d++) {
+    const overflow = node.scrollHeight - node.clientHeight;
+    if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+    node = node.parentElement;
+  }
+  const last = els[els.length - 1];
+  const first = els[0];
+  return {
+    renderedCount: els.length,
+    scrollTop: container.scrollTop, scrollHeight: container.scrollHeight, clientHeight: container.clientHeight,
+    atBottom: (container.scrollHeight - container.scrollTop - container.clientHeight) < 5,
+    firstDataId: first.getAttribute('data-id'), lastDataId: last.getAttribute('data-id'),
+  };
+}
+"""
+
+
+async def _dump_window(page, group_name: str, max_messages: int, diagnostic: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
     await _ensure_history_loaded(page, full_sel, max_messages)
+    if diagnostic is not None:
+        try:
+            diagnostic["scroll_state_after_history_load"] = await _evaluate(page, _SCROLL_DIAGNOSTIC_JS, [full_sel])
+        except Exception as exc:
+            diagnostic["scroll_state_after_history_load"] = {"error": str(exc)}
     loc = page.locator(full_sel)
     n = await loc.count()
     start = max(0, n - max_messages)
@@ -328,7 +357,7 @@ async def _dump_window(page, group_name: str, max_messages: int) -> List[Dict[st
     return out
 
 
-async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
+async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
     group_name = req["group_name"]
     max_messages = req.get("max_messages") or MAX_MESSAGES_SCANNED_DEFAULT
 
@@ -336,7 +365,14 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
     if status != "OPENED":
         return {"error": f"Could not open WhatsApp group {group_name!r} (status={status})"}
 
-    window = await _dump_window(page, group_name, max_messages)
+    scan_diagnostic: Dict[str, Any] = {
+        "session_identity": {
+            "own_phone_number": getattr(session, "own_phone_number", None),
+            "session_id": getattr(session, "session_id", None),
+            "generation": getattr(session, "generation", None),
+        },
+    }
+    window = await _dump_window(page, group_name, max_messages, diagnostic=scan_diagnostic)
 
     # Pass 1: index every plain (non-reply) media message's own hash/id in
     # this window — the source-of-truth pool a candidate mark resolves
@@ -531,6 +567,7 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
             {"hash": h, **v} for h, v in sources_by_hash.items()
         ],
         "all_replies": all_replies_debug,
+        "scan_diagnostic": scan_diagnostic,
     }
     return {"candidates": candidates, "debug": debug}
 
@@ -1451,7 +1488,7 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                             if page is None:
                                 logger.warning("mark_scan: no active page, skipping this claim")
                             elif req.get("mode") == "scan":
-                                result = await asyncio.wait_for(_run_scan(page, req), timeout=90.0)
+                                result = await asyncio.wait_for(_run_scan(page, req, session=session), timeout=90.0)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/scan-result",
                                     json={

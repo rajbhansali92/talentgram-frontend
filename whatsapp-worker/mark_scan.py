@@ -361,6 +361,24 @@ async ([sel, idx, tileIndex, expectVideo]) => {
   const tiles = el.querySelectorAll('[data-testid="video-content"], [data-testid="image-content"]');
   if (tileIndex >= tiles.length) return {ok: false, reason: "tile index out of range", tileCount: tiles.length};
   tiles[tileIndex].click();
+  await new Promise(r => setTimeout(r, 800));
+  // TEMPORARY diagnostic (2026-08-23) — dump every blob:-sourced element
+  // currently in the document so the real viewer element can be
+  // identified precisely instead of guessed at.
+  const blobEls = Array.from(document.querySelectorAll('img[src^="blob:"], video[src^="blob:"]')).map(e => {
+    let anc = e; let testids = [];
+    for (let d = 0; d < 6 && anc; d++) {
+      const t = anc.getAttribute && anc.getAttribute('data-testid');
+      if (t) testids.push(t);
+      anc = anc.parentElement;
+    }
+    return {
+      tag: e.tagName, src: e.src.slice(0, 60),
+      naturalWidth: e.naturalWidth || null, naturalHeight: e.naturalHeight || null,
+      videoWidth: e.videoWidth || null, videoHeight: e.videoHeight || null,
+      ancestorTestids: testids,
+    };
+  });
   // WhatsApp's viewer shows a static poster <img> immediately, then swaps
   // in the real <video> once it buffers — grabbing whichever appears
   // first (2026-08-23 bug) silently downloads the poster JPEG instead of
@@ -386,7 +404,7 @@ async ([sel, idx, tileIndex, expectVideo]) => {
   }
   if (!srcEl) {
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    return {ok: false, reason: "no viewer media element with blob: src appeared after click"};
+    return {ok: false, reason: "no viewer media element with blob: src appeared after click", blobEls};
   }
   const isVideo = srcEl.tagName === 'VIDEO';
   try {
@@ -400,10 +418,10 @@ async ([sel, idx, tileIndex, expectVideo]) => {
     }
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     await new Promise(r => setTimeout(r, 300));
-    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo, byteLength: bytes.length};
+    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo, byteLength: bytes.length, blobEls};
   } catch (e) {
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    return {ok: false, reason: String(e && e.message || e)};
+    return {ok: false, reason: String(e && e.message || e), blobEls};
   }
 }
 """
@@ -483,12 +501,16 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
             results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"download failed: {exc}"})
             continue
         if not fetched.get("ok"):
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": fetched.get("reason")})
+            results.append({
+                "ok": False, "source_message_id": target["source_message_id"], "error": fetched.get("reason"),
+                "blob_els": fetched.get("blobEls"),
+            })
             continue
         if not fetched.get("base64"):
             results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
             continue
         upload_result = await _upload_one(http, target, fetched["base64"], fetched.get("contentType", ""))
+        upload_result["blob_els"] = fetched.get("blobEls")
         upload_result["byte_length"] = fetched.get("byteLength")
         upload_result["is_video"] = fetched.get("isVideo")
         results.append(upload_result)

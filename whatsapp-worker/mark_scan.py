@@ -379,6 +379,26 @@ _CONTEXT_MENU_DUMP_JS = """
 }
 """
 
+# Broader fallback dump, used only when _CONTEXT_MENU_DUMP_JS finds nothing —
+# every direct <body> child plus, separately, any element anywhere whose
+# role/testid/class hints at a popup, so a truly empty result means "nothing
+# new was mounted at all" rather than "our selector guess was wrong". Same
+# technique that already conclusively ruled out the media-viewer approach.
+_BODY_SNAPSHOT_JS = """
+() => {
+  const child = (el) => ({
+    tag: el.tagName, id: el.id || null, testid: el.getAttribute('data-testid'),
+    role: el.getAttribute('role'), cls: (el.className || '').toString().slice(0, 80),
+    rect: (() => { const r = el.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })(),
+  });
+  const bodyChildren = Array.from(document.body.children).map(child);
+  const popupLike = Array.from(document.querySelectorAll(
+    '[class*="popup"], [class*="menu"], [class*="dropdown"], [class*="context"], [aria-haspopup]'
+  )).map(child);
+  return { bodyChildren, popupLike };
+}
+"""
+
 
 async def _find_message_index_by_data_id(page, group_name: str, data_id: str) -> Optional[int]:
     scope = await sender._resolve_scope(page)
@@ -418,6 +438,17 @@ async def _download_album_tile_via_context_menu(page, full_sel: str, idx: int, t
     except Exception:
         menu_dump = None
 
+    body_snapshot = None
+    if not menu_dump:
+        # Nothing matched the known menu selectors — before concluding
+        # anything, capture what (if anything) actually changed in the DOM
+        # after the right-click, so a failure carries real evidence of
+        # "no menu opened at all" vs. "opened with an unrecognized shape".
+        try:
+            body_snapshot = await page.evaluate(_BODY_SNAPSHOT_JS)
+        except Exception:
+            body_snapshot = None
+
     download_item = page.locator(
         '[role="menu"] :text-matches("download", "i"), '
         '[role="menuitem"]:has-text("Download"), '
@@ -431,7 +462,10 @@ async def _download_album_tile_via_context_menu(page, full_sel: str, idx: int, t
         visible = False
     if not visible:
         await page.keyboard.press("Escape")
-        return {"ok": False, "reason": "no visible 'Download' menu item found after right-click", "menu_dump": menu_dump}
+        return {
+            "ok": False, "reason": "no visible 'Download' menu item found after right-click",
+            "menu_dump": menu_dump, "body_snapshot": body_snapshot,
+        }
 
     try:
         async with page.expect_download(timeout=15000) as download_info:
@@ -512,7 +546,7 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
             if not dl.get("ok"):
                 results.append({
                     "ok": False, "source_message_id": target["source_message_id"], "error": dl.get("reason"),
-                    "menu_dump": dl.get("menu_dump"),
+                    "menu_dump": dl.get("menu_dump"), "body_snapshot": dl.get("body_snapshot"),
                 })
                 continue
             raw = dl["data"]

@@ -1837,6 +1837,18 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "after_reload": after,
         }], "session_identity": session_identity_after}
 
+    if probe_type == "album_viewer_diagnostic":
+        # Diagnostic-only (2026-08-23): the collapsed 2x2 preview only
+        # shows 4 image-thumb slots (one an overflow placeholder) for an
+        # album with more photos than that — this opens the album with
+        # ONE real click and inspects whatever gallery/viewer mounts from
+        # scratch, never uploads, never creates any request.
+        result = await _diagnose_photo_album_viewer(page, group_name, data_id)
+        result = _strip_raw_bytes(result)
+        result["source_message_id"] = data_id
+        result["session_identity"] = session_identity
+        return {"results": [result]}
+
     if probe_type == "photo_thumb_hash_check":
         # Diagnostic-only (2026-08-23): full_message_inventory revealed a
         # message (media-album + image-thumb, img_count=8) that every
@@ -2309,6 +2321,332 @@ async def _diagnose_photo_tile_open(page, message_locator, tile_index: int) -> D
         "detected_mime": detected_mime,
         "close_result": close_result,
         "_raw_bytes": raw_bytes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Full album-viewer/gallery diagnostic (2026-08-23) — a photo album's inline
+# preview only exposes a collapsed 2x2 grid (image-thumb, +N overflow); the
+# COMPLETE album has never been inspected. Never assumes this gallery
+# behaves like the single-tile video viewer — every stage dumps real DOM
+# evidence (buttons, images, innerText) from whatever new root actually
+# appears, the same diagnostic-first discipline already proven for the
+# video path and the single-photo-tile path.
+# ---------------------------------------------------------------------------
+_ALBUM_VIEWER_SNAPSHOT_JS = """
+async ([baselineSrcs, fetchBytes]) => {
+  const baseline = new Set(baselineSrcs);
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+  const allImgs = Array.from(document.querySelectorAll('img[src^="blob:"]'));
+  const newImgs = allImgs.filter(img => !baseline.has(img.src));
+
+  let root = null;
+  if (dialogs.length > 0) {
+    root = dialogs.reduce((a, b) => {
+      const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      return (ra.width * ra.height) >= (rb.width * rb.height) ? a : b;
+    });
+  } else if (newImgs.length > 0) {
+    let el = newImgs[0];
+    while (el.parentElement && el.parentElement !== document.body) el = el.parentElement;
+    root = el.parentElement ? el : null;
+  }
+  if (!root) {
+    return { found: false, dialogCount: dialogs.length, newImgCount: newImgs.length, totalImgCount: allImgs.length };
+  }
+
+  const rootImgs = Array.from(root.querySelectorAll('img[src^="blob:"]'));
+  const imgInfo = (img) => {
+    const r = img.getBoundingClientRect();
+    return { src: img.src, rect: [r.x, r.y, r.width, r.height], naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight };
+  };
+  const buttons = Array.from(root.querySelectorAll('button, [role="button"]')).map(b => {
+    const r = b.getBoundingClientRect();
+    const svgTitle = b.querySelector('svg title');
+    return {
+      ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
+      testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
+      rect: [r.x, r.y, r.width, r.height],
+    };
+  });
+
+  // The primary displayed photo is whichever blob img in the root has the
+  // largest rendered area (the full-res view, not a filmstrip thumbnail).
+  let primary = null;
+  if (rootImgs.length > 0) {
+    primary = rootImgs.reduce((a, b) => {
+      const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      return (ra.width * ra.height) >= (rb.width * rb.height) ? a : b;
+    });
+  }
+
+  let fetchResult = null;
+  if (primary && fetchBytes) {
+    try {
+      const resp = await fetch(primary.src);
+      const buf = await resp.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+      }
+      fetchResult = { ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '' };
+    } catch (e) {
+      fetchResult = { ok: false, reason: String(e && e.message || e) };
+    }
+  }
+
+  const rootRect = root.getBoundingClientRect();
+  return {
+    found: true,
+    dialogCount: dialogs.length,
+    rootTag: root.tagName, rootTestid: root.getAttribute('data-testid'), rootRole: root.getAttribute('role'),
+    rootRect: [rootRect.x, rootRect.y, rootRect.width, rootRect.height],
+    rootInnerTextExcerpt: (root.innerText || '').slice(0, 200),
+    rootImgCount: rootImgs.length,
+    rootImgs: rootImgs.slice(0, 12).map(imgInfo),
+    primary: primary ? imgInfo(primary) : null,
+    fetch: fetchResult,
+    buttons,
+  };
+}
+"""
+
+
+async def _fetch_and_hash_blob(page, src: str) -> Dict[str, Any]:
+    """Fetches one already-known blob: URL's bytes directly (no new DOM
+    diffing needed — the src itself is the identity), for re-fetching a
+    SPECIFIC previously-observed image (e.g. after navigating away and
+    wanting the first photo's bytes again) without re-running the full
+    viewer snapshot."""
+    try:
+        result = await _evaluate(page, """
+            async ([src]) => {
+              try {
+                const resp = await fetch(src);
+                const buf = await resp.arrayBuffer();
+                const bytes = new Uint8Array(buf);
+                let binary = '';
+                const chunkSize = 0x8000;
+                for (let i = 0; i < bytes.length; i += chunkSize) {
+                  binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+                }
+                return { ok: true, base64: btoa(binary) };
+              } catch (e) {
+                return { ok: false, reason: String(e && e.message || e) };
+              }
+            }
+        """, [src])
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+    return result
+
+
+def _hash_and_mime(base64_data: Optional[str]) -> Dict[str, Any]:
+    if not base64_data:
+        return {"byte_length": None, "sha256": None, "detected_mime": None}
+    raw = b64mod.b64decode(base64_data)
+    return {
+        "byte_length": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+        "detected_mime": _detect_mime_type(raw, "image"), "_raw_bytes": raw,
+    }
+
+
+async def _diagnose_photo_album_viewer(page, group_name: str, data_id: str) -> Dict[str, Any]:
+    """Full read-only diagnostic: records the album's collapsed preview
+    state, opens it with one real click, inspects whatever viewer/gallery
+    mounts from scratch (never assuming the video-viewer's shape),
+    identifies + hashes two distinct photos, probes the download
+    mechanism, then closes it — verifying the original message DOM is
+    unchanged afterward. Never uploads, never creates any request."""
+    idx = await _find_message_index_by_data_id(page, group_name, data_id)
+    if idx is None:
+        return {"ok": False, "stage": "locate_message", "reason": f"message {data_id!r} not found in scanned window"}
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    message = page.locator(full_sel).nth(idx)
+
+    try:
+        message_html_before = await message.evaluate("(el) => el.outerHTML", timeout=10000)
+    except Exception as exc:
+        return {"ok": False, "stage": "capture_before", "reason": str(exc)}
+
+    overflow_match = re.search(r"\+(\d+)", message_html_before)
+    thumbs = message.locator('[data-testid="image-thumb"]')
+    try:
+        thumb_count_before = await thumbs.count()
+    except Exception:
+        thumb_count_before = 0
+    tiles_before = []
+    for i in range(thumb_count_before):
+        thumb = thumbs.nth(i)
+        try:
+            thumb_html = await thumb.evaluate("(el) => el.outerHTML", timeout=10000)
+            tiles_before.append({"index": i, "hash": _smallest_hash(thumb_html)})
+        except Exception as exc:
+            tiles_before.append({"index": i, "hash": None, "error": str(exc)})
+
+    try:
+        baseline_srcs = await _evaluate(page, _PHOTO_BLOB_BASELINE_JS)
+    except Exception:
+        baseline_srcs = []
+
+    try:
+        await thumbs.first.scroll_into_view_if_needed(timeout=5000)
+        await thumbs.first.click(timeout=10000)
+    except Exception as exc:
+        return {"ok": False, "stage": "open_album", "reason": f"click failed: {exc}", "tiles_before": tiles_before, "overflow_badge": overflow_match.group(1) if overflow_match else None}
+
+    viewer = None
+    elapsed = 0.0
+    while elapsed < 10.0:
+        try:
+            viewer = await _evaluate(page, _ALBUM_VIEWER_SNAPSHOT_JS, [baseline_srcs, True])
+        except Exception as exc:
+            viewer = {"found": False, "error": str(exc)}
+        if viewer.get("found"):
+            break
+        await page.wait_for_timeout(500)
+        elapsed += 0.5
+
+    if not viewer or not viewer.get("found"):
+        try:
+            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
+        except Exception:
+            body_snapshot = None
+        return {
+            "ok": False, "stage": "open_album",
+            "reason": "no viewer/gallery detected within 10s of clicking the album",
+            "tiles_before": tiles_before, "overflow_badge": overflow_match.group(1) if overflow_match else None,
+            "last_probe": viewer, "body_snapshot": body_snapshot,
+        }
+
+    photo1_fetch = viewer.get("fetch") or {}
+    photo1 = {
+        "rect": (viewer.get("primary") or {}).get("rect"),
+        "natural_size": [(viewer.get("primary") or {}).get("naturalWidth"), (viewer.get("primary") or {}).get("naturalHeight")],
+        "src_present": bool(viewer.get("primary")),
+        **_hash_and_mime(photo1_fetch.get("base64") if photo1_fetch.get("ok") else None),
+    }
+    # Note: the preview thumbnail hash and the full-resolution viewer
+    # image are different assets (different resolutions) — no direct
+    # hash-equality check against tiles_before is attempted here; the
+    # report notes both hashes so the caller can judge identity linkage.
+    download_button_found = None
+    for b in viewer.get("buttons", []):
+        label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
+        if re.search(r"download", label):
+            download_button_found = b
+            break
+
+    native_download = None
+    if download_button_found:
+        async def _click_download():
+            cx = download_button_found["rect"][0] + download_button_found["rect"][2] / 2
+            cy = download_button_found["rect"][1] + download_button_found["rect"][3] / 2
+            await page.mouse.click(cx, cy, button="left")
+        try:
+            downloads = await _collect_downloads(page, _click_download, window_s=10.0, quiet_s=2.0)
+            native_download = {"triggered": True, "download_event_count": len(downloads)}
+            if downloads:
+                try:
+                    path = await downloads[0].path()
+                    native_download["saved_path"] = str(path) if path else None
+                    if path:
+                        with open(path, "rb") as fh:
+                            nd_bytes = fh.read()
+                        native_download["byte_length"] = len(nd_bytes)
+                        native_download["sha256"] = hashlib.sha256(nd_bytes).hexdigest()
+                except Exception as exc:
+                    native_download["read_error"] = str(exc)
+        except Exception as exc:
+            native_download = {"triggered": False, "error": str(exc)}
+
+    # Navigate to a second photo — look for a next/right/forward-labeled
+    # control among the SAME buttons already dumped; fall back to
+    # ArrowRight (a real, common gallery keyboard shortcut) if none found.
+    next_button = None
+    for b in viewer.get("buttons", []):
+        label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
+        if re.search(r"next|right|forward|chevron.?right|arrow.?right", label):
+            next_button = b
+            break
+    nav_method = None
+    if next_button:
+        cx = next_button["rect"][0] + next_button["rect"][2] / 2
+        cy = next_button["rect"][1] + next_button["rect"][3] / 2
+        try:
+            await page.mouse.click(cx, cy, button="left")
+            nav_method = "button_click"
+        except Exception as exc:
+            nav_method = f"button_click_failed:{exc}"
+    else:
+        try:
+            await page.keyboard.press("ArrowRight")
+            nav_method = "arrow_right_key"
+        except Exception as exc:
+            nav_method = f"arrow_right_failed:{exc}"
+
+    await page.wait_for_timeout(1200)
+    try:
+        viewer2 = await _evaluate(page, _ALBUM_VIEWER_SNAPSHOT_JS, [baseline_srcs, True])
+    except Exception as exc:
+        viewer2 = {"found": False, "error": str(exc)}
+
+    photo2_fetch = viewer2.get("fetch") or {}
+    photo2 = {
+        "rect": (viewer2.get("primary") or {}).get("rect"),
+        "natural_size": [(viewer2.get("primary") or {}).get("naturalWidth"), (viewer2.get("primary") or {}).get("naturalHeight")],
+        "src_present": bool(viewer2.get("primary")),
+        "same_src_as_photo1": (viewer2.get("primary") or {}).get("src") == (viewer.get("primary") or {}).get("src"),
+        **_hash_and_mime(photo2_fetch.get("base64") if photo2_fetch.get("ok") else None),
+    }
+
+    close_result = await _close_photo_viewer(
+        page, {"buttons": viewer2.get("buttons") or viewer.get("buttons", [])},
+        (viewer2.get("primary") or viewer.get("primary") or {}).get("src", ""),
+    )
+
+    try:
+        message_html_after = await message.evaluate("(el) => el.outerHTML", timeout=10000)
+    except Exception as exc:
+        message_html_after = None
+    thumb_count_after = None
+    tiles_after = []
+    try:
+        thumb_count_after = await thumbs.count()
+        for i in range(thumb_count_after):
+            thumb = thumbs.nth(i)
+            thumb_html = await thumb.evaluate("(el) => el.outerHTML", timeout=10000)
+            tiles_after.append({"index": i, "hash": _smallest_hash(thumb_html)})
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "overflow_badge": overflow_match.group(1) if overflow_match else None,
+        "tiles_before": tiles_before,
+        "viewer_root": {
+            "tag": viewer.get("rootTag"), "testid": viewer.get("rootTestid"), "role": viewer.get("rootRole"),
+            "rect": viewer.get("rootRect"), "dialog_count": viewer.get("dialogCount"),
+            "innerText_excerpt": viewer.get("rootInnerTextExcerpt"),
+        },
+        "viewer_root_img_count": viewer.get("rootImgCount"),
+        "viewer_buttons": viewer.get("buttons"),
+        "download_button_found": download_button_found,
+        "native_download": native_download,
+        "photo1": photo1,
+        "nav_method": nav_method,
+        "photo2": photo2,
+        "photos_distinct": (photo1.get("sha256") != photo2.get("sha256")) if photo1.get("sha256") and photo2.get("sha256") else None,
+        "close_result": close_result,
+        "message_unchanged_after": (message_html_before == message_html_after) if message_html_after else None,
+        "thumb_count_before": thumb_count_before,
+        "thumb_count_after": thumb_count_after,
+        "tiles_after": tiles_after,
+        "_raw_bytes_photo1": photo1.pop("_raw_bytes", None),
+        "_raw_bytes_photo2": photo2.pop("_raw_bytes", None),
     }
 
 

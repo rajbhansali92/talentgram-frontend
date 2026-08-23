@@ -674,21 +674,15 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
         click_x = box["x"] + box["width"] * frac[0]
         click_y = box["y"] + box["height"] * frac[1]
 
-        # 2026-08-23: with just a passive wait, the menu appeared but
-        # "Download all" was consistently absent — exact match to every
-        # other item the user saw manually. WhatsApp likely only starts
-        # fetching/caching an album's full-resolution media once something
-        # actually taps it (matching the user's own description of the
-        # single-video case: "Open/select video -> buffers -> Download
-        # becomes available"), not merely on becoming visible. Trigger
-        # that with a genuine left-click before opening the context menu.
-        try:
-            await page.mouse.move(click_x, click_y)
-            await page.mouse.click(click_x, click_y, button="left")
-        except Exception:
-            pass
-        await page.wait_for_timeout(8000)
-
+        # 2026-08-23: a preceding left-click was tried here as a way to
+        # force WhatsApp to start fetching the media before opening the
+        # menu (hypothesis: "Download all" needs it cached first, same as
+        # the single-video case) — it was REMOVED after live testing
+        # showed it actively breaks the menu (no menu at all afterward,
+        # vs. the reliable 7-item menu without it). Reverted to the
+        # right-click-only flow that reliably reproduces the user's
+        # manually-observed menu; "Download all" itself is still missing
+        # from it — see the session write-up for the current theory.
         try:
             await page.evaluate(_EVENT_CAPTURE_INSTALL_JS)
         except Exception:

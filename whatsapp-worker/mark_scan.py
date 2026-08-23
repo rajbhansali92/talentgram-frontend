@@ -853,7 +853,7 @@ async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dic
     if jumped_idx is None:
         return {"ok": False, "reason": "jumped-to message no longer found in window", "data_id": centered["dataId"]}
     try:
-        jumped_html = await page.locator(full_sel).nth(jumped_idx).evaluate("(el) => el.outerHTML")
+        jumped_html = await page.locator(full_sel).nth(jumped_idx).evaluate("(el) => el.outerHTML", timeout=10000)
     except Exception as exc:
         return {"ok": False, "reason": f"could not read jumped-to message HTML: {exc}", "data_id": centered["dataId"]}
     jumped_html = jumped_html[:HTML_TRUNCATE]
@@ -907,7 +907,16 @@ async def _identify_tile_index(page, group_name: str, data_id: str, expected_has
     tile_hashes: List[Optional[str]] = []
     for i in range(n):
         try:
-            tile_html = await tiles.nth(i).evaluate("(el) => el.outerHTML")
+            # Explicit timeout (2026-08-23 bug: this call previously had
+            # none, unlike every page.evaluate() call in this module —
+            # already wrapped via _evaluate() after the earlier
+            # unbounded-evaluate hang investigation. A real run hung on
+            # exactly this line, reaped by the backend's 360s orphan
+            # sweep, while three OTHER tiles processed right after it
+            # succeeded fine — an isolated stall, not a systemic issue,
+            # but every evaluate-family call in this file should be
+            # bounded on principle.
+            tile_html = await tiles.nth(i).evaluate("(el) => el.outerHTML", timeout=10000)
         except Exception:
             tile_hashes.append(None)
             continue
@@ -1117,7 +1126,7 @@ async def _diagnose_album_lifecycle(page, group_name: str, album_data_id: str, k
             return {"label": label, "found_by_data_id": False}
         loc = page.locator(full_sel).nth(idx)
         try:
-            html_full = await loc.evaluate("(el) => el.outerHTML")
+            html_full = await loc.evaluate("(el) => el.outerHTML", timeout=10000)
         except Exception as exc:
             return {"label": label, "found_by_data_id": True, "error": str(exc)}
         html_trunc = html_full[:HTML_TRUNCATE]

@@ -1745,10 +1745,20 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
               const el = els.find(e => e.getAttribute('data-id') === targetId);
               if (!el) return {found: false};
               const ct = el.querySelector('[data-pre-plain-text]');
+              const html = el.outerHTML;
+              const testidCounts = {};
+              (html.match(/data-testid="[^"]+"/g) || []).forEach(m => {
+                testidCounts[m] = (testidCounts[m] || 0) + 1;
+              });
               return {
                 found: true,
                 inner_text: (el.innerText || '').slice(0, 300),
                 pre_plain_text: ct ? ct.getAttribute('data-pre-plain-text') : null,
+                html_len: html.length,
+                testid_counts: testidCounts,
+                img_count: el.querySelectorAll('img').length,
+                img_srcs: Array.from(el.querySelectorAll('img')).slice(0, 5).map(i => (i.src || '').slice(0, 40)),
+                html_snippet: html.slice(0, 800),
               };
             }
         """, [full_sel, req.get("probe_message_id")])

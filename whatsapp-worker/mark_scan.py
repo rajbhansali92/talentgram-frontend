@@ -1101,6 +1101,11 @@ async def _diagnose_album_lifecycle(page, group_name: str, album_data_id: str, k
         structured = _album_tile_hashes_and_types(html_trunc)
         all_blobs = _B64_RE.findall(html_full)
         all_hashes_anywhere = {hashlib.sha256(b.encode()).hexdigest() for b in all_blobs}
+        grid_area_marker_count = len(_GRID_AREA_RE.findall(html_full))
+        try:
+            testid_count = await loc.locator('[data-testid="video-content"], [data-testid="image-content"]').count()
+        except Exception:
+            testid_count = None
         return {
             "label": label, "found_by_data_id": True,
             "own_data_id": _own_data_id(html_trunc),
@@ -1108,6 +1113,8 @@ async def _diagnose_album_lifecycle(page, group_name: str, album_data_id: str, k
             "is_album": _is_album(html_trunc),
             "structured_tile_count": len(structured),
             "structured_tile_hashes": [h for h, _ in structured],
+            "grid_area_marker_count_in_full_html": grid_area_marker_count,
+            "clickable_video_or_image_testid_count": testid_count,
             "total_base64_blobs_anywhere_in_message": len(all_blobs),
             "known_tile_hash_found_anywhere_in_message": {h: (h in all_hashes_anywhere) for h in known_tile_hashes},
             "message_html_length": len(html_full),

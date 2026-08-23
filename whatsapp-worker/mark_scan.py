@@ -402,6 +402,241 @@ _BODY_SNAPSHOT_JS = """
 """
 
 
+# ---------------------------------------------------------------------------
+# Individual-tile VIEWER workflow (2026-08-23) — reproduces, step for step,
+# what the user's own manual screenshots showed: open the tile -> a real
+# media viewer mounts -> the video buffers -> a three-dot menu inside that
+# viewer (not a right-click context menu) offers "Download". The three
+# earlier failed attempts at this were BEFORE the click-targeting fixes
+# proven later the same day (message row is full-width, bounding_box()
+# needs an explicit scroll-into-view first) — this redoes the open step
+# with those fixes applied, then works entirely inside whatever mounts,
+# diagnostic-first for the menu-button discovery (no blind selector guess).
+# ---------------------------------------------------------------------------
+_VIDEO_STATE_JS = """
+() => {
+  const v = document.querySelector('video');
+  if (!v) return null;
+  let buffered = [];
+  try {
+    for (let i = 0; i < v.buffered.length; i++) buffered.push([v.buffered.start(i), v.buffered.end(i)]);
+  } catch (e) {}
+  return {
+    readyState: v.readyState, networkState: v.networkState, duration: v.duration,
+    currentTime: v.currentTime, buffered: buffered, src: v.currentSrc || v.src || null,
+    videoWidth: v.videoWidth, videoHeight: v.videoHeight, paused: v.paused, error: v.error ? String(v.error.code) : null,
+  };
+}
+"""
+
+# Dumps every button-like element inside whatever most recently mounted as
+# a direct child of <body> (the standard React-portal/modal pattern) — aria
+# label, data-icon, and any inner <svg><title> text (WhatsApp icons
+# reliably carry one, e.g. "ic-search", "ic-close", seen already in this
+# codebase's own PHASE26B diagnostics), plus each button's own rect so a
+# "top-right" candidate can be identified from real measured positions,
+# never assumed.
+_VIEWER_BUTTONS_JS = """
+() => {
+  const root = document.body.lastElementChild;
+  if (!root) return {rootFound: false, buttons: []};
+  const btns = Array.from(root.querySelectorAll('button, [role="button"]'));
+  return {
+    rootFound: true,
+    rootInfo: {tag: root.tagName, id: root.id || null, testid: root.getAttribute('data-testid')},
+    buttons: btns.map(b => {
+      const r = b.getBoundingClientRect();
+      const svgTitle = b.querySelector('svg title');
+      return {
+        ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
+        testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
+        rect: [r.x, r.y, r.width, r.height],
+      };
+    }),
+  };
+}
+"""
+
+
+async def _identify_tile_index(page, group_name: str, data_id: str, expected_hash: str) -> Dict[str, Any]:
+    """Re-derives which tile index currently corresponds to `expected_hash`
+    by re-extracting the album's live HTML and re-running the same
+    _album_tile_hashes used everywhere else for identity — never assumes a
+    fixed index across DOM re-renders."""
+    idx = await _find_message_index_by_data_id(page, group_name, data_id)
+    if idx is None:
+        return {"ok": False, "reason": "album message not found in scanned window"}
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    try:
+        html = await page.locator(full_sel).nth(idx).evaluate("(el) => el.outerHTML")
+    except Exception as exc:
+        return {"ok": False, "reason": f"could not read message HTML: {exc}"}
+    if len(html) > HTML_TRUNCATE:
+        html = html[:HTML_TRUNCATE]
+    tile_hashes = _album_tile_hashes(html)
+    if expected_hash not in tile_hashes:
+        return {"ok": False, "reason": "expected tile hash not found among current album tiles", "tile_hashes": tile_hashes, "message_idx": idx}
+    tile_index = tile_hashes.index(expected_hash)
+    return {"ok": True, "message_idx": idx, "tile_index": tile_index, "tile_hashes": tile_hashes}
+
+
+async def _wait_for_video_readiness(page, min_ready_state: int = 3, timeout_s: float = 60.0) -> Dict[str, Any]:
+    """Bounded poll on the ACTUAL <video> element's own readyState/
+    networkState/buffered — never a fixed sleep. Returns the last observed
+    state regardless of whether the threshold was reached, so a timeout
+    still carries real evidence rather than silence."""
+    elapsed = 0.0
+    step = 1.0
+    last_state = None
+    while elapsed < timeout_s:
+        try:
+            last_state = await page.evaluate(_VIDEO_STATE_JS)
+        except Exception:
+            last_state = None
+        if last_state and last_state.get("readyState", 0) >= min_ready_state:
+            return {"reached": True, "elapsed_s": elapsed, "state": last_state}
+        await page.wait_for_timeout(int(step * 1000))
+        elapsed += step
+    return {"reached": False, "elapsed_s": elapsed, "state": last_state}
+
+
+async def _open_tile_viewer_and_download(page, message_locator, tile_index: int) -> Dict[str, Any]:
+    """Reproduces the manual workflow exactly: open the tile -> wait for a
+    real <video> to mount -> wait for it to actually buffer (bounded, not
+    a fixed sleep) -> dump the viewer's own buttons (diagnostic-first,
+    never a blind selector guess) -> if one looks like a menu trigger,
+    click it, dump whatever menu appears, click "Download" if present, and
+    collect the resulting download."""
+    tile = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile_index)
+    try:
+        await tile.scroll_into_view_if_needed(timeout=5000)
+    except Exception:
+        pass
+    try:
+        await page.evaluate(_EVENT_CAPTURE_INSTALL_JS)
+    except Exception:
+        pass
+    try:
+        await tile.click(timeout=10000)
+    except Exception as exc:
+        return {"ok": False, "stage": "open_tile", "reason": f"click failed: {exc}"}
+
+    video_mounted = False
+    elapsed = 0.0
+    while elapsed < 15.0:
+        try:
+            count = await page.locator("video").count()
+        except Exception:
+            count = 0
+        if count > 0:
+            video_mounted = True
+            break
+        await page.wait_for_timeout(500)
+        elapsed += 0.5
+
+    try:
+        click_event_log = await page.evaluate(_EVENT_CAPTURE_READ_JS)
+    except Exception:
+        click_event_log = None
+
+    if not video_mounted:
+        try:
+            body_snapshot = await page.evaluate(_BODY_SNAPSHOT_JS)
+        except Exception:
+            body_snapshot = None
+        return {
+            "ok": False, "stage": "open_tile", "reason": "no <video> element mounted within 15s of clicking the tile",
+            "click_event_log": click_event_log, "body_snapshot": body_snapshot,
+        }
+
+    readiness = await _wait_for_video_readiness(page)
+
+    try:
+        viewer_buttons = await page.evaluate(_VIEWER_BUTTONS_JS)
+    except Exception:
+        viewer_buttons = {"rootFound": False, "buttons": []}
+
+    menu_trigger = None
+    for b in viewer_buttons.get("buttons", []):
+        label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
+        if re.search(r"menu|more|option|kebab", label):
+            menu_trigger = b
+            break
+    if menu_trigger is None:
+        # Fallback: the button positioned furthest toward the top-right of
+        # the viewport, matching the user's own description ("top-right
+        # three-dot menu") — measured from real captured rects, not assumed.
+        candidates = [b for b in viewer_buttons.get("buttons", []) if b.get("rect")]
+        if candidates:
+            menu_trigger = max(candidates, key=lambda b: b["rect"][0] - b["rect"][1])
+
+    if menu_trigger is None:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return {
+            "ok": False, "stage": "find_menu_trigger", "reason": "video mounted but no plausible menu-trigger button found",
+            "readiness": readiness, "viewer_buttons": viewer_buttons,
+        }
+
+    mx = menu_trigger["rect"][0] + menu_trigger["rect"][2] / 2
+    my = menu_trigger["rect"][1] + menu_trigger["rect"][3] / 2
+    try:
+        await page.mouse.click(mx, my, button="left")
+    except Exception as exc:
+        return {"ok": False, "stage": "click_menu_trigger", "reason": str(exc), "readiness": readiness, "menu_trigger": menu_trigger}
+
+    await page.wait_for_timeout(600)
+    try:
+        menu_dump = await page.evaluate(_CONTEXT_MENU_DUMP_JS)
+    except Exception:
+        menu_dump = None
+    if not menu_dump:
+        try:
+            body_snapshot = await page.evaluate(_BODY_SNAPSHOT_JS)
+        except Exception:
+            body_snapshot = None
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return {
+            "ok": False, "stage": "menu_after_trigger_click", "reason": "clicked menu trigger but no menu appeared",
+            "readiness": readiness, "menu_trigger": menu_trigger, "body_snapshot": body_snapshot,
+        }
+
+    item = page.locator(
+        '[role="menu"] :text-matches("download", "i"), '
+        '[role="menuitem"]:has-text("Download"), '
+        'li:has-text("Download"), '
+        'div[role="button"]:has-text("Download")'
+    ).first
+    try:
+        visible = await item.is_visible(timeout=3000)
+    except Exception:
+        visible = False
+    if not visible:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return {
+            "ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found",
+            "readiness": readiness, "menu_dump": menu_dump,
+        }
+
+    async def _click_item():
+        await item.click(timeout=5000)
+
+    downloads = await _collect_downloads(page, _click_item)
+    return {
+        "ok": bool(downloads) and any(d.get("ok") for d in downloads),
+        "readiness": readiness, "menu_dump": menu_dump, "downloads": downloads,
+    }
+
+
 async def _find_message_index_by_data_id(page, group_name: str, data_id: str) -> Optional[int]:
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
@@ -756,18 +991,45 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
     return {"ok": False, "reason": "no 'Download' action reachable via right-click at any tried position", "attempts": attempts}
 
 
-async def _run_download_probe(page, req: Dict[str, Any]) -> Dict[str, Any]:
+async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, Any]:
     """Diagnostic-only entry point: proves (or disproves) the native
-    right-click Download / Download-all mechanism against one real
-    message. Never uploads, never triggers a report into the real
-    casting-agent WhatsApp group (see services/media_assignment_worker.py's
-    `mode == "download_probe"` short-circuit)."""
+    Download mechanism against one real message. Never uploads, never
+    triggers a report into the real casting-agent WhatsApp group (see
+    services/media_assignment_worker.py's `mode == "download_probe"`
+    short-circuit). `probe_type`:
+      - "tile_viewer" (default when a tile_index/expected_tile_hash is
+        given): reproduces the manual open-tile -> viewer -> buffer ->
+        three-dot -> Download workflow for one specific tile.
+      - "album_menu" (default otherwise): right-click the album/message
+        itself, looking for "Download all" / "Download"."""
     group_name = req["group_name"]
     status = await sender._open_group_chat(page, group_name)
     if status != "OPENED":
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     data_id = req["probe_message_id"]
+    probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
+
+    session_identity = {
+        "own_phone_number": getattr(session, "own_phone_number", None),
+        "session_id": getattr(session, "session_id", None),
+        "generation": getattr(session, "generation", None),
+    }
+
+    if probe_type == "tile_viewer":
+        expected_hash = req["expected_tile_hash"]
+        ident = await _identify_tile_index(page, group_name, data_id, expected_hash)
+        if not ident.get("ok"):
+            return {"results": [{"ok": False, "stage": "identify_tile", **ident, "session_identity": session_identity}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(ident["message_idx"])
+        result = await _open_tile_viewer_and_download(page, message, ident["tile_index"])
+        result["source_message_id"] = data_id
+        result["tile_index"] = ident["tile_index"]
+        result["expected_tile_hash"] = expected_hash
+        result["session_identity"] = session_identity
+        return {"results": [result]}
 
     async def _relocate():
         idx = await _find_message_index_by_data_id(page, group_name, data_id)
@@ -800,6 +1062,7 @@ async def _run_download_probe(page, req: Dict[str, Any]) -> Dict[str, Any]:
 
     result = await _right_click_and_probe_download(page, _relocate)
     result["source_message_id"] = data_id
+    result["session_identity"] = session_identity
     return {"results": [result]}
 
 
@@ -934,7 +1197,7 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                     headers=_auth_headers(), timeout=30.0,
                                 )
                             elif req.get("mode") == "download_probe":
-                                result = await asyncio.wait_for(_run_download_probe(page, req), timeout=120.0)
+                                result = await asyncio.wait_for(_run_download_probe(session, page, req), timeout=150.0)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
                                     json={"results": result.get("results", []), "error": result.get("error")},

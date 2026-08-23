@@ -332,29 +332,104 @@ _SCROLL_DIAGNOSTIC_JS = """
 }
 """
 
+# Single scroll-to-top STEP (not the full loop _LOAD_HISTORY_JS runs) — used
+# by _dump_window's own capture-then-scroll loop below, which needs to dump
+# the currently-rendered messages BETWEEN each scroll step, not just once
+# at the very end.
+_SCROLL_STEP_JS = """
+([sel]) => {
+  const els = document.querySelectorAll(sel);
+  if (!els.length) return {moved: false};
+  let container = els[0];
+  let maxOverflow = 0;
+  let node = els[0].parentElement;
+  for (let d = 0; d < 8 && node; d++) {
+    const overflow = node.scrollHeight - node.clientHeight;
+    if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+    node = node.parentElement;
+  }
+  if (maxOverflow <= 0) return {moved: false};
+  container.scrollTop = 0;
+  return {moved: true};
+}
+"""
 
-async def _dump_window(page, group_name: str, max_messages: int, diagnostic: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+
+async def _dump_window(
+    page, group_name: str, max_messages: int, diagnostic: Optional[Dict[str, Any]] = None, max_steps: int = 10,
+) -> List[Dict[str, Any]]:
+    """Captures messages at MULTIPLE scroll checkpoints, merging by data-id
+    — not a single dump after scrolling as far as possible. Root-caused
+    2026-08-23: a real, screenshot-confirmed reply (correct group, real
+    @mention, two ticks) never appeared across several repeated scans.
+    Direct evidence (_SCROLL_DIAGNOSTIC_JS): scrollTop=0, atBottom=false,
+    scrollHeight=4963 vs. only ~23 actually-rendered DOM nodes at that
+    scroll position — WhatsApp Web virtualizes the message list (a fixed-
+    size sliding window of real DOM nodes, not the full history), and the
+    OLD design (_ensure_history_loaded scrolls all the way to the top,
+    _dump_window then reads whatever's rendered) captured the TOP of
+    history, evicting the newest messages — including any reply sent since
+    the last scan — from the DOM entirely before ever seeing them.
+
+    Fix: capture the TAIL first (WhatsApp opens scrolled to the bottom —
+    this is the newest messages, exactly where a just-sent mark reply
+    lives), then scroll toward older history one step at a time, capturing
+    again after each step and merging everything by unique data-id. Still
+    fully bounded: at most `max_steps` scroll iterations, stops early once
+    a step surfaces no new messages (reached the top) or `max_messages`
+    unique messages have been captured — never an unbounded scan."""
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
-    await _ensure_history_loaded(page, full_sel, max_messages)
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    checkpoints: List[Dict[str, Any]] = []
+
+    async def _capture_step(label: str) -> None:
+        loc = page.locator(full_sel)
+        n = await loc.count()
+        new_here = 0
+        for i in range(n):
+            try:
+                dump = await _evaluate(page, _DOM_DUMP_JS, [full_sel, i])
+            except Exception:
+                continue
+            if not dump:
+                continue
+            data_id = _own_data_id(dump.get("messageHtml") or "")
+            if not data_id or data_id in merged:
+                continue
+            merged[data_id] = dump
+            order.append(data_id)
+            new_here += 1
+        checkpoints.append({"label": label, "rendered_count": n, "new_unique": new_here, "merged_total": len(merged)})
+
+    await _capture_step("tail")
+
+    for step in range(max_steps):
+        if len(merged) >= max_messages:
+            break
+        try:
+            step_result = await _evaluate(page, _SCROLL_STEP_JS, [full_sel])
+        except Exception:
+            logger.exception("mark_scan: history-load scroll step failed (continuing with whatever is captured)")
+            break
+        if not step_result.get("moved"):
+            break
+        await page.wait_for_timeout(400)
+        before_count = len(merged)
+        await _capture_step(f"scroll_step_{step}")
+        if len(merged) == before_count:
+            break  # no new messages surfaced -> reached the top of history
+
     if diagnostic is not None:
+        diagnostic["capture_checkpoints"] = checkpoints
         try:
             diagnostic["scroll_state_after_history_load"] = await _evaluate(page, _SCROLL_DIAGNOSTIC_JS, [full_sel])
         except Exception as exc:
             diagnostic["scroll_state_after_history_load"] = {"error": str(exc)}
-    loc = page.locator(full_sel)
-    n = await loc.count()
-    start = max(0, n - max_messages)
-    out = []
-    for i in range(start, n):
-        try:
-            dump = await _evaluate(page, _DOM_DUMP_JS, [full_sel, i])
-        except Exception:
-            logger.exception("mark_scan: DOM dump failed group=%r index=%d", group_name, i)
-            continue
-        if dump:
-            out.append(dump)
-    return out
+
+    return [merged[i] for i in order[:max_messages]]
 
 
 async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:

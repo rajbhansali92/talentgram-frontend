@@ -129,6 +129,38 @@ def main():
     assert tile_hashes[0] != tile_hashes[1]  # distinct tiles, never collapsed to one
     print("9. album tile hashing             -> each tile gets its own distinct hash, larger blob ignored")
 
+    types = [t for _, t in mark_scan._album_tile_hashes_and_types(ALBUM_MESSAGE_HTML)]
+    assert types == ["video", "video"], types
+    print("10. album tile media type         -> per-tile type detected (not hardcoded 'video')")
+
+    # Whole-album batch marking (2026-08-23) — "mark google: take 1, take
+    # 2, take 3, intro" replying to the ALBUM ITSELF, not one tile.
+    assert mark_scan._parse_batch_role_list("mark google: take 1, take 2, take 3, intro") == (
+        "google", ["take 1", "take 2", "take 3", "intro"]
+    )
+    print("11. batch role-list parsing       -> colon-delimited ordered list split correctly")
+
+    assert mark_scan._parse_batch_role_list("mark google take 1") is None  # no colon -> not a batch
+    assert mark_scan._parse_batch_role_list("mark google: take 1") is None  # single item -> not a batch
+    print("12. batch role-list non-match     -> plain single marks never misparsed as a batch")
+
+    assert mark_scan._SINGLE_PHOTOS_RE.match("mark google photos")
+    assert mark_scan._SINGLE_PHOTOS_RE.match("mark google photo")
+    assert not mark_scan._SINGLE_PHOTOS_RE.match("mark google take 1")
+    print("13. single-photos detection       -> 'mark <project> photos' recognized, takes are not")
+
+    WHOLE_ALBUM_QUOTE_HTML = (
+        '<div data-testid="quoted-message"><span data-testid="author">Raj Talentgram</span>'
+        '<div data-testid="chat-msg-symbol"></div>'
+        '<span data-testid="selectable-text" class="quoted-mention">4 videos</span></div>'
+    )
+    assert mark_scan._quoted_is_whole_item_summary(WHOLE_ALBUM_QUOTE_HTML) == 4
+    # A real single-tile quote (has an embedded thumbnail blob) must NEVER
+    # be misidentified as a whole-album summary, even if its text happens
+    # to contain a number.
+    assert mark_scan._quoted_is_whole_item_summary(QUOTED_PHOTO_BLOCK_HTML) is None
+    print("14. whole-album quote detection   -> 'N videos/photos' summary recognized only when no thumbnail hash exists")
+
 
 if __name__ == "__main__":
     main()

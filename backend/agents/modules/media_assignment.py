@@ -197,6 +197,27 @@ class ValidationOutcome:
     error: Optional[str] = None
 
 
+def slot_key(
+    media_role: str, take_number: Optional[int],
+    source_message_id: Optional[str] = None, source_thumbnail_hash: Optional[str] = None,
+) -> tuple:
+    """The "slot" a piece of media occupies for a talent+project.
+    "take"/"intro" have a genuine single slot per (role, take_number) —
+    exactly one video should ever occupy "Take 1"; two DIFFERENT source
+    tiles both claiming it is real ambiguity, never auto-picked. "photos"
+    has no such natural slot: a batch mark (e.g. "mark google photos" on a
+    whole photo album) legitimately produces many DISTINCT photos sharing
+    role="photos" — including the source identity in the key means each
+    photo gets its own slot, so two different photos never collide as
+    "ambiguous" with each other, and uploading one never makes another
+    look "already uploaded". Used consistently everywhere a slot is
+    compared: validate_candidates' ambiguity/dedup logic and the backend
+    orchestrator's already-uploaded / still-to-download checks."""
+    if media_role == "photos":
+        return (media_role, take_number, source_message_id, source_thumbnail_hash)
+    return (media_role, take_number)
+
+
 def validate_candidates(
     candidates: List[Dict[str, Any]],
     *,
@@ -228,21 +249,26 @@ def validate_candidates(
             **c, "media_role": parsed.media_role, "take_number": parsed.take_number,
         })
 
-    # Group by (media_role, take_number) to detect duplicate marks of the
-    # exact same slot — never auto-pick between them.
+    def _key(m: Dict[str, Any]) -> tuple:
+        return slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash"))
+
+    # Group by slot to detect duplicate marks of the exact same slot —
+    # never auto-pick between them.
     by_slot: Dict[tuple, List[Dict[str, Any]]] = {}
     for m in valid_marks:
-        key = (m["media_role"], m["take_number"])
-        by_slot.setdefault(key, []).append(m)
+        by_slot.setdefault(_key(m), []).append(m)
 
     for key, marks in by_slot.items():
         # Distinct source media resolving to the SAME slot is the
         # ambiguity the spec calls out; the SAME source media marked twice
-        # (identical resolved_source_message_id) is harmless idempotent
-        # duplication, not ambiguity.
-        distinct_sources = {m.get("resolved_source_message_id") for m in marks}
+        # (identical (source_message_id, quoted_thumbnail_hash) — the
+        # thumbnail hash matters here too: every tile in an album shares
+        # the same source_message_id, so comparing that alone would miss
+        # two DIFFERENT tiles both claiming the same take) is harmless
+        # idempotent duplication, not ambiguity.
+        distinct_sources = {(m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) for m in marks}
         if len(distinct_sources) > 1:
-            media_role, take_number = key
+            media_role, take_number = key[0], key[1]
             return ValidationOutcome(
                 ok=False,
                 ambiguous={
@@ -255,12 +281,12 @@ def validate_candidates(
     if unresolved:
         return ValidationOutcome(ok=False, unresolved=unresolved)
 
-    # Dedupe identical-slot/identical-source repeats (e.g. the same mark
-    # sent twice by accident) down to one assignment per slot.
+    # Dedupe identical-slot repeats (e.g. the same mark sent twice by
+    # accident) down to one assignment per slot.
     seen_slots = set()
     assignments = []
     for m in valid_marks:
-        key = (m["media_role"], m["take_number"])
+        key = _key(m)
         if key in seen_slots:
             continue
         seen_slots.add(key)

@@ -113,6 +113,55 @@ _TILE_TYPE_RE = re.compile(r'data-testid="(video-content|image-content)"')
 # tile during download — never as its persisted identity.
 _GRID_AREA_RE = re.compile(r"grid-area:\s*\d+\s*/\s*\d+\s*/\s*\d+\s*/\s*\d+")
 
+# Whole-album batch marking (2026-08-23) — "mark google: take 1, take 2,
+# take 3, intro" replying to the ALBUM ITSELF, not one tile. Proven via a
+# real diagnostic reply ("mark google diagnostic") that a whole-album
+# reply's quoted-message block carries NO thumbnail hash at all — just a
+# generic icon and literal "N videos"/"N photos" summary text — so the
+# existing hash-match resolution can never work for it. The colon requires
+# an explicit, unambiguous separator between the project and the ordered
+# role list — a plain "mark google take 1" (no colon) is left entirely to
+# the existing single-tile-reply path, untouched.
+_BATCH_COLON_RE = re.compile(r"^\s*mark\s+(.+?):\s*(.+)$", re.IGNORECASE | re.DOTALL)
+_SUMMARY_QUOTE_RE = re.compile(r"\b(\d+)\s+(videos?|photos?|images?)\b", re.IGNORECASE)
+# Worker-local, minimal check for "mark <project> photos" (no colon list) —
+# NOT a full reimplementation of the backend's extract_role_and_project
+# (which the worker can't import — separate service/deployment); this only
+# needs to decide whether a whole-album reply's single role is "photos",
+# so every tile in the jumped-to album gets expanded with that one role.
+# The backend's own parser is still the authority on whether the resulting
+# per-tile "mark <project> photos" text is valid.
+_SINGLE_PHOTOS_RE = re.compile(r"^\s*mark\s+(.+?)\s+photos?\s*$", re.IGNORECASE)
+
+
+def _parse_batch_role_list(mark_text: str) -> Optional[tuple]:
+    """"mark google: take 1, take 2, take 3, intro" ->
+    ("google", ["take 1", "take 2", "take 3", "intro"]). None if the text
+    isn't the colon-delimited batch shape, or has fewer than 2 items (a
+    single item after a colon isn't a batch)."""
+    m = _BATCH_COLON_RE.match((mark_text or "").strip())
+    if not m:
+        return None
+    project_fragment = m.group(1).strip()
+    items = [i.strip() for i in m.group(2).split(",") if i.strip()]
+    if len(items) < 2:
+        return None
+    return project_fragment, items
+
+
+def _quoted_is_whole_item_summary(quoted_html: str) -> Optional[int]:
+    """Returns the item count (e.g. 4 for "4 videos") if `quoted_html`
+    looks like WhatsApp's collapsed multi-item quote summary — detected
+    ONLY by the absence of any embedded thumbnail blob (a real single-tile
+    quote always has one) combined with the literal "N videos/photos"
+    text; returns None otherwise, including for an ordinary single-tile
+    quote whose hash simply failed to match anything (that must remain a
+    hard resolution failure, never silently reinterpreted as a batch)."""
+    if _smallest_hash(quoted_html):
+        return None
+    m = _SUMMARY_QUOTE_RE.search(quoted_html or "")
+    return int(m.group(1)) if m else None
+
 
 def _smallest_hash(html: Optional[str]) -> Optional[str]:
     """Every image/video message embeds at least one base64 thumbnail
@@ -138,9 +187,15 @@ def _is_album(html: str) -> bool:
     return bool(_ALBUM_RE.search(html or ""))
 
 
-def _album_tile_hashes(html: str) -> List[str]:
-    """One stable hash per tile, in DOM/grid order (order is a locator
-    only — see module note above). Returns [] for a non-album message."""
+def _album_tile_hashes_and_types(html: str) -> List[tuple]:
+    """One (hash, "video"|"image") pair per tile, in DOM/grid order (order
+    is a locator only — see module note above). A chunk with no
+    detectable hash is skipped entirely (never emits a partial/None
+    entry), keeping this the single source of truth both
+    _album_tile_hashes and Pass 1's per-tile media_type detection stay
+    aligned with — a photo album's tiles carry data-testid="image-content"
+    where a video album's carry "video-content"; previously Pass 1
+    hardcoded every album tile as "video" regardless."""
     if not html:
         return []
     starts = [m.start() for m in _GRID_AREA_RE.finditer(html)]
@@ -148,12 +203,21 @@ def _album_tile_hashes(html: str) -> List[str]:
         return []
     starts.append(len(html))
     chunks = [html[starts[i]:starts[i + 1]] for i in range(len(starts) - 1)]
-    hashes = []
+    result = []
     for chunk in chunks:
         h = _smallest_hash(chunk)
-        if h:
-            hashes.append(h)
-    return hashes
+        if not h:
+            continue
+        tm = _TILE_TYPE_RE.search(chunk)
+        media_type = "image" if (tm and tm.group(1) == "image-content") else "video"
+        result.append((h, media_type))
+    return result
+
+
+def _album_tile_hashes(html: str) -> List[str]:
+    """One stable hash per tile, in DOM/grid order (order is a locator
+    only — see module note above). Returns [] for a non-album message."""
+    return [h for h, _ in _album_tile_hashes_and_types(html)]
 
 
 def _media_type(html: str) -> Optional[str]:
@@ -274,9 +338,13 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
             # own deterministic identity. tile_index is a LOCATOR (used
             # only to click/download the right tile), never the identity
             # itself — that's (data_id, hash), same as any other source.
-            for tile_index, h in enumerate(_album_tile_hashes(html)):
+            # Per-tile media_type (2026-08-23 fix): a photo album's tiles
+            # are images, not videos — hardcoding "video" here routed
+            # every album-tile download through the video-viewer path
+            # regardless of actual type.
+            for tile_index, (h, tile_media_type) in enumerate(_album_tile_hashes_and_types(html)):
                 sources_by_hash[h] = {
-                    "source_message_id": data_id, "source_media_type": "video",
+                    "source_message_id": data_id, "source_media_type": tile_media_type,
                     "source_sender": _sender_name(html), "window_position": pos,
                     "album_tile_index": tile_index, "is_album_tile": True,
                 }
@@ -298,6 +366,7 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
     # failed; that's the backend's "MEDIA RESOLUTION FAILED" report, not a
     # worker-side decision).
     candidates: List[Dict[str, Any]] = []
+    batch_candidates: List[Dict[str, Any]] = []
     for item in window:
         quoted_html = item.get("quotedHtml")
         if not quoted_html:
@@ -310,6 +379,27 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
         if not mark_text:
             continue
         quoted_hash = _smallest_hash(quoted_html)
+
+        if quoted_hash is None:
+            # No thumbnail hash at all in the quoted block — proven
+            # (2026-08-23, real diagnostic reply) to be WhatsApp's
+            # collapsed "N videos"/"N photos" summary for a reply to a
+            # WHOLE album, not one tile. Only treated as a batch mark if
+            # the text ALSO parses as one — an ordinary single-tile quote
+            # whose hash genuinely failed to match anything still falls
+            # through to the unresolved candidate below, a hard failure,
+            # never silently reinterpreted.
+            item_count = _quoted_is_whole_item_summary(quoted_html)
+            batch = _parse_batch_role_list(mark_text)
+            single_photos_m = _SINGLE_PHOTOS_RE.match(mark_text.strip()) if item_count else None
+            if item_count and (batch or single_photos_m):
+                batch_candidates.append({
+                    "mention_lid": lid, "mark_text": mark_text,
+                    "reply_message_id": _own_data_id(html), "item_count": item_count,
+                    "batch": batch, "single_photos_project": single_photos_m.group(1).strip() if single_photos_m else None,
+                })
+                continue
+
         source = sources_by_hash.get(quoted_hash) if quoted_hash else None
         candidates.append({
             "mention_lid": lid,
@@ -323,6 +413,71 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
             "is_album_tile": (source or {}).get("is_album_tile", False),
             "album_tile_index": (source or {}).get("album_tile_index"),
         })
+
+    # Live resolution phase for whole-album batch marks (2026-08-23) — the
+    # one part of this scan that needs real Playwright interaction rather
+    # than the static window dump: click the reply's own quoted-message
+    # block (a real WhatsApp button that jumps to/highlights the original
+    # message) and observe which message ends up centered in the
+    # viewport — proven via a real test (jumped to the exact known album,
+    # distance 0.3px from dead-center, all 4 tile hashes matched). Each
+    # resolved batch reply is expanded into one candidate PER TILE here,
+    # so validate_candidates on the backend sees ordinary-looking
+    # single-tile candidates and needs no batch-specific logic at all.
+    for bc in batch_candidates:
+        jump = await _resolve_quoted_jump(page, group_name, bc["reply_message_id"])
+        if not jump.get("ok"):
+            candidates.append({
+                "mention_lid": bc["mention_lid"], "mark_text": bc["mark_text"],
+                "reply_message_id": bc["reply_message_id"], "quoted_thumbnail_hash": None,
+                "resolved_source_message_id": None, "batch_resolution_error": jump.get("reason"),
+            })
+            continue
+        tile_hashes_and_types = jump["tile_hashes_and_types"]
+        if len(tile_hashes_and_types) != bc["item_count"]:
+            # WhatsApp's own summary count disagrees with what we can
+            # actually see in the jumped-to album — never guess which
+            # tiles to use; report as a resolution failure for the whole
+            # batch mark, not a partial/best-effort match.
+            candidates.append({
+                "mention_lid": bc["mention_lid"], "mark_text": bc["mark_text"],
+                "reply_message_id": bc["reply_message_id"], "quoted_thumbnail_hash": None,
+                "resolved_source_message_id": jump["data_id"],
+                "batch_resolution_error": f"summary said {bc['item_count']} items, album has {len(tile_hashes_and_types)}",
+            })
+            continue
+
+        if bc["batch"]:
+            project_fragment, role_items = bc["batch"]
+            if len(role_items) != len(tile_hashes_and_types):
+                candidates.append({
+                    "mention_lid": bc["mention_lid"], "mark_text": bc["mark_text"],
+                    "reply_message_id": bc["reply_message_id"], "quoted_thumbnail_hash": None,
+                    "resolved_source_message_id": jump["data_id"],
+                    "batch_resolution_error": f"{len(role_items)} roles given for {len(tile_hashes_and_types)} tiles — counts must match exactly",
+                })
+                continue
+            for tile_index, (role_item, (h, media_type)) in enumerate(zip(role_items, tile_hashes_and_types)):
+                candidates.append({
+                    "mention_lid": bc["mention_lid"], "mark_text": f"mark {project_fragment} {role_item}",
+                    "reply_message_id": bc["reply_message_id"], "quoted_thumbnail_hash": h,
+                    "resolved_source_message_id": jump["data_id"], "source_media_type": media_type,
+                    "source_sender": None, "source_timestamp": None,
+                    "is_album_tile": True, "album_tile_index": tile_index,
+                })
+        else:
+            # "mark <project> photos" against a whole photo album — every
+            # tile gets role="photos"; no order/number is inferred (never
+            # guessed), each tile's own hash is its real, distinct identity.
+            project_fragment = bc["single_photos_project"]
+            for tile_index, (h, media_type) in enumerate(tile_hashes_and_types):
+                candidates.append({
+                    "mention_lid": bc["mention_lid"], "mark_text": f"mark {project_fragment} photos",
+                    "reply_message_id": bc["reply_message_id"], "quoted_thumbnail_hash": h,
+                    "resolved_source_message_id": jump["data_id"], "source_media_type": media_type,
+                    "source_sender": None, "source_timestamp": None,
+                    "is_album_tile": True, "album_tile_index": tile_index,
+                })
 
     # TEMPORARY debug (2026-08-23) — grouped/batch-media investigation.
     # Full source inventory (every plain media message found in the
@@ -534,6 +689,54 @@ _CENTERED_MESSAGE_JS = """
   return { dataId: best.getAttribute('data-id'), distancePx: bestDist };
 }
 """
+
+
+async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
+    """Clicks a reply's own quoted-message block (a real WhatsApp button
+    that jumps to/highlights the original message) and observes which
+    message ends up closest to the viewport's vertical center afterward —
+    the proven identity link (2026-08-23: jumped to the exact known
+    album, 0.3px from dead-center, all 4 tile hashes matched) for a reply
+    whose quoted block carries no thumbnail hash — WhatsApp's collapsed
+    "N videos"/"N photos" summary for a reply to a WHOLE album, not one
+    tile. Returns {ok, data_id, is_album, tile_hashes_and_types, reason}."""
+    idx = await _find_message_index_by_data_id(page, group_name, reply_data_id)
+    if idx is None:
+        return {"ok": False, "reason": f"reply message {reply_data_id!r} not found in scanned window"}
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    reply_message = page.locator(full_sel).nth(idx)
+    quoted = reply_message.locator('[data-testid="quoted-message"]')
+    if await quoted.count() == 0:
+        return {"ok": False, "reason": "reply message has no quoted-message block"}
+    try:
+        await quoted.first.click(timeout=10000)
+    except Exception as exc:
+        return {"ok": False, "reason": f"click on quoted-message failed: {exc}"}
+    await page.wait_for_timeout(1000)
+    try:
+        centered = await _evaluate(page, _CENTERED_MESSAGE_JS)
+    except Exception as exc:
+        return {"ok": False, "reason": f"centered-message evaluate failed: {exc}"}
+    if not centered or not centered.get("dataId"):
+        return {"ok": False, "reason": "no message found near viewport center after jump", "centered": centered}
+    jumped_idx = await _find_message_index_by_data_id(page, group_name, centered["dataId"])
+    if jumped_idx is None:
+        return {"ok": False, "reason": "jumped-to message no longer found in window", "data_id": centered["dataId"]}
+    try:
+        jumped_html = await page.locator(full_sel).nth(jumped_idx).evaluate("(el) => el.outerHTML")
+    except Exception as exc:
+        return {"ok": False, "reason": f"could not read jumped-to message HTML: {exc}", "data_id": centered["dataId"]}
+    jumped_html = jumped_html[:HTML_TRUNCATE]
+    if not _is_album(jumped_html):
+        return {
+            "ok": False, "data_id": centered["dataId"],
+            "reason": "jumped-to message is not an album (batch marking only supports whole-album replies)",
+        }
+    return {
+        "ok": True, "data_id": centered["dataId"], "is_album": True,
+        "tile_hashes_and_types": _album_tile_hashes_and_types(jumped_html), "centered": centered,
+    }
 
 
 async def _identify_tile_index(page, group_name: str, data_id: str, expected_hash: str) -> Dict[str, Any]:
@@ -1038,54 +1241,12 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
     }
 
     if probe_type == "quoted_jump":
-        # Diagnostic (2026-08-23): a reply to a whole ALBUM (not one tile)
-        # carries no thumbnail hash in its quoted-message block — proven
-        # via _run_scan's debug capture on a real "mark google diagnostic"
-        # reply (its quoted block was just a generic image icon + literal
-        # "4 videos" text, no base64 blob at all). WhatsApp's own quoted-
-        # message block is a real button (role="button",
-        # aria-label="Quoted message") that jumps to/highlights the
-        # original message when clicked — this tests whether that
-        # navigation can be used as the identity link instead, by finding
-        # which message ends up closest to the viewport's vertical center
-        # right after the click.
-        idx = await _find_message_index_by_data_id(page, group_name, data_id)
-        if idx is None:
-            return {"results": [{"ok": False, "error": f"reply message {data_id!r} not found in scanned window"}]}
-        scope = await sender._resolve_scope(page)
-        full_sel = f"{scope} [data-testid^='conv-msg-']"
-        reply_message = page.locator(full_sel).nth(idx)
-        quoted = reply_message.locator('[data-testid="quoted-message"]')
-        if await quoted.count() == 0:
-            return {"results": [{"ok": False, "error": "reply message has no quoted-message block"}]}
-        try:
-            await quoted.first.click(timeout=10000)
-        except Exception as exc:
-            return {"results": [{"ok": False, "error": f"click on quoted-message failed: {exc}"}]}
-        await page.wait_for_timeout(1000)
-        try:
-            centered = await _evaluate(page, _CENTERED_MESSAGE_JS)
-        except Exception as exc:
-            centered = {"error": str(exc)}
-        jumped_html = None
-        jumped_is_album = None
-        jumped_tile_hashes = None
-        if centered and centered.get("dataId"):
-            jumped_idx = await _find_message_index_by_data_id(page, group_name, centered["dataId"])
-            if jumped_idx is not None:
-                try:
-                    jumped_html = await page.locator(full_sel).nth(jumped_idx).evaluate("(el) => el.outerHTML")
-                    jumped_html = jumped_html[:HTML_TRUNCATE]
-                    jumped_is_album = _is_album(jumped_html)
-                    jumped_tile_hashes = _album_tile_hashes(jumped_html) if jumped_is_album else None
-                except Exception:
-                    pass
-        return {"results": [{
-            "ok": bool(centered and centered.get("dataId")),
-            "reply_message_id": data_id, "centered_after_jump": centered,
-            "jumped_to_is_album": jumped_is_album, "jumped_to_tile_hashes": jumped_tile_hashes,
-            "session_identity": session_identity,
-        }]}
+        # Diagnostic (2026-08-23): proves _resolve_quoted_jump (used for
+        # real by _run_scan's whole-album batch-mark resolution) against
+        # one specific reply, for inspection.
+        jump = await _resolve_quoted_jump(page, group_name, data_id)
+        jump["session_identity"] = session_identity
+        return {"results": [jump]}
 
     if probe_type == "tile_viewer":
         expected_hash = req["expected_tile_hash"]

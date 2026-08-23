@@ -195,6 +195,40 @@ def test_validate_candidates_same_source_marked_twice_is_not_ambiguous():
     assert len(outcome.assignments) == 1
 
 
+def test_slot_key_distinguishes_photos_by_source_but_not_takes():
+    # "take"/"intro" have exactly one real slot per (role, take_number) —
+    # source identity must NOT be part of their key, or two different
+    # source tiles both claiming "Take 1" would never be caught as
+    # ambiguous (each getting its own singleton slot instead).
+    assert ma.slot_key("take", 1, "src-a", "hash-a") == ma.slot_key("take", 1, "src-b", "hash-b")
+    # "photos" has no natural slot — two distinct photos (even from the
+    # same album, i.e. same source_message_id) must get DIFFERENT keys.
+    assert ma.slot_key("photos", None, "album-1", "hash-photo-1") != ma.slot_key("photos", None, "album-1", "hash-photo-2")
+
+
+def test_validate_candidates_multiple_photos_same_album_not_ambiguous():
+    """A batch "mark google photos" against a whole photo album resolves
+    to several DISTINCT photos sharing role="photos" and the SAME
+    source_message_id (the album's own data-id) but different tile
+    hashes — this must never be treated as ambiguous duplication of one
+    slot, unlike two different videos both claiming "Take 1"."""
+    candidates = [
+        {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google photos", source_message_id="album-1"),
+         "quoted_thumbnail_hash": "hash-photo-1"},
+        {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google photos", source_message_id="album-1"),
+         "quoted_thumbnail_hash": "hash-photo-2"},
+        {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google photos", source_message_id="album-1"),
+         "quoted_thumbnail_hash": "hash-photo-3"},
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok
+    assert len(outcome.assignments) == 3
+    assert {a["quoted_thumbnail_hash"] for a in outcome.assignments} == {"hash-photo-1", "hash-photo-2", "hash-photo-3"}
+
+
 def test_validate_candidates_unresolved_mark_reports_failure_not_guess():
     candidates = [
         {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 2", source_message_id="whatever"),

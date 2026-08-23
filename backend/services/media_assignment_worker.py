@@ -217,7 +217,10 @@ async def _process_scan_done() -> bool:
         return True
 
     already = await media_assignment.already_uploaded(talent_id, project_id)
-    already_slots = {(a["media_role"], a.get("take_number")) for a in already}
+    already_slots = {
+        media_assignment.slot_key(a["media_role"], a.get("take_number"), a.get("source_message_id"), a.get("source_thumbnail_hash"))
+        for a in already
+    }
 
     for m in outcome.assignments:
         await media_assignment.record_assignment(
@@ -225,7 +228,10 @@ async def _process_scan_done() -> bool:
             group_name=group_name, group_id=doc.get("group_id"), mark=m, created_by="whatsapp-agent",
         )
 
-    to_download = [m for m in outcome.assignments if (m["media_role"], m["take_number"]) not in already_slots]
+    to_download = [
+        m for m in outcome.assignments
+        if media_assignment.slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) not in already_slots
+    ]
     if not to_download:
         await _finish(doc["id"], _report_already_uploaded(talent_label, project_label, already))
         return True
@@ -293,16 +299,22 @@ async def _process_download_done() -> bool:
     talent_id, project_id = doc["talent_id"], doc["project_id"]
 
     fresh_uploaded = await media_assignment.already_uploaded(talent_id, project_id)
-    uploaded_slots = {(a["media_role"], a.get("take_number")) for a in fresh_uploaded}
+    uploaded_slots = {
+        media_assignment.slot_key(a["media_role"], a.get("take_number"), a.get("source_message_id"), a.get("source_thumbnail_hash"))
+        for a in fresh_uploaded
+    }
 
     uploaded_labels, failed_labels = [], []
     for target in doc.get("download_targets") or []:
-        slot = (target["media_role"], target["take_number"])
+        slot = media_assignment.slot_key(
+            target["media_role"], target["take_number"], target.get("source_message_id"), target.get("source_thumbnail_hash"),
+        )
         label = target["original_label"]
         # Was this specific slot newly uploaded (not already-uploaded
         # before this run, which is reported separately)?
         already_before = any(
-            (a["media_role"], a.get("take_number")) == slot for a in (ctx.get("already") or [])
+            media_assignment.slot_key(a["media_role"], a.get("take_number"), a.get("source_message_id"), a.get("source_thumbnail_hash")) == slot
+            for a in (ctx.get("already") or [])
         )
         if slot in uploaded_slots and not already_before:
             uploaded_labels.append(label)

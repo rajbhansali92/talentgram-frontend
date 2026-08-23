@@ -1837,6 +1837,48 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "after_reload": after,
         }], "session_identity": session_identity_after}
 
+    if probe_type == "photo_thumb_hash_check":
+        # Diagnostic-only (2026-08-23): full_message_inventory revealed a
+        # message (media-album + image-thumb, img_count=8) that every
+        # earlier probe had silently miscategorized, because those probes
+        # only ever checked for image-content/video-content (the ALBUM-
+        # TILE-GRID testids) — image-thumb is a DIFFERENT structure this
+        # codebase has never hashed per-tile before. Mirrors
+        # _hash_album_tiles_live's exact per-element outerHTML->smallest-
+        # hash technique (proven immune to the whole-message-HTML-growth
+        # bug) but targets [data-testid="image-thumb"] instead, to
+        # determine whether these tiles carry the same kind of stable,
+        # independently-hashable identity.
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        thumbs = message.locator('[data-testid="image-thumb"]')
+        try:
+            n = await thumbs.count()
+        except Exception as exc:
+            return {"results": [{"ok": False, "error": f"count failed: {exc}"}]}
+        tiles = []
+        for i in range(n):
+            thumb = thumbs.nth(i)
+            entry: Dict[str, Any] = {"index": i}
+            try:
+                entry["rect"] = await thumb.evaluate("(el) => { const r = el.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }", timeout=10000)
+            except Exception as exc:
+                entry["rect"] = None
+                entry["rect_error"] = str(exc)
+            try:
+                thumb_html = await thumb.evaluate("(el) => el.outerHTML", timeout=10000)
+                entry["hash"] = _smallest_hash(thumb_html)
+                entry["html_len"] = len(thumb_html)
+            except Exception as exc:
+                entry["hash"] = None
+                entry["html_error"] = str(exc)
+            tiles.append(entry)
+        return {"results": [{"ok": True, "data_id": data_id, "tile_count": n, "tiles": tiles}], "session_identity": session_identity}
+
     if probe_type == "full_message_inventory":
         # Diagnostic-only (2026-08-23): the single-photo A/B test proved
         # media sync itself works (a plain photo arrived and rendered

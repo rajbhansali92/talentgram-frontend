@@ -353,18 +353,26 @@ async ([sel, idx]) => {
 """
 
 
-_ALBUM_TILE_DOWNLOAD_JS = """
-async ([sel, idx, tileIndex, expectVideo]) => {
-  const els = document.querySelectorAll(sel);
-  if (idx >= els.length) return {ok: false, reason: "message not found at index"};
-  const el = els[idx];
-  const tiles = el.querySelectorAll('[data-testid="video-content"], [data-testid="image-content"]');
-  if (tileIndex >= tiles.length) return {ok: false, reason: "tile index out of range", tileCount: tiles.length};
-  tiles[tileIndex].click();
-  await new Promise(r => setTimeout(r, 800));
-  // TEMPORARY diagnostic (2026-08-23) — dump every blob:-sourced element
-  // currently in the document so the real viewer element can be
-  // identified precisely instead of guessed at.
+_VIEWER_TESTID_HINTS = (
+    '[data-testid="media-viewer"]', '[data-animate-media-viewer-modal]',
+    '[data-testid="mv-container"]', '[role="dialog"]',
+)
+
+_WAIT_AND_EXTRACT_VIEWER_JS = """
+async ([expectVideo, viewerHints]) => {
+  // TEMPORARY diagnostic (2026-08-23) — a plain JS .click() on a tile
+  // (previous attempt) never opened WhatsApp's real viewer at all; every
+  // blob: element found afterward turned out to be an unrelated photo
+  // thumbnail already in the message list (ancestor testid
+  // "image-thumb", not a viewer). Scoping the search to a likely viewer
+  // container FIRST (falling back to document-wide only if none of the
+  // hints match) plus a real Playwright-driven click (done by the
+  // caller, not here) should find the actual opened media this time.
+  let scope = document;
+  for (const hint of viewerHints) {
+    const found = document.querySelector(hint);
+    if (found) { scope = found; break; }
+  }
   const blobEls = Array.from(document.querySelectorAll('img[src^="blob:"], video[src^="blob:"]')).map(e => {
     let anc = e; let testids = [];
     for (let d = 0; d < 6 && anc; d++) {
@@ -376,35 +384,27 @@ async ([sel, idx, tileIndex, expectVideo]) => {
       tag: e.tagName, src: e.src.slice(0, 60),
       naturalWidth: e.naturalWidth || null, naturalHeight: e.naturalHeight || null,
       videoWidth: e.videoWidth || null, videoHeight: e.videoHeight || null,
-      ancestorTestids: testids,
+      ancestorTestids: testids, inScope: scope.contains(e),
     };
   });
-  // WhatsApp's viewer shows a static poster <img> immediately, then swaps
-  // in the real <video> once it buffers — grabbing whichever appears
-  // first (2026-08-23 bug) silently downloads the poster JPEG instead of
-  // the actual video. When the source is known to be a video, wait for a
-  // real <video> the WHOLE budget before ever falling back to <img>.
   let srcEl = null;
   const deadlineMs = 6000;
   const start = Date.now();
   while (Date.now() - start < deadlineMs) {
     await new Promise(r => setTimeout(r, 200));
-    const video = document.querySelector('video[src^="blob:"]');
+    const video = scope.querySelector('video[src^="blob:"]');
     if (video) { srcEl = video; break; }
     if (!expectVideo) {
-      const img = document.querySelector('img[src^="blob:"]');
+      const img = scope.querySelector('img[src^="blob:"]');
       if (img) { srcEl = img; break; }
     }
   }
   if (!srcEl) {
-    // Last resort only for a video that never produced a <video> tag —
-    // fall back to whatever blob: image exists rather than failing
-    // outright, but this path is expected to be rare.
-    srcEl = document.querySelector('video[src^="blob:"]') || document.querySelector('img[src^="blob:"]');
+    srcEl = scope.querySelector('video[src^="blob:"]') || scope.querySelector('img[src^="blob:"]');
   }
   if (!srcEl) {
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    return {ok: false, reason: "no viewer media element with blob: src appeared after click", blobEls};
+    return {ok: false, reason: "no viewer media element with blob: src appeared after click", blobEls, scopeFound: scope !== document};
   }
   const isVideo = srcEl.tagName === 'VIDEO';
   try {
@@ -418,7 +418,7 @@ async ([sel, idx, tileIndex, expectVideo]) => {
     }
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     await new Promise(r => setTimeout(r, 300));
-    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo, byteLength: bytes.length, blobEls};
+    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo, byteLength: bytes.length, blobEls, scopeFound: scope !== document};
   } catch (e) {
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     return {ok: false, reason: String(e && e.message || e), blobEls};
@@ -491,9 +491,19 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
         full_sel = f"{scope} [data-testid^='conv-msg-']"
         try:
             if target.get("album_tile_index") is not None:
+                # A plain JS .click() (previous attempt) never opened
+                # WhatsApp's real viewer — switched to a genuine
+                # Playwright-driven click (real trusted browser event)
+                # on the specific tile locator.
+                tile_locator = (
+                    page.locator(full_sel).nth(idx)
+                    .locator('[data-testid="video-content"], [data-testid="image-content"]')
+                    .nth(target["album_tile_index"])
+                )
+                await tile_locator.click(timeout=10000)
                 expect_video = target.get("source_media_type") == "video"
                 fetched = await page.evaluate(
-                    _ALBUM_TILE_DOWNLOAD_JS, [full_sel, idx, target["album_tile_index"], expect_video]
+                    _WAIT_AND_EXTRACT_VIEWER_JS, [expect_video, list(_VIEWER_TESTID_HINTS)]
                 )
             else:
                 fetched = await page.evaluate(_DOWNLOAD_JS, [full_sel, idx])

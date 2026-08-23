@@ -557,27 +557,48 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                 resp = await http.post(f"{BASE}/scan-requests/claim", headers=_auth_headers(), timeout=15.0)
                 req = resp.json() if resp.status_code == 200 else {}
                 if req and req.get("id"):
-                    async with session.page_lock:
-                        page = session.page
-                        if page is None:
-                            logger.warning("mark_scan: no active page, skipping this claim")
-                        elif req.get("mode") == "scan":
-                            result = await _run_scan(page, req)
-                            await http.post(
-                                f"{BASE}/scan-requests/{req['id']}/scan-result",
-                                json={
-                                    "candidates": result.get("candidates", []), "error": result.get("error"),
-                                    "debug": result.get("debug"),
-                                },
-                                headers=_auth_headers(), timeout=30.0,
-                            )
-                        elif req.get("mode") == "download":
-                            result = await _run_download(page, http, req)
-                            await http.post(
-                                f"{BASE}/scan-requests/{req['id']}/download-result",
-                                json={"results": result.get("results", []), "error": result.get("error")},
-                                headers=_auth_headers(), timeout=30.0,
-                            )
+                    # A claimed request must NEVER be left stuck in
+                    # "processing" forever (2026-08-23 bug: an unexpected
+                    # hang inside a page.evaluate/click during album-tile
+                    # download left a request claimed but never reported
+                    # back) — bound the whole attempt and always report
+                    # SOMETHING, even just a timeout, so the backend
+                    # orchestrator can move on rather than wait forever.
+                    try:
+                        async with session.page_lock:
+                            page = session.page
+                            if page is None:
+                                logger.warning("mark_scan: no active page, skipping this claim")
+                            elif req.get("mode") == "scan":
+                                result = await asyncio.wait_for(_run_scan(page, req), timeout=90.0)
+                                await http.post(
+                                    f"{BASE}/scan-requests/{req['id']}/scan-result",
+                                    json={
+                                        "candidates": result.get("candidates", []), "error": result.get("error"),
+                                        "debug": result.get("debug"),
+                                    },
+                                    headers=_auth_headers(), timeout=30.0,
+                                )
+                            elif req.get("mode") == "download":
+                                result = await asyncio.wait_for(_run_download(page, http, req), timeout=180.0)
+                                await http.post(
+                                    f"{BASE}/scan-requests/{req['id']}/download-result",
+                                    json={"results": result.get("results", []), "error": result.get("error")},
+                                    headers=_auth_headers(), timeout=30.0,
+                                )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.exception("mark_scan: claimed request %r failed/hung — reporting failure so it isn't stuck", req.get("id"))
+                        endpoint = "scan-result" if req.get("mode") == "scan" else "download-result"
+                        body = (
+                            {"candidates": [], "error": f"worker exception: {exc}"} if endpoint == "scan-result"
+                            else {"results": [], "error": f"worker exception: {exc}"}
+                        )
+                        try:
+                            await http.post(f"{BASE}/scan-requests/{req['id']}/{endpoint}", json=body, headers=_auth_headers(), timeout=30.0)
+                        except Exception:
+                            logger.exception("mark_scan: failed to even report the failure for %r", req.get("id"))
                     continue  # check for more work immediately, no sleep
         except asyncio.CancelledError:
             raise

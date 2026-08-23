@@ -641,17 +641,29 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
     item matching `menu_text_re` is visible, clicks it and collects every
     resulting download."""
     attempts = []
-    # Neither position is the element's exact geometric center: for a
-    # multi-tile grid, dead center can land precisely on a grid-line
-    # boundary between tiles rather than any tile's own pixels (same class
-    # of "unclaimed space" issue already confirmed via event-capture for a
-    # full-width row container) — a small fixed inset stays safely inside
-    # real content for any reasonably sized element.
-    for label, position in (("inset", {"x": 20, "y": 20}), ("top-left-corner", {"x": 4, "y": 4})):
+    # Fixed pixel offsets aren't safe here: the previous attempt's
+    # event-capture evidence showed a {20,20} inset landing squarely on
+    # the sender-name label WhatsApp renders above album/media content in
+    # group chats (event.target had data-testid="author") — a header of
+    # unknown height sits above the actual grid. Compute each attempt's
+    # point from the element's OWN measured bounding box instead, biased
+    # well below its top edge, so it lands on real media regardless of
+    # header height.
+    for label, frac in (("lower-center", (0.5, 0.7)), ("lower-left", (0.2, 0.85))):
         locator = await relocate()
         if locator is None:
             attempts.append({"position": label, "reason": "target message not found when re-resolving"})
             continue
+
+        try:
+            box = await locator.bounding_box()
+        except Exception as exc:
+            box = None
+        if not box:
+            attempts.append({"position": label, "reason": "could not measure element bounding box"})
+            continue
+        click_x = box["x"] + box["width"] * frac[0]
+        click_y = box["y"] + box["height"] * frac[1]
 
         try:
             await page.evaluate(_EVENT_CAPTURE_INSTALL_JS)
@@ -659,12 +671,10 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
             pass
 
         try:
-            if position is None:
-                await locator.click(button="right", timeout=10000)
-            else:
-                await locator.click(button="right", timeout=10000, position=position)
+            await page.mouse.move(click_x, click_y)
+            await page.mouse.click(click_x, click_y, button="right")
         except Exception as exc:
-            attempts.append({"position": label, "reason": f"right-click failed: {exc}"})
+            attempts.append({"position": label, "reason": f"right-click failed: {exc}", "click_point": [click_x, click_y], "box": box})
             continue
 
         await page.wait_for_timeout(600)
@@ -687,7 +697,7 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
             except Exception:
                 pass
             attempts.append({
-                "position": label, "reason": "no context menu appeared",
+                "position": label, "reason": "no context menu appeared", "click_point": [click_x, click_y],
                 "menu_dump": menu_dump, "body_snapshot": body_snapshot, "event_log": event_log,
             })
             continue

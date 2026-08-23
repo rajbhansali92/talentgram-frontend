@@ -869,22 +869,49 @@ async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dic
 
 
 async def _identify_tile_index(page, group_name: str, data_id: str, expected_hash: str) -> Dict[str, Any]:
-    """Re-derives which tile index currently corresponds to `expected_hash`
-    by re-extracting the album's live HTML and re-running the same
-    _album_tile_hashes used everywhere else for identity — never assumes a
-    fixed index across DOM re-renders."""
+    """Re-derives which tile index currently corresponds to `expected_hash`.
+
+    2026-08-23 fix: previously chunked the WHOLE message HTML by
+    `grid-area:` CSS boundary count (_album_tile_hashes) — proven broken
+    by a real diagnostic (_diagnose_album_lifecycle): opening/downloading/
+    closing a tile causes WhatsApp to append substantial extra content
+    into the SAME message subtree (html length grew from 46843 to 108327
+    bytes across 2 tile interactions, same DOM node throughout — never
+    replaced), which desynced the boundary-counting heuristic and made it
+    undercount tiles (4 -> 3 -> 2) even though EVERY known tile hash
+    remained findable anywhere in the message the entire time. Hashes
+    each `[data-testid="video-content"/"image-content"]` element's OWN
+    outerHTML directly instead — the exact same selector/positions
+    _open_tile_viewer_and_download's `.nth(tile_index)` click target uses
+    — so identity is tied directly to the real clickable element, never a
+    boundary-counting heuristic that content growth can desync.
+
+    Note: production's _run_download does NOT call this function at all —
+    it uses the album_tile_index already recorded once during the
+    original scan (never re-derived at download time), which is why the
+    grid-area miscount never affected real uploads. This function exists
+    only for this probe tool's own single-tile ad-hoc testing
+    convenience, where no prior scan result is available to draw an
+    index from."""
     idx = await _find_message_index_by_data_id(page, group_name, data_id)
     if idx is None:
         return {"ok": False, "reason": "album message not found in scanned window"}
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
+    message = page.locator(full_sel).nth(idx)
+    tiles = message.locator('[data-testid="video-content"], [data-testid="image-content"]')
     try:
-        html = await page.locator(full_sel).nth(idx).evaluate("(el) => el.outerHTML")
+        n = await tiles.count()
     except Exception as exc:
-        return {"ok": False, "reason": f"could not read message HTML: {exc}"}
-    if len(html) > HTML_TRUNCATE:
-        html = html[:HTML_TRUNCATE]
-    tile_hashes = _album_tile_hashes(html)
+        return {"ok": False, "reason": f"could not count tile elements: {exc}"}
+    tile_hashes: List[Optional[str]] = []
+    for i in range(n):
+        try:
+            tile_html = await tiles.nth(i).evaluate("(el) => el.outerHTML")
+        except Exception:
+            tile_hashes.append(None)
+            continue
+        tile_hashes.append(_smallest_hash(tile_html))
     if expected_hash not in tile_hashes:
         return {"ok": False, "reason": "expected tile hash not found among current album tiles", "tile_hashes": tile_hashes, "message_idx": idx}
     tile_index = tile_hashes.index(expected_hash)

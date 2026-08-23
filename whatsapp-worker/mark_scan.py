@@ -1722,7 +1722,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1730,6 +1730,79 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         "session_id": getattr(session, "session_id", None),
         "generation": getattr(session, "generation", None),
     }
+
+    if probe_type == "session_sync_check":
+        # Diagnostic (2026-08-23): the user confirmed via a real screenshot
+        # that the 6-7-photo album exists in the correct WhatsApp group,
+        # yet neither the bounded scan nor a raw, un-cached DOM query (with
+        # a proven-stable scrollTop=scrollHeight bottom position) show it.
+        # Rather than touch any application code, this investigates whether
+        # the worker's own WhatsApp Web session/tab is simply stale — forces
+        # a full page reload (a real re-sync from WhatsApp's servers, not a
+        # resend/any data mutation) and re-reads the SAME group's tail
+        # before and after, to distinguish "this session's in-page JS state
+        # hasn't caught up" from "the session genuinely has nothing newer".
+        scope_before = await sender._resolve_scope(page)
+        full_sel_before = f"{scope_before} [data-testid^='conv-msg-']"
+
+        _tail_js = """
+            ([sel]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              return {
+                total_rendered: els.length,
+                last_ids: els.slice(-8).map(el => {
+                  const ct = el.querySelector('[data-pre-plain-text]');
+                  return {
+                    data_id: el.getAttribute('data-id'),
+                    pre_plain_text: ct ? ct.getAttribute('data-pre-plain-text') : null,
+                    media_album: el.outerHTML.includes('data-testid="media-album"'),
+                    image_content_count: (el.outerHTML.match(/data-testid="image-content"/g) || []).length,
+                  };
+                }),
+              };
+            }
+        """
+
+        session_identity_before = {
+            "own_phone_number": getattr(session, "own_phone_number", None),
+            "session_id": getattr(session, "session_id", None),
+            "generation": getattr(session, "generation", None),
+        }
+        try:
+            before = await _evaluate(page, _tail_js, [full_sel_before])
+        except Exception as exc:
+            before = {"error": str(exc)}
+
+        reload_error = None
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(3000)
+        except Exception as exc:
+            reload_error = str(exc)
+
+        status_after_reload = await sender._open_group_chat(page, group_name)
+        session_identity_after = {
+            "own_phone_number": getattr(session, "own_phone_number", None),
+            "session_id": getattr(session, "session_id", None),
+            "generation": getattr(session, "generation", None),
+        }
+        after = {"error": f"group not open after reload (status={status_after_reload})"}
+        if status_after_reload == "OPENED":
+            scope_after = await sender._resolve_scope(page)
+            full_sel_after = f"{scope_after} [data-testid^='conv-msg-']"
+            try:
+                after = await _evaluate(page, _tail_js, [full_sel_after])
+            except Exception as exc:
+                after = {"error": str(exc)}
+
+        return {"results": [{
+            "session_identity_before": session_identity_before,
+            "session_identity_after": session_identity_after,
+            "before_reload": before,
+            "reload_error": reload_error,
+            "status_after_reload": status_after_reload,
+            "after_reload": after,
+        }], "session_identity": session_identity_after}
 
     if probe_type == "raw_tail_ids":
         # Diagnostic (2026-08-23): a fresh 6-7-photo album didn't appear

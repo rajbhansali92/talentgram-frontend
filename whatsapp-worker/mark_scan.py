@@ -664,6 +664,15 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
             await locator.scroll_into_view_if_needed(timeout=5000)
         except Exception:
             pass
+        # The menu DOES appear once scrolled/clicked correctly (proven
+        # 2026-08-23: exact match to the user's manually-observed
+        # Reply/Reply privately/Message.../React/Forward/Star all/Delete)
+        # but "Download all" itself was missing — consistent with the
+        # user's own observation that WhatsApp gates Download behind the
+        # media finishing loading. Give it a moment to load/cache before
+        # opening the menu, rather than right-clicking the instant it
+        # scrolls into view.
+        await page.wait_for_timeout(4000)
         try:
             box = await locator.bounding_box()
         except Exception as exc:

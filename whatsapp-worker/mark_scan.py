@@ -1721,14 +1721,52 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
     if status != "OPENED":
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
-    data_id = req["probe_message_id"]
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
+    data_id = req.get("probe_message_id") if probe_type == "album_discovery" else req["probe_message_id"]
 
     session_identity = {
         "own_phone_number": getattr(session, "own_phone_number", None),
         "session_id": getattr(session, "session_id", None),
         "generation": getattr(session, "generation", None),
     }
+
+    if probe_type == "album_discovery":
+        # Diagnostic (2026-08-23): locates a freshly-sent, not-yet-marked
+        # album in the group's current scan window without needing its
+        # data-id in advance — reports every album-shaped message's tile
+        # count/types/hashes so a specific one (e.g. the newest all-photo
+        # album) can be identified before the photo-tile-viewer diagnostic.
+        max_messages = req.get("max_messages") or MAX_MESSAGES_SCANNED_DEFAULT
+        window = await _dump_window(page, group_name, max_messages)
+        albums = []
+        for item in window:
+            html = item.get("messageHtml") or ""
+            if not _is_album(html):
+                continue
+            tiles = _album_tile_hashes_and_types(html)
+            albums.append({
+                "data_id": _own_data_id(html),
+                "tile_count": len(tiles),
+                "tile_types": [t for _, t in tiles],
+                "tile_hashes": [h for h, _ in tiles],
+            })
+        return {"results": albums, "session_identity": session_identity}
+
+    if probe_type == "photo_tile_diagnostic":
+        # Diagnostic (2026-08-23): does the video-viewer mechanism
+        # generalize to a photo tile? Never assumed — see
+        # _diagnose_photo_tile_open's own module note.
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        result = await _diagnose_photo_tile_open(page, message, req["tile_index"])
+        result = _strip_raw_bytes(result)
+        result["source_message_id"] = data_id
+        result["session_identity"] = session_identity
+        return {"results": [result]}
 
     if probe_type == "quoted_jump":
         # Diagnostic (2026-08-23): proves _resolve_quoted_jump (used for
@@ -1812,6 +1850,202 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
     result["source_message_id"] = data_id
     result["session_identity"] = session_identity
     return {"results": [result]}
+
+
+# ---------------------------------------------------------------------------
+# Photo-tile viewer diagnostic (2026-08-23) — the video-tile mechanism
+# (_open_tile_viewer_and_download) hard-anchors on a <video> element
+# mounting; a photo tile has none, so it cannot simply be reused. This
+# never assumes photos behave like videos: it diffs the document's
+# blob: <img> elements before/after clicking a specific tile to find
+# whichever one is newly mounted (if any), then inspects THAT element's
+# own ancestor chain for Close/Download controls, exactly the same
+# "dump real buttons, never guess a selector" discipline already proven
+# for video.
+# ---------------------------------------------------------------------------
+_PHOTO_BLOB_BASELINE_JS = "() => Array.from(document.querySelectorAll('img[src^=\"blob:\"]')).map(img => img.src)"
+
+_PHOTO_VIEWER_PROBE_JS = """
+async ([baselineSrcs]) => {
+  const baseline = new Set(baselineSrcs);
+  const videoCount = document.querySelectorAll('video').length;
+  const allImgs = Array.from(document.querySelectorAll('img[src^="blob:"]'));
+  const newImgs = allImgs.filter(img => !baseline.has(img.src));
+  const info = (img) => {
+    const r = img.getBoundingClientRect();
+    return { src: img.src, rect: [r.x, r.y, r.width, r.height], naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight };
+  };
+  let candidateEl = null;
+  if (newImgs.length > 0) {
+    candidateEl = newImgs.reduce((a, b) => {
+      const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      return (ra.width * ra.height) >= (rb.width * rb.height) ? a : b;
+    });
+  }
+  let fetchResult = null;
+  if (candidateEl) {
+    try {
+      const resp = await fetch(candidateEl.src);
+      const buf = await resp.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+      }
+      fetchResult = { ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '' };
+    } catch (e) {
+      fetchResult = { ok: false, reason: String(e && e.message || e) };
+    }
+  }
+  let buttons = [];
+  let rootInfo = null;
+  if (candidateEl) {
+    let root = candidateEl;
+    while (root.parentElement && root.parentElement !== document.body) {
+      root = root.parentElement;
+    }
+    if (root.parentElement) {
+      rootInfo = { tag: root.tagName, id: root.id || null, testid: root.getAttribute('data-testid') };
+      buttons = Array.from(root.querySelectorAll('button, [role="button"]')).map(b => {
+        const r = b.getBoundingClientRect();
+        const svgTitle = b.querySelector('svg title');
+        return {
+          ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
+          testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
+          rect: [r.x, r.y, r.width, r.height],
+        };
+      });
+    }
+  }
+  return {
+    videoCount, totalBlobImgCount: allImgs.length, newImgCount: newImgs.length,
+    candidate: candidateEl ? info(candidateEl) : null, fetch: fetchResult,
+    buttons, rootInfo,
+  };
+}
+"""
+
+_PHOTO_STILL_PRESENT_JS = "([src]) => Array.from(document.querySelectorAll('img[src^=\"blob:\"]')).some(img => img.src === src)"
+
+
+async def _close_photo_viewer(page, viewer_buttons: Dict[str, Any], candidate_src: str) -> Dict[str, Any]:
+    """Same real-Close-button-first, verify-don't-trust discipline as
+    _close_viewer, but verifies via the candidate blob: <img> disappearing
+    rather than a <video> count (there is none for a photo viewer)."""
+    close_btn = None
+    for b in (viewer_buttons or {}).get("buttons", []):
+        label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
+        if re.search(r"close|back|dismiss", label):
+            close_btn = b
+            break
+    if close_btn is None:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+    else:
+        cx = close_btn["rect"][0] + close_btn["rect"][2] / 2
+        cy = close_btn["rect"][1] + close_btn["rect"][3] / 2
+        try:
+            await page.mouse.click(cx, cy, button="left")
+        except Exception as exc:
+            return {"closed": False, "reason": f"close button click failed: {exc}", "used_close_button": True}
+
+    elapsed = 0.0
+    while elapsed < 8.0:
+        try:
+            still_present = await _evaluate(page, _PHOTO_STILL_PRESENT_JS, [candidate_src])
+        except Exception:
+            still_present = True
+        if not still_present:
+            return {"closed": True, "elapsed_s": elapsed, "used_close_button": close_btn is not None}
+        await page.wait_for_timeout(300)
+        elapsed += 0.3
+    return {
+        "closed": False, "reason": "candidate image still present 8s after close attempt",
+        "used_close_button": close_btn is not None,
+    }
+
+
+async def _diagnose_photo_tile_open(page, message_locator, tile_index: int) -> Dict[str, Any]:
+    """Diagnostic-only: determines whether opening a PHOTO tile inside a
+    multi-photo album mounts a full-resolution viewer the same proven
+    architecture (identify -> open -> download -> close) can be adapted
+    to, WITHOUT assuming it behaves like the video path. Reports real
+    evidence either way; never guesses a selector that wasn't observed."""
+    tile = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile_index)
+    try:
+        await tile.scroll_into_view_if_needed(timeout=5000)
+    except Exception:
+        pass
+    try:
+        baseline_srcs = await _evaluate(page, _PHOTO_BLOB_BASELINE_JS)
+    except Exception:
+        baseline_srcs = []
+    try:
+        await _evaluate(page, _EVENT_CAPTURE_INSTALL_JS)
+    except Exception:
+        pass
+    try:
+        await tile.click(timeout=10000)
+    except Exception as exc:
+        return {"ok": False, "stage": "open_tile", "reason": f"click failed: {exc}"}
+
+    probe = None
+    elapsed = 0.0
+    while elapsed < 10.0:
+        try:
+            probe = await _evaluate(page, _PHOTO_VIEWER_PROBE_JS, [baseline_srcs])
+        except Exception as exc:
+            probe = {"error": str(exc)}
+        if probe and probe.get("candidate"):
+            break
+        await page.wait_for_timeout(500)
+        elapsed += 0.5
+
+    try:
+        click_event_log = await _evaluate(page, _EVENT_CAPTURE_READ_JS)
+    except Exception:
+        click_event_log = None
+
+    if not probe or not probe.get("candidate"):
+        try:
+            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
+        except Exception:
+            body_snapshot = None
+        return {
+            "ok": False, "stage": "open_tile",
+            "reason": "no new blob: <img> mounted within 10s of clicking the photo tile",
+            "video_count": (probe or {}).get("videoCount"), "click_event_log": click_event_log,
+            "body_snapshot": body_snapshot, "last_probe": probe,
+        }
+
+    candidate = probe["candidate"]
+    fetch_result = probe.get("fetch") or {}
+    raw_bytes = b64mod.b64decode(fetch_result["base64"]) if fetch_result.get("ok") and fetch_result.get("base64") else None
+    sha256_hex = hashlib.sha256(raw_bytes).hexdigest() if raw_bytes else None
+    detected_mime = _detect_mime_type(raw_bytes, "image") if raw_bytes else None
+
+    close_result = await _close_photo_viewer(page, {"buttons": probe.get("buttons", [])}, candidate["src"])
+
+    return {
+        "ok": True, "tile_index": tile_index,
+        "video_count_during_view": probe.get("videoCount"),
+        "total_blob_img_count": probe.get("totalBlobImgCount"),
+        "new_img_count": probe.get("newImgCount"),
+        "candidate_rect": candidate.get("rect"),
+        "candidate_natural_size": [candidate.get("naturalWidth"), candidate.get("naturalHeight")],
+        "root_info": probe.get("rootInfo"),
+        "buttons": probe.get("buttons"),
+        "fetch_ok": fetch_result.get("ok"),
+        "fetch_error": fetch_result.get("reason"),
+        "byte_length": len(raw_bytes) if raw_bytes else None,
+        "sha256": sha256_hex,
+        "detected_mime": detected_mime,
+        "close_result": close_result,
+        "_raw_bytes": raw_bytes,
+    }
 
 
 # MIME detection from actual bytes (2026-08-23) — the disposable E2E's

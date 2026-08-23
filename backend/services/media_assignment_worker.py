@@ -166,6 +166,21 @@ async def _process_scan_done() -> bool:
     if not doc:
         return False
 
+    if doc.get("scan_probe"):
+        # TEMPORARY (2026-08-23) — diagnostic-only scan (no real
+        # talent/project), used to inspect raw DOM shapes (e.g. a
+        # whole-album reply's quoted-block) without ever validating
+        # candidates against a fake talent/project or sending a report —
+        # mirrors mode=="download_probe"'s short-circuit in
+        # _process_download_done. Marks finished directly; the candidates/
+        # debug fields the worker already wrote stay on the doc for
+        # inspection.
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": doc["id"]},
+            {"$set": {"status": media_assignment.STATUS_FINISHED, "completed_at": _now()}},
+        )
+        return True
+
     talent_id, project_id = doc["talent_id"], doc["project_id"]
     talent_label, project_label = doc["talent_label"], doc["project_label"]
     group_name = doc["group_name"]

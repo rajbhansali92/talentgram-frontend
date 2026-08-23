@@ -2492,34 +2492,59 @@ async def _diagnose_photo_album_viewer(page, group_name: str, data_id: str) -> D
     except Exception:
         baseline_srcs = []
 
-    try:
-        await thumbs.first.scroll_into_view_if_needed(timeout=5000)
-        await thumbs.first.click(timeout=10000)
-    except Exception as exc:
-        return {"ok": False, "stage": "open_album", "reason": f"click failed: {exc}", "tiles_before": tiles_before, "overflow_badge": overflow_match.group(1) if overflow_match else None}
-
-    viewer = None
-    elapsed = 0.0
-    while elapsed < 10.0:
+    async def _try_open(tile_locator, label: str) -> Dict[str, Any]:
         try:
-            viewer = await _evaluate(page, _ALBUM_VIEWER_SNAPSHOT_JS, [baseline_srcs, True])
+            await _evaluate(page, _EVENT_CAPTURE_INSTALL_JS)
+        except Exception:
+            pass
+        try:
+            await tile_locator.scroll_into_view_if_needed(timeout=5000)
+            await tile_locator.click(timeout=10000)
         except Exception as exc:
-            viewer = {"found": False, "error": str(exc)}
-        if viewer.get("found"):
-            break
-        await page.wait_for_timeout(500)
-        elapsed += 0.5
+            return {"clicked": False, "click_error": str(exc), "label": label}
+        try:
+            click_event_log = await _evaluate(page, _EVENT_CAPTURE_READ_JS)
+        except Exception:
+            click_event_log = None
+        viewer_result = None
+        elapsed = 0.0
+        while elapsed < 6.0:
+            try:
+                viewer_result = await _evaluate(page, _ALBUM_VIEWER_SNAPSHOT_JS, [baseline_srcs, True])
+            except Exception as exc:
+                viewer_result = {"found": False, "error": str(exc)}
+            if viewer_result.get("found"):
+                break
+            await page.wait_for_timeout(500)
+            elapsed += 0.5
+        return {"clicked": True, "label": label, "click_event_log": click_event_log, "viewer": viewer_result}
 
-    if not viewer or not viewer.get("found"):
+    attempt1 = await _try_open(thumbs.first, "first_tile(index_0)")
+    viewer = (attempt1.get("viewer") or {}) if attempt1.get("clicked") else {}
+    attempts = [attempt1]
+
+    if not viewer.get("found"):
+        # The overlay ("+N") badge is drawn over the LAST visible tile in
+        # WhatsApp's collapsed preview grid — clicking index 0 may not be
+        # the control that opens the full gallery. Try the last tile as a
+        # distinct, reasoned second attempt (not a blind retry of the same
+        # action) before concluding nothing opens at all.
+        last_index = max(thumb_count_before - 1, 0)
+        attempt2 = await _try_open(thumbs.nth(last_index), f"last_tile(index_{last_index})")
+        attempts.append(attempt2)
+        if attempt2.get("clicked"):
+            viewer = attempt2.get("viewer") or {}
+
+    if not viewer.get("found"):
         try:
             body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
         except Exception:
             body_snapshot = None
         return {
             "ok": False, "stage": "open_album",
-            "reason": "no viewer/gallery detected within 10s of clicking the album",
+            "reason": "no viewer/gallery detected after trying both the first and last preview tile",
             "tiles_before": tiles_before, "overflow_badge": overflow_match.group(1) if overflow_match else None,
-            "last_probe": viewer, "body_snapshot": body_snapshot,
+            "attempts": attempts, "body_snapshot": body_snapshot,
         }
 
     photo1_fetch = viewer.get("fetch") or {}
@@ -2627,6 +2652,7 @@ async def _diagnose_photo_album_viewer(page, group_name: str, data_id: str) -> D
         "ok": True,
         "overflow_badge": overflow_match.group(1) if overflow_match else None,
         "tiles_before": tiles_before,
+        "attempts": attempts,
         "viewer_root": {
             "tag": viewer.get("rootTag"), "testid": viewer.get("rootTestid"), "role": viewer.get("rootRole"),
             "rect": viewer.get("rootRect"), "dialog_count": viewer.get("dialogCount"),

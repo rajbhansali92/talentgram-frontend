@@ -641,7 +641,13 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
     item matching `menu_text_re` is visible, clicks it and collects every
     resulting download."""
     attempts = []
-    for label, position in (("center", None), ("top-left-corner", {"x": 4, "y": 4})):
+    # Neither position is the element's exact geometric center: for a
+    # multi-tile grid, dead center can land precisely on a grid-line
+    # boundary between tiles rather than any tile's own pixels (same class
+    # of "unclaimed space" issue already confirmed via event-capture for a
+    # full-width row container) — a small fixed inset stays safely inside
+    # real content for any reasonably sized element.
+    for label, position in (("inset", {"x": 20, "y": 20}), ("top-left-corner", {"x": 4, "y": 4})):
         locator = await relocate()
         if locator is None:
             attempts.append({"position": label, "reason": "target message not found when re-resolving"})
@@ -741,7 +747,24 @@ async def _run_download_probe(page, req: Dict[str, Any]) -> Dict[str, Any]:
             return None
         scope = await sender._resolve_scope(page)
         full_sel = f"{scope} [data-testid^='conv-msg-']"
-        return page.locator(full_sel).nth(idx)
+        message = page.locator(full_sel).nth(idx)
+        # The message ROW (conv-msg-*) spans the full conversation width;
+        # a right-click at its geometric center can land in empty space
+        # beside the actual bubble rather than on any content at all —
+        # confirmed directly (2026-08-23): a raw event-capture diagnostic
+        # showed mousedown/contextmenu/mouseup/auxclick all fired correctly
+        # at that center point with defaultPrevented=false, meaning nothing
+        # in WhatsApp's own JS claimed the event — consistent with hitting
+        # unclaimed row background, not any handler intentionally ignoring
+        # it. Target the actual visible content instead, reusing the same
+        # selectors already proven for album/media structural detection.
+        album = message.locator('[data-testid="media-album"]')
+        if await album.count() > 0:
+            return album.first
+        media = message.locator('[data-testid="video-content"], [data-testid="image-content"]')
+        if await media.count() > 0:
+            return media.first
+        return message
 
     first = await _relocate()
     if first is None:

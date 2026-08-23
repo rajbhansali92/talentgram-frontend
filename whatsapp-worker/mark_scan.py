@@ -1730,6 +1730,34 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         "generation": getattr(session, "generation", None),
     }
 
+    if probe_type == "raw_tail_ids":
+        # Diagnostic (2026-08-23): a fresh 6-7-photo album didn't appear
+        # anywhere in album_discovery's _dump_window-based scan (24 unique
+        # messages total, none with any image-content tile) — bypasses
+        # _dump_window/_DOM_DUMP_JS entirely (no per-message evaluate that
+        # could silently except-and-skip a large message) and reads
+        # exactly what's rendered in the DOM right now, to rule out
+        # (or confirm) a scan-layer issue vs. the message genuinely not
+        # being where expected.
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        raw = await _evaluate(page, """
+            ([sel]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              return {
+                total_rendered: els.length,
+                last_ids: els.slice(-15).map(el => ({
+                  data_id: el.getAttribute('data-id'),
+                  html_len: el.outerHTML.length,
+                  image_content_count: (el.outerHTML.match(/data-testid="image-content"/g) || []).length,
+                  video_content_count: (el.outerHTML.match(/data-testid="video-content"/g) || []).length,
+                  media_album: el.outerHTML.includes('data-testid="media-album"'),
+                })),
+              };
+            }
+        """, [full_sel])
+        return {"results": [raw], "session_identity": session_identity}
+
     if probe_type == "album_discovery":
         # Diagnostic (2026-08-23): locates a freshly-sent, not-yet-marked
         # album in the group's current scan window without needing its

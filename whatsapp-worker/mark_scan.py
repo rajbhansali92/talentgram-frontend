@@ -1722,7 +1722,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1836,6 +1836,47 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "status_after_reload": status_after_reload,
             "after_reload": after,
         }], "session_identity": session_identity_after}
+
+    if probe_type == "full_message_inventory":
+        # Diagnostic-only (2026-08-23): the single-photo A/B test proved
+        # media sync itself works (a plain photo arrived and rendered
+        # correctly) while the 6-7-photo album still shows no trace at
+        # all across every prior check. Rather than assume the album's
+        # absence means "not received", this dumps EVERY currently-
+        # rendered message node's COMPLETE testid inventory (not just the
+        # image-content/video-content/media-album markers already known
+        # to matter for a rendered album) — an unrendered/placeholder/
+        # deferred representation would still need to be a message node
+        # matching this same selector, so any such shell would appear
+        # here even if it carries none of the markers already checked.
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        inventory = await _evaluate(page, """
+            ([sel]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              return {
+                total_rendered: els.length,
+                messages: els.map((el, i) => {
+                  const html = el.outerHTML;
+                  const ct = el.querySelector('[data-pre-plain-text]');
+                  const testidCounts = {};
+                  (html.match(/data-testid="[^"]+"/g) || []).forEach(m => {
+                    testidCounts[m] = (testidCounts[m] || 0) + 1;
+                  });
+                  return {
+                    index: i,
+                    data_id: el.getAttribute('data-id'),
+                    pre_plain_text: ct ? ct.getAttribute('data-pre-plain-text') : null,
+                    inner_text: (el.innerText || '').slice(0, 120),
+                    html_len: html.length,
+                    testid_counts: testidCounts,
+                    img_count: el.querySelectorAll('img').length,
+                  };
+                }),
+              };
+            }
+        """, [full_sel])
+        return {"results": [inventory], "session_identity": session_identity}
 
     if probe_type == "raw_tail_ids":
         # Diagnostic (2026-08-23): a fresh 6-7-photo album didn't appear

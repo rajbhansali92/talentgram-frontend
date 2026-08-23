@@ -2497,6 +2497,30 @@ async def _diagnose_photo_album_viewer(page, group_name: str, data_id: str) -> D
             await _evaluate(page, _EVENT_CAPTURE_INSTALL_JS)
         except Exception:
             pass
+        # Local-only "click"/pointer capture with full bubble-path — the
+        # shared _EVENT_CAPTURE_INSTALL_JS only listens for mousedown/
+        # mouseup/contextmenu/auxclick, none of which prove whether a real
+        # "click" event fired or was stopped somewhere along its path to
+        # whatever handler WhatsApp attaches it to.
+        try:
+            await _evaluate(page, """
+                () => {
+                  window.__clickProbe = [];
+                  const describe = (t) => t ? { tag: t.tagName, testid: t.getAttribute && t.getAttribute('data-testid'), role: t.getAttribute && t.getAttribute('role') } : null;
+                  const record = (e) => {
+                    const path = (e.composedPath ? e.composedPath() : []).slice(0, 8).map(describe);
+                    window.__clickProbe.push({ type: e.type, isTrusted: e.isTrusted, defaultPrevented: e.defaultPrevented, target: describe(e.target), path });
+                  };
+                  if (!window.__clickProbeInstalled) {
+                    document.addEventListener('pointerdown', record, true);
+                    document.addEventListener('pointerup', record, true);
+                    document.addEventListener('click', record, true);
+                    window.__clickProbeInstalled = true;
+                  }
+                }
+            """)
+        except Exception:
+            pass
         try:
             await tile_locator.scroll_into_view_if_needed(timeout=5000)
             await tile_locator.click(timeout=10000)
@@ -2506,6 +2530,10 @@ async def _diagnose_photo_album_viewer(page, group_name: str, data_id: str) -> D
             click_event_log = await _evaluate(page, _EVENT_CAPTURE_READ_JS)
         except Exception:
             click_event_log = None
+        try:
+            click_probe_log = await _evaluate(page, "() => { const ev = window.__clickProbe || []; window.__clickProbe = []; return ev; }")
+        except Exception:
+            click_probe_log = None
         viewer_result = None
         elapsed = 0.0
         while elapsed < 6.0:
@@ -2517,7 +2545,7 @@ async def _diagnose_photo_album_viewer(page, group_name: str, data_id: str) -> D
                 break
             await page.wait_for_timeout(500)
             elapsed += 0.5
-        return {"clicked": True, "label": label, "click_event_log": click_event_log, "viewer": viewer_result}
+        return {"clicked": True, "label": label, "click_event_log": click_event_log, "click_probe_log": click_probe_log, "viewer": viewer_result}
 
     attempt1 = await _try_open(thumbs.first, "first_tile(index_0)")
     viewer = (attempt1.get("viewer") or {}) if attempt1.get("clicked") else {}

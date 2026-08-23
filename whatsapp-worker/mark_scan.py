@@ -328,11 +328,38 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
     # Full source inventory (every plain media message found in the
     # window, in DOM order) so a grouped/multi-select send's individual
     # message identities can be inspected directly.
+    #
+    # ALSO TEMPORARY (2026-08-23): every reply with quoted content,
+    # regardless of whether it has a real mention/mark — Pass 2 above only
+    # ever surfaces replies that already pass full validation, but a
+    # whole-album-reply batch-mark syntax hasn't been designed yet and its
+    # exact quoted-block DOM shape is unverified. This captures raw
+    # evidence (truncated) for that investigation without assuming
+    # anything about the shape in advance.
+    all_replies_debug = []
+    for item in window:
+        quoted_html = item.get("quotedHtml")
+        if not quoted_html:
+            continue
+        html = item.get("messageHtml") or ""
+        quoted_hash = _smallest_hash(quoted_html)
+        all_replies_debug.append({
+            "reply_data_id": _own_data_id(html),
+            "has_real_mention": bool(_mention_lid(html)),
+            "mark_text_best_effort": _mark_text(html),
+            "quoted_is_album": _is_album(quoted_html),
+            "quoted_album_tile_hashes": _album_tile_hashes(quoted_html) if _is_album(quoted_html) else None,
+            "quoted_smallest_hash": quoted_hash,
+            "quoted_html_snippet": quoted_html[:3000],
+            "message_html_snippet": html[:1500],
+        })
+
     debug = {
         "window_count": len(window),
         "sources": [
             {"hash": h, **v} for h, v in sources_by_hash.items()
         ],
+        "all_replies": all_replies_debug,
     }
     return {"candidates": candidates, "debug": debug}
 
@@ -691,79 +718,6 @@ async def _find_message_index_by_data_id(page, group_name: str, data_id: str) ->
     return None
 
 
-async def _download_album_tile_via_context_menu(page, full_sel: str, idx: int, tile_index: int) -> Dict[str, Any]:
-    """Right-click the specific tile, dump the resulting context menu
-    (always — evidence either way), and if a "Download" item is found,
-    click it inside page.expect_download() to capture WhatsApp Web's own
-    native download rather than reverse-engineering a viewer/blob: URL.
-    Returns {ok, data (raw bytes), suggested_filename, menu_dump, reason}."""
-    tile_locator = (
-        page.locator(full_sel).nth(idx)
-        .locator('[data-testid="video-content"], [data-testid="image-content"]')
-        .nth(tile_index)
-    )
-    try:
-        await tile_locator.click(button="right", timeout=10000)
-    except Exception as exc:
-        return {"ok": False, "reason": f"right-click failed: {exc}", "menu_dump": None}
-
-    await page.wait_for_timeout(500)
-    try:
-        menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
-    except Exception:
-        menu_dump = None
-
-    body_snapshot = None
-    if not menu_dump:
-        # Nothing matched the known menu selectors — before concluding
-        # anything, capture what (if anything) actually changed in the DOM
-        # after the right-click, so a failure carries real evidence of
-        # "no menu opened at all" vs. "opened with an unrecognized shape".
-        try:
-            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
-        except Exception:
-            body_snapshot = None
-
-    download_item = page.locator(
-        '[role="menu"] :text-matches("download", "i"), '
-        '[role="menuitem"]:has-text("Download"), '
-        'li:has-text("Download"), '
-        'div[role="button"]:has-text("Download")'
-    ).first
-
-    try:
-        visible = await download_item.is_visible(timeout=3000)
-    except Exception:
-        visible = False
-    if not visible:
-        await page.keyboard.press("Escape")
-        return {
-            "ok": False, "reason": "no visible 'Download' menu item found after right-click",
-            "menu_dump": menu_dump, "body_snapshot": body_snapshot,
-        }
-
-    try:
-        async with page.expect_download(timeout=15000) as download_info:
-            await download_item.click(timeout=5000)
-        download = await download_info.value
-        path = await download.path()
-        if not path:
-            return {"ok": False, "reason": "download event fired but no file path available", "menu_dump": menu_dump}
-        with open(path, "rb") as f:
-            data = f.read()
-        return {
-            "ok": True, "data": data, "suggested_filename": download.suggested_filename(),
-            "menu_dump": menu_dump,
-        }
-    except Exception as exc:
-        return {"ok": False, "reason": f"download did not complete: {exc}", "menu_dump": menu_dump}
-    finally:
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-
-
 # ---------------------------------------------------------------------------
 # Download-mechanism PROBE (2026-08-23) — diagnostic only, never uploads.
 # The user manually confirmed via screenshots that a right-click on the
@@ -777,11 +731,15 @@ async def _download_album_tile_via_context_menu(page, full_sel: str, idx: int, t
 async def _read_file_diagnostics(path: str) -> Dict[str, Any]:
     """Local-only diagnostics on a downloaded file — byte length, sha256,
     magic-byte signature, and (best-effort, via ffprobe/ffmpeg) container
-    duration and a hash of the first extracted frame. Never ships raw
-    bytes back over HTTP/Mongo."""
+    duration and a hash of the first extracted frame. Includes the raw
+    bytes under "_raw_bytes" (underscore-prefixed: the real upload path
+    needs them, but every diagnostic/report path MUST strip this key
+    before JSON-serializing a result back to the backend — never ships
+    raw bytes over HTTP/Mongo as part of a report)."""
     with open(path, "rb") as f:
         data = f.read()
     info: Dict[str, Any] = {
+        "_raw_bytes": data,
         "byte_length": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "magic_hex": data[:16].hex(),
@@ -1150,31 +1108,40 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
             continue
         scope = await sender._resolve_scope(page)
         full_sel = f"{scope} [data-testid^='conv-msg-']"
-        if target.get("album_tile_index") is not None:
-            # Right-click -> native "Download" (2026-08-23) — replaces the
-            # media-viewer/blob: approach, which proved to never actually
-            # open a viewer for an album tile (see module comment above
-            # _CONTEXT_MENU_DUMP_JS). Authoritative identity stays
-            # (album data_id, tile's own thumbnail hash) — tile_index here
-            # is only used to locate/click the right element.
-            dl = await _download_album_tile_via_context_menu(page, full_sel, idx, target["album_tile_index"])
+        message = page.locator(full_sel).nth(idx)
+
+        if target.get("source_media_type") == "video":
+            # Proven mechanism (2026-08-23): open the tile/message's own
+            # viewer, wait for the actual <video> to buffer its FULL
+            # duration (readyState alone is not sufficient — see
+            # _wait_for_video_readiness), use the viewer's own native
+            # "Download" item. Tested 4/4 on a real album, restart-stable.
+            # Works uniformly for a single (non-album) video message too —
+            # tile_index 0 addresses that message's own sole media element.
+            tile_index = target.get("album_tile_index")
+            if tile_index is None:
+                tile_index = 0
+            dl = await _open_tile_viewer_and_download(page, message, tile_index)
             if not dl.get("ok"):
-                results.append({
-                    "ok": False, "source_message_id": target["source_message_id"], "error": dl.get("reason"),
-                    "menu_dump": dl.get("menu_dump"), "body_snapshot": dl.get("body_snapshot"),
-                })
+                results.append(_strip_raw_bytes({
+                    "ok": False, "source_message_id": target["source_message_id"],
+                    "error": dl.get("reason") or f"failed at stage {dl.get('stage')}", "detail": dl,
+                }))
                 continue
-            raw = dl["data"]
+            downloads = dl.get("downloads") or []
+            raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
             if not raw:
                 results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
                 continue
             b64 = b64mod.b64encode(raw).decode()
             upload_result = await _upload_one(http, target, b64, "")
             upload_result["byte_length"] = len(raw)
-            upload_result["suggested_filename"] = dl.get("suggested_filename")
             results.append(upload_result)
             continue
 
+        # Photos: the simpler blob-fetch path — unchanged since Phase 0,
+        # no buffering/viewer-menu complexity has been observed for a
+        # static image the way it was for video.
         try:
             fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
         except Exception as exc:
@@ -1191,6 +1158,20 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
         results.append(upload_result)
 
     return {"results": results}
+
+
+def _strip_raw_bytes(obj: Any) -> Any:
+    """Recursively removes any "_raw_bytes" key before a result is
+    JSON-serialized for an HTTP report — a safety net independent of which
+    code path produced the dict, so raw media bytes can never accidentally
+    leave the worker as part of a scan/download-result report (the real
+    upload path consumes them directly via _upload_one, never through this
+    JSON-serialized report)."""
+    if isinstance(obj, dict):
+        return {k: _strip_raw_bytes(v) for k, v in obj.items() if k != "_raw_bytes"}
+    if isinstance(obj, list):
+        return [_strip_raw_bytes(v) for v in obj]
+    return obj
 
 
 async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
@@ -1231,14 +1212,14 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                 result = await asyncio.wait_for(_run_download(page, http, req), timeout=180.0)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
-                                    json={"results": result.get("results", []), "error": result.get("error")},
+                                    json={"results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error")},
                                     headers=_auth_headers(), timeout=30.0,
                                 )
                             elif req.get("mode") == "download_probe":
                                 result = await asyncio.wait_for(_run_download_probe(session, page, req), timeout=150.0)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
-                                    json={"results": result.get("results", []), "error": result.get("error")},
+                                    json={"results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error")},
                                     headers=_auth_headers(), timeout=30.0,
                                 )
                     except asyncio.CancelledError:

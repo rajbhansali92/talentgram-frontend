@@ -76,10 +76,24 @@ async def get_gunwanti_identity() -> Optional[Dict[str, str]]:
 
 async def ensure_indexes() -> None:
     """Called once at backend startup (see server.py) — safe to call
-    repeatedly, create_index is idempotent."""
+    repeatedly, create_index is idempotent.
+
+    2026-08-23: the original unique key (talent_id, project_id,
+    source_message_id) was correct for single-message marks but wrong for
+    albums — every tile in an album shares the SAME source_message_id (the
+    album's own data-id), so two tiles marked for the same talent+project
+    collided on this index; record_assignment's except-fallback would
+    silently return tile 1's row when tile 2 was inserted. Added
+    source_thumbnail_hash (unique per tile) to the key. Old index dropped
+    by name first since Mongo errors on redefining an existing index name
+    with different keys."""
+    try:
+        await db[ASSIGNMENTS_COLLECTION].drop_index("uniq_talent_project_source_message")
+    except Exception:
+        pass  # never existed, or already dropped — fine either way
     await db[ASSIGNMENTS_COLLECTION].create_index(
-        [("talent_id", 1), ("project_id", 1), ("source_message_id", 1)],
-        unique=True, name="uniq_talent_project_source_message",
+        [("talent_id", 1), ("project_id", 1), ("source_message_id", 1), ("source_thumbnail_hash", 1)],
+        unique=True, name="uniq_talent_project_source_message_hash",
     )
     await db[SCAN_REQUESTS_COLLECTION].create_index("created_at")
 
@@ -303,18 +317,49 @@ async def record_assignment(
         await db[ASSIGNMENTS_COLLECTION].insert_one(doc)
         return doc
     except Exception:
+        # Matches the unique index exactly (talent_id, project_id,
+        # source_message_id, source_thumbnail_hash) — for an album,
+        # source_message_id alone is shared by every tile, so this MUST
+        # include the hash or it can return a different tile's row.
         existing = await db[ASSIGNMENTS_COLLECTION].find_one(
-            {"talent_id": talent_id, "project_id": project_id, "source_message_id": doc["source_message_id"]},
+            {
+                "talent_id": talent_id, "project_id": project_id,
+                "source_message_id": doc["source_message_id"],
+                "source_thumbnail_hash": doc["source_thumbnail_hash"],
+            },
             {"_id": 0},
         )
         return existing or doc
 
 
-async def mark_assignment_status(talent_id: str, project_id: str, source_message_id: str, status: str, **extra) -> None:
+async def mark_assignment_status(
+    talent_id: str, project_id: str, source_message_id: str, source_thumbnail_hash: str, status: str, **extra
+) -> None:
+    """source_thumbnail_hash is required, not optional — for an album,
+    source_message_id alone matches every tile sharing that album; without
+    the hash, update_one could silently update the wrong tile's row."""
     await db[ASSIGNMENTS_COLLECTION].update_one(
-        {"talent_id": talent_id, "project_id": project_id, "source_message_id": source_message_id},
+        {
+            "talent_id": talent_id, "project_id": project_id,
+            "source_message_id": source_message_id, "source_thumbnail_hash": source_thumbnail_hash,
+        },
         {"$set": {"assignment_status": status, **extra}},
     )
+
+
+def submission_label(media_role: str, take_number: Optional[int]) -> str:
+    """The label shown on the SUBMISSION itself, where the project is
+    already implicit (unlike role_label, used for cross-project WhatsApp
+    chat reports, which prefixes the project name) — "Take 1",
+    "Introduction", "Photo" — matching the codebase's own "Take N"
+    submission-media-naming convention (routers/submissions.py)."""
+    if media_role == "take" and take_number:
+        return f"Take {take_number}"
+    if media_role == "intro":
+        return "Introduction"
+    if media_role == "photos":
+        return "Photo"
+    return media_role.capitalize()
 
 
 def role_label(media_role: str, take_number: Optional[int], project_label: str) -> str:

@@ -386,7 +386,7 @@ async def media_upload(
     await db.submissions.update_one({"id": sid}, {"$push": {"media": media_obj}})
 
     await media_assignment.mark_assignment_status(
-        talent_id, project_id, source_message_id, media_assignment.ASSIGN_STATUS_UPLOADED,
+        talent_id, project_id, source_message_id, source_thumbnail_hash, media_assignment.ASSIGN_STATUS_UPLOADED,
         submission_id=sid, submission_media_id=media_id,
     )
 

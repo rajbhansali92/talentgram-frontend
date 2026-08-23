@@ -223,7 +223,15 @@ async def _process_scan_done() -> bool:
         "source_sender": m.get("source_sender"), "source_timestamp": m.get("source_timestamp"),
         "mark_reply_message_id": m.get("reply_message_id"), "mark_reply_text": m.get("mark_text"),
         "mark_target_contact_id": m.get("mention_lid"),
-        "original_label": media_assignment.role_label(m["media_role"], m["take_number"], project_label),
+        # submission_label (not role_label) — the submission's own media
+        # label should read "Take 1"/"Introduction", not "Google Take 1";
+        # role_label's project-name prefix is for cross-project WhatsApp
+        # chat reports only (see _report_upload_result below).
+        "original_label": media_assignment.submission_label(m["media_role"], m["take_number"]),
+        # album_tile_index (may be None for a non-album source) is what
+        # tells the worker to use the proven tile-viewer download path
+        # instead of the plain single-message path.
+        "album_tile_index": m.get("album_tile_index"),
         "talent_id": talent_id, "project_id": project_id,
     } for m in to_download]
 

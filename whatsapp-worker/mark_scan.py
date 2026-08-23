@@ -354,18 +354,35 @@ async ([sel, idx]) => {
 
 
 _ALBUM_TILE_DOWNLOAD_JS = """
-async ([sel, idx, tileIndex]) => {
+async ([sel, idx, tileIndex, expectVideo]) => {
   const els = document.querySelectorAll(sel);
   if (idx >= els.length) return {ok: false, reason: "message not found at index"};
   const el = els[idx];
   const tiles = el.querySelectorAll('[data-testid="video-content"], [data-testid="image-content"]');
   if (tileIndex >= tiles.length) return {ok: false, reason: "tile index out of range", tileCount: tiles.length};
   tiles[tileIndex].click();
+  // WhatsApp's viewer shows a static poster <img> immediately, then swaps
+  // in the real <video> once it buffers — grabbing whichever appears
+  // first (2026-08-23 bug) silently downloads the poster JPEG instead of
+  // the actual video. When the source is known to be a video, wait for a
+  // real <video> the WHOLE budget before ever falling back to <img>.
   let srcEl = null;
-  for (let i = 0; i < 25; i++) {
+  const deadlineMs = 6000;
+  const start = Date.now();
+  while (Date.now() - start < deadlineMs) {
     await new Promise(r => setTimeout(r, 200));
+    const video = document.querySelector('video[src^="blob:"]');
+    if (video) { srcEl = video; break; }
+    if (!expectVideo) {
+      const img = document.querySelector('img[src^="blob:"]');
+      if (img) { srcEl = img; break; }
+    }
+  }
+  if (!srcEl) {
+    // Last resort only for a video that never produced a <video> tag —
+    // fall back to whatever blob: image exists rather than failing
+    // outright, but this path is expected to be rare.
     srcEl = document.querySelector('video[src^="blob:"]') || document.querySelector('img[src^="blob:"]');
-    if (srcEl) break;
   }
   if (!srcEl) {
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
@@ -382,7 +399,8 @@ async ([sel, idx, tileIndex]) => {
       binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
     }
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo};
+    await new Promise(r => setTimeout(r, 300));
+    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo, byteLength: bytes.length};
   } catch (e) {
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     return {ok: false, reason: String(e && e.message || e)};
@@ -439,6 +457,14 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
 
     results = []
     for target in req.get("download_targets") or []:
+        # Re-verify the conversation is still the right one before each
+        # target — a prior tile's viewer-open/Escape cycle can leave the
+        # DOM in a state where a fresh index lookup misses (2026-08-23
+        # bug); this fast-paths straight through when already fine.
+        status = await sender._open_group_chat(page, group_name)
+        if status != "OPENED":
+            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"group not open (status={status})"})
+            continue
         idx = await _find_message_index_by_data_id(page, group_name, target["source_message_id"])
         if idx is None:
             results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "source message no longer found in window"})
@@ -447,7 +473,10 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
         full_sel = f"{scope} [data-testid^='conv-msg-']"
         try:
             if target.get("album_tile_index") is not None:
-                fetched = await page.evaluate(_ALBUM_TILE_DOWNLOAD_JS, [full_sel, idx, target["album_tile_index"]])
+                expect_video = target.get("source_media_type") == "video"
+                fetched = await page.evaluate(
+                    _ALBUM_TILE_DOWNLOAD_JS, [full_sel, idx, target["album_tile_index"], expect_video]
+                )
             else:
                 fetched = await page.evaluate(_DOWNLOAD_JS, [full_sel, idx])
         except Exception as exc:
@@ -456,7 +485,12 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
         if not fetched.get("ok"):
             results.append({"ok": False, "source_message_id": target["source_message_id"], "error": fetched.get("reason")})
             continue
+        if not fetched.get("base64"):
+            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
+            continue
         upload_result = await _upload_one(http, target, fetched["base64"], fetched.get("contentType", ""))
+        upload_result["byte_length"] = fetched.get("byteLength")
+        upload_result["is_video"] = fetched.get("isVideo")
         results.append(upload_result)
 
     return {"results": results}

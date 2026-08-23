@@ -1059,19 +1059,37 @@ async def _open_tile_viewer_and_download(page, message_locator, tile_index: int)
 
 
 async def _find_message_index_by_data_id(page, group_name: str, data_id: str) -> Optional[int]:
+    """Checks the currently-rendered tail FIRST (the group was just
+    opened, which WhatsApp scrolls to the bottom by default) — only
+    scrolls up to search older history if not found there. Scrolling
+    unconditionally before searching would evict a tail-resident target
+    from WhatsApp's virtualized DOM before ever finding it (2026-08-23:
+    the exact same root cause proven for _dump_window — a real reply,
+    freshly sent, resolved zero times because this function's old
+    unconditional _ensure_history_loaded() scrolled straight to the top
+    first, and the reply — living in the tail — was never rendered by
+    the time the search actually ran)."""
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
+
+    async def _search_current() -> Optional[int]:
+        loc = page.locator(full_sel)
+        n = await loc.count()
+        for i in range(n):
+            try:
+                testid = await loc.nth(i).get_attribute("data-testid")
+            except Exception:
+                continue
+            if testid == f"conv-msg-{data_id}":
+                return i
+        return None
+
+    found = await _search_current()
+    if found is not None:
+        return found
+
     await _ensure_history_loaded(page, full_sel, MAX_MESSAGES_SCANNED_DEFAULT)
-    loc = page.locator(full_sel)
-    n = await loc.count()
-    for i in range(n):
-        try:
-            testid = await loc.nth(i).get_attribute("data-testid")
-        except Exception:
-            continue
-        if testid == f"conv-msg-{data_id}":
-            return i
-    return None
+    return await _search_current()
 
 
 # ---------------------------------------------------------------------------

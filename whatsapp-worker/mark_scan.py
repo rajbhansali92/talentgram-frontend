@@ -30,6 +30,8 @@ import base64 as b64mod
 import hashlib
 import logging
 import re
+import subprocess
+import tempfile
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -489,6 +491,215 @@ async def _download_album_tile_via_context_menu(page, full_sel: str, idx: int, t
             pass
 
 
+# ---------------------------------------------------------------------------
+# Download-mechanism PROBE (2026-08-23) — diagnostic only, never uploads.
+# The user manually confirmed via screenshots that a right-click on the
+# *message/album itself* (not on an individual tile) opens a real WhatsApp
+# context menu with "Download" (single message) or "Download all" (album) —
+# a different target than the tile-scoped right-click above, which reached
+# no menu at all. This probes that exact confirmed UI path against a real
+# message and reports hard evidence (menu contents, downloaded file
+# diagnostics) without assuming file count, order, or format.
+# ---------------------------------------------------------------------------
+async def _read_file_diagnostics(path: str) -> Dict[str, Any]:
+    """Local-only diagnostics on a downloaded file — byte length, sha256,
+    magic-byte signature, and (best-effort, via ffprobe/ffmpeg) container
+    duration and a hash of the first extracted frame. Never ships raw
+    bytes back over HTTP/Mongo."""
+    with open(path, "rb") as f:
+        data = f.read()
+    info: Dict[str, Any] = {
+        "byte_length": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "magic_hex": data[:16].hex(),
+        "is_zip": data[:4] == b"PK\x03\x04",
+    }
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path],
+            capture_output=True, timeout=20, text=True,
+        )
+        if probe.returncode == 0 and probe.stdout:
+            import json as _json
+            parsed = _json.loads(probe.stdout)
+            fmt = parsed.get("format") or {}
+            streams = parsed.get("streams") or []
+            vstream = next((s for s in streams if s.get("codec_type") == "video"), None)
+            info["ffprobe"] = {
+                "duration_s": fmt.get("duration"), "format_name": fmt.get("format_name"),
+                "width": vstream.get("width") if vstream else None,
+                "height": vstream.get("height") if vstream else None,
+                "codec": vstream.get("codec_name") if vstream else None,
+            }
+        else:
+            info["ffprobe_error"] = (probe.stderr or "")[:300]
+    except Exception as exc:
+        info["ffprobe_error"] = str(exc)
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as frame_f:
+            frame_path = frame_f.name
+        frame = subprocess.run(
+            ["ffmpeg", "-y", "-i", path, "-frames:v", "1", "-q:v", "2", frame_path],
+            capture_output=True, timeout=20,
+        )
+        if frame.returncode == 0:
+            with open(frame_path, "rb") as f:
+                frame_bytes = f.read()
+            if frame_bytes:
+                info["first_frame_sha256"] = hashlib.sha256(frame_bytes).hexdigest()
+                info["first_frame_byte_length"] = len(frame_bytes)
+    except Exception as exc:
+        info["frame_extract_error"] = str(exc)
+    return info
+
+
+async def _collect_downloads(page, trigger, window_s: float = 25.0, quiet_s: float = 3.0) -> List[Dict[str, Any]]:
+    """"Download all" can fire one OR several separate browser download
+    events — never assume exactly one. Listens for every download event
+    for a bounded window, stopping early once no NEW download has arrived
+    for `quiet_s` seconds (so a single file doesn't wait the full budget)."""
+    downloads: List[Any] = []
+
+    def _on_download(dl):
+        downloads.append(dl)
+
+    page.on("download", _on_download)
+    try:
+        await trigger()
+        elapsed = 0.0
+        last_count = 0
+        last_growth = 0.0
+        step = 0.5
+        while elapsed < window_s:
+            await page.wait_for_timeout(int(step * 1000))
+            elapsed += step
+            if len(downloads) != last_count:
+                last_count = len(downloads)
+                last_growth = elapsed
+            elif last_count > 0 and (elapsed - last_growth) >= quiet_s:
+                break
+    finally:
+        page.remove_listener("download", _on_download)
+
+    results = []
+    for dl in downloads:
+        try:
+            path = await dl.path()
+        except Exception as exc:
+            results.append({"ok": False, "error": f"download.path() failed: {exc}"})
+            continue
+        if not path:
+            results.append({"ok": False, "error": "download event fired but no file path available"})
+            continue
+        try:
+            diag = await _read_file_diagnostics(path)
+        except Exception as exc:
+            diag = {"diagnostics_error": str(exc)}
+        diag["ok"] = True
+        try:
+            diag["suggested_filename"] = dl.suggested_filename()
+        except Exception:
+            diag["suggested_filename"] = None
+        results.append(diag)
+    return results
+
+
+async def _right_click_and_probe_download(page, locator, menu_text_re: str = "download") -> Dict[str, Any]:
+    """Right-click `locator` — trying its default center first, then a
+    top-left-corner offset if that opens no menu at all (the earlier
+    tile-scoped right-click hit exactly this: a click centered on the
+    media surface reached no menu, evidence already captured). Dumps
+    whatever menu appears; if an item matching `menu_text_re` is visible,
+    clicks it and collects every resulting download."""
+    attempts = []
+    for label, position in (("center", None), ("top-left-corner", {"x": 4, "y": 4})):
+        try:
+            if position is None:
+                await locator.click(button="right", timeout=10000)
+            else:
+                await locator.click(button="right", timeout=10000, position=position)
+        except Exception as exc:
+            attempts.append({"position": label, "reason": f"right-click failed: {exc}"})
+            continue
+
+        await page.wait_for_timeout(600)
+        try:
+            menu_dump = await page.evaluate(_CONTEXT_MENU_DUMP_JS)
+        except Exception:
+            menu_dump = None
+        body_snapshot = None
+        if not menu_dump:
+            try:
+                body_snapshot = await page.evaluate(_BODY_SNAPSHOT_JS)
+            except Exception:
+                body_snapshot = None
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            attempts.append({"position": label, "reason": "no context menu appeared", "menu_dump": menu_dump, "body_snapshot": body_snapshot})
+            continue
+
+        item = page.locator(
+            f'[role="menu"] :text-matches("{menu_text_re}", "i"), '
+            f'[role="menuitem"]:has-text("Download"), '
+            f'li:has-text("Download"), '
+            f'div[role="button"]:has-text("Download")'
+        ).first
+        try:
+            visible = await item.is_visible(timeout=3000)
+        except Exception:
+            visible = False
+        if not visible:
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            attempts.append({"position": label, "reason": "menu appeared but no matching 'Download' item found", "menu_dump": menu_dump})
+            continue
+
+        try:
+            item_text = (await item.inner_text()).strip()
+        except Exception:
+            item_text = None
+
+        async def _click_item():
+            await item.click(timeout=5000)
+
+        downloads = await _collect_downloads(page, _click_item)
+        return {
+            "ok": bool(downloads) and any(d.get("ok") for d in downloads),
+            "position_used": label, "menu_dump": menu_dump, "item_text_clicked": item_text,
+            "downloads": downloads,
+        }
+
+    return {"ok": False, "reason": "no 'Download' action reachable via right-click at any tried position", "attempts": attempts}
+
+
+async def _run_download_probe(page, req: Dict[str, Any]) -> Dict[str, Any]:
+    """Diagnostic-only entry point: proves (or disproves) the native
+    right-click Download / Download-all mechanism against one real
+    message. Never uploads, never triggers a report into the real
+    casting-agent WhatsApp group (see services/media_assignment_worker.py's
+    `mode == "download_probe"` short-circuit)."""
+    group_name = req["group_name"]
+    status = await sender._open_group_chat(page, group_name)
+    if status != "OPENED":
+        return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
+
+    data_id = req["probe_message_id"]
+    idx = await _find_message_index_by_data_id(page, group_name, data_id)
+    if idx is None:
+        return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    locator = page.locator(full_sel).nth(idx)
+    result = await _right_click_and_probe_download(page, locator)
+    result["source_message_id"] = data_id
+    return {"results": [result]}
+
+
 async def _upload_one(http: httpx.AsyncClient, target: Dict[str, Any], base64_data: str, content_type: str) -> Dict[str, Any]:
     raw = b64mod.b64decode(base64_data)
     ext = "mp4" if target.get("source_media_type") == "video" else "jpg"
@@ -614,6 +825,13 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                 )
                             elif req.get("mode") == "download":
                                 result = await asyncio.wait_for(_run_download(page, http, req), timeout=180.0)
+                                await http.post(
+                                    f"{BASE}/scan-requests/{req['id']}/download-result",
+                                    json={"results": result.get("results", []), "error": result.get("error")},
+                                    headers=_auth_headers(), timeout=30.0,
+                                )
+                            elif req.get("mode") == "download_probe":
+                                result = await asyncio.wait_for(_run_download_probe(page, req), timeout=120.0)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
                                     json={"results": result.get("results", []), "error": result.get("error")},

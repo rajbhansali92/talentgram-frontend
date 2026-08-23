@@ -253,6 +253,18 @@ async def _process_download_done() -> bool:
     if not doc:
         return False
 
+    if doc.get("mode") == "download_probe":
+        # TEMPORARY (2026-08-23) — diagnostic-only mode for the download-
+        # mechanism investigation (right-click "Download"/"Download all").
+        # No real talent/project upload happened and none should be
+        # reported — mark finished directly, no _send_report(), so probing
+        # never sends anything into the real casting-agent WhatsApp group.
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": doc["id"]},
+            {"$set": {"status": media_assignment.STATUS_FINISHED, "completed_at": _now()}},
+        )
+        return True
+
     ctx = doc.get("pending_report_context") or {}
     talent_label, project_label = ctx.get("talent_label", ""), ctx.get("project_label", "")
     talent_id, project_id = doc["talent_id"], doc["project_id"]

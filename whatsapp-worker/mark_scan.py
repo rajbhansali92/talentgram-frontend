@@ -511,7 +511,15 @@ async def _wait_for_video_readiness(page, min_ready_state: int = 3, timeout_s: f
     """Bounded poll on the ACTUAL <video> element's own readyState/
     networkState/buffered — never a fixed sleep. Returns the last observed
     state regardless of whether the threshold was reached, so a timeout
-    still carries real evidence rather than silence."""
+    still carries real evidence rather than silence.
+
+    readyState alone is NOT sufficient (proven 2026-08-23, Tile 3): it
+    reached 4 (HAVE_ENOUGH_DATA) after 1s with only [0, 3.839] of a
+    14.7s video actually buffered, and WhatsApp's own viewer menu did
+    NOT offer "Download" at that point — vs. Tiles 1-2, where the video
+    had buffered its FULL duration and Download was present both times.
+    Also require the buffered range to reach (near) the video's full
+    duration before considering it ready."""
     elapsed = 0.0
     step = 1.0
     last_state = None
@@ -521,7 +529,11 @@ async def _wait_for_video_readiness(page, min_ready_state: int = 3, timeout_s: f
         except Exception:
             last_state = None
         if last_state and last_state.get("readyState", 0) >= min_ready_state:
-            return {"reached": True, "elapsed_s": elapsed, "state": last_state}
+            duration = last_state.get("duration") or 0
+            buffered = last_state.get("buffered") or []
+            buffered_end = max((b[1] for b in buffered), default=0.0)
+            if duration and buffered_end >= duration - 0.5:
+                return {"reached": True, "elapsed_s": elapsed, "state": last_state}
         await page.wait_for_timeout(int(step * 1000))
         elapsed += step
     return {"reached": False, "elapsed_s": elapsed, "state": last_state}

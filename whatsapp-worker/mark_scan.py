@@ -922,6 +922,131 @@ async def _wait_for_video_readiness(page, min_ready_state: int = 3, timeout_s: f
     return {"reached": False, "elapsed_s": elapsed, "state": last_state}
 
 
+# Viewer-close lifecycle diagnostic (2026-08-23) — the real E2E's Take 2/3/
+# Introduction all failed identically at open_tile with "pointer events
+# intercepted" by a background div, after Take 1's viewer successfully
+# opened, buffered, and downloaded. _open_tile_viewer_and_download's
+# success path never explicitly closes the viewer at all — this captures
+# exactly what the user asked for (overlays, fixed/absolute/high-z-index
+# elements, elementFromPoint/elementsFromPoint at the next tile's own
+# click point, bounding boxes, pointer-events, data-testid/aria) at three
+# points: before opening anything, while the viewer is still open, and
+# after attempting to close it — never assumed, always captured fresh.
+_OVERLAY_DIAGNOSTIC_JS = """
+([x, y]) => {
+  const describe = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    return {
+      tag: el.tagName, id: el.id || null, testid: el.getAttribute('data-testid'),
+      role: el.getAttribute('role'), ariaLabel: el.getAttribute('aria-label'),
+      cls: (el.className || '').toString().slice(0, 100),
+      position: cs.position, zIndex: cs.zIndex, pointerEvents: cs.pointerEvents,
+      display: cs.display, visibility: cs.visibility,
+      rect: [r.x, r.y, r.width, r.height],
+    };
+  };
+
+  const all = Array.from(document.querySelectorAll('body *'));
+  const suspects = [];
+  for (const el of all) {
+    const cs = getComputedStyle(el);
+    const z = parseInt(cs.zIndex || '0', 10) || 0;
+    if (cs.position === 'fixed' || cs.position === 'absolute' || z > 0) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) suspects.push(describe(el));
+    }
+  }
+
+  let atPoint = null;
+  if (typeof x === 'number' && typeof y === 'number') {
+    atPoint = {
+      elementFromPoint: describe(document.elementFromPoint(x, y)),
+      elementsFromPoint: document.elementsFromPoint(x, y).slice(0, 8).map(describe),
+    };
+  }
+
+  return { suspectOverlayCount: suspects.length, suspects: suspects.slice(0, 40), atPoint };
+}
+"""
+
+
+async def _diagnose_viewer_close_lifecycle(page, message_locator, tile1_index: int, tile2_index: int) -> Dict[str, Any]:
+    """Diagnostic-only: never assumes what's blocking tile 2's click —
+    captures real DOM/style evidence at three checkpoints (baseline,
+    viewer-open, after-close-attempt) so the actual lifecycle issue can be
+    identified and fixed properly, not patched around with force=True or
+    a longer timeout."""
+    report: Dict[str, Any] = {}
+
+    tile2 = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile2_index)
+    try:
+        box = await tile2.bounding_box()
+    except Exception:
+        box = None
+    point = [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2] if box else [None, None]
+    report["tile2_click_point"] = point
+
+    report["baseline_before_opening_tile1"] = await _evaluate(page, _OVERLAY_DIAGNOSTIC_JS, point)
+
+    dl = await _open_tile_viewer_and_download(page, message_locator, tile1_index)
+    report["tile1_download_result"] = {k: v for k, v in dl.items() if k != "downloads"}
+    report["tile1_download_ok"] = dl.get("ok")
+
+    report["while_viewer_open"] = await _evaluate(page, _OVERLAY_DIAGNOSTIC_JS, point)
+    try:
+        report["viewer_buttons_while_open"] = await _evaluate(page, _VIEWER_BUTTONS_JS)
+    except Exception as exc:
+        report["viewer_buttons_while_open"] = {"error": str(exc)}
+
+    close_btn = None
+    for b in (report["viewer_buttons_while_open"] or {}).get("buttons", []) if isinstance(report["viewer_buttons_while_open"], dict) else []:
+        label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
+        if re.search(r"close|back|dismiss", label):
+            close_btn = b
+            break
+    report["close_button_found"] = close_btn
+
+    if close_btn:
+        cx = close_btn["rect"][0] + close_btn["rect"][2] / 2
+        cy = close_btn["rect"][1] + close_btn["rect"][3] / 2
+        try:
+            await page.mouse.click(cx, cy, button="left")
+            report["close_action"] = "clicked_close_button"
+        except Exception as exc:
+            report["close_action"] = f"close_button_click_failed: {exc}"
+    else:
+        try:
+            await page.keyboard.press("Escape")
+            report["close_action"] = "escape_key_fallback_no_close_button_found"
+        except Exception as exc:
+            report["close_action"] = f"escape_failed: {exc}"
+
+    await page.wait_for_timeout(800)
+    report["after_close_attempt"] = await _evaluate(page, _OVERLAY_DIAGNOSTIC_JS, point)
+
+    # The actual proof the diagnostic is after: does the SAME click point
+    # WhatsApp's own click-target logic would use for tile 2 now resolve
+    # to the real tile, or is something else still on top of it?
+    if box:
+        try:
+            live_at_point = await _evaluate(
+                page,
+                "([x, y]) => { const el = document.elementFromPoint(x, y); "
+                "return el ? {tag: el.tagName, testid: el.getAttribute('data-testid')} : null; }",
+                point,
+            )
+            report["tile2_point_resolves_to_tile"] = bool(
+                live_at_point and live_at_point.get("testid") in ("video-content", "image-content")
+            )
+            report["tile2_point_actual_element"] = live_at_point
+        except Exception as exc:
+            report["tile2_point_check_error"] = str(exc)
+
+    return report
+
+
 async def _open_tile_viewer_and_download(page, message_locator, tile_index: int) -> Dict[str, Any]:
     """Reproduces the manual workflow exactly: open the tile -> wait for a
     real <video> to mount -> wait for it to actually buffer (bounded, not
@@ -1409,6 +1534,21 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         result["session_identity"] = session_identity
         return {"results": [result]}
 
+    if probe_type == "viewer_close_diagnostic":
+        # Diagnostic (2026-08-23): the real E2E's Take 2/3/Introduction all
+        # failed identically opening their tile after Take 1's viewer
+        # successfully downloaded — never assumed why; captures real DOM/
+        # style evidence around the open->download->close transition.
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        result = await _diagnose_viewer_close_lifecycle(page, message, req["tile1_index"], req["tile2_index"])
+        result["session_identity"] = session_identity
+        return {"results": [result]}
+
     async def _relocate():
         idx = await _find_message_index_by_data_id(page, group_name, data_id)
         if idx is None:
@@ -1444,10 +1584,47 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
     return {"results": [result]}
 
 
+# MIME detection from actual bytes (2026-08-23) — the disposable E2E's
+# first real upload failed with "MIME type header does not match detected
+# file signature": _upload_one was passing an empty content_type through
+# for video downloads, which defaulted to generic application/octet-
+# stream, and the backend's own (deliberately strict, unweakened here)
+# signature validation correctly rejected the mismatch against the real
+# MP4 bytes. Detects from the file's own magic bytes — never trusts the
+# WhatsApp media_type label or a file extension alone; the label is used
+# only to decide which signature family to report if none match (an
+# honest "we don't know" rather than a specific type we can't verify,
+# which the backend's own validation will then reject on its own terms,
+# exactly as it should for genuinely anomalous bytes).
+_MIME_BY_EXT = {"video/mp4": "mp4", "video/webm": "webm", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}
+
+
+def _detect_mime_type(data: bytes, media_type_hint: Optional[str] = None) -> str:
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return "video/mp4"
+    if data[:4] == b"\x1aE\xdf\xa3":
+        return "video/webm"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "video/mp4" if media_type_hint == "video" else "application/octet-stream"
+
+
 async def _upload_one(http: httpx.AsyncClient, target: Dict[str, Any], base64_data: str, content_type: str) -> Dict[str, Any]:
     raw = b64mod.b64decode(base64_data)
-    ext = "mp4" if target.get("source_media_type") == "video" else "jpg"
-    files = {"file": (f"{target['source_message_id']}.{ext}", raw, content_type or "application/octet-stream")}
+    # content_type (the caller's hint, e.g. from a blob: fetch's own HTTP
+    # response header) is only a fallback — the bytes' own signature is
+    # authoritative whenever a known one is detected.
+    detected = _detect_mime_type(raw, target.get("source_media_type"))
+    if detected == "application/octet-stream" and content_type:
+        detected = content_type
+    ext = _MIME_BY_EXT.get(detected, "bin")
+    files = {"file": (f"{target['source_message_id']}.{ext}", raw, detected)}
     data = {
         "talent_id": target["talent_id"], "project_id": target["project_id"],
         "media_role": target["media_role"],

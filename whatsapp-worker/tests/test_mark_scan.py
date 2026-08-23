@@ -8,6 +8,8 @@ directly from real captured DOM during that spike (see the
 
 Run:  MONGO_URL=mongodb://x python tests/test_mark_scan.py
 """
+import asyncio
+import base64
 import hashlib
 import os
 import sys
@@ -79,6 +81,33 @@ ALBUM_MESSAGE_HTML = (
     '</div></div>'
     '</div></div>'
 )
+
+
+class _FakeResponse:
+    status_code = 200
+    text = "{}"
+
+
+class _FakeHTTPClient:
+    """Records what _upload_one would actually send to /media-upload,
+    without a real backend — enough to assert on the content_type/
+    filename it computed from the downloaded bytes."""
+    def __init__(self):
+        self.calls = []
+
+    async def post(self, url, data=None, files=None, headers=None, timeout=None):
+        self.calls.append({"url": url, "data": data, "files": files})
+        return _FakeResponse()
+
+
+def _upload_target(**overrides):
+    base = {
+        "source_message_id": "test-msg-id", "talent_id": "t1", "project_id": "p1",
+        "media_role": "take", "take_number": 1, "original_label": "Take 1",
+        "source_media_type": "video",
+    }
+    base.update(overrides)
+    return base
 
 
 def main():
@@ -171,6 +200,39 @@ def main():
     # to contain a number.
     assert mark_scan._quoted_is_whole_item_summary(QUOTED_PHOTO_BLOCK_HTML) is None
     print("14. whole-album quote detection   -> 'N videos/photos' summary recognized only when no thumbnail hash exists")
+
+    # 2026-08-23 real E2E bug: _run_download's video path called
+    # _upload_one(..., "") - an empty content_type - which defaulted to
+    # generic application/octet-stream and the backend's own (strict,
+    # unweakened) signature validation correctly rejected it against the
+    # real MP4 bytes: "MIME type header does not match detected file
+    # signature." Detection must come from the ACTUAL bytes' own magic
+    # signature, never a label or extension.
+    MP4_MAGIC = bytes.fromhex("00000018667479706d70343200000000") + b"\x00" * 32  # real shape, see this session's own captured magic_hex
+    assert mark_scan._detect_mime_type(MP4_MAGIC, media_type_hint="video") == "video/mp4"
+    JPEG_MAGIC = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+    assert mark_scan._detect_mime_type(JPEG_MAGIC, media_type_hint="image") == "image/jpeg"
+    PNG_MAGIC = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    assert mark_scan._detect_mime_type(PNG_MAGIC, media_type_hint="image") == "image/png"
+    WEBP_MAGIC = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 32
+    assert mark_scan._detect_mime_type(WEBP_MAGIC, media_type_hint="image") == "image/webp"
+    # Bytes that don't match ANY known signature must never be silently
+    # assigned a specific type we can't verify - the label is a fallback,
+    # not an override of a real (mis)match.
+    UNKNOWN_BYTES = b"\x00\x01\x02\x03" * 10
+    assert mark_scan._detect_mime_type(UNKNOWN_BYTES, media_type_hint="video") == "video/mp4"  # honest hint fallback, not a specific codec guess
+    assert mark_scan._detect_mime_type(UNKNOWN_BYTES, media_type_hint=None) == "application/octet-stream"
+    print("15. MIME detection from bytes     -> real magic-byte signatures recognized, unknown bytes never given a specific guessed type")
+
+    upload_client = _FakeHTTPClient()
+    mp4_b64 = base64.b64encode(MP4_MAGIC).decode()
+    upload_result = asyncio.run(mark_scan._upload_one(upload_client, _upload_target(), mp4_b64, ""))
+    assert upload_result["ok"] is True, upload_result
+    sent_filename, sent_bytes, sent_content_type = upload_client.calls[0]["files"]["file"]
+    assert sent_content_type == "video/mp4", sent_content_type
+    assert sent_filename.endswith(".mp4"), sent_filename
+    assert sent_bytes == MP4_MAGIC
+    print("16. _upload_one MIME wiring       -> real MP4 bytes uploaded with content_type=video/mp4 (not octet-stream), .mp4 filename")
 
 
 if __name__ == "__main__":

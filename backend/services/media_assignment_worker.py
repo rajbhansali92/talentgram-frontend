@@ -120,6 +120,18 @@ def _report_unresolved(talent_label: str, project_label: str, unresolved: List[D
     )
 
 
+def _report_batch_failed(talent_label: str, project_label: str, batch_failures: List[Dict[str, Any]]) -> str:
+    items = "\n".join(
+        f"- {(b.get('mark_text') or '').strip()} ({b.get('batch_resolution_error') or 'could not resolve album tiles'})"
+        for b in batch_failures
+    )
+    return (
+        f"BATCH RESOLUTION FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
+        f"The following batch mark(s) could not be deterministically resolved to the album's "
+        f"tiles:\n{items}\n\nNo upload was performed. Re-check the mark and album, then retry."
+    )
+
+
 def _report_already_uploaded(talent_label: str, project_label: str, already: List[Dict[str, Any]]) -> str:
     lines = [
         media_assignment.role_label(a["media_role"], a.get("take_number"), project_label)
@@ -209,6 +221,9 @@ async def _process_scan_done() -> bool:
         talent_id=talent_id,
     )
 
+    if outcome.batch_failures:
+        await _finish(doc["id"], _report_batch_failed(talent_label, project_label, outcome.batch_failures))
+        return True
     if outcome.ambiguous:
         await _finish(doc["id"], _report_ambiguous(talent_label, project_label, outcome.ambiguous))
         return True

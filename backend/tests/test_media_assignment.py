@@ -229,6 +229,127 @@ def test_validate_candidates_multiple_photos_same_album_not_ambiguous():
     assert {a["quoted_thumbnail_hash"] for a in outcome.assignments} == {"hash-photo-1", "hash-photo-2", "hash-photo-3"}
 
 
+def test_validate_candidates_batch_resolution_failure_creates_no_single_media_candidate():
+    """Real production bug (2026-08-23 E2E, Tests C & D): a batch mark
+    ("mark Google Test: take 1, take 2, take 3, intro") that failed to
+    resolve to its album's tiles still carried resolved_source_message_id
+    and its raw, unparsed text through to the single-mark parser, which
+    matched the FIRST role keyword it found ("take 1") and created a
+    bogus single-take assignment with no resolved hash. The worker now
+    marks such candidates with resolution_status="BATCH_RESOLUTION_FAILED"
+    and explicit Nones on every field a single-media assignment would
+    need; validate_candidates must reject them before extract_role_and_
+    project ever sees the raw text — never a chance at becoming
+    ("take", 1) or any other slot."""
+    candidates = [{
+        "mention_lid": GUNWANTI_LID,
+        "mark_text": "mark Google Test: take 1, take 2, take 3, intro     2:08 pm         2:08 pm",
+        "reply_message_id": "reply-1",
+        "quoted_thumbnail_hash": None, "resolved_source_message_id": None,
+        "album_tile_index": None, "source_media_type": None, "is_album_tile": False,
+        "resolution_status": "BATCH_RESOLUTION_FAILED",
+        "batch_resolution_error": "summary said 4 items, album has 3",
+    }]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert not outcome.ok
+    assert len(outcome.batch_failures) == 1
+    assert outcome.assignments == []  # Test C: ZERO single-media candidates ever created
+    assert outcome.ambiguous is None
+    assert outcome.unresolved == []
+    # Test D: the raw "take 1, take 2, take 3, intro" text is never
+    # reinterpreted as a single "take 1" mark.
+    assert not any(a.get("media_role") == "take" and a.get("take_number") == 1 for a in outcome.assignments)
+
+
+def test_validate_candidates_batch_photos_failure_creates_no_single_media_candidate():
+    """Test E: the same invariant for a failed "mark <project> photos"
+    whole-album batch — must not fall through as a single "photos"
+    assignment either."""
+    candidates = [{
+        "mention_lid": GUNWANTI_LID,
+        "mark_text": "mark google photos     3:00 pm         3:00 pm",
+        "reply_message_id": "reply-2",
+        "quoted_thumbnail_hash": None, "resolved_source_message_id": None,
+        "album_tile_index": None, "source_media_type": None, "is_album_tile": False,
+        "resolution_status": "BATCH_RESOLUTION_FAILED",
+        "batch_resolution_error": "summary said 7 items, album has 5",
+    }]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert not outcome.ok
+    assert len(outcome.batch_failures) == 1
+    assert outcome.assignments == []
+
+
+def test_validate_candidates_batch_failure_for_different_project_is_filtered_out():
+    """A batch-resolution-failure candidate for a DIFFERENT project must
+    not spuriously block or clutter this project's report."""
+    candidates = [{
+        "mention_lid": GUNWANTI_LID,
+        "mark_text": "mark netflix: take 1, take 2",
+        "reply_message_id": "reply-3",
+        "quoted_thumbnail_hash": None, "resolved_source_message_id": None,
+        "album_tile_index": None, "source_media_type": None, "is_album_tile": False,
+        "resolution_status": "BATCH_RESOLUTION_FAILED",
+        "batch_resolution_error": "summary said 2 items, album has 1",
+    }]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok  # nothing relevant to Google in this scan — not a failure for THIS request
+    assert outcome.batch_failures == []
+    assert outcome.assignments == []
+
+
+def test_validate_candidates_four_tile_album_all_independent_and_idempotent():
+    """Test F: the four legitimate tile assignments for one album (same
+    source_message_id, four distinct thumbnail hashes) resolve
+    independently — no false ambiguity — and re-validating the identical
+    candidate set again (simulating a retry) produces the exact same
+    four slots, never a fifth."""
+    candidates = [
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 1", source_message_id="album-x"),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 2", source_message_id="album-x"),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 3", source_message_id="album-x"),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="album-x"),
+    ]
+    # _mark() ties quoted_thumbnail_hash to source_message_id 1:1, so all
+    # four would collide on hash unless distinguished explicitly — give
+    # each its own real tile hash, matching the actual album shape.
+    for c, h in zip(candidates, ["hash-t1", "hash-t2", "hash-t3", "hash-intro"]):
+        c["quoted_thumbnail_hash"] = h
+
+    def _slots(outcome):
+        return {
+            ma.slot_key(a["media_role"], a["take_number"], a["resolved_source_message_id"], a["quoted_thumbnail_hash"])
+            for a in outcome.assignments
+        }
+
+    outcome1 = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome1.ok
+    assert len(outcome1.assignments) == 4
+    slots1 = _slots(outcome1)
+    assert len(slots1) == 4  # all four independently distinct, no collision
+
+    # Re-run with the identical candidate set (simulating a retry) — must
+    # produce the exact same four slots, never a fifth.
+    outcome2 = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome2.ok
+    assert _slots(outcome2) == slots1
+
+
 def test_validate_candidates_unresolved_mark_reports_failure_not_guess():
     candidates = [
         {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 2", source_message_id="whatever"),

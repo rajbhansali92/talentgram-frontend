@@ -194,6 +194,16 @@ class ValidationOutcome:
     assignments: List[Dict[str, Any]] = dataclass_field(default_factory=list)
     ambiguous: Optional[Dict[str, Any]] = None  # {"media_role", "take_number", "candidates": [...]}
     unresolved: List[Dict[str, Any]] = dataclass_field(default_factory=list)  # marks with no hash match
+    # Batch marks (e.g. "mark google: take 1, take 2, ...") the worker
+    # could not deterministically resolve to an album's tiles — a
+    # DISTINCT failure category from `unresolved`, never merged into it
+    # and never given a chance at the single-mark parser (see
+    # validate_candidates' resolution_status short-circuit below): a
+    # failed batch's raw text (e.g. "take 1, take 2, take 3, intro")
+    # could otherwise be misread as an ordinary single "take 1" mark by
+    # extract_role_and_project, which only looks for the FIRST role
+    # keyword it finds.
+    batch_failures: List[Dict[str, Any]] = dataclass_field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -233,11 +243,33 @@ def validate_candidates(
     mention validity (the worker stays a dumb I/O layer; this function
     owns the identity check, per the module docstring)."""
     valid_marks: List[Dict[str, Any]] = []
+    batch_failures: List[Dict[str, Any]] = []
     for c in candidates:
         if (c.get("mention_lid") or "") != gunwanti_lid:
             # A bare "Gunwanti"/"Talentgram Team" text mention with no real
             # WhatsApp @mention, or a mention of someone else entirely,
             # never qualifies — never falls back to display-name matching.
+            continue
+        if c.get("resolution_status") == "BATCH_RESOLUTION_FAILED":
+            # A batch mark (e.g. "mark google: take 1, take 2, take 3,
+            # intro") the worker could not deterministically resolve to
+            # an album's tiles. Regardless of what follows below, this
+            # candidate can NEVER become a resolved single-media
+            # assignment — that's the actual bug found in production
+            # (2026-08-23 E2E): extract_role_and_project only looks for
+            # the FIRST role keyword it finds, so a failed batch's raw
+            # text was misread as an ordinary single "take 1" mark,
+            # creating a bogus assignment with no resolved hash. A
+            # best-effort project-relevance check still runs (so a
+            # failure for a DIFFERENT project doesn't spuriously block
+            # or clutter this one's report) — but its result is used
+            # ONLY to filter, never to build an assignment.
+            parsed_for_relevance = extract_role_and_project(c.get("mark_text") or "")
+            if parsed_for_relevance is not None:
+                relevance_match = nlu.resolve_project_by_name(parsed_for_relevance.project_fragment, projects)
+                if not relevance_match.project or relevance_match.project["id"] != requested_project_id:
+                    continue  # this failed batch belongs to a different project — not relevant here
+            batch_failures.append(c)
             continue
         parsed = extract_role_and_project(c.get("mark_text") or "")
         if parsed is None:
@@ -248,6 +280,14 @@ def validate_candidates(
         valid_marks.append({
             **c, "media_role": parsed.media_role, "take_number": parsed.take_number,
         })
+
+    if batch_failures:
+        # Checked before ambiguous/unresolved, same "stop, don't partially
+        # proceed" posture — a batch mark that failed to resolve means the
+        # employee's intended assignment for (at least) this reply was
+        # never established at all; never silently ignored in favor of
+        # whatever other marks happened to resolve fine in the same scan.
+        return ValidationOutcome(ok=False, batch_failures=batch_failures)
 
     def _key(m: Dict[str, Any]) -> tuple:
         return slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash"))

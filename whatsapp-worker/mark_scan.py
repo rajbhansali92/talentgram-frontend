@@ -552,14 +552,32 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
     # resolved batch reply is expanded into one candidate PER TILE here,
     # so validate_candidates on the backend sees ordinary-looking
     # single-tile candidates and needs no batch-specific logic at all.
+    def _batch_failure_candidate(bc: Dict[str, Any], error: str) -> Dict[str, Any]:
+        # A failed batch mark must NEVER be able to fall through to the
+        # backend's single-mark parser (a real production bug, 2026-08-23:
+        # extract_role_and_project only looks for the FIRST role keyword
+        # it finds, so a failed batch's raw "take 1, take 2, take 3,
+        # intro" text was misread as an ordinary single "take 1" mark,
+        # creating a bogus assignment with no resolved hash). Every field
+        # a single-media assignment would need is explicitly None here —
+        # resolved_source_message_id included, even when we DO know the
+        # album's data_id, because "we found the album but not which
+        # tiles" is still an unresolved batch, not a usable single-media
+        # identity — plus the explicit resolution_status marker the
+        # backend's validate_candidates checks before its parser ever
+        # sees this candidate's mark_text.
+        return {
+            "mention_lid": bc["mention_lid"], "mark_text": bc["mark_text"],
+            "reply_message_id": bc["reply_message_id"],
+            "quoted_thumbnail_hash": None, "resolved_source_message_id": None,
+            "album_tile_index": None, "source_media_type": None, "is_album_tile": False,
+            "resolution_status": "BATCH_RESOLUTION_FAILED", "batch_resolution_error": error,
+        }
+
     for bc in batch_candidates:
         jump = await _resolve_quoted_jump(page, group_name, bc["reply_message_id"])
         if not jump.get("ok"):
-            candidates.append({
-                "mention_lid": bc["mention_lid"], "mark_text": bc["mark_text"],
-                "reply_message_id": bc["reply_message_id"], "quoted_thumbnail_hash": None,
-                "resolved_source_message_id": None, "batch_resolution_error": jump.get("reason"),
-            })
+            candidates.append(_batch_failure_candidate(bc, jump.get("reason") or "quoted-jump resolution failed"))
             continue
         tile_hashes_and_types = jump["tile_hashes_and_types"]
         if len(tile_hashes_and_types) != bc["item_count"]:
@@ -567,23 +585,17 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             # actually see in the jumped-to album — never guess which
             # tiles to use; report as a resolution failure for the whole
             # batch mark, not a partial/best-effort match.
-            candidates.append({
-                "mention_lid": bc["mention_lid"], "mark_text": bc["mark_text"],
-                "reply_message_id": bc["reply_message_id"], "quoted_thumbnail_hash": None,
-                "resolved_source_message_id": jump["data_id"],
-                "batch_resolution_error": f"summary said {bc['item_count']} items, album has {len(tile_hashes_and_types)}",
-            })
+            candidates.append(_batch_failure_candidate(
+                bc, f"summary said {bc['item_count']} items, album has {len(tile_hashes_and_types)}",
+            ))
             continue
 
         if bc["batch"]:
             project_fragment, role_items = bc["batch"]
             if len(role_items) != len(tile_hashes_and_types):
-                candidates.append({
-                    "mention_lid": bc["mention_lid"], "mark_text": bc["mark_text"],
-                    "reply_message_id": bc["reply_message_id"], "quoted_thumbnail_hash": None,
-                    "resolved_source_message_id": jump["data_id"],
-                    "batch_resolution_error": f"{len(role_items)} roles given for {len(tile_hashes_and_types)} tiles — counts must match exactly",
-                })
+                candidates.append(_batch_failure_candidate(
+                    bc, f"{len(role_items)} roles given for {len(tile_hashes_and_types)} tiles — counts must match exactly",
+                ))
                 continue
             for tile_index, (role_item, (h, media_type)) in enumerate(zip(role_items, tile_hashes_and_types)):
                 candidates.append({
@@ -820,6 +832,49 @@ _CENTERED_MESSAGE_JS = """
 """
 
 
+async def _hash_album_tiles_live(message_locator) -> List[Dict[str, Any]]:
+    """Authoritative album tile inventory — hashes each ACTUAL
+    [data-testid="video-content"/"image-content"] element's own outerHTML
+    directly, never by chunking the whole message HTML on `grid-area:`
+    CSS boundary count. Proven necessary (2026-08-23,
+    _diagnose_album_lifecycle): opening/downloading/closing a tile causes
+    WhatsApp to append substantial extra content into the SAME message
+    subtree (html length grew 46843 -> 75901 -> 108327 bytes across two
+    tile interactions — same DOM node throughout, never replaced), which
+    desyncs any boundary-counting heuristic and undercounts tiles (4 -> 3
+    -> 2) even though every tile's own data never changes. This is the
+    single shared source of truth both _identify_tile_index (probe-only)
+    and _resolve_quoted_jump (real scan-time batch resolution) use —
+    fixing the extraction once here covers both call sites, and any
+    future one.
+
+    Returns one entry per element in DOM order — {hash, media_type} —
+    even when a specific element's own read fails (hash: None), so the
+    returned list's length always matches the real, current element
+    count; never silently drops an entry the way chunk-based extraction
+    could."""
+    tiles = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]')
+    try:
+        n = await tiles.count()
+    except Exception:
+        return []
+    result = []
+    for i in range(n):
+        tile = tiles.nth(i)
+        try:
+            media_type_attr = await tile.get_attribute("data-testid", timeout=10000)
+        except Exception:
+            media_type_attr = None
+        media_type = "image" if media_type_attr == "image-content" else "video"
+        try:
+            tile_html = await tile.evaluate("(el) => el.outerHTML", timeout=10000)
+        except Exception:
+            result.append({"hash": None, "media_type": media_type})
+            continue
+        result.append({"hash": _smallest_hash(tile_html), "media_type": media_type})
+    return result
+
+
 async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
     """Clicks a reply's own quoted-message block (a real WhatsApp button
     that jumps to/highlights the original message) and observes which
@@ -852,8 +907,9 @@ async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dic
     jumped_idx = await _find_message_index_by_data_id(page, group_name, centered["dataId"])
     if jumped_idx is None:
         return {"ok": False, "reason": "jumped-to message no longer found in window", "data_id": centered["dataId"]}
+    jumped_message = page.locator(full_sel).nth(jumped_idx)
     try:
-        jumped_html = await page.locator(full_sel).nth(jumped_idx).evaluate("(el) => el.outerHTML", timeout=10000)
+        jumped_html = await jumped_message.evaluate("(el) => el.outerHTML", timeout=10000)
     except Exception as exc:
         return {"ok": False, "reason": f"could not read jumped-to message HTML: {exc}", "data_id": centered["dataId"]}
     jumped_html = jumped_html[:HTML_TRUNCATE]
@@ -862,35 +918,26 @@ async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dic
             "ok": False, "data_id": centered["dataId"],
             "reason": "jumped-to message is not an album (batch marking only supports whole-album replies)",
         }
+    # Per-element hashing (2026-08-23 fix), not grid-area chunking — see
+    # _hash_album_tiles_live's own docstring for the full evidence trail.
+    live_tiles = await _hash_album_tiles_live(jumped_message)
+    tile_hashes_and_types = [(t["hash"], t["media_type"]) for t in live_tiles if t["hash"]]
     return {
         "ok": True, "data_id": centered["dataId"], "is_album": True,
-        "tile_hashes_and_types": _album_tile_hashes_and_types(jumped_html), "centered": centered,
+        "tile_hashes_and_types": tile_hashes_and_types, "centered": centered,
     }
 
 
 async def _identify_tile_index(page, group_name: str, data_id: str, expected_hash: str) -> Dict[str, Any]:
-    """Re-derives which tile index currently corresponds to `expected_hash`.
-
-    2026-08-23 fix: previously chunked the WHOLE message HTML by
-    `grid-area:` CSS boundary count (_album_tile_hashes) — proven broken
-    by a real diagnostic (_diagnose_album_lifecycle): opening/downloading/
-    closing a tile causes WhatsApp to append substantial extra content
-    into the SAME message subtree (html length grew from 46843 to 108327
-    bytes across 2 tile interactions, same DOM node throughout — never
-    replaced), which desynced the boundary-counting heuristic and made it
-    undercount tiles (4 -> 3 -> 2) even though EVERY known tile hash
-    remained findable anywhere in the message the entire time. Hashes
-    each `[data-testid="video-content"/"image-content"]` element's OWN
-    outerHTML directly instead — the exact same selector/positions
-    _open_tile_viewer_and_download's `.nth(tile_index)` click target uses
-    — so identity is tied directly to the real clickable element, never a
-    boundary-counting heuristic that content growth can desync.
+    """Re-derives which tile index currently corresponds to `expected_hash`,
+    via the shared _hash_album_tiles_live (per-element hashing, not
+    grid-area chunking — see its own docstring for the full evidence
+    trail).
 
     Note: production's _run_download does NOT call this function at all —
     it uses the album_tile_index already recorded once during the
-    original scan (never re-derived at download time), which is why the
-    grid-area miscount never affected real uploads. This function exists
-    only for this probe tool's own single-tile ad-hoc testing
+    original scan (never re-derived at download time). This function
+    exists only for this probe tool's own single-tile ad-hoc testing
     convenience, where no prior scan result is available to draw an
     index from."""
     idx = await _find_message_index_by_data_id(page, group_name, data_id)
@@ -899,28 +946,8 @@ async def _identify_tile_index(page, group_name: str, data_id: str, expected_has
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
     message = page.locator(full_sel).nth(idx)
-    tiles = message.locator('[data-testid="video-content"], [data-testid="image-content"]')
-    try:
-        n = await tiles.count()
-    except Exception as exc:
-        return {"ok": False, "reason": f"could not count tile elements: {exc}"}
-    tile_hashes: List[Optional[str]] = []
-    for i in range(n):
-        try:
-            # Explicit timeout (2026-08-23 bug: this call previously had
-            # none, unlike every page.evaluate() call in this module —
-            # already wrapped via _evaluate() after the earlier
-            # unbounded-evaluate hang investigation. A real run hung on
-            # exactly this line, reaped by the backend's 360s orphan
-            # sweep, while three OTHER tiles processed right after it
-            # succeeded fine — an isolated stall, not a systemic issue,
-            # but every evaluate-family call in this file should be
-            # bounded on principle.
-            tile_html = await tiles.nth(i).evaluate("(el) => el.outerHTML", timeout=10000)
-        except Exception:
-            tile_hashes.append(None)
-            continue
-        tile_hashes.append(_smallest_hash(tile_html))
+    live_tiles = await _hash_album_tiles_live(message)
+    tile_hashes = [t["hash"] for t in live_tiles]
     if expected_hash not in tile_hashes:
         return {"ok": False, "reason": "expected tile hash not found among current album tiles", "tile_hashes": tile_hashes, "message_idx": idx}
     tile_index = tile_hashes.index(expected_hash)

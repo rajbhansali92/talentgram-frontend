@@ -201,6 +201,60 @@ def main():
     assert mark_scan._quoted_is_whole_item_summary(QUOTED_PHOTO_BLOCK_HTML) is None
     print("14. whole-album quote detection   -> 'N videos/photos' summary recognized only when no thumbnail hash exists")
 
+    # 2026-08-23 real production bug (Test A): _identify_tile_index and
+    # _resolve_quoted_jump both used to chunk the WHOLE message HTML by
+    # grid-area boundary count, which a real diagnostic proved desyncs
+    # once WhatsApp appends extra content to the message after tile
+    # interactions (html length grew 46843 -> 75901 -> 108327 bytes,
+    # tile count undercounted 4 -> 3 -> 2 even though nothing was
+    # actually missing). _hash_album_tiles_live fixes this by hashing
+    # each ACTUAL clickable element directly - proven here by giving it
+    # a message locator whose tile elements are correct regardless of
+    # how much unrelated "message" content exists around them (the
+    # fake locator here has NO surrounding HTML at all, the extreme
+    # case of "grown DOM" - the function still finds exactly 4).
+    class _FakeTileElement:
+        def __init__(self, testid, html):
+            self._testid = testid
+            self._html = html
+        async def get_attribute(self, name, timeout=None):
+            return self._testid if name == "data-testid" else None
+        async def evaluate(self, js, timeout=None):
+            return self._html
+
+    class _FakeTilesLocator:
+        def __init__(self, elements):
+            self._elements = elements
+        async def count(self):
+            return len(self._elements)
+        def nth(self, i):
+            return self._elements[i]
+
+    class _FakeMessageLocator:
+        def __init__(self, elements):
+            self._elements = elements
+        def locator(self, selector):
+            assert "video-content" in selector and "image-content" in selector
+            return _FakeTilesLocator(self._elements)
+
+    def _tile_element(seed: str, media_type: str = "video"):
+        testid = "video-content" if media_type == "video" else "image-content"
+        blob = (seed * 20)[:80]
+        html = f'<div data-testid="{testid}"><div style="background-image: url(&quot;data:image/jpeg;base64,{blob}&quot;);"></div></div>'
+        return _FakeTileElement(testid, html), hashlib.sha256(blob.encode()).hexdigest()
+
+    elements, expected_hashes = [], []
+    for seed in ("TILE1", "TILE2", "TILE3", "TILE4"):
+        el, h = _tile_element(seed)
+        elements.append(el)
+        expected_hashes.append(h)
+    message = _FakeMessageLocator(elements)
+    live_tiles = asyncio.run(mark_scan._hash_album_tiles_live(message))
+    assert [t["hash"] for t in live_tiles] == expected_hashes, live_tiles
+    assert all(t["media_type"] == "video" for t in live_tiles)
+    assert len(live_tiles) == 4  # Test A: grown-DOM equivalent still yields exactly 4 tiles
+    print("15. _hash_album_tiles_live (Test A) -> per-element hashing yields exactly 4 tiles, immune to message-HTML growth")
+
     # 2026-08-23 real E2E bug: _run_download's video path called
     # _upload_one(..., "") - an empty content_type - which defaulted to
     # generic application/octet-stream and the backend's own (strict,
@@ -222,7 +276,7 @@ def main():
     UNKNOWN_BYTES = b"\x00\x01\x02\x03" * 10
     assert mark_scan._detect_mime_type(UNKNOWN_BYTES, media_type_hint="video") == "video/mp4"  # honest hint fallback, not a specific codec guess
     assert mark_scan._detect_mime_type(UNKNOWN_BYTES, media_type_hint=None) == "application/octet-stream"
-    print("15. MIME detection from bytes     -> real magic-byte signatures recognized, unknown bytes never given a specific guessed type")
+    print("16. MIME detection from bytes     -> real magic-byte signatures recognized, unknown bytes never given a specific guessed type")
 
     upload_client = _FakeHTTPClient()
     mp4_b64 = base64.b64encode(MP4_MAGIC).decode()
@@ -232,7 +286,7 @@ def main():
     assert sent_content_type == "video/mp4", sent_content_type
     assert sent_filename.endswith(".mp4"), sent_filename
     assert sent_bytes == MP4_MAGIC
-    print("16. _upload_one MIME wiring       -> real MP4 bytes uploaded with content_type=video/mp4 (not octet-stream), .mp4 filename")
+    print("17. _upload_one MIME wiring       -> real MP4 bytes uploaded with content_type=video/mp4 (not octet-stream), .mp4 filename")
 
     # 2026-08-23 real E2E bug: Take 2/3/Introduction all failed identically
     # opening their tile after Take 1's viewer successfully downloaded -
@@ -282,13 +336,13 @@ def main():
     assert close1["closed"] is True and close1["used_close_button"] is True, close1
     assert page1.mouse.clicks == [(1242.0, 30.0, "left")], page1.mouse.clicks  # center of the real Close button's rect
     assert page1.keyboard.presses == []  # real button found -> no Escape fallback needed
-    print("17. _close_viewer real button     -> clicks the actual discovered Close button, waits for <video> to detach")
+    print("18. _close_viewer real button     -> clicks the actual discovered Close button, waits for <video> to detach")
 
     page2 = _FakePage([0])  # no video ever present (edge case: already closed)
     close2 = asyncio.run(mark_scan._close_viewer(page2, {"buttons": []}))
     assert close2["closed"] is True and close2["used_close_button"] is False, close2
     assert page2.keyboard.presses == ["Escape"]  # no close button in dump -> Escape fallback used
-    print("18. _close_viewer no button found -> falls back to Escape, still verifies via <video> count")
+    print("19. _close_viewer no button found -> falls back to Escape, still verifies via <video> count")
 
 
 if __name__ == "__main__":

@@ -182,6 +182,9 @@ async def task_sent(
 class ScanResultIn(BaseModel):
     candidates: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
+    # TEMPORARY (2026-08-23) — debug-only field for the E2E investigation;
+    # remove once the scan-resolution mismatch is root-caused and fixed.
+    debug: Optional[Dict[str, Any]] = None
 
 
 class DownloadResultIn(BaseModel):
@@ -238,6 +241,7 @@ async def report_scan_result(
         {"id": request_id},
         {"$set": {
             "status": status, "candidates": payload.candidates, "scan_error": payload.error,
+            "debug": payload.debug,
             "updated_at": datetime.now(timezone.utc),
         }},
     )

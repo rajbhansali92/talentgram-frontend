@@ -212,7 +212,15 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
             "source_timestamp": None,
         })
 
-    return {"candidates": candidates}
+    # TEMPORARY debug (2026-08-23) — investigating a resolution mismatch
+    # between isolated function tests and the live scan; remove once root
+    # cause is found and fixed.
+    debug = {
+        "window_count": len(window),
+        "source_hashes": list(sources_by_hash.keys()),
+        "source_message_ids": [v["source_message_id"] for v in sources_by_hash.values()],
+    }
+    return {"candidates": candidates, "debug": debug}
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +343,10 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                             result = await _run_scan(page, req)
                             await http.post(
                                 f"{BASE}/scan-requests/{req['id']}/scan-result",
-                                json={"candidates": result.get("candidates", []), "error": result.get("error")},
+                                json={
+                                    "candidates": result.get("candidates", []), "error": result.get("error"),
+                                    "debug": result.get("debug"),
+                                },
                                 headers=_auth_headers(), timeout=30.0,
                             )
                         elif req.get("mode") == "download":

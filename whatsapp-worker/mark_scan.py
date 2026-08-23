@@ -1722,7 +1722,8 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    data_id = req.get("probe_message_id") if probe_type == "album_discovery" else req["probe_message_id"]
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids"}
+    data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
         "own_phone_number": getattr(session, "own_phone_number", None),

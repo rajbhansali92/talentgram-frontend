@@ -134,9 +134,53 @@ def _sender_name(html: str) -> Optional[str]:
     return m2.group(1).strip() if m2 else None
 
 
+_LOAD_HISTORY_JS = """
+async ([sel, targetCount, maxSteps]) => {
+  const countNow = () => document.querySelectorAll(sel).length;
+  let count = countNow();
+  for (let i = 0; i < maxSteps && count < targetCount; i++) {
+    const els = document.querySelectorAll(sel);
+    if (!els.length) break;
+    const el = els[0];
+    let container = el;
+    let maxOverflow = 0;
+    let node = el.parentElement;
+    for (let d = 0; d < 8 && node; d++) {
+      const overflow = node.scrollHeight - node.clientHeight;
+      if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+      node = node.parentElement;
+    }
+    if (maxOverflow <= 0) break;
+    container.scrollTop = 0;
+    await new Promise(r => setTimeout(r, 400));
+    const newCount = countNow();
+    if (newCount <= count) break;  // stopped growing -> reached the top of history
+    count = newCount;
+  }
+  return count;
+}
+"""
+
+
+async def _ensure_history_loaded(page, full_sel: str, max_messages: int, max_steps: int = 10) -> int:
+    """WhatsApp Web virtualizes long message lists — a chat with more
+    history than fits the viewport only renders the tail until the panel
+    is scrolled toward the top (see sender.py's get_group_participants,
+    which documents/handles the identical issue for the members drawer).
+    Bounded: at most `max_steps` scroll-to-top + settle iterations, and
+    never past `max_messages` — this loads MORE of a small, fixed history
+    window reliably, it does not turn the scan into an unbounded one."""
+    try:
+        return await page.evaluate(_LOAD_HISTORY_JS, [full_sel, max_messages, max_steps])
+    except Exception:
+        logger.exception("mark_scan: history-load scroll failed (continuing with whatever is rendered)")
+        return 0
+
+
 async def _dump_window(page, group_name: str, max_messages: int) -> List[Dict[str, Any]]:
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
+    await _ensure_history_loaded(page, full_sel, max_messages)
     loc = page.locator(full_sel)
     n = await loc.count()
     start = max(0, n - max_messages)
@@ -259,6 +303,7 @@ async ([sel, idx]) => {
 async def _find_message_index_by_data_id(page, group_name: str, data_id: str) -> Optional[int]:
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
+    await _ensure_history_loaded(page, full_sel, MAX_MESSAGES_SCANNED_DEFAULT)
     loc = page.locator(full_sel)
     n = await loc.count()
     for i in range(n):

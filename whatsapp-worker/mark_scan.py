@@ -444,8 +444,14 @@ _VIDEO_STATE_JS = """
 }
 """
 
-# Dumps every button-like element inside whatever most recently mounted as
-# a direct child of <body> (the standard React-portal/modal pattern) — aria
+# Dumps every button-like element inside the viewer overlay — located by
+# walking UP from the actual mounted <video> element to its direct-child-
+# of-<body> ancestor, not by assuming DOM position (2026-08-23: Tile 1's
+# test happened to have the viewer as body's literal last child, but Tile
+# 2's did not — document.body.lastElementChild resolved to an unrelated
+# "has-finished-comet-page" tracking div instead, with zero real buttons.
+# Anchoring on the video's own ancestor chain is structural, not
+# positional, so it can't be fooled by sibling ordering). Captures aria
 # label, data-icon, and any inner <svg><title> text (WhatsApp icons
 # reliably carry one, e.g. "ic-search", "ic-close", seen already in this
 # codebase's own PHASE26B diagnostics), plus each button's own rect so a
@@ -453,8 +459,13 @@ _VIDEO_STATE_JS = """
 # never assumed.
 _VIEWER_BUTTONS_JS = """
 () => {
-  const root = document.body.lastElementChild;
-  if (!root) return {rootFound: false, buttons: []};
+  const v = document.querySelector('video');
+  if (!v) return {rootFound: false, buttons: [], reason: 'no video element'};
+  let root = v;
+  while (root.parentElement && root.parentElement !== document.body) {
+    root = root.parentElement;
+  }
+  if (!root.parentElement) return {rootFound: false, buttons: [], reason: 'video not attached under body'};
   const btns = Array.from(root.querySelectorAll('button, [role="button"]'));
   return {
     rootFound: true,

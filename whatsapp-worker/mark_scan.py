@@ -373,6 +373,22 @@ async ([expectVideo, viewerHints]) => {
     const found = document.querySelector(hint);
     if (found) { scope = found; break; }
   }
+  // TEMPORARY diagnostic (2026-08-23) — a lightbox/viewer is often
+  // appended as its own top-level overlay directly under <body>, outside
+  // #app entirely. Dump every direct body child with its testid/role/
+  // class/computed z-index/position so a genuine new overlay (vs. the
+  // pre-existing app root) is identifiable even if none of the hint
+  // selectors above matched it.
+  const bodyChildren = Array.from(document.body.children).map(c => {
+    const cs = window.getComputedStyle(c);
+    return {
+      tag: c.tagName, id: c.id || null,
+      testid: c.getAttribute('data-testid'), role: c.getAttribute('role'),
+      classSample: (c.className || '').toString().slice(0, 80),
+      position: cs.position, zIndex: cs.zIndex,
+      childCount: c.children.length,
+    };
+  });
   const blobEls = Array.from(document.querySelectorAll('img[src^="blob:"], video[src^="blob:"]')).map(e => {
     let anc = e; let testids = [];
     for (let d = 0; d < 6 && anc; d++) {
@@ -404,7 +420,7 @@ async ([expectVideo, viewerHints]) => {
   }
   if (!srcEl) {
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    return {ok: false, reason: "no viewer media element with blob: src appeared after click", blobEls, scopeFound: scope !== document};
+    return {ok: false, reason: "no viewer media element with blob: src appeared after click", blobEls, scopeFound: scope !== document, bodyChildren};
   }
   const isVideo = srcEl.tagName === 'VIDEO';
   try {
@@ -418,10 +434,10 @@ async ([expectVideo, viewerHints]) => {
     }
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     await new Promise(r => setTimeout(r, 300));
-    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo, byteLength: bytes.length, blobEls, scopeFound: scope !== document};
+    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo, byteLength: bytes.length, blobEls, scopeFound: scope !== document, bodyChildren};
   } catch (e) {
     document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
-    return {ok: false, reason: String(e && e.message || e), blobEls};
+    return {ok: false, reason: String(e && e.message || e), blobEls, bodyChildren};
   }
 }
 """
@@ -513,7 +529,7 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
         if not fetched.get("ok"):
             results.append({
                 "ok": False, "source_message_id": target["source_message_id"], "error": fetched.get("reason"),
-                "blob_els": fetched.get("blobEls"),
+                "blob_els": fetched.get("blobEls"), "body_children": fetched.get("bodyChildren"),
             })
             continue
         if not fetched.get("base64"):
@@ -521,6 +537,7 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
             continue
         upload_result = await _upload_one(http, target, fetched["base64"], fetched.get("contentType", ""))
         upload_result["blob_els"] = fetched.get("blobEls")
+        upload_result["body_children"] = fetched.get("bodyChildren")
         upload_result["byte_length"] = fetched.get("byteLength")
         upload_result["is_video"] = fetched.get("isVideo")
         results.append(upload_result)

@@ -8,6 +8,7 @@ directly from real captured DOM during that spike (see the
 
 Run:  MONGO_URL=mongodb://x python tests/test_mark_scan.py
 """
+import hashlib
 import os
 import sys
 
@@ -56,6 +57,29 @@ BARE_MARK_NO_MENTION_HTML = (
     '</div>'
 )
 
+# Grouped-album structure (2026-08-23) — trimmed directly from a real
+# captured "send 4 videos together" multi-select album: ONE data-id, a
+# media-album container, N tiles each starting with its own
+# `grid-area: r/c/r/c` style boundary and its own embedded thumbnail. Tile
+# 2 here also carries a second, larger "extraneous" blob (same pattern
+# already known from single video messages) that must NOT be picked.
+ALBUM_MESSAGE_HTML = (
+    '<div data-id="3B99A3545E173C9DA2C8" data-testid="conv-msg-3B99A3545E173C9DA2C8">'
+    '<div data-testid="media-album">'
+    '<div style="grid-area: 1 / 1 / 2 / 2;"><div data-testid="video-content">'
+    '<div style="background-image: url(&quot;data:image/jpeg;base64,'
+    'TILE1AAAABBBBCCCCDDDDTILE1AAAABBBBCCCCDDDDTILE1AAAABBBBCCCCDDDDTILE1AAAAXXXXXXXXX&quot;);"></div>'
+    '</div></div>'
+    '<div style="grid-area: 1 / 2 / 2 / 3;"><div data-testid="video-content">'
+    '<div style="background-image: url(&quot;data:image/jpeg;base64,'
+    'TILE2AAAABBBBCCCCDDDDTILE2AAAABBBBCCCCDDDDTILE2AAAABBBBCCCCDDDDTILE2AAAAXXXXXXXXX&quot;);"></div>'
+    '<div style="background-image: url(&quot;data:image/jpeg;base64,'
+    + ("TILE2BIGPOSTERBLOBDIFFERSEACHTIME" * 5) +
+    '&quot;);"></div>'
+    '</div></div>'
+    '</div></div>'
+)
+
 
 def main():
     assert mark_scan._own_data_id(PHOTO_MESSAGE_HTML) == "3B6637D11A63081B8712"
@@ -71,7 +95,6 @@ def main():
     video_hash = mark_scan._smallest_hash(VIDEO_MESSAGE_HTML)
     assert video_hash is not None
     # The SMALLER blob must win — never the larger, non-stable one.
-    import hashlib
     bigger_hash = hashlib.sha256(("BIGGERPOSTERBLOBDIFFERSEACHTIME" * 5).encode()).hexdigest()
     assert video_hash != bigger_hash
     print("3. video thumbnail hashing        -> picks the smallest (stable) blob, not the larger one")
@@ -89,6 +112,22 @@ def main():
 
     assert mark_scan._mark_text('<div>no keyword here</div>') is None
     print("7. no 'mark' keyword              -> _mark_text returns None, never guessed")
+
+    assert mark_scan._is_album(ALBUM_MESSAGE_HTML) is True
+    assert mark_scan._is_album(PHOTO_MESSAGE_HTML) is False
+    print("8. album detection                -> media-album correctly distinguished from a plain message")
+
+    tile_hashes = mark_scan._album_tile_hashes(ALBUM_MESSAGE_HTML)
+    assert len(tile_hashes) == 2, tile_hashes
+    tile1_expected = hashlib.sha256(
+        "TILE1AAAABBBBCCCCDDDDTILE1AAAABBBBCCCCDDDDTILE1AAAABBBBCCCCDDDDTILE1AAAAXXXXXXXXX".encode()
+    ).hexdigest()
+    tile2_expected = hashlib.sha256(
+        "TILE2AAAABBBBCCCCDDDDTILE2AAAABBBBCCCCDDDDTILE2AAAABBBBCCCCDDDDTILE2AAAAXXXXXXXXX".encode()
+    ).hexdigest()
+    assert tile_hashes == [tile1_expected, tile2_expected]
+    assert tile_hashes[0] != tile_hashes[1]  # distinct tiles, never collapsed to one
+    print("9. album tile hashing             -> each tile gets its own distinct hash, larger blob ignored")
 
 
 if __name__ == "__main__":

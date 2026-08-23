@@ -82,6 +82,19 @@ _AUTHOR_RE = re.compile(r'data-testid="author"[^>]*>([^<]*)<')
 _PRE_PLAIN_RE = re.compile(r'data-pre-plain-text="(\[[^\]]*\][^"]*):"')
 _IMG_TAG_RE = re.compile(r"data-testid=\"(image-thumb|image-content)\"")
 _VIDEO_TAG_RE = re.compile(r"data-testid=\"(video-thumb|video-content)\"")
+_ALBUM_RE = re.compile(r'data-testid="media-album"')
+_TILE_TYPE_RE = re.compile(r'data-testid="(video-content|image-content)"')
+# Grouped-media albums (2026-08-23) — WhatsApp's native multi-select "send
+# together" produces ONE message (one data-id) containing a media-album
+# grid of N tiles, each with its own thumbnail but NO separate data-id.
+# Proven (real captured data, see the grouped-media investigation): each
+# tile's own CSS grid cell reliably starts with a `grid-area: r/c/r/c`
+# style, cleanly delineating tile boundaries — splitting on that boundary
+# and taking each chunk's smallest embedded blob (same rule _smallest_hash
+# already uses per-message) gives each tile's own stable, byte-exact
+# thumbnail hash. Position (chunk order) is used ONLY to locate/click a
+# tile during download — never as its persisted identity.
+_GRID_AREA_RE = re.compile(r"grid-area:\s*\d+\s*/\s*\d+\s*/\s*\d+\s*/\s*\d+")
 
 
 def _smallest_hash(html: Optional[str]) -> Optional[str]:
@@ -102,6 +115,28 @@ def _smallest_hash(html: Optional[str]) -> Optional[str]:
 def _own_data_id(html: str) -> Optional[str]:
     m = _DATA_ID_RE.search(html)
     return m.group(1) if m else None
+
+
+def _is_album(html: str) -> bool:
+    return bool(_ALBUM_RE.search(html or ""))
+
+
+def _album_tile_hashes(html: str) -> List[str]:
+    """One stable hash per tile, in DOM/grid order (order is a locator
+    only — see module note above). Returns [] for a non-album message."""
+    if not html:
+        return []
+    starts = [m.start() for m in _GRID_AREA_RE.finditer(html)]
+    if not starts:
+        return []
+    starts.append(len(html))
+    chunks = [html[starts[i]:starts[i + 1]] for i in range(len(starts) - 1)]
+    hashes = []
+    for chunk in chunks:
+        h = _smallest_hash(chunk)
+        if h:
+            hashes.append(h)
+    return hashes
 
 
 def _media_type(html: str) -> Optional[str]:
@@ -210,20 +245,34 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
     # this window — the source-of-truth pool a candidate mark resolves
     # against.
     sources_by_hash: Dict[str, Dict[str, Any]] = {}
-    for item in window:
+    for pos, item in enumerate(window):
         html = item.get("messageHtml") or ""
         if item.get("quotedHtml"):
             continue  # this is itself a reply, not a plain source message
+        data_id = _own_data_id(html)
+        if not data_id:
+            continue
+        if _is_album(html):
+            # Grouped media (2026-08-23) — one message, N tiles, each its
+            # own deterministic identity. tile_index is a LOCATOR (used
+            # only to click/download the right tile), never the identity
+            # itself — that's (data_id, hash), same as any other source.
+            for tile_index, h in enumerate(_album_tile_hashes(html)):
+                sources_by_hash[h] = {
+                    "source_message_id": data_id, "source_media_type": "video",
+                    "source_sender": _sender_name(html), "window_position": pos,
+                    "album_tile_index": tile_index, "is_album_tile": True,
+                }
+            continue
         media_type = _media_type(html)
         if not media_type:
             continue
         h = _smallest_hash(html)
-        data_id = _own_data_id(html)
-        if not h or not data_id:
+        if not h:
             continue
         sources_by_hash[h] = {
             "source_message_id": data_id, "source_media_type": media_type,
-            "source_sender": _sender_name(html),
+            "source_sender": _sender_name(html), "window_position": pos,
         }
 
     # Pass 2: every reply that has BOTH a real mention (any LID) and the
@@ -254,15 +303,19 @@ async def _run_scan(page, req: Dict[str, Any]) -> Dict[str, Any]:
             "source_media_type": (source or {}).get("source_media_type"),
             "source_sender": (source or {}).get("source_sender"),
             "source_timestamp": None,
+            "is_album_tile": (source or {}).get("is_album_tile", False),
+            "album_tile_index": (source or {}).get("album_tile_index"),
         })
 
-    # TEMPORARY debug (2026-08-23) — investigating a resolution mismatch
-    # between isolated function tests and the live scan; remove once root
-    # cause is found and fixed.
+    # TEMPORARY debug (2026-08-23) — grouped/batch-media investigation.
+    # Full source inventory (every plain media message found in the
+    # window, in DOM order) so a grouped/multi-select send's individual
+    # message identities can be inspected directly.
     debug = {
         "window_count": len(window),
-        "source_hashes": list(sources_by_hash.keys()),
-        "source_message_ids": [v["source_message_id"] for v in sources_by_hash.values()],
+        "sources": [
+            {"hash": h, **v} for h, v in sources_by_hash.items()
+        ],
     }
     return {"candidates": candidates, "debug": debug}
 
@@ -294,6 +347,44 @@ async ([sel, idx]) => {
     }
     return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || ''};
   } catch (e) {
+    return {ok: false, reason: String(e && e.message || e)};
+  }
+}
+"""
+
+
+_ALBUM_TILE_DOWNLOAD_JS = """
+async ([sel, idx, tileIndex]) => {
+  const els = document.querySelectorAll(sel);
+  if (idx >= els.length) return {ok: false, reason: "message not found at index"};
+  const el = els[idx];
+  const tiles = el.querySelectorAll('[data-testid="video-content"], [data-testid="image-content"]');
+  if (tileIndex >= tiles.length) return {ok: false, reason: "tile index out of range", tileCount: tiles.length};
+  tiles[tileIndex].click();
+  let srcEl = null;
+  for (let i = 0; i < 25; i++) {
+    await new Promise(r => setTimeout(r, 200));
+    srcEl = document.querySelector('video[src^="blob:"]') || document.querySelector('img[src^="blob:"]');
+    if (srcEl) break;
+  }
+  if (!srcEl) {
+    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    return {ok: false, reason: "no viewer media element with blob: src appeared after click"};
+  }
+  const isVideo = srcEl.tagName === 'VIDEO';
+  try {
+    const resp = await fetch(srcEl.src);
+    const buf = await resp.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || '', isVideo};
+  } catch (e) {
+    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     return {ok: false, reason: String(e && e.message || e)};
   }
 }
@@ -355,7 +446,10 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
         scope = await sender._resolve_scope(page)
         full_sel = f"{scope} [data-testid^='conv-msg-']"
         try:
-            fetched = await page.evaluate(_DOWNLOAD_JS, [full_sel, idx])
+            if target.get("album_tile_index") is not None:
+                fetched = await page.evaluate(_ALBUM_TILE_DOWNLOAD_JS, [full_sel, idx, target["album_tile_index"]])
+            else:
+                fetched = await page.evaluate(_DOWNLOAD_JS, [full_sel, idx])
         except Exception as exc:
             results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"download failed: {exc}"})
             continue

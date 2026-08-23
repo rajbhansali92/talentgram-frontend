@@ -1731,6 +1731,29 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         "generation": getattr(session, "generation", None),
     }
 
+    if probe_type == "message_text_snapshot":
+        # Diagnostic-only (2026-08-23): confirms a specific message's ACTUAL
+        # text content by data-id (no reload, no code touching the
+        # downloader) — used to verify a candidate "new tail" entry really
+        # is the expected control message rather than inferring from html
+        # size alone.
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        result = await _evaluate(page, """
+            ([sel, targetId]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              const el = els.find(e => e.getAttribute('data-id') === targetId);
+              if (!el) return {found: false};
+              const ct = el.querySelector('[data-pre-plain-text]');
+              return {
+                found: true,
+                inner_text: (el.innerText || '').slice(0, 300),
+                pre_plain_text: ct ? ct.getAttribute('data-pre-plain-text') : null,
+              };
+            }
+        """, [full_sel, req.get("probe_message_id")])
+        return {"results": [result], "session_identity": session_identity}
+
     if probe_type == "session_sync_check":
         # Diagnostic (2026-08-23): the user confirmed via a real screenshot
         # that the 6-7-photo album exists in the correct WhatsApp group,

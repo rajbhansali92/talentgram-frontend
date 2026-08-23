@@ -1103,83 +1103,133 @@ async def _open_tile_viewer_and_download(page, message_locator, tile_index: int)
     except Exception:
         viewer_buttons = {"rootFound": False, "buttons": []}
 
-    menu_trigger = None
-    for b in viewer_buttons.get("buttons", []):
+    # The viewer is now genuinely open (video mounted) — from here on,
+    # EVERY exit path must close it properly before returning, or the next
+    # tile's open-click fails (proven root cause, 2026-08-23: the real
+    # E2E's Take 2/3/Introduction all failed identically at open_tile with
+    # "pointer events intercepted" by a background div, because Take 1's
+    # successful download path never closed its viewer at all). Wrapped in
+    # an inner function purely so every early return below still reaches
+    # the shared _close_viewer() call at the bottom, without duplicating it
+    # at each return site.
+    async def _inner() -> Dict[str, Any]:
+        menu_trigger = None
+        for b in viewer_buttons.get("buttons", []):
+            label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
+            if re.search(r"menu|more|option|kebab", label):
+                menu_trigger = b
+                break
+        if menu_trigger is None:
+            # Fallback: the button positioned furthest toward the top-right
+            # of the viewport, matching the user's own description
+            # ("top-right three-dot menu") — measured from real captured
+            # rects, not assumed.
+            candidates = [b for b in viewer_buttons.get("buttons", []) if b.get("rect")]
+            if candidates:
+                menu_trigger = max(candidates, key=lambda b: b["rect"][0] - b["rect"][1])
+
+        if menu_trigger is None:
+            return {
+                "ok": False, "stage": "find_menu_trigger", "reason": "video mounted but no plausible menu-trigger button found",
+                "readiness": readiness, "viewer_buttons": viewer_buttons,
+            }
+
+        mx = menu_trigger["rect"][0] + menu_trigger["rect"][2] / 2
+        my = menu_trigger["rect"][1] + menu_trigger["rect"][3] / 2
+        try:
+            await page.mouse.click(mx, my, button="left")
+        except Exception as exc:
+            return {"ok": False, "stage": "click_menu_trigger", "reason": str(exc), "readiness": readiness, "menu_trigger": menu_trigger}
+
+        await page.wait_for_timeout(600)
+        try:
+            menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
+        except Exception:
+            menu_dump = None
+        if not menu_dump:
+            try:
+                body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
+            except Exception:
+                body_snapshot = None
+            return {
+                "ok": False, "stage": "menu_after_trigger_click", "reason": "clicked menu trigger but no menu appeared",
+                "readiness": readiness, "menu_trigger": menu_trigger, "body_snapshot": body_snapshot,
+            }
+
+        item = page.locator(
+            '[role="menu"] :text-matches("download", "i"), '
+            '[role="menuitem"]:has-text("Download"), '
+            'li:has-text("Download"), '
+            'div[role="button"]:has-text("Download")'
+        ).first
+        try:
+            visible = await item.is_visible(timeout=3000)
+        except Exception:
+            visible = False
+        if not visible:
+            return {
+                "ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found",
+                "readiness": readiness, "menu_dump": menu_dump,
+            }
+
+        async def _click_item():
+            await item.click(timeout=5000)
+
+        downloads = await _collect_downloads(page, _click_item)
+        return {
+            "ok": bool(downloads) and any(d.get("ok") for d in downloads),
+            "readiness": readiness, "menu_dump": menu_dump, "downloads": downloads,
+        }
+
+    result = await _inner()
+    result["viewer_closed"] = await _close_viewer(page, viewer_buttons)
+    return result
+
+
+async def _close_viewer(page, viewer_buttons: Dict[str, Any]) -> Dict[str, Any]:
+    """Finds and clicks the REAL WhatsApp "Close" control — reusing the
+    SAME button dump already captured for menu-trigger discovery, never a
+    second blind lookup — and waits until the viewer is actually gone (no
+    <video> element remains), never a fixed sleep or force=True. Proven
+    (2026-08-23): after clicking this exact real Close button
+    (aria-label="Close", svg title "ic-close"), the next tile's own click
+    point correctly resolves back to that tile via elementFromPoint —
+    confirmed with real evidence via a diagnostic probe, not assumed."""
+    close_btn = None
+    for b in (viewer_buttons or {}).get("buttons", []):
         label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
-        if re.search(r"menu|more|option|kebab", label):
-            menu_trigger = b
+        if re.search(r"close|back|dismiss", label):
+            close_btn = b
             break
-    if menu_trigger is None:
-        # Fallback: the button positioned furthest toward the top-right of
-        # the viewport, matching the user's own description ("top-right
-        # three-dot menu") — measured from real captured rects, not assumed.
-        candidates = [b for b in viewer_buttons.get("buttons", []) if b.get("rect")]
-        if candidates:
-            menu_trigger = max(candidates, key=lambda b: b["rect"][0] - b["rect"][1])
 
-    if menu_trigger is None:
+    if close_btn is None:
+        # No real close control found in this viewer's own button dump —
+        # Escape as a last resort, still verified below rather than trusted.
         try:
             await page.keyboard.press("Escape")
         except Exception:
             pass
-        return {
-            "ok": False, "stage": "find_menu_trigger", "reason": "video mounted but no plausible menu-trigger button found",
-            "readiness": readiness, "viewer_buttons": viewer_buttons,
-        }
-
-    mx = menu_trigger["rect"][0] + menu_trigger["rect"][2] / 2
-    my = menu_trigger["rect"][1] + menu_trigger["rect"][3] / 2
-    try:
-        await page.mouse.click(mx, my, button="left")
-    except Exception as exc:
-        return {"ok": False, "stage": "click_menu_trigger", "reason": str(exc), "readiness": readiness, "menu_trigger": menu_trigger}
-
-    await page.wait_for_timeout(600)
-    try:
-        menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
-    except Exception:
-        menu_dump = None
-    if not menu_dump:
+    else:
+        cx = close_btn["rect"][0] + close_btn["rect"][2] / 2
+        cy = close_btn["rect"][1] + close_btn["rect"][3] / 2
         try:
-            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
-        except Exception:
-            body_snapshot = None
+            await page.mouse.click(cx, cy, button="left")
+        except Exception as exc:
+            return {"closed": False, "reason": f"close button click failed: {exc}", "used_close_button": True}
+
+    elapsed = 0.0
+    while elapsed < 8.0:
         try:
-            await page.keyboard.press("Escape")
+            count = await page.locator("video").count()
         except Exception:
-            pass
-        return {
-            "ok": False, "stage": "menu_after_trigger_click", "reason": "clicked menu trigger but no menu appeared",
-            "readiness": readiness, "menu_trigger": menu_trigger, "body_snapshot": body_snapshot,
-        }
-
-    item = page.locator(
-        '[role="menu"] :text-matches("download", "i"), '
-        '[role="menuitem"]:has-text("Download"), '
-        'li:has-text("Download"), '
-        'div[role="button"]:has-text("Download")'
-    ).first
-    try:
-        visible = await item.is_visible(timeout=3000)
-    except Exception:
-        visible = False
-    if not visible:
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-        return {
-            "ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found",
-            "readiness": readiness, "menu_dump": menu_dump,
-        }
-
-    async def _click_item():
-        await item.click(timeout=5000)
-
-    downloads = await _collect_downloads(page, _click_item)
+            count = -1
+        if count == 0:
+            return {"closed": True, "elapsed_s": elapsed, "used_close_button": close_btn is not None}
+        await page.wait_for_timeout(300)
+        elapsed += 0.3
     return {
-        "ok": bool(downloads) and any(d.get("ok") for d in downloads),
-        "readiness": readiness, "menu_dump": menu_dump, "downloads": downloads,
+        "closed": False, "reason": "video element still present 8s after close attempt",
+        "used_close_button": close_btn is not None,
     }
 
 

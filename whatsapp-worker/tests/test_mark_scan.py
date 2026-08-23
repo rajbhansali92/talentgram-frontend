@@ -234,6 +234,62 @@ def main():
     assert sent_bytes == MP4_MAGIC
     print("16. _upload_one MIME wiring       -> real MP4 bytes uploaded with content_type=video/mp4 (not octet-stream), .mp4 filename")
 
+    # 2026-08-23 real E2E bug: Take 2/3/Introduction all failed identically
+    # opening their tile after Take 1's viewer successfully downloaded -
+    # "pointer events intercepted" by a background div, because the
+    # download path never closed the viewer at all. Proven fix (real
+    # diagnostic probe): click the actual "Close" button
+    # (aria-label="Close", svg title "ic-close") found in the same button
+    # dump already used for menu-trigger discovery, then wait for the
+    # <video> element to actually detach - never force=True, never assumed.
+    class _FakeLocator:
+        def __init__(self, video_count_sequence):
+            self._seq = video_count_sequence
+        async def count(self):
+            return self._seq.pop(0) if len(self._seq) > 1 else self._seq[0]
+
+    class _FakeMouse:
+        def __init__(self):
+            self.clicks = []
+        async def click(self, x, y, button=None):
+            self.clicks.append((x, y, button))
+
+    class _FakeKeyboard:
+        def __init__(self):
+            self.presses = []
+        async def press(self, key):
+            self.presses.append(key)
+
+    class _FakePage:
+        def __init__(self, video_count_sequence):
+            self.mouse = _FakeMouse()
+            self.keyboard = _FakeKeyboard()
+            self._video_loc = _FakeLocator(video_count_sequence)
+        def locator(self, sel):
+            assert sel == "video"
+            return self._video_loc
+        async def wait_for_timeout(self, ms):
+            pass
+
+    REAL_CLOSE_BUTTONS = {
+        "buttons": [
+            {"ariaLabel": "Reply", "dataIcon": None, "svgTitle": None, "testid": None, "rect": [100, 10, 40, 40]},
+            {"ariaLabel": "Close", "dataIcon": None, "svgTitle": "ic-close", "testid": None, "rect": [1222, 10, 40, 40]},
+        ],
+    }
+    page1 = _FakePage([1, 0])  # video present, then gone after close
+    close1 = asyncio.run(mark_scan._close_viewer(page1, REAL_CLOSE_BUTTONS))
+    assert close1["closed"] is True and close1["used_close_button"] is True, close1
+    assert page1.mouse.clicks == [(1242.0, 30.0, "left")], page1.mouse.clicks  # center of the real Close button's rect
+    assert page1.keyboard.presses == []  # real button found -> no Escape fallback needed
+    print("17. _close_viewer real button     -> clicks the actual discovered Close button, waits for <video> to detach")
+
+    page2 = _FakePage([0])  # no video ever present (edge case: already closed)
+    close2 = asyncio.run(mark_scan._close_viewer(page2, {"buttons": []}))
+    assert close2["closed"] is True and close2["used_close_button"] is False, close2
+    assert page2.keyboard.presses == ["Escape"]  # no close button in dump -> Escape fallback used
+    print("18. _close_viewer no button found -> falls back to Escape, still verifies via <video> count")
+
 
 if __name__ == "__main__":
     main()

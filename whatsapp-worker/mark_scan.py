@@ -664,15 +664,6 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
             await locator.scroll_into_view_if_needed(timeout=5000)
         except Exception:
             pass
-        # The menu DOES appear once scrolled/clicked correctly (proven
-        # 2026-08-23: exact match to the user's manually-observed
-        # Reply/Reply privately/Message.../React/Forward/Star all/Delete)
-        # but "Download all" itself was missing — consistent with the
-        # user's own observation that WhatsApp gates Download behind the
-        # media finishing loading. Give it a moment to load/cache before
-        # opening the menu, rather than right-clicking the instant it
-        # scrolls into view.
-        await page.wait_for_timeout(4000)
         try:
             box = await locator.bounding_box()
         except Exception as exc:
@@ -682,6 +673,21 @@ async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "d
             continue
         click_x = box["x"] + box["width"] * frac[0]
         click_y = box["y"] + box["height"] * frac[1]
+
+        # 2026-08-23: with just a passive wait, the menu appeared but
+        # "Download all" was consistently absent — exact match to every
+        # other item the user saw manually. WhatsApp likely only starts
+        # fetching/caching an album's full-resolution media once something
+        # actually taps it (matching the user's own description of the
+        # single-video case: "Open/select video -> buffers -> Download
+        # becomes available"), not merely on becoming visible. Trigger
+        # that with a genuine left-click before opening the context menu.
+        try:
+            await page.mouse.move(click_x, click_y)
+            await page.mouse.click(click_x, click_y, button="left")
+        except Exception:
+            pass
+        await page.wait_for_timeout(8000)
 
         try:
             await page.evaluate(_EVENT_CAPTURE_INSTALL_JS)

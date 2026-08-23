@@ -1750,6 +1750,29 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
                 "tile_types": [t for _, t in tiles],
                 "tile_hashes": [h for h, _ in tiles],
             })
+        # Raw tail evidence regardless of _is_album's own match — 2026-08-23:
+        # a photo-only album (unlike the previously-proven 4-video one)
+        # might structure its DOM differently (e.g. an overflow "+N" tile
+        # for >4 items); never assume _ALBUM_RE/grid-area chunking still
+        # applies without checking the newest messages directly.
+        raw_tail = []
+        for item in window[-15:]:
+            html = item.get("messageHtml") or ""
+            raw_tail.append({
+                "data_id": _own_data_id(html),
+                "html_len": len(html),
+                "is_album": _is_album(html),
+                "image_content_count": len(re.findall(r'data-testid="image-content"', html)),
+                "video_content_count": len(re.findall(r'data-testid="video-content"', html)),
+                "grid_area_count": len(_GRID_AREA_RE.findall(html)),
+                "html_snippet": html[:300],
+            })
+        # _run_download_probe's caller only forwards this function's
+        # "results" key to the backend (see mark_scan_loop's download_probe
+        # branch) — raw_tail/window_total are nested as one extra entry in
+        # that same list rather than added as sibling top-level keys, so
+        # they actually reach the stored scan_request doc for inspection.
+        albums.append({"_diagnostic_raw_tail": raw_tail, "_diagnostic_window_total": len(window)})
         return {"results": albums, "session_identity": session_identity}
 
     if probe_type == "photo_tile_diagnostic":

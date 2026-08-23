@@ -32,6 +32,7 @@ import logging
 import re
 import subprocess
 import tempfile
+import uuid
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -1047,6 +1048,104 @@ async def _diagnose_viewer_close_lifecycle(page, message_locator, tile1_index: i
     return report
 
 
+# Album-lifecycle diagnostic (2026-08-23) — after the sequential 4-tile
+# test, tiles 0 and 1 downloaded correctly (proving the viewer-close fix),
+# but tiles 2 and 3 then failed with "expected tile hash not found among
+# current album tiles" — a re-scan independently confirmed only 2 of 4
+# tiles are visible in the album's OWN re-extracted HTML afterward. Never
+# assumed the other two tiles vanished from WhatsApp itself: tags the
+# live album DOM node with a custom attribute (persists ONLY if React did
+# NOT remount the node — a direct identity test, not inferred from
+# data-id alone, which could be reused by a replacement node) and, at
+# each checkpoint, searches for EVERY base64 blob anywhere in the full
+# message HTML (not just the grid-area-chunked structure
+# _album_tile_hashes already relies on) so a tile that moved outside the
+# expected shape would still be found by its known hash.
+_ALBUM_IDENTITY_MARK_JS = """
+([sel, dataId, marker]) => {
+  const els = document.querySelectorAll(sel);
+  for (const el of els) {
+    if (el.getAttribute('data-id') === dataId) {
+      el.setAttribute('data-diag-marker', marker);
+      return true;
+    }
+  }
+  return false;
+}
+"""
+
+_ALBUM_MARKER_CHECK_JS = """
+([marker]) => !!document.querySelector('[data-diag-marker="' + marker + '"]')
+"""
+
+
+async def _diagnose_album_lifecycle(page, group_name: str, album_data_id: str, known_tile_hashes: List[str]) -> Dict[str, Any]:
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    marker = f"diag-{uuid.uuid4().hex[:8]}"
+
+    async def _snapshot(label: str) -> Dict[str, Any]:
+        idx = await _find_message_index_by_data_id(page, group_name, album_data_id)
+        if idx is None:
+            return {"label": label, "found_by_data_id": False}
+        loc = page.locator(full_sel).nth(idx)
+        try:
+            html_full = await loc.evaluate("(el) => el.outerHTML")
+        except Exception as exc:
+            return {"label": label, "found_by_data_id": True, "error": str(exc)}
+        html_trunc = html_full[:HTML_TRUNCATE]
+        try:
+            marker_present = await _evaluate(page, _ALBUM_MARKER_CHECK_JS, [marker])
+        except Exception:
+            marker_present = None
+        structured = _album_tile_hashes_and_types(html_trunc)
+        all_blobs = _B64_RE.findall(html_full)
+        all_hashes_anywhere = {hashlib.sha256(b.encode()).hexdigest() for b in all_blobs}
+        return {
+            "label": label, "found_by_data_id": True,
+            "own_data_id": _own_data_id(html_trunc),
+            "same_dom_node_as_before": marker_present,
+            "is_album": _is_album(html_trunc),
+            "structured_tile_count": len(structured),
+            "structured_tile_hashes": [h for h, _ in structured],
+            "total_base64_blobs_anywhere_in_message": len(all_blobs),
+            "known_tile_hash_found_anywhere_in_message": {h: (h in all_hashes_anywhere) for h in known_tile_hashes},
+            "message_html_length": len(html_full),
+        }
+
+    report: Dict[str, Any] = {"marker": marker, "known_tile_hashes": known_tile_hashes}
+
+    try:
+        report["marked_ok"] = await _evaluate(page, _ALBUM_IDENTITY_MARK_JS, [full_sel, album_data_id, marker])
+    except Exception as exc:
+        report["marked_ok"] = False
+        report["mark_error"] = str(exc)
+
+    report["before"] = await _snapshot("before")
+
+    idx0 = await _find_message_index_by_data_id(page, group_name, album_data_id)
+    if idx0 is None:
+        report["error"] = "album not found before any interaction"
+        return report
+    message0 = page.locator(full_sel).nth(idx0)
+    dl1 = await _open_tile_viewer_and_download(page, message0, 0)
+    report["tile1_result"] = {"ok": dl1.get("ok"), "viewer_closed": dl1.get("viewer_closed"), "stage": dl1.get("stage")}
+
+    report["after_tile1"] = await _snapshot("after_tile1")
+
+    idx1 = await _find_message_index_by_data_id(page, group_name, album_data_id)
+    if idx1 is None:
+        report["error_after_tile1"] = "album not found by data-id after tile1 interaction"
+        return report
+    message1 = page.locator(full_sel).nth(idx1)
+    dl2 = await _open_tile_viewer_and_download(page, message1, 1)
+    report["tile2_result"] = {"ok": dl2.get("ok"), "viewer_closed": dl2.get("viewer_closed"), "stage": dl2.get("stage")}
+
+    report["after_tile2"] = await _snapshot("after_tile2")
+
+    return report
+
+
 async def _open_tile_viewer_and_download(page, message_locator, tile_index: int) -> Dict[str, Any]:
     """Reproduces the manual workflow exactly: open the tile -> wait for a
     real <video> to mount -> wait for it to actually buffer (bounded, not
@@ -1596,6 +1695,17 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         full_sel = f"{scope} [data-testid^='conv-msg-']"
         message = page.locator(full_sel).nth(idx)
         result = await _diagnose_viewer_close_lifecycle(page, message, req["tile1_index"], req["tile2_index"])
+        result["session_identity"] = session_identity
+        return {"results": [result]}
+
+    if probe_type == "album_lifecycle_diagnostic":
+        # Diagnostic (2026-08-23): after the sequential 4-tile test, tiles
+        # 2/3 failed with "expected tile hash not found among current
+        # album tiles" - a fresh re-scan independently confirmed the
+        # album's own DOM only exposes 2 of 4 tiles afterward. Investigates
+        # WHY before/after tile1/after tile2, never assuming the tiles
+        # vanished from WhatsApp itself.
+        result = await _diagnose_album_lifecycle(page, group_name, data_id, req["known_tile_hashes"])
         result["session_identity"] = session_identity
         return {"results": [result]}
 

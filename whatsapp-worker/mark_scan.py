@@ -1743,18 +1743,41 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         scope = await sender._resolve_scope(page)
         full_sel = f"{scope} [data-testid^='conv-msg-']"
         raw = await _evaluate(page, """
-            ([sel]) => {
-              const els = Array.from(document.querySelectorAll(sel));
-              return {
-                total_rendered: els.length,
-                last_ids: els.slice(-15).map(el => ({
-                  data_id: el.getAttribute('data-id'),
-                  html_len: el.outerHTML.length,
-                  image_content_count: (el.outerHTML.match(/data-testid="image-content"/g) || []).length,
-                  video_content_count: (el.outerHTML.match(/data-testid="video-content"/g) || []).length,
-                  media_album: el.outerHTML.includes('data-testid="media-album"'),
-                })),
+            async ([sel]) => {
+              const snapshot = () => {
+                const els = Array.from(document.querySelectorAll(sel));
+                let container = els[0] || null, maxOverflow = 0;
+                let node = els[0] ? els[0].parentElement : null;
+                for (let d = 0; d < 8 && node; d++) {
+                  const overflow = node.scrollHeight - node.clientHeight;
+                  if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+                  node = node.parentElement;
+                }
+                return {
+                  total_rendered: els.length,
+                  scrollTop: container ? container.scrollTop : null,
+                  scrollHeight: container ? container.scrollHeight : null,
+                  clientHeight: container ? container.clientHeight : null,
+                  atBottom: container ? (container.scrollHeight - container.scrollTop - container.clientHeight) < 5 : null,
+                  last_ids: els.slice(-15).map(el => ({
+                    data_id: el.getAttribute('data-id'),
+                    html_len: el.outerHTML.length,
+                    image_content_count: (el.outerHTML.match(/data-testid="image-content"/g) || []).length,
+                    video_content_count: (el.outerHTML.match(/data-testid="video-content"/g) || []).length,
+                    media_album: el.outerHTML.includes('data-testid="media-album"'),
+                  })),
+                  _container: container,
+                };
               };
+              const before = snapshot();
+              if (before._container) {
+                before._container.scrollTop = before._container.scrollHeight;
+                await new Promise(r => setTimeout(r, 1000));
+              }
+              const after = snapshot();
+              delete before._container;
+              delete after._container;
+              return { before, after };
             }
         """, [full_sel])
         return {"results": [raw], "session_identity": session_identity}

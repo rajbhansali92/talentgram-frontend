@@ -604,15 +604,54 @@ async def _collect_downloads(page, trigger, window_s: float = 25.0, quiet_s: flo
     return results
 
 
-async def _right_click_and_probe_download(page, locator, menu_text_re: str = "download") -> Dict[str, Any]:
-    """Right-click `locator` — trying its default center first, then a
-    top-left-corner offset if that opens no menu at all (the earlier
-    tile-scoped right-click hit exactly this: a click centered on the
-    media surface reached no menu, evidence already captured). Dumps
-    whatever menu appears; if an item matching `menu_text_re` is visible,
-    clicks it and collects every resulting download."""
+_EVENT_CAPTURE_INSTALL_JS = """
+() => {
+  window.__ctxProbe = [];
+  const record = (e) => {
+    const t = e.target;
+    window.__ctxProbe.push({
+      type: e.type, button: e.button, x: e.clientX, y: e.clientY,
+      targetTag: t && t.tagName, targetTestid: t && t.getAttribute && t.getAttribute('data-testid'),
+      targetCls: t && t.className ? String(t.className).slice(0, 80) : null,
+      defaultPrevented: e.defaultPrevented,
+    });
+  };
+  if (!window.__ctxProbeInstalled) {
+    document.addEventListener('mousedown', record, true);
+    document.addEventListener('mouseup', record, true);
+    document.addEventListener('contextmenu', record, true);
+    document.addEventListener('auxclick', record, true);
+    window.__ctxProbeInstalled = true;
+  }
+}
+"""
+_EVENT_CAPTURE_READ_JS = "() => { const ev = window.__ctxProbe || []; window.__ctxProbe = []; return ev; }"
+
+
+async def _right_click_and_probe_download(page, relocate, menu_text_re: str = "download") -> Dict[str, Any]:
+    """Right-click the element `relocate()` freshly resolves each attempt
+    (never a locator captured before a prior attempt — a prior Escape/
+    click can shift WhatsApp's virtualized message list, making a stale
+    index miss) — trying its default center first, then a top-left-corner
+    offset if that opens no menu at all. Also installs a raw
+    mousedown/mouseup/contextmenu/auxclick capture on `document` before
+    each attempt so a "no menu" result carries hard evidence of whether
+    the browser-level events even reached WhatsApp's own handlers, not
+    just another blind selector guess. Dumps whatever menu appears; if an
+    item matching `menu_text_re` is visible, clicks it and collects every
+    resulting download."""
     attempts = []
     for label, position in (("center", None), ("top-left-corner", {"x": 4, "y": 4})):
+        locator = await relocate()
+        if locator is None:
+            attempts.append({"position": label, "reason": "target message not found when re-resolving"})
+            continue
+
+        try:
+            await page.evaluate(_EVENT_CAPTURE_INSTALL_JS)
+        except Exception:
+            pass
+
         try:
             if position is None:
                 await locator.click(button="right", timeout=10000)
@@ -623,6 +662,10 @@ async def _right_click_and_probe_download(page, locator, menu_text_re: str = "do
             continue
 
         await page.wait_for_timeout(600)
+        try:
+            event_log = await page.evaluate(_EVENT_CAPTURE_READ_JS)
+        except Exception:
+            event_log = None
         try:
             menu_dump = await page.evaluate(_CONTEXT_MENU_DUMP_JS)
         except Exception:
@@ -637,7 +680,10 @@ async def _right_click_and_probe_download(page, locator, menu_text_re: str = "do
                 await page.keyboard.press("Escape")
             except Exception:
                 pass
-            attempts.append({"position": label, "reason": "no context menu appeared", "menu_dump": menu_dump, "body_snapshot": body_snapshot})
+            attempts.append({
+                "position": label, "reason": "no context menu appeared",
+                "menu_dump": menu_dump, "body_snapshot": body_snapshot, "event_log": event_log,
+            })
             continue
 
         item = page.locator(
@@ -670,7 +716,7 @@ async def _right_click_and_probe_download(page, locator, menu_text_re: str = "do
         return {
             "ok": bool(downloads) and any(d.get("ok") for d in downloads),
             "position_used": label, "menu_dump": menu_dump, "item_text_clicked": item_text,
-            "downloads": downloads,
+            "event_log": event_log, "downloads": downloads,
         }
 
     return {"ok": False, "reason": "no 'Download' action reachable via right-click at any tried position", "attempts": attempts}
@@ -688,14 +734,20 @@ async def _run_download_probe(page, req: Dict[str, Any]) -> Dict[str, Any]:
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     data_id = req["probe_message_id"]
-    idx = await _find_message_index_by_data_id(page, group_name, data_id)
-    if idx is None:
+
+    async def _relocate():
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return None
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        return page.locator(full_sel).nth(idx)
+
+    first = await _relocate()
+    if first is None:
         return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
 
-    scope = await sender._resolve_scope(page)
-    full_sel = f"{scope} [data-testid^='conv-msg-']"
-    locator = page.locator(full_sel).nth(idx)
-    result = await _right_click_and_probe_download(page, locator)
+    result = await _right_click_and_probe_download(page, _relocate)
     result["source_message_id"] = data_id
     return {"results": [result]}
 

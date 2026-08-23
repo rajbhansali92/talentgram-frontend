@@ -510,6 +510,31 @@ _VIEWER_BUTTONS_JS = """
 }
 """
 
+# Finds whichever currently-rendered message is closest to the viewport's
+# vertical center — used right after clicking a quoted-message block's own
+# "jump to original" button, to observe (not assume) which message
+# WhatsApp scrolled to, for whole-album replies whose quoted block carries
+# no thumbnail hash (see the "quoted_jump" probe_type module note).
+_CENTERED_MESSAGE_JS = """
+() => {
+  const els = Array.from(document.querySelectorAll('[data-testid^="conv-msg-"]'));
+  const viewportCenter = window.innerHeight / 2;
+  let best = null, bestDist = Infinity;
+  for (const el of els) {
+    const r = el.getBoundingClientRect();
+    if (r.height === 0) continue;
+    const elCenter = r.y + r.height / 2;
+    const dist = Math.abs(elCenter - viewportCenter);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = el;
+    }
+  }
+  if (!best) return null;
+  return { dataId: best.getAttribute('data-id'), distancePx: bestDist };
+}
+"""
+
 
 async def _identify_tile_index(page, group_name: str, data_id: str, expected_hash: str) -> Dict[str, Any]:
     """Re-derives which tile index currently corresponds to `expected_hash`
@@ -1011,6 +1036,56 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         "session_id": getattr(session, "session_id", None),
         "generation": getattr(session, "generation", None),
     }
+
+    if probe_type == "quoted_jump":
+        # Diagnostic (2026-08-23): a reply to a whole ALBUM (not one tile)
+        # carries no thumbnail hash in its quoted-message block — proven
+        # via _run_scan's debug capture on a real "mark google diagnostic"
+        # reply (its quoted block was just a generic image icon + literal
+        # "4 videos" text, no base64 blob at all). WhatsApp's own quoted-
+        # message block is a real button (role="button",
+        # aria-label="Quoted message") that jumps to/highlights the
+        # original message when clicked — this tests whether that
+        # navigation can be used as the identity link instead, by finding
+        # which message ends up closest to the viewport's vertical center
+        # right after the click.
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"reply message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        reply_message = page.locator(full_sel).nth(idx)
+        quoted = reply_message.locator('[data-testid="quoted-message"]')
+        if await quoted.count() == 0:
+            return {"results": [{"ok": False, "error": "reply message has no quoted-message block"}]}
+        try:
+            await quoted.first.click(timeout=10000)
+        except Exception as exc:
+            return {"results": [{"ok": False, "error": f"click on quoted-message failed: {exc}"}]}
+        await page.wait_for_timeout(1000)
+        try:
+            centered = await _evaluate(page, _CENTERED_MESSAGE_JS)
+        except Exception as exc:
+            centered = {"error": str(exc)}
+        jumped_html = None
+        jumped_is_album = None
+        jumped_tile_hashes = None
+        if centered and centered.get("dataId"):
+            jumped_idx = await _find_message_index_by_data_id(page, group_name, centered["dataId"])
+            if jumped_idx is not None:
+                try:
+                    jumped_html = await page.locator(full_sel).nth(jumped_idx).evaluate("(el) => el.outerHTML")
+                    jumped_html = jumped_html[:HTML_TRUNCATE]
+                    jumped_is_album = _is_album(jumped_html)
+                    jumped_tile_hashes = _album_tile_hashes(jumped_html) if jumped_is_album else None
+                except Exception:
+                    pass
+        return {"results": [{
+            "ok": bool(centered and centered.get("dataId")),
+            "reply_message_id": data_id, "centered_after_jump": centered,
+            "jumped_to_is_album": jumped_is_album, "jumped_to_tile_hashes": jumped_tile_hashes,
+            "session_identity": session_identity,
+        }]}
 
     if probe_type == "tile_viewer":
         expected_hash = req["expected_tile_hash"]

@@ -893,6 +893,66 @@ async def _hash_album_tiles_live(message_locator) -> List[Dict[str, Any]]:
     return result
 
 
+STUB_HTML_LEN_THRESHOLD = 1000
+MAX_HYDRATION_ATTEMPTS = 3
+HYDRATION_RETRY_DELAY_MS = 900
+
+
+async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: str, full_sel: str) -> Dict[str, Any]:
+    """Bounded re-hydration wait (2026-08-24) — real evidence (cross_check
+    html_len=222 vs. the same message's real ~4959-byte rendered size when
+    checked in isolation) proved WhatsApp's virtualized list can
+    momentarily mount a lightweight, not-yet-hydrated stub for a message
+    in the middle of a busy multi-candidate scan, before the quoted-
+    message block (and the rest of the reply's real content) has
+    rendered. Re-locates the message fresh each attempt via
+    _find_message_index_by_data_id (never trusts a stale index — that
+    function's own tail-first-then-scroll search is what keeps this from
+    losing the target to virtualization) and re-checks; never scrolls the
+    conversation itself beyond what that existing search already does,
+    and never falls back to picking a message by proximity — only ever
+    the exact `reply_data_id` requested.
+
+    Returns {"ok": True, "reply_message": <locator>, "quoted": <locator>}
+    once a real quoted-message block is found, or {"ok": False, "reason",
+    "resolved_index", "requested_data_id", "cross_check",
+    "hydration_attempts"} if it never hydrates (a genuine reply-to-a-non-
+    media-message never has one either — this exhausts the same bounded
+    retries and correctly reports failure, not stalls)."""
+    last_cross_check: Optional[Dict[str, Any]] = None
+    for attempt in range(MAX_HYDRATION_ATTEMPTS):
+        idx = await _find_message_index_by_data_id(page, group_name, reply_data_id)
+        if idx is None:
+            return {"ok": False, "reason": f"reply message {reply_data_id!r} not found in scanned window"}
+        reply_message = page.locator(full_sel).nth(idx)
+        quoted = reply_message.locator('[data-testid="quoted-message"]')
+        if await quoted.count() > 0:
+            return {"ok": True, "reply_message": reply_message, "quoted": quoted}
+        try:
+            last_cross_check = await reply_message.evaluate("""
+                (el) => ({
+                  own_data_id: el.getAttribute('data-id'),
+                  js_quoted_found: !!el.querySelector('[data-testid="quoted-message"]'),
+                  html_len: el.outerHTML.length,
+                })
+            """, timeout=10000)
+        except Exception as exc:
+            last_cross_check = {"cross_check_error": str(exc)}
+        is_stub = bool(last_cross_check.get("html_len") is not None and last_cross_check["html_len"] < STUB_HTML_LEN_THRESHOLD)
+        if attempt < MAX_HYDRATION_ATTEMPTS - 1 and is_stub:
+            await page.wait_for_timeout(HYDRATION_RETRY_DELAY_MS)
+            continue
+        # Either not a stub (genuinely no quoted block — a real reply-to-
+        # a-non-media-message case) or retries exhausted: stop, never
+        # guess, report exactly what was observed on the last attempt.
+        return {
+            "ok": False, "reason": "reply message has no quoted-message block",
+            "resolved_index": idx, "requested_data_id": reply_data_id, "cross_check": last_cross_check,
+            "hydration_attempts": attempt + 1,
+        }
+    return {"ok": False, "reason": "unreachable"}
+
+
 async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
     """Clicks a reply's own quoted-message block (a real WhatsApp button
     that jumps to/highlights the original message) and observes which
@@ -902,34 +962,12 @@ async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dic
     whose quoted block carries no thumbnail hash — WhatsApp's collapsed
     "N videos"/"N photos" summary for a reply to a WHOLE album, not one
     tile. Returns {ok, data_id, is_album, tile_hashes_and_types, reason}."""
-    idx = await _find_message_index_by_data_id(page, group_name, reply_data_id)
-    if idx is None:
-        return {"ok": False, "reason": f"reply message {reply_data_id!r} not found in scanned window"}
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
-    reply_message = page.locator(full_sel).nth(idx)
-    quoted = reply_message.locator('[data-testid="quoted-message"]')
-    if await quoted.count() == 0:
-        # Diagnostic cross-check (2026-08-24): a raw JS querySelector on
-        # the SAME located element, at the SAME moment, to distinguish a
-        # genuine DOM absence from a Playwright-locator-specific miss
-        # (stale handle, actionability/visibility filtering, or the
-        # located index no longer pointing at the intended message after
-        # earlier jumps in the same scan shifted scroll state).
-        try:
-            cross_check = await reply_message.evaluate("""
-                (el) => ({
-                  own_data_id: el.getAttribute('data-id'),
-                  js_quoted_found: !!el.querySelector('[data-testid="quoted-message"]'),
-                  html_len: el.outerHTML.length,
-                })
-            """, timeout=10000)
-        except Exception as exc:
-            cross_check = {"cross_check_error": str(exc)}
-        return {
-            "ok": False, "reason": "reply message has no quoted-message block",
-            "resolved_index": idx, "requested_data_id": reply_data_id, "cross_check": cross_check,
-        }
+    located = await _wait_for_quoted_message_block(page, group_name, reply_data_id, full_sel)
+    if not located.get("ok"):
+        return located
+    quoted = located["quoted"]
     try:
         await quoted.first.click(timeout=10000)
     except Exception as exc:

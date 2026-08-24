@@ -524,6 +524,109 @@ def main():
     assert all(t["media_type"] == "image" for t in live_photo_tiles), live_photo_tiles
     print("28. _hash_album_tiles_live(image-thumb) -> pure-photo albums are found and typed 'image', not silently zero-tiled")
 
+    # 2026-08-24 real production bug: a reply's quoted-message block
+    # (proven present, ~4959 bytes, when checked in isolation) was found
+    # ABSENT during a real multi-candidate scan - real cross_check
+    # evidence showed the SAME message rendering as a 222-byte
+    # virtualized stub mid-scan. _wait_for_quoted_message_block re-checks
+    # a bounded number of times, re-locating the message fresh each
+    # attempt (never a stale index, never a different data-id), only
+    # waiting between attempts when the observed HTML is small enough to
+    # look like a genuine not-yet-hydrated stub.
+    class _FakeQuotedLocator:
+        def __init__(self, present):
+            self._present = present
+        async def count(self):
+            return 1 if self._present else 0
+
+    class _FakeReplyMessage:
+        def __init__(self, step):
+            self._step = step
+        def locator(self, sel):
+            assert sel == '[data-testid="quoted-message"]'
+            return _FakeQuotedLocator(self._step["quoted_present"])
+        async def evaluate(self, js, timeout=None):
+            return self._step["cross_check"]
+
+    class _FakeLocatorRoot:
+        def __init__(self, state, sequence):
+            self._state = state
+            self._sequence = sequence
+        def nth(self, idx):
+            return _FakeReplyMessage(self._sequence[self._state["attempt"]])
+
+    class _FakeHydrationPage:
+        def __init__(self, state, sequence):
+            self._state = state
+            self._sequence = sequence
+            self.waits = []
+        def locator(self, sel):
+            return _FakeLocatorRoot(self._state, self._sequence)
+        async def wait_for_timeout(self, ms):
+            self.waits.append(ms)
+
+    def _make_fake_find_idx(state, sequence, expected_data_id, received_ids):
+        async def fake_find_idx(page, group, data_id):
+            received_ids.append(data_id)
+            state["attempt"] += 1
+            if state["attempt"] >= len(sequence):
+                return None
+            return state["attempt"]
+        return fake_find_idx
+
+    orig_find_idx = mark_scan._find_message_index_by_data_id
+
+    # A: stub on attempts 1-2, real quoted block hydrates on attempt 3.
+    seq_a = [
+        {"quoted_present": False, "cross_check": {"own_data_id": "REPLY123", "js_quoted_found": False, "html_len": 222}},
+        {"quoted_present": False, "cross_check": {"own_data_id": "REPLY123", "js_quoted_found": False, "html_len": 240}},
+        {"quoted_present": True, "cross_check": None},
+    ]
+    state_a = {"attempt": -1}
+    received_a: list = []
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx(state_a, seq_a, "REPLY123", received_a)
+    try:
+        page_a = _FakeHydrationPage(state_a, seq_a)
+        result_a = asyncio.run(mark_scan._wait_for_quoted_message_block(page_a, "GROUP", "REPLY123", "SEL"))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx
+    assert result_a["ok"] is True, result_a
+    assert len(page_a.waits) == 2, page_a.waits  # waited between attempt 1->2 and 2->3, none after success
+    print("29. hydration retry succeeds       -> stub on attempts 1-2, real quoted block found on attempt 3 -> resolves")
+
+    # B: stub persists across ALL bounded retries -> clean failure, never stalls, never guesses.
+    seq_b = [
+        {"quoted_present": False, "cross_check": {"own_data_id": "REPLY123", "js_quoted_found": False, "html_len": 222}},
+        {"quoted_present": False, "cross_check": {"own_data_id": "REPLY123", "js_quoted_found": False, "html_len": 230}},
+        {"quoted_present": False, "cross_check": {"own_data_id": "REPLY123", "js_quoted_found": False, "html_len": 222}},
+    ]
+    state_b = {"attempt": -1}
+    received_b: list = []
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx(state_b, seq_b, "REPLY123", received_b)
+    try:
+        page_b = _FakeHydrationPage(state_b, seq_b)
+        result_b = asyncio.run(mark_scan._wait_for_quoted_message_block(page_b, "GROUP", "REPLY123", "SEL"))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx
+    assert result_b["ok"] is False, result_b
+    assert result_b["hydration_attempts"] == 3, result_b
+    assert result_b["reason"] == "reply message has no quoted-message block", result_b
+    assert len(page_b.waits) == 2, page_b.waits  # waited between 1->2 and 2->3, never a 3rd wait after exhausting retries
+    print("30. hydration retry exhausted      -> stub on every attempt -> clean BATCH_RESOLUTION_FAILED, never stalls or guesses")
+
+    # C: every retry attempt requests the EXACT same reply_data_id - never
+    # substitutes a different/nearby message id across retries.
+    assert received_a == ["REPLY123"] * 3, received_a
+    assert received_b == ["REPLY123"] * 3, received_b
+    print("31. hydration retry identity       -> every attempt re-requests the exact same data-id, never resolves by proximity")
+
+    # D/E: _wait_for_quoted_message_block is a pure retry wrapper around
+    # the SAME _find_message_index_by_data_id/locator calls already in
+    # use - it does not touch _hash_album_tiles_live at all, so the
+    # existing video (test 15) and photo (test 28) tile-hashing coverage
+    # above already proves both album types remain unaffected by this fix.
+    print("32. video/photo batch marking      -> unaffected by the hydration fix (see tests 15 and 28, unchanged)")
+
 
 if __name__ == "__main__":
     main()

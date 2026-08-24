@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1934,6 +1934,54 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "plus_rounded_locations_diagnostic":
+        # Diagnostic-only (2026-08-24) — the previous probe's click on the
+        # FIRST [data-testid="plus-rounded"] in the DOM revealed 2
+        # image-only file inputs that look like profile/status pickers
+        # (one sits right next to "navbar-item-me-tab-photo"), not a chat
+        # attach menu — meaning a bare, unscoped click almost certainly
+        # hit the WRONG "plus-rounded" (WhatsApp reuses this testid in
+        # multiple places: sidebar nav, status composer, AND the actual
+        # chat attach button). This is read-only: locates every
+        # "plus-rounded" element without clicking any of them, and reports
+        # each one's position/visibility/ancestor context so the real
+        # chat-compose one can be identified and properly scoped.
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+        _js = """
+            () => {
+              const els = Array.from(document.querySelectorAll('[data-testid="plus-rounded"]'));
+              return els.map((el, i) => {
+                const rect = el.getBoundingClientRect();
+                let anc = el.parentElement, chain = [];
+                for (let d = 0; d < 6 && anc; d++) {
+                  const t = anc.getAttribute && anc.getAttribute('data-testid');
+                  if (t) chain.push(t);
+                  anc = anc.parentElement;
+                }
+                return {
+                  index: i,
+                  visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                  rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                  ancestor_testids: chain,
+                  aria_label: el.getAttribute('aria-label') || (el.closest('[aria-label]') && el.closest('[aria-label]').getAttribute('aria-label')),
+                };
+              });
+            }
+        """
+        try:
+            dom_result = await _evaluate(page, _js, [])
+        except Exception as exc:
+            dom_result = {"error": str(exc)}
+        return {"results": [{
+            "ok": True, "group_name": group_name,
+            "chat_ready_error": ready_error,
+            "plus_rounded_locations": dom_result,
         }], "session_identity": session_identity}
 
     if probe_type == "attach_menu_after_click_diagnostic":

@@ -1837,6 +1837,125 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "after_reload": after,
         }], "session_identity": session_identity_after}
 
+    if probe_type == "keyboard_activation_diagnostic":
+        # Diagnostic-only (2026-08-23): the DOM/CSS structure is byte-for-
+        # byte identical between a single photo's image-thumb (which
+        # opens a viewer on click) and an album tile's image-thumb (which
+        # doesn't) — role="button" + tabindex="0" is the WAI-ARIA
+        # convention for a control also activatable via Enter/Space, not
+        # just click. Tests the browser's normal keyboard activation path
+        # — no synthetic events, no internals, real Playwright focus +
+        # real key presses only.
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        tile_index = req.get("tile_index", 0)
+        thumbs = message.locator('[data-testid="image-thumb"]')
+        try:
+            thumb_count = await thumbs.count()
+        except Exception as exc:
+            return {"results": [{"ok": False, "error": f"count failed: {exc}"}]}
+        if tile_index >= thumb_count:
+            return {"results": [{"ok": False, "error": f"tile_index {tile_index} out of range (count={thumb_count})"}]}
+        tile = thumbs.nth(tile_index)
+
+        active_element_js = """
+            () => {
+              const el = document.activeElement;
+              return el ? { tag: el.tagName, testid: el.getAttribute('data-testid'), role: el.getAttribute('role'), ariaLabel: el.getAttribute('aria-label') } : null;
+            }
+        """
+
+        async def _test_key(key: str) -> Dict[str, Any]:
+            try:
+                await tile.scroll_into_view_if_needed(timeout=5000)
+                await tile.focus(timeout=5000)
+            except Exception as exc:
+                return {"key": key, "ok": False, "stage": "focus", "reason": str(exc)}
+            try:
+                active_before = await _evaluate(page, active_element_js)
+            except Exception:
+                active_before = None
+            focused_correctly = bool(active_before and active_before.get("testid") == "image-thumb")
+            try:
+                baseline_srcs = await _evaluate(page, _PHOTO_BLOB_BASELINE_JS)
+            except Exception:
+                baseline_srcs = []
+            try:
+                url_before = await page.evaluate("() => location.href")
+            except Exception:
+                url_before = None
+            try:
+                await _evaluate(page, """
+                    () => {
+                      window.__keyProbe = [];
+                      const record = (e) => { window.__keyProbe.push({ type: e.type, key: e.key, defaultPrevented: e.defaultPrevented, target: e.target && e.target.getAttribute && e.target.getAttribute('data-testid') }); };
+                      if (!window.__keyProbeInstalled) {
+                        document.addEventListener('keydown', record, true);
+                        document.addEventListener('keyup', record, true);
+                        window.__keyProbeInstalled = true;
+                      }
+                    }
+                """)
+            except Exception:
+                pass
+            try:
+                await page.keyboard.press(key)
+            except Exception as exc:
+                return {"key": key, "ok": False, "stage": "press", "reason": str(exc), "focused_correctly": focused_correctly, "active_before": active_before}
+            try:
+                key_event_log = await _evaluate(page, "() => { const ev = window.__keyProbe || []; window.__keyProbe = []; return ev; }")
+            except Exception:
+                key_event_log = None
+
+            viewer_result = None
+            elapsed = 0.0
+            while elapsed < 6.0:
+                try:
+                    viewer_result = await _evaluate(page, _ALBUM_VIEWER_SNAPSHOT_JS, [baseline_srcs, False])
+                except Exception as exc:
+                    viewer_result = {"found": False, "error": str(exc)}
+                if viewer_result.get("found"):
+                    break
+                await page.wait_for_timeout(500)
+                elapsed += 0.5
+
+            try:
+                url_after = await page.evaluate("() => location.href")
+            except Exception:
+                url_after = None
+            try:
+                active_after = await _evaluate(page, active_element_js)
+            except Exception:
+                active_after = None
+
+            close_result = None
+            if viewer_result and viewer_result.get("found"):
+                primary_src = (viewer_result.get("primary") or {}).get("src", "")
+                close_result = await _close_photo_viewer(page, {"buttons": viewer_result.get("buttons", [])}, primary_src)
+
+            return {
+                "key": key, "ok": True, "focused_correctly": focused_correctly, "active_before": active_before,
+                "active_after": active_after, "key_event_log": key_event_log,
+                "url_changed": url_before != url_after, "url_before": url_before, "url_after": url_after,
+                "viewer_found": bool(viewer_result and viewer_result.get("found")),
+                "viewer_detail": viewer_result, "close_result": close_result,
+            }
+
+        enter_result = await _test_key("Enter")
+        space_result = await _test_key("Space")
+
+        return {
+            "results": [{
+                "ok": True, "data_id": data_id, "tile_index": tile_index,
+                "enter_result": enter_result, "space_result": space_result,
+            }],
+            "session_identity": session_identity,
+        }
+
     if probe_type == "click_internals_diagnostic":
         # Diagnostic-only (2026-08-23): the album's tile 0 receives a real,
         # unblocked, trusted click that mounts nothing, while the single-

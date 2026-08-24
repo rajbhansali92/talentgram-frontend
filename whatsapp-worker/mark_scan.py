@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1934,6 +1934,85 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "attach_real_file_diagnostic":
+        # Diagnostic-only (2026-08-24) — final live verification of the
+        # sender.py fix (real "plus-rounded" button -> real "Photos &
+        # videos" menu item -> Playwright's own expect_file_chooser()),
+        # exercising the EXACT code path sender.py now uses, against the
+        # real live WhatsApp UI. Uses a tiny disposable 1x1 JPEG generated
+        # on the worker's own local disk (never derived from any real
+        # submission/production media) purely to prove attachment reaches
+        # the preview screen. Stops immediately after that — never types a
+        # caption, never clicks Send. The preview is explicitly cancelled
+        # (Escape, the same safe close mechanism every other diagnostic in
+        # this file already uses) before returning, so nothing is ever
+        # introduced into the real conversation.
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        _tiny_jpeg_b64 = (
+            "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8Q"
+            "EBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"
+            "EBAQEBAQEBD/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QA"
+            "FQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k="
+        )
+        temp_path = None
+        attach_error = None
+        preview_dom = None
+        cancel_error = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            tmp.write(b64mod.b64decode(_tiny_jpeg_b64))
+            tmp.close()
+            temp_path = tmp.name
+
+            await page.click(sender.SEL["attach_btn"], timeout=10_000)
+            await asyncio.sleep(0.5)
+            async with page.expect_file_chooser(timeout=10_000) as fc_info:
+                await page.click('button[aria-label="Photos & videos"]', timeout=10_000)
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(temp_path)
+            await asyncio.sleep(2.0)
+
+            _preview_js = """
+                () => {
+                  const imgs = document.querySelectorAll('img[src^="blob:"]');
+                  const sendBtn = document.querySelector('[data-testid="send"]');
+                  return {
+                    blob_image_count: imgs.length,
+                    send_button_present: !!sendBtn,
+                    total_testid_elements: document.querySelectorAll('[data-testid]').length,
+                  };
+                }
+            """
+            try:
+                preview_dom = await _evaluate(page, _preview_js, [])
+            except Exception as exc:
+                preview_dom = {"error": str(exc)}
+        except Exception as exc:
+            attach_error = str(exc)
+        finally:
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
+                await page.keyboard.press("Escape")
+            except Exception as exc:
+                cancel_error = str(exc)
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+
+        return {"results": [{
+            "ok": attach_error is None, "group_name": group_name,
+            "chat_ready_error": ready_error, "attach_error": attach_error,
+            "preview_dom": preview_dom, "cancel_error": cancel_error,
         }], "session_identity": session_identity}
 
     if probe_type == "attach_photos_videos_filechooser_diagnostic":

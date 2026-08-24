@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1892,6 +1892,49 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         "session_id": getattr(session, "session_id", None),
         "generation": getattr(session, "generation", None),
     }
+
+    if probe_type == "attach_button_diagnostic":
+        # Diagnostic-only (2026-08-24): a real disposable SEND E2E had the
+        # media download succeed for all 6 items but every send failed at
+        # `page.click(SEL["attach_btn"])` (data-testid="attach-menu-plus")
+        # with a clean 30s "waiting for locator" timeout — never found at
+        # all. Read-only: after the chat is open/ready, dump every
+        # data-testid on screen that looks attach/plus/clip-related, plus
+        # whether the exact expected testid exists anywhere in the DOM
+        # (even off-screen/hidden), to tell a genuinely stale selector
+        # apart from a timing/visibility issue. Never clicks anything.
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+        _js = """
+            () => {
+              const all = Array.from(document.querySelectorAll('[data-testid]'));
+              const matches = all
+                .filter(el => /attach|plus|clip|footer/i.test(el.getAttribute('data-testid') || ''))
+                .map(el => ({
+                  testid: el.getAttribute('data-testid'),
+                  tag: el.tagName,
+                  visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                  aria_label: el.getAttribute('aria-label'),
+                }));
+              return {
+                total_testid_elements: all.length,
+                attach_menu_plus_exists: !!document.querySelector('[data-testid="attach-menu-plus"]'),
+                matches,
+              };
+            }
+        """
+        try:
+            dom_result = await _evaluate(page, _js, [])
+        except Exception as exc:
+            dom_result = {"error": str(exc)}
+        return {"results": [{
+            "ok": True, "group_name": group_name,
+            "chat_ready_error": ready_error,
+            "dom": dom_result,
+        }], "session_identity": session_identity}
 
     if probe_type == "group_participants_check":
         # Diagnostic-only (2026-08-24, Part 5 of SEND rollout): read-only

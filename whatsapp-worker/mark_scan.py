@@ -1379,14 +1379,61 @@ async def _diagnose_album_lifecycle(page, group_name: str, album_data_id: str, k
     return report
 
 
-async def _open_tile_viewer_and_download(page, message_locator, tile_index: int) -> Dict[str, Any]:
+MAX_TILE_CLICK_ATTEMPTS = 3
+
+
+async def _resolve_video_tile_locator(page, group_name: str, source_message_id: str, tile_index: int):
+    """Fresh, position-independent resolution (2026-08-24 fix): re-finds
+    the message by its immutable source_message_id — NEVER trusts a
+    previously-computed positional index, which can go stale if the
+    group receives new messages between when that index was computed and
+    when the click actually fires (real 2026-08-24 finding: a live SEND
+    attempt's Playwright error referenced index 3; a diagnostic moments
+    later found the exact same message, unchanged, at index 10 — the
+    group had received 8 new messages in between). Returns
+    (tile_locator, message_locator) or (None, None) if the message isn't
+    found at all — never substitutes a different message/tile."""
+    idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+    if idx is None:
+        return None, None
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    message_locator = page.locator(full_sel).nth(idx)
+    tile = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile_index)
+    return tile, message_locator
+
+
+async def _open_tile_viewer_and_download(
+    page, message_locator, tile_index: int,
+    *, group_name: Optional[str] = None, source_message_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Reproduces the manual workflow exactly: open the tile -> wait for a
     real <video> to mount -> wait for it to actually buffer (bounded, not
     a fixed sleep) -> dump the viewer's own buttons (diagnostic-first,
     never a blind selector guess) -> if one looks like a menu trigger,
     click it, dump whatever menu appears, click "Download" if present, and
-    collect the resulting download."""
-    tile = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile_index)
+    collect the resulting download.
+
+    `group_name`/`source_message_id` (2026-08-24, video-tile re-resolution
+    fix): when BOTH are given, `message_locator` is only an initial
+    reference — the tile the click actually targets is re-resolved fresh
+    from `source_message_id` (see _resolve_video_tile_locator) immediately
+    before the click, and again — bounded to MAX_TILE_CLICK_ATTEMPTS total
+    attempts, never falling back to a different message or tile — if the
+    click fails with a "not stable"/"detached" error specifically. A
+    message that's genuinely gone fails cleanly once re-resolution itself
+    returns nothing; this never infinitely retries. When either param is
+    omitted (every existing diagnostic-only caller), behavior is exactly
+    as before — message_locator is used directly, no re-resolution."""
+    use_live_resolution = bool(group_name and source_message_id)
+
+    if use_live_resolution:
+        tile, _ = await _resolve_video_tile_locator(page, group_name, source_message_id, tile_index)
+        if tile is None:
+            return {"ok": False, "stage": "open_tile", "reason": "source message no longer found in window (live re-resolution)"}
+    else:
+        tile = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile_index)
+
     try:
         await tile.scroll_into_view_if_needed(timeout=5000)
     except Exception:
@@ -1395,10 +1442,36 @@ async def _open_tile_viewer_and_download(page, message_locator, tile_index: int)
         await _evaluate(page, _EVENT_CAPTURE_INSTALL_JS)
     except Exception:
         pass
-    try:
-        await tile.click(timeout=10000)
-    except Exception as exc:
-        return {"ok": False, "stage": "open_tile", "reason": f"click failed: {exc}"}
+
+    click_error: Optional[Exception] = None
+    click_attempts: List[str] = []
+    max_attempts = MAX_TILE_CLICK_ATTEMPTS if use_live_resolution else 1
+    for attempt in range(max_attempts):
+        try:
+            await tile.click(timeout=10000)
+            click_error = None
+            break
+        except Exception as exc:
+            click_error = exc
+            click_attempts.append(str(exc))
+            is_stability_error = "not stable" in str(exc) or "detached" in str(exc)
+            if not use_live_resolution or not is_stability_error or attempt == max_attempts - 1:
+                break
+            # Re-resolve fresh by source_message_id (never trust the
+            # stale index) and retry — never falls back to a different
+            # message or tile; if re-resolution can't find the SAME
+            # message at all, that's a clean failure, not a substitution.
+            tile, _ = await _resolve_video_tile_locator(page, group_name, source_message_id, tile_index)
+            if tile is None:
+                click_error = RuntimeError("source message no longer found in window during retry")
+                break
+            try:
+                await tile.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
+
+    if click_error is not None:
+        return {"ok": False, "stage": "open_tile", "reason": f"click failed: {click_error}", "click_attempts": click_attempts}
 
     video_mounted = False
     elapsed = 0.0
@@ -5372,7 +5445,10 @@ async def _send_one_target(page, group_name: str, target: Dict[str, Any], item_l
         tile_index = target.get("album_tile_index")
         if tile_index is None:
             tile_index = 0
-        dl = await _open_tile_viewer_and_download(page, message, tile_index)
+        dl = await _open_tile_viewer_and_download(
+            page, message, tile_index,
+            group_name=group_name, source_message_id=target["source_message_id"],
+        )
         viewer_closed = dl.get("viewer_closed")
         if not dl.get("ok"):
             fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"

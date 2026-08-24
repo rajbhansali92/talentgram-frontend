@@ -692,6 +692,204 @@ def main():
         assert not os.path.exists(capture_fail[0]["local_file_path"])  # cleaned up even on failure
     print("35. _send_one failure states       -> never counted as sent, temp file still cleaned up on every outcome")
 
+    # ------------------------------------------------------------------
+    # 36-40: video-tile re-resolution fix (2026-08-24). Real finding: a
+    # live SEND's Playwright error referenced index 3; a diagnostic
+    # moments later found the SAME message, completely unchanged,
+    # sitting at index 10 — the group had received 8 new messages in
+    # between the initial positional lookup and the actual click.
+    # _open_tile_viewer_and_download now re-resolves the message fresh by
+    # its immutable source_message_id (never a stale positional index)
+    # immediately before clicking, and again — bounded, never
+    # substituting a different message/tile — if the click fails with a
+    # "not stable"/"detached" error specifically.
+    # ------------------------------------------------------------------
+    class _FakeVideoTileElement:
+        def __init__(self, tile_id, fail_times=0):
+            self.tile_id = tile_id
+            self._fail_times = fail_times
+            self.click_count = 0
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def click(self, timeout=None):
+            self.click_count += 1
+            if self.click_count <= self._fail_times:
+                raise Exception(
+                    "Locator.click: Timeout 10000ms exceeded.\n"
+                    "  - element is not stable\n"
+                    "  - element was detached from the DOM, retrying"
+                )
+
+    class _FakeVideoTilesLocator:
+        def __init__(self, tile):
+            self._tile = tile
+        def nth(self, i):
+            return self._tile
+
+    class _FakeVideoMessageLocator:
+        def __init__(self, tile):
+            self._tile = tile
+        def locator(self, sel):
+            assert "video-content" in sel and "image-content" in sel
+            return _FakeVideoTilesLocator(self._tile)
+
+    class _CountLocator:
+        def __init__(self, n):
+            self._n = n
+        async def count(self):
+            return self._n
+
+    class _FakeVideoConvLocator:
+        def __init__(self, message_by_index):
+            self._message_by_index = message_by_index
+        def nth(self, idx):
+            return self._message_by_index.get(idx)
+
+    class _FakeVideoPage:
+        def __init__(self, message_by_index):
+            self._message_by_index = message_by_index
+            self.waits = 0
+        def locator(self, sel):
+            if sel == "video":
+                return _CountLocator(0)  # never mounts -> _inner() never reached, keeps these tests focused on click/resolution only
+            return _FakeVideoConvLocator(self._message_by_index)
+        async def wait_for_timeout(self, ms):
+            self.waits += 1
+
+    orig_evaluate = mark_scan._evaluate
+    orig_resolve_scope = mark_scan.sender._resolve_scope
+
+    async def _fake_evaluate(page, js, arg=None, timeout=10.0):
+        return None  # _EVENT_CAPTURE_INSTALL_JS / _EVENT_CAPTURE_READ_JS — irrelevant to these tests
+
+    async def _fake_resolve_scope(page):
+        return "#main"
+
+    def _make_fake_find_idx(index_sequence, received):
+        calls = {"n": -1}
+        async def fake_find_idx(page, group, data_id):
+            received.append(data_id)
+            calls["n"] += 1
+            return index_sequence[min(calls["n"], len(index_sequence) - 1)]
+        return fake_find_idx
+
+    mark_scan._evaluate = _fake_evaluate
+    mark_scan.sender._resolve_scope = _fake_resolve_scope
+    orig_find_idx = mark_scan._find_message_index_by_data_id
+
+    # 36: the message's CURRENT live index (10) is what actually gets
+    # used, completely independent of whatever positional index a caller
+    # might have separately computed earlier (the real 2026-08-24 bug: a
+    # live error referenced index 3 for this exact message while it was
+    # actually sitting at index 10 by click time) — proven by never
+    # passing any such stale index in at all: only group_name/
+    # source_message_id are given, and the function's own fresh lookup
+    # supplies the current truth (10) directly.
+    tile_36 = _FakeVideoTileElement("TILE-36")
+    received_36: list = []
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx([10], received_36)
+    try:
+        page_36 = _FakeVideoPage({10: _FakeVideoMessageLocator(tile_36)})
+        dl_36 = asyncio.run(mark_scan._open_tile_viewer_and_download(
+            page_36, message_locator=None, tile_index=0,
+            group_name="Talentgram MEDIA SPIKE TEST", source_message_id="3B07252BFE7BC81FB956",
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx
+    assert tile_36.click_count == 1, tile_36.click_count
+    assert "click failed" not in (dl_36.get("reason") or ""), dl_36  # never failed at the click stage
+    assert received_36 == ["3B07252BFE7BC81FB956"], received_36  # always looked up by the immutable identity, never by position
+    print("36. video tile index drift         -> re-resolved by source_message_id at click time, not a stale positional index")
+
+    # 37: the tile detaches once (mid-click failure), then re-resolution
+    # finds the SAME message again and the retry succeeds.
+    tile_37 = _FakeVideoTileElement("TILE-37", fail_times=1)
+    received_37: list = []
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx([5, 5], received_37)
+    try:
+        page_37 = _FakeVideoPage({5: _FakeVideoMessageLocator(tile_37)})
+        dl_37 = asyncio.run(mark_scan._open_tile_viewer_and_download(
+            page_37, message_locator=None, tile_index=0,
+            group_name="Talentgram MEDIA SPIKE TEST", source_message_id="3B07252BFE7BC81FB956",
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx
+    assert tile_37.click_count == 2, tile_37.click_count  # failed once, retried once, succeeded
+    assert "click failed" not in (dl_37.get("reason") or ""), dl_37
+    assert len(received_37) == 2, received_37  # re-resolved by data-id before the retry, not reused
+    print("37. video tile detaches once       -> re-resolution + bounded retry recovers, same message re-clicked")
+
+    # 38: the source message is genuinely gone (removed/scrolled beyond
+    # reach) on every lookup attempt -> clean bounded failure, no infinite loop.
+    received_38: list = []
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx([None], received_38)
+    try:
+        page_38 = _FakeVideoPage({})
+        dl_38 = asyncio.run(mark_scan._open_tile_viewer_and_download(
+            page_38, message_locator=None, tile_index=0,
+            group_name="Talentgram MEDIA SPIKE TEST", source_message_id="3B07252BFE7BC81FB956",
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx
+    assert dl_38["ok"] is False, dl_38
+    assert dl_38["stage"] == "open_tile", dl_38
+    assert "no longer found" in dl_38["reason"], dl_38
+    assert len(received_38) == 1, received_38  # exactly one lookup attempt — no infinite retry against a message that's simply gone
+    print("38. source message genuinely gone  -> clean bounded failure, never an infinite retry loop")
+
+    # 39: a persistently-unstable tile (fails every attempt) is bounded to
+    # MAX_TILE_CLICK_ATTEMPTS total clicks, then fails cleanly — never
+    # substituting a different message/tile along the way.
+    tile_39 = _FakeVideoTileElement("TILE-39", fail_times=99)
+    received_39: list = []
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx([7, 7, 7], received_39)
+    try:
+        page_39 = _FakeVideoPage({7: _FakeVideoMessageLocator(tile_39)})
+        dl_39 = asyncio.run(mark_scan._open_tile_viewer_and_download(
+            page_39, message_locator=None, tile_index=0,
+            group_name="Talentgram MEDIA SPIKE TEST", source_message_id="3B07252BFE7BC81FB956",
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx
+    assert dl_39["ok"] is False, dl_39
+    assert tile_39.click_count == mark_scan.MAX_TILE_CLICK_ATTEMPTS, tile_39.click_count
+    assert all(rid == "3B07252BFE7BC81FB956" for rid in received_39), received_39  # every re-resolution used the SAME identity, never a substitute
+    print("39. persistently unstable tile     -> bounded to MAX_TILE_CLICK_ATTEMPTS, fails cleanly, never substitutes another item")
+
+    # 40: diagnostic-only callers that omit group_name/source_message_id
+    # get EXACTLY the old behavior — the passed message_locator is used
+    # directly, no re-resolution, no retry (proves this fix is additive,
+    # not a behavior change for existing callers).
+    tile_40 = _FakeVideoTileElement("TILE-40")
+    message_40 = _FakeVideoMessageLocator(tile_40)
+    page_40 = _FakeVideoPage({})
+    dl_40 = asyncio.run(mark_scan._open_tile_viewer_and_download(page_40, message_40, 0))
+    assert tile_40.click_count == 1, tile_40.click_count
+    assert "click failed" not in (dl_40.get("reason") or ""), dl_40
+    print("40. legacy callers unaffected      -> omitting group_name/source_message_id preserves the exact pre-fix behavior")
+
+    mark_scan._evaluate = orig_evaluate
+    mark_scan.sender._resolve_scope = orig_resolve_scope
+
+    # 41: the photo/blob path (_download_photo_album_tile_via_blob) is
+    # completely untouched by this fix — same exact-hash-match behavior
+    # as tests 20-27, re-verified after the video-tile change (same
+    # fixtures/pattern as test 20 above).
+    tile_c_jpeg = _fake_jpeg(800, 600)
+    tile_c = _FakePhotoTile(
+        _photo_tile_html("TILEC41"),
+        {"src": "blob:https://web.whatsapp.com/tile-c41", "naturalWidth": 800, "naturalHeight": 600, "complete": True},
+    )
+    photo_message_41 = _FakePhotoMessageLocator([tile_c])
+    photo_page_41 = _FakeBlobPage({"blob:https://web.whatsapp.com/tile-c41": tile_c_jpeg})
+    photo_result_41 = asyncio.run(mark_scan._download_photo_album_tile_via_blob(
+        photo_message_41, photo_page_41, 0, _hash_of("TILEC41"),
+    ))
+    assert photo_result_41["ok"] is True, photo_result_41
+    assert photo_result_41["matched_tile_index"] == 0
+    assert photo_result_41["sha256"] == hashlib.sha256(tile_c_jpeg).hexdigest()
+    print("41. photo/blob path unaffected     -> _download_photo_album_tile_via_blob behavior unchanged by the video-tile fix")
+
 
 if __name__ == "__main__":
     main()

@@ -1956,10 +1956,26 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         except Exception as exc:
             reload_error = str(exc)
 
-        status_after_reload = await sender._open_group_chat(page, group_name)
+        # A hard reload needs real settle time for WhatsApp's SPA to fully
+        # re-init (auth/socket reconnect) before the sidebar search box is
+        # usable — 3s alone wasn't enough (session_sync_check hit the same
+        # SEARCH_FAILED). Bounded retry with backoff instead of a single
+        # blind wait, same "prove it's ready, don't guess" spirit as the
+        # rest of this file.
+        status_after_reload = "SEARCH_FAILED"
+        reload_settle_attempts = []
+        for attempt, extra_wait_ms in enumerate((0, 4000, 6000, 8000)):
+            if extra_wait_ms:
+                await page.wait_for_timeout(extra_wait_ms)
+            status_after_reload = await sender._open_group_chat(page, group_name)
+            reload_settle_attempts.append({"attempt": attempt, "extra_wait_ms": extra_wait_ms, "status": status_after_reload})
+            if status_after_reload == "OPENED":
+                break
+
         if status_after_reload != "OPENED":
             return {"results": [{
                 "ok": False, "reload_error": reload_error,
+                "reload_settle_attempts": reload_settle_attempts,
                 "error": f"group not open after reload (status={status_after_reload})",
             }], "session_identity": session_identity}
 
@@ -2018,6 +2034,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
 
         return {"results": [{
             "ok": True, "reload_error": reload_error,
+            "reload_settle_attempts": reload_settle_attempts,
             "status_after_reload": status_after_reload, "inventory": inventory,
         }], "session_identity": session_identity}
 

@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1934,6 +1934,194 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "destination_media_inventory_diagnostic":
+        # Diagnostic-only (2026-08-24) — the user directly confirmed via a
+        # real screenshot that 6 media files WERE delivered to Talentgram
+        # Casting Test, contradicting a prior worker readback that showed
+        # only the 2 original system messages. This forces a real page
+        # reload FIRST (same mechanism session_sync_check already proved
+        # useful for exactly this "session hasn't caught up" class of
+        # issue), then dumps a rich per-message inventory — data_id,
+        # pre_plain_text, an evidence-based outgoing-direction guess (never
+        # asserted as fact), media-album presence, best-effort caption
+        # text, image/video counts and src prefixes — so the actual
+        # destination DOM structure can be read directly rather than
+        # inferred. Never sends, never clicks, never mutates anything.
+        reload_error = None
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(3000)
+        except Exception as exc:
+            reload_error = str(exc)
+
+        status_after_reload = await sender._open_group_chat(page, group_name)
+        if status_after_reload != "OPENED":
+            return {"results": [{
+                "ok": False, "reload_error": reload_error,
+                "error": f"group not open after reload (status={status_after_reload})",
+            }], "session_identity": session_identity}
+
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        _js = """
+            ([sel]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              return {
+                total_rendered: els.length,
+                messages: els.map((el, i) => {
+                  const html = el.outerHTML;
+                  const ct = el.querySelector('[data-pre-plain-text]');
+                  const testidCounts = {};
+                  (html.match(/data-testid="[^"]+"/g) || []).forEach(m => {
+                    testidCounts[m] = (testidCounts[m] || 0) + 1;
+                  });
+                  const outgoingSignals = {
+                    cls_message_out: el.className.toString().includes('message-out'),
+                    has_dblcheck_testid: !!el.querySelector('[data-testid="msg-dblcheck"]'),
+                    has_check_testid: !!el.querySelector('[data-testid="msg-check"]'),
+                    has_dblcheck_icon: !!el.querySelector('[data-icon="msg-dblcheck"]'),
+                    has_check_icon: !!el.querySelector('[data-icon="msg-check"]'),
+                    has_tail_out_icon: !!el.querySelector('[data-icon="tail-out"]'),
+                    html_has_message_out: html.includes('message-out'),
+                  };
+                  const albumEl = el.querySelector('[data-testid="media-album"]');
+                  const captionCandidates = Array.from(
+                    el.querySelectorAll('span.copyable-text, div.copyable-text span, [data-testid="media-caption"] span, [data-testid="media-caption"]')
+                  ).map(c => (c.innerText || '').trim()).filter(t => t.length > 0);
+                  const imgs = Array.from(el.querySelectorAll('img')).map(im => ({
+                    src_prefix: (im.src || '').slice(0, 24), alt: im.alt || null,
+                  }));
+                  return {
+                    index: i,
+                    data_id: el.getAttribute('data-id'),
+                    pre_plain_text: ct ? ct.getAttribute('data-pre-plain-text') : null,
+                    inner_text: (el.innerText || '').slice(0, 300),
+                    html_len: html.length,
+                    testid_counts: testidCounts,
+                    img_count: el.querySelectorAll('img').length,
+                    video_count: el.querySelectorAll('video').length,
+                    outgoing_signals: outgoingSignals,
+                    has_media_album: !!albumEl,
+                    caption_candidates: captionCandidates,
+                    img_srcs: imgs,
+                  };
+                }),
+              };
+            }
+        """
+        try:
+            inventory = await _evaluate(page, _js, [full_sel])
+        except Exception as exc:
+            inventory = {"error": str(exc)}
+
+        return {"results": [{
+            "ok": True, "reload_error": reload_error,
+            "status_after_reload": status_after_reload, "inventory": inventory,
+        }], "session_identity": session_identity}
+
+    if probe_type == "caption_field_diagnostic":
+        # Diagnostic-only (2026-08-24) — the current caption code
+        # (sender.py) clicks `//div[contains(@class, "lexical-rich-text")]`
+        # wrapped in a try/except that only LOGS a warning on failure and
+        # silently continues WITHOUT a caption if that selector doesn't
+        # match — exactly the same class of staleness already found and
+        # fixed for the attach button. This attaches a real disposable
+        # local JPEG through the ALREADY-PROVEN mechanism (plus-rounded ->
+        # Photos & videos -> expect_file_chooser -> set_files), stops
+        # BEFORE any caption/send interaction, inventories every
+        # contenteditable/textbox-like element on the preview screen (not
+        # assuming the old selector is still right), types a disposable
+        # test string into the best match, verifies it landed in the DOM,
+        # then cancels via Escape — never clicks Send.
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        _tiny_jpeg_b64 = (
+            "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8Q"
+            "EBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"
+            "EBAQEBAQEBD/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QA"
+            "FQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k="
+        )
+        temp_path = None
+        attach_error = None
+        caption_inputs_before: Any = None
+        caption_inputs_after: Any = None
+        typed_ok = False
+        type_error = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            tmp.write(b64mod.b64decode(_tiny_jpeg_b64))
+            tmp.close()
+            temp_path = tmp.name
+
+            await page.click(sender.SEL["attach_btn"], timeout=10_000)
+            await asyncio.sleep(0.5)
+            async with page.expect_file_chooser(timeout=10_000) as fc_info:
+                await page.click('button[aria-label="Photos & videos"]', timeout=10_000)
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(temp_path)
+            await asyncio.sleep(2.0)
+
+            _caption_inventory_js = """
+                () => {
+                  function describe(el) {
+                    const rect = el.getBoundingClientRect();
+                    return {
+                      tag: el.tagName,
+                      testid: el.getAttribute('data-testid'),
+                      role: el.getAttribute('role'),
+                      aria_label: el.getAttribute('aria-label'),
+                      placeholder: el.getAttribute('data-placeholder') || el.getAttribute('placeholder'),
+                      contenteditable: el.getAttribute('contenteditable'),
+                      cls: (el.className || '').toString().slice(0, 160),
+                      text: (el.innerText || '').slice(0, 60),
+                      rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                      visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                      enabled: !el.disabled,
+                    };
+                  }
+                  const sel = '[contenteditable="true"], div[role="textbox"], textarea, input[type="text"]';
+                  return Array.from(document.querySelectorAll(sel)).map(describe);
+                }
+            """
+            caption_inputs_before = await _evaluate(page, _caption_inventory_js, [])
+
+            caption_xpath = '//div[contains(@class, "lexical-rich-text")]'
+            try:
+                await page.click(caption_xpath, timeout=5_000)
+                await page.keyboard.type("CAPTION DIAGNOSTIC TEST")
+                await asyncio.sleep(0.5)
+                typed_ok = True
+            except Exception as exc:
+                type_error = f"lexical-rich-text click/type failed: {exc}"
+
+            caption_inputs_after = await _evaluate(page, _caption_inventory_js, [])
+        except Exception as exc:
+            attach_error = str(exc)
+        finally:
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+
+        return {"results": [{
+            "ok": attach_error is None, "group_name": group_name,
+            "chat_ready_error": ready_error, "attach_error": attach_error,
+            "caption_inputs_before_typing": caption_inputs_before,
+            "caption_xpath_type_attempted": typed_ok, "caption_xpath_type_error": type_error,
+            "caption_inputs_after_typing": caption_inputs_after,
         }], "session_identity": session_identity}
 
     if probe_type == "attach_interceptor_diagnostic":

@@ -3779,6 +3779,73 @@ async def _send_one(page, target: Dict[str, Any], raw: bytes) -> Dict[str, Any]:
                 pass
 
 
+PER_ITEM_SEND_TIMEOUT = 90.0
+
+
+async def _send_one_target(page, group_name: str, target: Dict[str, Any]) -> Dict[str, Any]:
+    """One SEND item end-to-end: reopen the source group, locate the exact
+    marked message, retrieve its original bytes via the same proven
+    mechanism its media type requires, then hand off to _send_one. Split
+    out from _run_send so each item can be individually time-bounded —
+    one truly stuck item must fail on its own, never silently swallow the
+    rest of the batch's already-real results (see _run_send's docstring)."""
+    status = await sender._open_group_chat(page, group_name)
+    if status != "OPENED":
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"source group not open (status={status})"}
+    idx = await _find_message_index_by_data_id(page, group_name, target["source_message_id"])
+    if idx is None:
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": "source message no longer found in window"}
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    message = page.locator(full_sel).nth(idx)
+
+    raw: Optional[bytes] = None
+    fetch_error: Optional[str] = None
+
+    if target.get("source_media_type") == "video":
+        tile_index = target.get("album_tile_index")
+        if tile_index is None:
+            tile_index = 0
+        dl = await _open_tile_viewer_and_download(page, message, tile_index)
+        if not dl.get("ok"):
+            fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
+        else:
+            downloads = dl.get("downloads") or []
+            raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
+            if not raw:
+                fetch_error = "downloaded zero bytes"
+    elif target.get("album_tile_index") is not None:
+        dl = await _download_photo_album_tile_via_blob(
+            message, page, target.get("album_tile_index"), target["source_thumbnail_hash"],
+        )
+        if not dl.get("ok"):
+            fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
+        else:
+            raw = dl.get("_raw_bytes")
+            if not raw:
+                fetch_error = "downloaded zero bytes"
+    else:
+        try:
+            fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
+        except Exception as exc:
+            fetched = None
+            fetch_error = f"download failed: {exc}"
+        if fetched is not None:
+            if not fetched.get("ok"):
+                fetch_error = fetched.get("reason")
+            elif not fetched.get("base64"):
+                fetch_error = "downloaded zero bytes"
+            else:
+                raw = b64mod.b64decode(fetched["base64"])
+
+    if raw is None:
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": fetch_error or "download failed"}
+
+    send_result = await _send_one(page, target, raw)
+    send_result["byte_length"] = len(raw)
+    return send_result
+
+
 async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     """SEND workflow (2026-08-24) — independent of UPLOAD: retrieves the
     ORIGINAL WhatsApp source media using the exact same proven mechanisms
@@ -3788,7 +3855,14 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     bytes directly to the destination Casting group — never touching
     Cloudinary, /media-upload, submissions, or media_assignments. Each
     target is independently resilient: one item's failure never prevents
-    the rest from being attempted, and never substitutes another tile."""
+    the rest from being attempted, and never substitutes another tile.
+
+    Each item runs under its own PER_ITEM_SEND_TIMEOUT bound (2026-08-24
+    fix — a real disposable E2E against 6 items hit the OUTER 180s
+    mark_scan_loop timeout, which cancels this whole function and reports
+    zero results for every item, discarding any that had already
+    genuinely sent; a per-item bound means one slow/stuck item is reported
+    as its own failure while every other item's real result is preserved)."""
     group_name = req["group_name"]
     status = await sender._open_group_chat(page, group_name)
     if status != "OPENED":
@@ -3796,64 +3870,13 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
 
     results = []
     for target in req.get("send_targets") or []:
-        status = await sender._open_group_chat(page, group_name)
-        if status != "OPENED":
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"source group not open (status={status})"})
-            continue
-        idx = await _find_message_index_by_data_id(page, group_name, target["source_message_id"])
-        if idx is None:
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "source message no longer found in window"})
-            continue
-        scope = await sender._resolve_scope(page)
-        full_sel = f"{scope} [data-testid^='conv-msg-']"
-        message = page.locator(full_sel).nth(idx)
-
-        raw: Optional[bytes] = None
-        fetch_error: Optional[str] = None
-
-        if target.get("source_media_type") == "video":
-            tile_index = target.get("album_tile_index")
-            if tile_index is None:
-                tile_index = 0
-            dl = await _open_tile_viewer_and_download(page, message, tile_index)
-            if not dl.get("ok"):
-                fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
-            else:
-                downloads = dl.get("downloads") or []
-                raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
-                if not raw:
-                    fetch_error = "downloaded zero bytes"
-        elif target.get("album_tile_index") is not None:
-            dl = await _download_photo_album_tile_via_blob(
-                message, page, target.get("album_tile_index"), target["source_thumbnail_hash"],
-            )
-            if not dl.get("ok"):
-                fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
-            else:
-                raw = dl.get("_raw_bytes")
-                if not raw:
-                    fetch_error = "downloaded zero bytes"
-        else:
-            try:
-                fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
-            except Exception as exc:
-                fetched = None
-                fetch_error = f"download failed: {exc}"
-            if fetched is not None:
-                if not fetched.get("ok"):
-                    fetch_error = fetched.get("reason")
-                elif not fetched.get("base64"):
-                    fetch_error = "downloaded zero bytes"
-                else:
-                    raw = b64mod.b64decode(fetched["base64"])
-
-        if raw is None:
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": fetch_error or "download failed"})
-            continue
-
-        send_result = await _send_one(page, target, raw)
-        send_result["byte_length"] = len(raw)
-        results.append(send_result)
+        try:
+            result = await asyncio.wait_for(_send_one_target(page, group_name, target), timeout=PER_ITEM_SEND_TIMEOUT)
+        except asyncio.TimeoutError:
+            result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"timed out after {PER_ITEM_SEND_TIMEOUT}s"}
+        except Exception as exc:
+            result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"item failed: {exc}"}
+        results.append(result)
 
     return {"results": results}
 
@@ -3921,7 +3944,14 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                 # this doc's own "mode" field to interpret
                                 # results as sends, not uploads — no wire
                                 # protocol change needed).
-                                result = await asyncio.wait_for(_run_send(page, req), timeout=180.0)
+                                # Outer safety net only — normal completion
+                                # happens well inside this via _run_send's own
+                                # per-item PER_ITEM_SEND_TIMEOUT bound; sized
+                                # generously above the per-item sum so it
+                                # essentially never fires for a real batch.
+                                n_send_targets = len(req.get("send_targets") or [])
+                                send_timeout = 60.0 + PER_ITEM_SEND_TIMEOUT * max(1, n_send_targets)
+                                result = await asyncio.wait_for(_run_send(page, req), timeout=send_timeout)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
                                     json={"results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error")},

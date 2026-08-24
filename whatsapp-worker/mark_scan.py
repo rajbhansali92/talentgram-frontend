@@ -2723,13 +2723,32 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         def _classify_buttons(dump):
             if not dump or not dump.get("rootFound"):
                 return {"forward": None, "download": None}
-            def _match(pattern):
+            def _match_all(pattern):
+                out = []
                 for b in dump.get("buttons") or []:
                     hay = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("testid"), b.get("svgTitle")])).lower()
                     if re.search(pattern, hay):
-                        return b
-                return None
-            return {"forward": _match(r"forward"), "download": _match(r"download")}
+                        out.append(b)
+                return out
+            forward_all = _match_all(r"forward")
+            download_all = _match_all(r"download")
+            # Prefer an on-screen match over the first DOM-order match — a
+            # 2026-08-25 finding showed a persistently off-screen
+            # "Forward media" button (unchanged position across a full 19s
+            # window) that was very likely an unrelated hover/quick-action
+            # control elsewhere in the DOM, not the actual open viewer's
+            # own toolbar button; picking the first on-screen candidate
+            # (falling back to the first match if none are on-screen) never
+            # silently prefers a real control the OLD first-match logic
+            # would have missed.
+            forward_onscreen_matches = [b for b in forward_all if _is_onscreen(b)]
+            forward_best = forward_onscreen_matches[0] if forward_onscreen_matches else (forward_all[0] if forward_all else None)
+            download_onscreen_matches = [b for b in download_all if _is_onscreen(b)]
+            download_best = download_onscreen_matches[0] if download_onscreen_matches else (download_all[0] if download_all else None)
+            return {
+                "forward": forward_best, "download": download_best,
+                "forward_all": forward_all, "download_all": download_all,
+            }
 
         def _is_onscreen(button):
             # The very first checkpoint (2026-08-24 finding) found Forward
@@ -2764,8 +2783,10 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
                     "forward_present": classified["forward"] is not None,
                     "forward_onscreen": forward_onscreen,
                     "forward_button": classified["forward"],
+                    "forward_all_matches": classified.get("forward_all"),
                     "download_present": classified["download"] is not None,
                     "download_button": classified["download"],
+                    "download_all_matches": classified.get("download_all"),
                     "total_buttons": len((button_dump or {}).get("buttons") or []),
                 })
                 stable_run = stable_run + 1 if forward_onscreen else 0

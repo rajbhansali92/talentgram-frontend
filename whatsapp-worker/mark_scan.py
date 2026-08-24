@@ -29,6 +29,7 @@ import asyncio
 import base64 as b64mod
 import hashlib
 import logging
+import math
 import os
 import re
 import subprocess
@@ -2703,6 +2704,22 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             }
         """
 
+        def _json_safe(obj):
+            # A <video> element's own duration/currentTime are legitimately
+            # NaN/Infinity before metadata loads (HTML5 spec) — not valid
+            # JSON, and this diagnostic transports raw video state back
+            # over HTTP (unlike _wait_for_video_readiness's own use of the
+            # same _VIDEO_STATE_JS, which only ever consumes it in-process
+            # and never serializes it). Recursively replaces any non-finite
+            # float with None; everything else passes through unchanged.
+            if isinstance(obj, float) and not math.isfinite(obj):
+                return None
+            if isinstance(obj, dict):
+                return {k: _json_safe(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_json_safe(v) for v in obj]
+            return obj
+
         def _classify_buttons(dump):
             if not dump or not dump.get("rootFound"):
                 return {"forward": None, "download": None}
@@ -2718,7 +2735,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             checkpoints = []
             for i in range(max_checks):
                 try:
-                    video_state = await _evaluate(page, _VIDEO_STATE_JS)
+                    video_state = _json_safe(await _evaluate(page, _VIDEO_STATE_JS))
                 except Exception as exc:
                     video_state = {"error": str(exc)}
                 try:

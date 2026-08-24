@@ -898,7 +898,26 @@ async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dic
     reply_message = page.locator(full_sel).nth(idx)
     quoted = reply_message.locator('[data-testid="quoted-message"]')
     if await quoted.count() == 0:
-        return {"ok": False, "reason": "reply message has no quoted-message block"}
+        # Diagnostic cross-check (2026-08-24): a raw JS querySelector on
+        # the SAME located element, at the SAME moment, to distinguish a
+        # genuine DOM absence from a Playwright-locator-specific miss
+        # (stale handle, actionability/visibility filtering, or the
+        # located index no longer pointing at the intended message after
+        # earlier jumps in the same scan shifted scroll state).
+        try:
+            cross_check = await reply_message.evaluate("""
+                (el) => ({
+                  own_data_id: el.getAttribute('data-id'),
+                  js_quoted_found: !!el.querySelector('[data-testid="quoted-message"]'),
+                  html_len: el.outerHTML.length,
+                })
+            """, timeout=10000)
+        except Exception as exc:
+            cross_check = {"cross_check_error": str(exc)}
+        return {
+            "ok": False, "reason": "reply message has no quoted-message block",
+            "resolved_index": idx, "requested_data_id": reply_data_id, "cross_check": cross_check,
+        }
     try:
         await quoted.first.click(timeout=10000)
     except Exception as exc:

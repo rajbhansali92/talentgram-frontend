@@ -634,6 +634,64 @@ def main():
     # above already proves both album types remain unaffected by this fix.
     print("32. video/photo batch marking      -> unaffected by the hydration fix (see tests 15 and 28, unchanged)")
 
+    # 2026-08-24: SEND workflow — independent of UPLOAD, sends already-
+    # downloaded WhatsApp bytes DIRECTLY to a destination group, never via
+    # Cloudinary/URL. _send_one owns the temp file's full lifecycle: write
+    # -> pass to the existing proven sender via local_file_path -> delete,
+    # regardless of send outcome. Classification matches worker.py's own
+    # established outbound-job policy exactly (sent+unverified still
+    # counts as genuinely sent, never retried).
+    class _FakeSenderModule:
+        def __init__(self, state, capture):
+            self._state = state
+            self._capture = capture
+        async def send_whatsapp_message(self, **kwargs):
+            self._capture.append(kwargs)
+            if kwargs.get("local_file_path"):
+                # Prove the file genuinely exists and is readable AT the
+                # moment the sender is invoked (not deleted early, not
+                # never-written).
+                with open(kwargs["local_file_path"], "rb") as fh:
+                    self._capture[-1]["_file_contents_at_send_time"] = fh.read()
+            return {"state": self._state, "evidence": {}}
+
+    orig_sender = mark_scan.sender
+
+    def _run_send_one_with_state(state):
+        capture = []
+        mark_scan.sender = _FakeSenderModule(state, capture)
+        try:
+            target = {
+                "source_message_id": "SRC123", "destination_group": "Talentgram Casting Test",
+                "caption": "Ahana Test — Google Test Take 1", "source_media_type": "image",
+            }
+            raw = b"\xff\xd8\xff\xe0" + b"\x00" * 32  # real JPEG magic bytes
+            result = asyncio.run(mark_scan._send_one(page=object(), target=target, raw=raw))
+            return result, capture
+        finally:
+            mark_scan.sender = orig_sender
+
+    result_ok, capture_ok = _run_send_one_with_state("MESSAGE_SENT_AND_VERIFIED")
+    assert result_ok["ok"] is True, result_ok
+    assert result_ok["source_message_id"] == "SRC123"
+    assert capture_ok[0]["destination_type"] == "group"
+    assert capture_ok[0]["destination"] == "Talentgram Casting Test"
+    assert capture_ok[0]["message_body"] == "Ahana Test — Google Test Take 1"
+    assert capture_ok[0]["_file_contents_at_send_time"] == b"\xff\xd8\xff\xe0" + b"\x00" * 32
+    temp_path_ok = capture_ok[0]["local_file_path"]
+    assert not os.path.exists(temp_path_ok)  # _send_one cleaned up its own temp file
+    print("33. _send_one verified send        -> writes real bytes to a local temp file, passes local_file_path, cleans up after")
+
+    result_unverified, _ = _run_send_one_with_state("MESSAGE_SENT_BUT_NOT_VERIFIED")
+    assert result_unverified["ok"] is True, result_unverified  # matches worker.py's own retry policy exactly
+    print("34. _send_one unverified send      -> still counts as genuinely sent (matches existing outbound-job policy)")
+
+    for failure_state in ("CHAT_NOT_OPENED", "MESSAGE_NOT_SENT", "INVALID_DESTINATION"):
+        result_fail, capture_fail = _run_send_one_with_state(failure_state)
+        assert result_fail["ok"] is False, (failure_state, result_fail)
+        assert not os.path.exists(capture_fail[0]["local_file_path"])  # cleaned up even on failure
+    print("35. _send_one failure states       -> never counted as sent, temp file still cleaned up on every outcome")
+
 
 if __name__ == "__main__":
     main()

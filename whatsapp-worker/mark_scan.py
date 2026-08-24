@@ -29,6 +29,7 @@ import asyncio
 import base64 as b64mod
 import hashlib
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -3722,6 +3723,125 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
     return {"results": results}
 
 
+# SEND-state success/failure classification (2026-08-24) — matches
+# worker.py's own outbound-job policy exactly: MESSAGE_SENT_AND_VERIFIED
+# and MESSAGE_SENT_BUT_NOT_VERIFIED both mean the send genuinely
+# happened (the same reason worker.py never retries "sent+unverified");
+# everything else is a real failure, safe to retry on a later SEND run.
+_SEND_SUCCESS_STATES = {"MESSAGE_SENT_AND_VERIFIED", "MESSAGE_SENT_BUT_NOT_VERIFIED"}
+
+
+async def _send_one(page, target: Dict[str, Any], raw: bytes) -> Dict[str, Any]:
+    """Writes already-downloaded WhatsApp source bytes to a local temp
+    file and sends them via the existing, proven send_whatsapp_message —
+    local_file_path skips any URL/Cloudinary round-trip entirely. This
+    function owns the temp file's full lifecycle (create, pass, delete) —
+    send_whatsapp_message never deletes a local_file_path it didn't
+    create itself (see its own docstring)."""
+    detected = _detect_mime_type(raw, target.get("source_media_type"))
+    ext = _MIME_BY_EXT.get(detected, "bin")
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tf:
+            tf.write(raw)
+            temp_path = tf.name
+        result = await sender.send_whatsapp_message(
+            page=page, destination_type="group", destination=target["destination_group"],
+            message_body=target.get("caption") or "", local_file_path=temp_path,
+        )
+        state = result.get("state")
+        if state in _SEND_SUCCESS_STATES:
+            return {"ok": True, "source_message_id": target["source_message_id"], "send_state": state}
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send state {state!r}", "send_state": state}
+    except Exception as exc:
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send failed: {exc}"}
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
+
+async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
+    """SEND workflow (2026-08-24) — independent of UPLOAD: retrieves the
+    ORIGINAL WhatsApp source media using the exact same proven mechanisms
+    (_download_photo_album_tile_via_blob for photo album tiles,
+    _open_tile_viewer_and_download for video/album-video, the plain
+    blob-fetch path for a single non-album photo) and sends the resulting
+    bytes directly to the destination Casting group — never touching
+    Cloudinary, /media-upload, submissions, or media_assignments. Each
+    target is independently resilient: one item's failure never prevents
+    the rest from being attempted, and never substitutes another tile."""
+    group_name = req["group_name"]
+    status = await sender._open_group_chat(page, group_name)
+    if status != "OPENED":
+        return {"error": f"Could not open WhatsApp source group {group_name!r} (status={status})"}
+
+    results = []
+    for target in req.get("send_targets") or []:
+        status = await sender._open_group_chat(page, group_name)
+        if status != "OPENED":
+            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"source group not open (status={status})"})
+            continue
+        idx = await _find_message_index_by_data_id(page, group_name, target["source_message_id"])
+        if idx is None:
+            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "source message no longer found in window"})
+            continue
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+
+        raw: Optional[bytes] = None
+        fetch_error: Optional[str] = None
+
+        if target.get("source_media_type") == "video":
+            tile_index = target.get("album_tile_index")
+            if tile_index is None:
+                tile_index = 0
+            dl = await _open_tile_viewer_and_download(page, message, tile_index)
+            if not dl.get("ok"):
+                fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
+            else:
+                downloads = dl.get("downloads") or []
+                raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
+                if not raw:
+                    fetch_error = "downloaded zero bytes"
+        elif target.get("album_tile_index") is not None:
+            dl = await _download_photo_album_tile_via_blob(
+                message, page, target.get("album_tile_index"), target["source_thumbnail_hash"],
+            )
+            if not dl.get("ok"):
+                fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
+            else:
+                raw = dl.get("_raw_bytes")
+                if not raw:
+                    fetch_error = "downloaded zero bytes"
+        else:
+            try:
+                fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
+            except Exception as exc:
+                fetched = None
+                fetch_error = f"download failed: {exc}"
+            if fetched is not None:
+                if not fetched.get("ok"):
+                    fetch_error = fetched.get("reason")
+                elif not fetched.get("base64"):
+                    fetch_error = "downloaded zero bytes"
+                else:
+                    raw = b64mod.b64decode(fetched["base64"])
+
+        if raw is None:
+            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": fetch_error or "download failed"})
+            continue
+
+        send_result = await _send_one(page, target, raw)
+        send_result["byte_length"] = len(raw)
+        results.append(send_result)
+
+    return {"results": results}
+
+
 def _strip_raw_bytes(obj: Any) -> Any:
     """Recursively removes any "_raw_bytes" key before a result is
     JSON-serialized for an HTTP report — a safety net independent of which
@@ -3772,6 +3892,20 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                 )
                             elif req.get("mode") == "download":
                                 result = await asyncio.wait_for(_run_download(page, http, req), timeout=180.0)
+                                await http.post(
+                                    f"{BASE}/scan-requests/{req['id']}/download-result",
+                                    json={"results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error")},
+                                    headers=_auth_headers(), timeout=30.0,
+                                )
+                            elif req.get("mode") == "send":
+                                # SEND workflow (2026-08-24) — independent
+                                # of UPLOAD; reuses the SAME generic
+                                # download-result endpoint/status values
+                                # (the backend orchestrator branches on
+                                # this doc's own "mode" field to interpret
+                                # results as sends, not uploads — no wire
+                                # protocol change needed).
+                                result = await asyncio.wait_for(_run_send(page, req), timeout=180.0)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
                                     json={"results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error")},

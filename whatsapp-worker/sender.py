@@ -1453,12 +1453,24 @@ async def send_whatsapp_message(
     destination: str,
     message_body: str,
     media_url: Optional[str] = None,
+    local_file_path: Optional[str] = None,
     is_retry: bool = False,
     fast: bool = False,
 ) -> dict:
     """
     Core automation logic for sending a single WhatsApp message.
     Returns {"state": str, "evidence": dict} with structured decision evidence.
+
+    `local_file_path` (2026-08-24, SEND workflow): an alternative to
+    `media_url` for a caller that already has the file's bytes on disk
+    (e.g. already downloaded directly from a WhatsApp source group — no
+    reason to round-trip through a URL just to attach it elsewhere). When
+    set, the URL-download step is skipped entirely and this path is used
+    directly with the SAME proven attach/caption/send flow. The CALLER
+    owns this file — it is never deleted here (unlike a `media_url`
+    download, which this function creates and must clean up itself).
+    Mutually exclusive with `media_url`; if both are somehow given,
+    `local_file_path` wins (no network fetch attempted).
 
     `fast`: shortens the fixed post-type/post-click/pre-verify sleeps in the
     text-send path (2026-07-21 speed pass). Those sleeps were tuned for bulk
@@ -1665,23 +1677,34 @@ async def send_whatsapp_message(
     _mark("composer_wait")
 
     # Handle media attachment if present
-    if media_url:
-        logger.info("sender: media_url provided, downloading %s", media_url)
+    if media_url or local_file_path:
         temp_file_path = None
+        owns_temp_file = False  # only True when WE downloaded/created the file
         try:
-            # Download file to a secure temporary path
-            suffix = os.path.splitext(media_url.split("?")[0])[1] or ".jpg"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-                temp_file_path = temp_file.name
-                
-            # Perform download
-            headers = {"User-Agent": "Mozilla/5.0"}
-            req = urllib.request.Request(media_url, headers=headers)
-            with urllib.request.urlopen(req) as response, open(temp_file_path, "wb") as out_file:
-                out_file.write(response.read())
-                
-            logger.info("sender: downloaded media to %s", temp_file_path)
-            
+            if local_file_path:
+                # SEND workflow (2026-08-24) — caller already has the bytes
+                # on disk (downloaded directly from a WhatsApp source
+                # group); use it as-is, no network fetch, no ownership of
+                # its lifecycle.
+                logger.info("sender: local_file_path provided, using directly: %s", local_file_path)
+                temp_file_path = local_file_path
+                suffix = os.path.splitext(local_file_path)[1] or ".jpg"
+            else:
+                logger.info("sender: media_url provided, downloading %s", media_url)
+                # Download file to a secure temporary path
+                suffix = os.path.splitext(media_url.split("?")[0])[1] or ".jpg"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+                    temp_file_path = temp_file.name
+                owns_temp_file = True
+
+                # Perform download
+                headers = {"User-Agent": "Mozilla/5.0"}
+                req = urllib.request.Request(media_url, headers=headers)
+                with urllib.request.urlopen(req) as response, open(temp_file_path, "wb") as out_file:
+                    out_file.write(response.read())
+
+                logger.info("sender: downloaded media to %s", temp_file_path)
+
             # Click attachment button (+)
             await page.click(SEL["attach_btn"])
             await asyncio.sleep(1.0)
@@ -1730,7 +1753,7 @@ async def send_whatsapp_message(
             await _safe_screenshot(page, "/tmp/post_send.png")
             
         finally:
-            if temp_file_path and os.path.exists(temp_file_path):
+            if owns_temp_file and temp_file_path and os.path.exists(temp_file_path):
                 try:
                     os.unlink(temp_file_path)
                 except Exception:

@@ -1837,6 +1837,161 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "after_reload": after,
         }], "session_identity": session_identity_after}
 
+    if probe_type == "media_readiness_diagnostic":
+        # Diagnostic-only (2026-08-23): final observation layer, after
+        # ruling out selector/click-target/CSS/keyboard/album-size/general-
+        # sync explanations. Observes DOM-visible media/readiness state
+        # only — no internals, no synthetic events, no network calls to
+        # WhatsApp endpoints beyond what the page itself already exposes.
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        tile_index = req.get("tile_index", 0)
+        thumbs = message.locator('[data-testid="image-thumb"]')
+        try:
+            thumb_count = await thumbs.count()
+        except Exception as exc:
+            return {"results": [{"ok": False, "error": f"count failed: {exc}"}]}
+        if tile_index >= thumb_count:
+            return {"results": [{"ok": False, "error": f"tile_index {tile_index} out of range (count={thumb_count})"}]}
+        tile = thumbs.nth(tile_index)
+
+        snapshot_js = """
+            (tile) => {
+              const allAttrs = (el) => {
+                const out = {};
+                for (const a of el.attributes) out[a.name] = a.value.slice(0, 120);
+                return out;
+              };
+              const imgState = (img) => ({
+                src: (img.src || '').slice(0, 60), currentSrc: (img.currentSrc || '').slice(0, 60),
+                naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight,
+                complete: img.complete, loading: img.loading, decoding: img.decoding,
+                attrs: allAttrs(img),
+              });
+              const imgs = Array.from(tile.querySelectorAll('img')).map(imgState);
+
+              let provider = tile.closest('[data-testid="media-url-provider"]') || tile.querySelector('[data-testid="media-url-provider"]');
+              const providerInfo = provider ? {
+                attrs: allAttrs(provider), html_len: provider.outerHTML.length,
+                html_snippet: provider.outerHTML.slice(0, 500),
+              } : null;
+
+              // Loading/pending/progress indicators anywhere in the tile.
+              const loadingCandidates = Array.from(tile.querySelectorAll('*')).filter(el => {
+                const testid = (el.getAttribute('data-testid') || '').toLowerCase();
+                const cls = (el.className || '').toString().toLowerCase();
+                return /load|spinner|progress|pending|skeleton/.test(testid) || /load|spinner|progress|pending|skeleton/.test(cls);
+              }).slice(0, 10).map(el => ({ tag: el.tagName, testid: el.getAttribute('data-testid'), cls: (el.className || '').toString().slice(0, 80) }));
+
+              const ancestorAttrs = [];
+              let el = tile;
+              let hops = 0;
+              while (el && hops < 6) {
+                ancestorAttrs.push({ tag: el.tagName, testid: el.getAttribute('data-testid'), attrs: allAttrs(el) });
+                el = el.parentElement;
+                hops++;
+              }
+
+              return {
+                tileAttrs: allAttrs(tile),
+                imgs,
+                mediaUrlProvider: providerInfo,
+                loadingIndicators: loadingCandidates,
+                ancestorAttrs,
+                activeElement: document.activeElement ? { tag: document.activeElement.tagName, testid: document.activeElement.getAttribute('data-testid') } : null,
+                videoCount: document.querySelectorAll('video').length,
+                dialogCount: document.querySelectorAll('[role="dialog"]').length,
+              };
+            }
+        """
+
+        try:
+            await tile.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            pass
+        try:
+            before = await tile.evaluate(snapshot_js, timeout=15000)
+        except Exception as exc:
+            return {"results": [{"ok": False, "stage": "before_snapshot", "error": str(exc)}]}
+
+        # Message-level metadata — search the WHOLE message's attributes
+        # (not just the tile's) for anything hinting at count/state/
+        # readiness, without assuming any specific attribute exists.
+        try:
+            message_meta = await message.evaluate("""
+                (msg) => {
+                  const interesting = [];
+                  const walk = (el, depth) => {
+                    if (depth > 8) return;
+                    for (const a of el.attributes || []) {
+                      if (/count|state|status|ready|pending|load|batch|total/i.test(a.name) || /count|state|status|ready|pending|loading|batch/i.test(a.value)) {
+                        interesting.push({ tag: el.tagName, testid: el.getAttribute('data-testid'), attr: a.name, value: a.value.slice(0, 100) });
+                      }
+                    }
+                    for (const child of el.children) walk(child, depth + 1);
+                  };
+                  walk(msg, 0);
+                  return interesting.slice(0, 30);
+                }
+            """, timeout=15000)
+        except Exception as exc:
+            message_meta = {"error": str(exc)}
+
+        # perform_click defaults True, but the caller can skip the click
+        # entirely (e.g. for the already-proven single photo, where a real
+        # click would open its viewer and require closing it again — this
+        # probe only needs its READINESS state, not a repeat of the
+        # already-established click-opens-it fact).
+        perform_click = req.get("perform_click", True)
+        click_ok = None
+        click_error = None
+        after = None
+        close_result = None
+        if perform_click:
+            try:
+                baseline_srcs = await _evaluate(page, _PHOTO_BLOB_BASELINE_JS)
+            except Exception:
+                baseline_srcs = []
+            try:
+                await tile.click(timeout=10000)
+                click_ok = True
+            except Exception as exc:
+                click_ok = False
+                click_error = str(exc)
+
+            await page.wait_for_timeout(3000)
+
+            try:
+                after = await tile.evaluate(snapshot_js, timeout=15000)
+            except Exception as exc:
+                after = {"error": str(exc)}
+
+            # Safety net: if this click DID open a viewer (e.g. run against
+            # the single photo for a control comparison), close it via the
+            # real Close control rather than leaving it open.
+            try:
+                viewer_check = await _evaluate(page, _ALBUM_VIEWER_SNAPSHOT_JS, [baseline_srcs, False])
+            except Exception:
+                viewer_check = {"found": False}
+            if viewer_check.get("found"):
+                primary_src = (viewer_check.get("primary") or {}).get("src", "")
+                close_result = await _close_photo_viewer(page, {"buttons": viewer_check.get("buttons", [])}, primary_src)
+
+        return {
+            "results": [{
+                "ok": True, "data_id": data_id, "tile_index": tile_index,
+                "before": before, "after": after,
+                "message_level_metadata": message_meta,
+                "click_performed": perform_click, "click_ok": click_ok, "click_error": click_error,
+                "close_result": close_result,
+            }],
+            "session_identity": session_identity,
+        }
+
     if probe_type == "keyboard_activation_diagnostic":
         # Diagnostic-only (2026-08-23): the DOM/CSS structure is byte-for-
         # byte identical between a single photo's image-thumb (which

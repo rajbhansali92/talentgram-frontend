@@ -33,7 +33,7 @@ import re
 import subprocess
 import tempfile
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -1837,6 +1837,104 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "after_reload": after,
         }], "session_identity": session_identity_after}
 
+    if probe_type == "blob_tile_download_diagnostic":
+        # Diagnostic-only (2026-08-23): media_readiness_diagnostic proved
+        # each album tile's full-resolution photo is ALREADY loaded as a
+        # real, complete blob: URL directly in the tile's own DOM — no
+        # gallery/viewer needed. This locates one exact tile by its
+        # thumbnail hash (never by position/order), fetches that tile's
+        # OWN full-res blob directly, and verifies the bytes (SHA-256,
+        # magic-byte MIME, real parsed dimensions cross-checked against
+        # the DOM-reported naturalWidth/naturalHeight) — never claims
+        # identity merely from "found under the right element".
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        thumbs = message.locator('[data-testid="image-thumb"]')
+        try:
+            thumb_count = await thumbs.count()
+        except Exception as exc:
+            return {"results": [{"ok": False, "error": f"count failed: {exc}"}]}
+
+        tile_inventory = []
+        for i in range(thumb_count):
+            thumb = thumbs.nth(i)
+            entry: Dict[str, Any] = {"index": i}
+            try:
+                thumb_html = await thumb.evaluate("(el) => el.outerHTML", timeout=10000)
+                entry["hash"] = _smallest_hash(thumb_html)
+            except Exception as exc:
+                entry["hash"] = None
+                entry["hash_error"] = str(exc)
+            try:
+                full_res = await thumb.evaluate("""
+                    (tile) => {
+                      const imgs = Array.from(tile.querySelectorAll('img'));
+                      if (imgs.length === 0) return null;
+                      const best = imgs.reduce((a, b) => (a.naturalWidth * a.naturalHeight) >= (b.naturalWidth * b.naturalHeight) ? a : b);
+                      return { src: best.src, naturalWidth: best.naturalWidth, naturalHeight: best.naturalHeight, complete: best.complete, isBlob: best.src.startsWith('blob:') };
+                    }
+                """, timeout=10000)
+            except Exception as exc:
+                full_res = None
+                entry["full_res_error"] = str(exc)
+            entry["full_res"] = full_res
+            tile_inventory.append(entry)
+
+        target_hash = req.get("target_hash")
+        result: Dict[str, Any] = {"ok": True, "data_id": data_id, "thumb_count": thumb_count, "tile_inventory": tile_inventory}
+
+        if target_hash:
+            match = next((t for t in tile_inventory if t.get("hash") == target_hash), None)
+            if not match:
+                result["download"] = {"ok": False, "reason": f"no tile matched target_hash {target_hash!r}"}
+                return {"results": [result], "session_identity": session_identity}
+            full_res = match.get("full_res")
+            if not full_res or not full_res.get("isBlob"):
+                result["download"] = {"ok": False, "reason": "matched tile has no blob: full-res image", "matched_tile": match}
+                return {"results": [result], "session_identity": session_identity}
+            try:
+                fetch_result = await _evaluate(page, """
+                    async ([src]) => {
+                      try {
+                        const resp = await fetch(src);
+                        const buf = await resp.arrayBuffer();
+                        const bytes = new Uint8Array(buf);
+                        let binary = '';
+                        const chunkSize = 0x8000;
+                        for (let i = 0; i < bytes.length; i += chunkSize) {
+                          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+                        }
+                        return { ok: true, status: resp.status, base64: btoa(binary), contentType: resp.headers.get('content-type') || '' };
+                      } catch (e) {
+                        return { ok: false, reason: String(e && e.message || e) };
+                      }
+                    }
+                """, [full_res["src"]])
+            except Exception as exc:
+                fetch_result = {"ok": False, "reason": str(exc)}
+
+            download: Dict[str, Any] = {"matched_tile_index": match["index"], "matched_tile_hash": match["hash"], "fetch_status": fetch_result.get("status"), "fetch_content_type": fetch_result.get("contentType")}
+            if not fetch_result.get("ok"):
+                download["ok"] = False
+                download["reason"] = fetch_result.get("reason")
+            else:
+                raw = b64mod.b64decode(fetch_result["base64"]) if fetch_result.get("base64") else b""
+                parsed_w, parsed_h = _parse_image_dimensions(raw)
+                download.update({
+                    "ok": True, "byte_length": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                    "detected_mime": _detect_mime_type(raw, "image"),
+                    "parsed_width": parsed_w, "parsed_height": parsed_h,
+                    "dom_reported_width": full_res.get("naturalWidth"), "dom_reported_height": full_res.get("naturalHeight"),
+                    "dimensions_match_dom": (parsed_w == full_res.get("naturalWidth") and parsed_h == full_res.get("naturalHeight")),
+                })
+            result["download"] = download
+
+        return {"results": [result], "session_identity": session_identity}
+
     if probe_type == "media_readiness_diagnostic":
         # Diagnostic-only (2026-08-23): final observation layer, after
         # ruling out selector/click-target/CSS/keyboard/album-size/general-
@@ -3105,6 +3203,52 @@ def _detect_mime_type(data: bytes, media_type_hint: Optional[str] = None) -> str
     if data[:6] in (b"GIF87a", b"GIF89a"):
         return "image/gif"
     return "video/mp4" if media_type_hint == "video" else "application/octet-stream"
+
+
+def _parse_image_dimensions(data: bytes) -> Tuple[Optional[int], Optional[int]]:
+    """Dependency-free width/height parser for JPEG/PNG/WEBP (the worker
+    has no Pillow/ImageMagick installed) — reads real file structure, not
+    any DOM-reported value, so it's an independent cross-check against the
+    browser's own naturalWidth/naturalHeight rather than trusting it."""
+    if not data:
+        return None, None
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        width = int.from_bytes(data[16:20], "big")
+        height = int.from_bytes(data[20:24], "big")
+        return width, height
+    if data[:3] == b"\xff\xd8\xff":
+        i = 2
+        n = len(data)
+        while i + 9 < n:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            if i + 4 > n:
+                break
+            seg_len = int.from_bytes(data[i + 2:i + 4], "big")
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                if i + 9 <= n:
+                    height = int.from_bytes(data[i + 5:i + 7], "big")
+                    width = int.from_bytes(data[i + 7:i + 9], "big")
+                    return width, height
+            if marker == 0xDA:
+                break
+            i += 2 + seg_len
+        return None, None
+    if data[:4] == b"RIFF" and len(data) >= 30 and data[8:12] == b"WEBP":
+        if data[12:16] == b"VP8 " and len(data) >= 30:
+            width = int.from_bytes(data[26:28], "little") & 0x3FFF
+            height = int.from_bytes(data[28:30], "little") & 0x3FFF
+            return width, height
+        if data[12:16] == b"VP8X" and len(data) >= 30:
+            width = 1 + int.from_bytes(data[24:27], "little")
+            height = 1 + int.from_bytes(data[27:30], "little")
+            return width, height
+    return None, None
 
 
 async def _upload_one(http: httpx.AsyncClient, target: Dict[str, Any], base64_data: str, content_type: str) -> Dict[str, Any]:

@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1892,6 +1892,22 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         "session_id": getattr(session, "session_id", None),
         "generation": getattr(session, "generation", None),
     }
+
+    if probe_type == "group_participants_check":
+        # Diagnostic-only (2026-08-24, Part 5 of SEND rollout): read-only
+        # membership check via the SAME sender.get_group_participants
+        # already used by the inbound listener's group_members security
+        # mode — never sends anything, just scrapes the already-open
+        # Group Info drawer's visible text so we can confirm Gunwanti's
+        # account is actually a member of both the SEND source and
+        # destination test groups before any real media is sent.
+        participants = await sender.get_group_participants(page, group_name)
+        return {"results": [{
+            "ok": participants is not None,
+            "group_name": group_name,
+            "participants": participants,
+            "error": None if participants is not None else "could not read group participants panel",
+        }], "session_identity": session_identity}
 
     if probe_type == "reply_quote_diagnostic":
         # Diagnostic-only (2026-08-24): _resolve_quoted_jump reported

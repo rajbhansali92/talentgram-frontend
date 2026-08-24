@@ -2731,8 +2731,22 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
                 return None
             return {"forward": _match(r"forward"), "download": _match(r"download")}
 
-        async def _readiness_checkpoints(page, max_checks=20, interval_s=2.0):
+        def _is_onscreen(button):
+            # The very first checkpoint (2026-08-24 finding) found Forward
+            # present in the DOM immediately for both videos, but at wildly
+            # off-screen y coordinates (-1426, -3451) — the viewer chrome's
+            # own slide-in animation, not a readiness gate. A button is
+            # only counted as genuinely available once its rect sits within
+            # a sane on-screen range.
+            if not button:
+                return False
+            rect = button.get("rect") or [0, 0, 0, 0]
+            y = rect[1] if len(rect) > 1 else 0
+            return -50 <= y <= 3000
+
+        async def _readiness_checkpoints(page, max_checks=20, interval_s=1.0, stable_needed=2):
             checkpoints = []
+            stable_run = 0
             for i in range(max_checks):
                 try:
                     video_state = _json_safe(await _evaluate(page, _VIDEO_STATE_JS))
@@ -2743,16 +2757,19 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
                 except Exception as exc:
                     button_dump = {"error": str(exc)}
                 classified = _classify_buttons(button_dump)
+                forward_onscreen = _is_onscreen(classified["forward"])
                 checkpoints.append({
                     "t_s": round(i * interval_s, 1),
                     "video_state": video_state,
                     "forward_present": classified["forward"] is not None,
+                    "forward_onscreen": forward_onscreen,
                     "forward_button": classified["forward"],
                     "download_present": classified["download"] is not None,
                     "download_button": classified["download"],
                     "total_buttons": len((button_dump or {}).get("buttons") or []),
                 })
-                if classified["forward"] is not None:
+                stable_run = stable_run + 1 if forward_onscreen else 0
+                if stable_run >= stable_needed:
                     break
                 await page.wait_for_timeout(int(interval_s * 1000))
             return checkpoints

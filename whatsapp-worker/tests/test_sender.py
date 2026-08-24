@@ -21,6 +21,7 @@ contract closely enough to prove the attach sequence itself is correct.
 Run:  MONGO_URL=mongodb://x python -m pytest tests/test_sender.py -q
 """
 import asyncio
+import contextlib
 import os
 import sys
 
@@ -78,6 +79,11 @@ sender._resolve_scope = _resolve_scope
 sender._snapshot_msg_baselines = _baselines
 sender._dump_send_dom = _noop
 sender._already_delivered = _not_already_delivered
+# Saved BEFORE the fake overwrite below — the strict_send_confirmation
+# tests (2026-08-24, near the end of this file) restore the REAL
+# _find_and_click_send for their duration, since they exercise its
+# actual selector-matching/Enter-fallback logic directly.
+_REAL_FIND_AND_CLICK_SEND = sender._find_and_click_send
 sender._find_and_click_send = _sent_via
 sender._safe_screenshot = _noop
 sender._dump_outgoing_dom = _noop
@@ -115,11 +121,15 @@ class _FakeCaptionLocator:
 
 
 class _FakeKeyboard:
-    def __init__(self):
+    def __init__(self, log=None):
         self.typed = []
+        self.pressed = []
+        self._log = log
 
     async def type(self, text):
         self.typed.append(text)
+        if self._log is not None:
+            self._log.append(("keyboard_type", text))
 
     async def down(self, key):
         pass
@@ -128,7 +138,9 @@ class _FakeKeyboard:
         pass
 
     async def press(self, key):
-        pass
+        self.pressed.append(key)
+        if self._log is not None:
+            self._log.append(("keyboard_press", key))
 
 
 class _FakeFileChooserElement:
@@ -185,16 +197,24 @@ class _FileChooserCtx:
 
 class FakePage:
     def __init__(self, *, chooser_should_raise=False, attach_click_should_raise=False,
-                 caption_selector_that_matches="__default__"):
+                 caption_selector_that_matches="__default__",
+                 send_button_selector_that_matches="__default__"):
         """`caption_selector_that_matches`: which entry of
         sender.CAPTION_INPUT_SELECTORS "exists and is visible" on this fake
         preview screen. "__default__" (the sentinel, not a real selector)
         means the CURRENT real one (index 0) — matching the fixed
         production behavior. Pass a specific selector string to simulate
         only the legacy fallback matching, or None to simulate neither
-        matching at all (no caption input found anywhere)."""
+        matching at all (no caption input found anywhere).
+
+        `send_button_selector_that_matches`: same idea for
+        sender.SEND_BUTTON_SELECTORS — "__default__" means the confirmed-
+        live entry (index 0) matches, matching the fixed production
+        behavior. Pass None to simulate NO selector matching (the real
+        2026-08-24 bug scenario that used to fall through to Enter)."""
+        self.action_log = []
         self.clicks = []
-        self.keyboard = _FakeKeyboard()
+        self.keyboard = _FakeKeyboard(log=self.action_log)
         self.file_choosers = []
         self.evaluate_calls = []
         self.caption_clicks = []
@@ -205,6 +225,12 @@ class FakePage:
             if caption_selector_that_matches == "__default__"
             else caption_selector_that_matches
         )
+        self._send_button_selector_that_matches = (
+            sender.SEND_BUTTON_SELECTORS[0]
+            if send_button_selector_that_matches == "__default__"
+            else send_button_selector_that_matches
+        )
+        self.send_button_clicks = []
 
     async def click(self, selector, timeout=None):
         if self._attach_click_should_raise and selector == sender.SEL["attach_btn"]:
@@ -213,6 +239,7 @@ class FakePage:
                 f'  - element intercepts pointer events'
             )
         self.clicks.append(selector)
+        self.action_log.append(("page_click", selector))
 
     def expect_file_chooser(self, timeout=None):
         return _FileChooserCtx(self, should_raise=self._chooser_should_raise)
@@ -220,10 +247,18 @@ class FakePage:
     def locator(self, sel):
         if sel in sender.CAPTION_INPUT_SELECTORS:
             matches = sel == self._caption_selector_that_matches
-            return _FakeCaptionLocator(
-                count=1 if matches else 0, visible=matches,
-                on_click=(lambda _sel=sel: self.caption_clicks.append(_sel)) if matches else None,
-            )
+
+            def _on_caption_click(_sel=sel):
+                self.caption_clicks.append(_sel)
+                self.action_log.append(("caption_click", _sel))
+            return _FakeCaptionLocator(count=1 if matches else 0, visible=matches, on_click=_on_caption_click if matches else None)
+        if sel in sender.SEND_BUTTON_SELECTORS:
+            matches = sel == self._send_button_selector_that_matches
+
+            def _on_send_click(_sel=sel):
+                self.send_button_clicks.append(_sel)
+                self.action_log.append(("send_button_click", _sel))
+            return _FakeCaptionLocator(count=1 if matches else 0, visible=matches, on_click=_on_send_click if matches else None)
         return _FakeLocator()
 
     async def evaluate(self, js, arg=None):
@@ -522,6 +557,166 @@ def test_caption_prefers_new_selector_over_legacy_when_both_match():
             message_body="Ahana Test — Google Test Intro", local_file_path=path,
         ))
         assert page.caption_clicks == [sender.CAPTION_INPUT_SELECTORS[0]]
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+# --- strict_send_confirmation (2026-08-24): SEND's own send-click safety ---
+# Live diagnostics on the real media-preview screen (send_button_preview_diagnostic,
+# never sent anything) confirmed the real Send control: a
+# div[role="button"][aria-label^="Send"] (aria-label reflects selection
+# count, e.g. "Send 1 selected") wrapping a
+# span[data-icon="wds-ic-send-filled"] icon — both now the first two
+# entries in SEND_BUTTON_SELECTORS. Every pre-existing entry returned
+# count=0 during a real SEND, which fell through to a blind Enter
+# keypress — unsafe, since a cleared composer is not proof of submission.
+#
+# These tests need the REAL _find_and_click_send (the earlier attach/
+# caption tests above replaced it with a fixed-result fake to isolate
+# THOSE tests from send-click behavior entirely) — restored for exactly
+# the duration of each test below via this context manager.
+@contextlib.contextmanager
+def _real_send_click():
+    sender._find_and_click_send = _REAL_FIND_AND_CLICK_SEND
+    try:
+        yield
+    finally:
+        sender._find_and_click_send = _sent_via
+
+
+def test_send_control_identified_and_clicked_correctly():
+    """1/2: the current media-preview Send control is identified via the
+    confirmed-live selector and is the ONLY thing clicked — no Enter."""
+    page = FakePage()
+    path = _real_temp_file(".jpg")
+    try:
+        with _real_send_click():
+            result = run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="Ahana Test — Google Test Take 1", local_file_path=path,
+                strict_send_confirmation=True,
+            ))
+        assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+        assert page.send_button_clicks == [sender.SEND_BUTTON_SELECTORS[0]]
+        assert "Enter" not in page.keyboard.pressed
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_strict_mode_never_falls_back_to_enter():
+    """3: under strict_send_confirmation, when no send-control selector
+    matches, Enter must NEVER be pressed — this is the exact real bug
+    (blind Enter treated as a send)."""
+    page = FakePage(send_button_selector_that_matches=None)
+    path = _real_temp_file(".jpg")
+    try:
+        with _real_send_click():
+            result = run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="Ahana Test — Google Test Take 2", local_file_path=path,
+                strict_send_confirmation=True,
+            ))
+        assert result["state"] == sender.MESSAGE_NOT_SENT
+        assert "Enter" not in page.keyboard.pressed
+        assert page.send_button_clicks == []
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_non_strict_mode_still_allows_enter_fallback_for_other_callers():
+    """Pre-existing callers (campaign/job-queue sends) that never pass
+    strict_send_confirmation must be completely unaffected — Enter
+    fallback still works exactly as before."""
+    page = FakePage(send_button_selector_that_matches=None)
+    path = _real_temp_file(".jpg")
+    try:
+        with _real_send_click():
+            result = run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="some campaign message", local_file_path=path,
+            ))
+        assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+        assert "Enter" in page.keyboard.pressed
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_strict_mode_unverified_submission_never_produces_sent_status():
+    """4: a caller-level check — mark_scan.py's _SEND_SUCCESS_STATES must
+    never include MESSAGE_NOT_SENT, so an unverified/failed submission can
+    never become send_status="sent" in media_sends."""
+    import mark_scan
+    assert sender.MESSAGE_NOT_SENT not in mark_scan._SEND_SUCCESS_STATES
+    assert sender.MESSAGE_SENT_AND_VERIFIED in mark_scan._SEND_SUCCESS_STATES
+    assert sender.MESSAGE_SENT_BUT_NOT_VERIFIED in mark_scan._SEND_SUCCESS_STATES
+
+
+def test_successful_submission_is_deterministic_not_incidental():
+    """5: a successful send under strict mode is driven by a real,
+    positively-identified click — re-running with the same fake state
+    produces the same selector/state every time (deterministic), not a
+    coincidental Enter-based clearing."""
+    for _ in range(3):
+        page = FakePage()
+        path = _real_temp_file(".jpg")
+        try:
+            with _real_send_click():
+                result = run(sender.send_whatsapp_message(
+                    page=page, destination_type="group", destination="Talentgram Casting Test",
+                    message_body="Ahana Test — Google Test Take 3", local_file_path=path,
+                    strict_send_confirmation=True,
+                ))
+            assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+            assert page.send_button_clicks == [sender.SEND_BUTTON_SELECTORS[0]]
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def test_caption_entered_before_send_is_clicked():
+    """6: the caption must be typed BEFORE the send control is clicked —
+    verified via the shared action_log's temporal ordering, not just that
+    both happened."""
+    page = FakePage()
+    path = _real_temp_file(".jpg")
+    try:
+        with _real_send_click():
+            run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="Ahana Test — Google Test Intro", local_file_path=path,
+                strict_send_confirmation=True,
+            ))
+        kinds = [entry[0] for entry in page.action_log]
+        assert "caption_click" in kinds and "send_button_click" in kinds
+        assert kinds.index("caption_click") < kinds.index("send_button_click")
+        # the actual typed text is the caption, and it happened before the click too.
+        type_events = [e for e in page.action_log if e[0] == "keyboard_type"]
+        assert type_events and type_events[0][1] == "Ahana Test — Google Test Intro"
+        assert kinds.index("keyboard_type") < kinds.index("send_button_click")
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_local_file_path_survives_strict_mode_not_sent_path():
+    """7: local_file_path must never be deleted by sender.py even on the
+    NEW strict-mode MESSAGE_NOT_SENT early-return path — the finally
+    block's owns_temp_file gating still applies."""
+    page = FakePage(send_button_selector_that_matches=None)
+    path = _real_temp_file(".jpg")
+    try:
+        with _real_send_click():
+            result = run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="caption", local_file_path=path,
+                strict_send_confirmation=True,
+            ))
+        assert result["state"] == sender.MESSAGE_NOT_SENT
+        assert os.path.exists(path), "local_file_path must survive the strict-mode MESSAGE_NOT_SENT path"
     finally:
         if os.path.exists(path):
             os.unlink(path)

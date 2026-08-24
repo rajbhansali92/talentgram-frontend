@@ -148,10 +148,20 @@ async def _p26b_search_evidence(page: Page, stage: str, search_sel: Optional[str
     return evidence
 
 # Resilient send-button fallback chain. WhatsApp Web rotates data-testid/class
-# names, so we try several signals in order and log which one matched. The
-# data-icon="send" span has been the most stable signal historically.
+# names, so we try several signals in order and log which one matched.
+# The first two entries were confirmed live (2026-08-24) via a diagnostic-only
+# attach+inspect run on the media-preview screen (never sent): every entry
+# below them returned count=0 for a real disposable SEND. The real control is
+# a div[role="button"] whose aria-label reflects the selection count
+# ("Send 1 selected", "Send 2 selected", ...) — hence the prefix match rather
+# than an exact string — wrapping a span[data-icon="wds-ic-send-filled"] icon
+# glyph (WhatsApp's current icon-system naming). Clicking the icon span
+# directly also works (same event-bubbling behavior already proven for the
+# attach button's plus-rounded span), so both are listed.
 SEND_BUTTON_SELECTORS = [
-    "[data-testid='send']",                  # legacy (the selector that just went stale)
+    '[aria-label^="Send"][role="button"]',   # confirmed live (2026-08-24) — media-preview send, count reflects selection
+    '[data-icon="wds-ic-send-filled"]',      # confirmed live (2026-08-24) — the send icon glyph itself
+    "[data-testid='send']",                  # legacy (the selector that first went stale)
     "button[aria-label='Send']",
     "button[aria-label*='Send']",
     "footer button[aria-label*='Send']",
@@ -161,11 +171,18 @@ SEND_BUTTON_SELECTORS = [
 ]
 
 
-async def _find_and_click_send(page: Page) -> str:
+async def _find_and_click_send(page: Page, *, allow_enter_fallback: bool = True) -> Optional[str]:
     """Locate and click the WhatsApp send button via the fallback chain.
 
-    Returns the selector that worked (or 'keyboard:Enter'). Logs every probe so
-    the live DOM tells us which selector is currently valid — no guessing.
+    Returns the selector that worked, `'keyboard:Enter'` if the Enter
+    fallback fired, or `None` if `allow_enter_fallback=False` and no real
+    selector matched — the caller must treat `None` as "no positive
+    submission evidence" and refuse to claim success (2026-08-24: SEND's
+    own verification must never classify an item as sent merely because
+    the composer cleared after a blind Enter keypress — see
+    send_whatsapp_message's `strict_send_confirmation` param). Logs every
+    probe so the live DOM tells us which selector is currently valid — no
+    guessing.
     """
     for sel in SEND_BUTTON_SELECTORS:
         try:
@@ -182,6 +199,11 @@ async def _find_and_click_send(page: Page) -> str:
                 return sel
         except Exception as exc:
             logger.info("sender: send probe %-42s error=%s", sel, exc)
+
+    if not allow_enter_fallback:
+        logger.warning("sender: no send button matched any selector — "
+                        "allow_enter_fallback=False, refusing to guess via Enter")
+        return None
 
     # Resilient last resort: Enter sends a focused text message / media preview.
     logger.warning("sender: no send button matched any selector — falling back to Enter key")
@@ -1602,10 +1624,26 @@ async def send_whatsapp_message(
     is_retry: bool = False,
     fast: bool = False,
     diagnostic_meta: Optional[Dict[str, Any]] = None,
+    strict_send_confirmation: bool = False,
 ) -> dict:
     """
     Core automation logic for sending a single WhatsApp message.
     Returns {"state": str, "evidence": dict} with structured decision evidence.
+
+    `strict_send_confirmation` (2026-08-24, SEND workflow safety): when
+    True, `_find_and_click_send` is never allowed to fall back to a blind
+    Enter keypress — if no real send-control selector matches, this
+    returns MESSAGE_NOT_SENT immediately rather than guessing. A blind
+    Enter clearing the composer is not proof media was actually
+    submitted (2026-08-24 finding: SEND_BUTTON_SELECTORS returned 0 for
+    every entry during a real send, fell to Enter, and the resulting
+    MESSAGE_SENT_BUT_NOT_VERIFIED state was indistinguishable from a
+    genuine ambiguous-but-likely-delivered case). Defaults to False so
+    every pre-existing caller (campaign/job-queue sends) is completely
+    unaffected — only mark_scan.py's SEND path opts in. When a real
+    selector DOES match (now including the confirmed-live entries at the
+    top of SEND_BUTTON_SELECTORS), this flag changes nothing — the click
+    is real either way; it only removes the last-resort guess.
 
     `diagnostic_meta` (2026-08-24, diagnostic-only): caller-supplied context
     (source group/media type/role/tile index/item number — see mark_scan.py
@@ -1910,7 +1948,11 @@ async def send_whatsapp_message(
                                "anything -> MESSAGE_NOT_SENT")
                 return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing}
             await _safe_screenshot(page, "/tmp/pre_send.png")
-            sent_via = await _find_and_click_send(page)
+            sent_via = await _find_and_click_send(page, allow_enter_fallback=not strict_send_confirmation)
+            if sent_via is None:
+                logger.warning("sender: strict_send_confirmation — no real send control found for media, "
+                               "refusing to guess via Enter -> MESSAGE_NOT_SENT")
+                return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing}
             evidence["send_clicked"] = True
             logger.info("sender: media send click executed via %s", sent_via)
             await asyncio.sleep(3.0)  # Wait for media upload and send to complete
@@ -1954,7 +1996,11 @@ async def send_whatsapp_message(
                            "-> MESSAGE_NOT_SENT")
             return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing}
         await _safe_screenshot(page, "/tmp/pre_send.png")
-        sent_via = await _find_and_click_send(page)
+        sent_via = await _find_and_click_send(page, allow_enter_fallback=not strict_send_confirmation)
+        if sent_via is None:
+            logger.warning("sender: strict_send_confirmation — no real send control found for text, "
+                           "refusing to guess via Enter -> MESSAGE_NOT_SENT")
+            return {"state": MESSAGE_NOT_SENT, "evidence": evidence, "timing": timing}
         evidence["send_clicked"] = True
         logger.info("sender: text send click executed via %s", sent_via)
         await asyncio.sleep(0.4 if fast else 1.0)

@@ -5185,7 +5185,7 @@ async def _send_one(page, target: Dict[str, Any], raw: bytes, diagnostic_meta: O
         result = await sender.send_whatsapp_message(
             page=page, destination_type="group", destination=target["destination_group"],
             message_body=target.get("caption") or "", local_file_path=temp_path,
-            diagnostic_meta=diagnostic_meta,
+            diagnostic_meta=diagnostic_meta, strict_send_confirmation=True,
         )
         state = result.get("state")
         if state in _SEND_SUCCESS_STATES:

@@ -1885,7 +1885,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1936,6 +1936,173 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "chat_ready_error": ready_error,
             "dom": dom_result,
         }], "session_identity": session_identity}
+
+    if probe_type == "destination_incoming_message_diagnostic":
+        # Diagnostic-only (2026-08-24) — classification C1/C2/C3/C4 test.
+        # The user manually sends ONE disposable plain-text message from
+        # THEIR OWN account (not the Gunwanti worker) into the destination
+        # group, to determine whether the group's live sync is healthy for
+        # a genuinely INCOMING message even though the worker's own 6
+        # historical outgoing media messages remain invisible. Never sends
+        # anything, never mutates media_sends/casting_pipeline, never
+        # relinks/logs out. Checks BEFORE any reload first, then does one
+        # controlled forced reload (reusing the same bounded settle-retry
+        # already proven necessary — see destination_media_inventory_diagnostic)
+        # and checks again.
+        marker_text = req.get("marker_text") or "DESTINATION SYNC TEST 7f31c9 — ignore"
+
+        def _tail_search_js():
+            return """
+                ([sel, marker]) => {
+                  const els = Array.from(document.querySelectorAll(sel));
+                  const found = els.find(el => (el.innerText || '').includes(marker));
+                  if (!found) {
+                    return {
+                      found: false,
+                      total_rendered: els.length,
+                      last_5_ids: els.slice(-5).map(el => el.getAttribute('data-id')),
+                    };
+                  }
+                  const ct = found.querySelector('[data-pre-plain-text]');
+                  const html = found.outerHTML;
+                  const testidCounts = {};
+                  (html.match(/data-testid="[^"]+"/g) || []).forEach(m => {
+                    testidCounts[m] = (testidCounts[m] || 0) + 1;
+                  });
+                  return {
+                    found: true,
+                    total_rendered: els.length,
+                    data_id: found.getAttribute('data-id'),
+                    pre_plain_text: ct ? ct.getAttribute('data-pre-plain-text') : null,
+                    inner_text: (found.innerText || '').slice(0, 200),
+                    html_len: html.length,
+                    testid_counts: testidCounts,
+                    outer_html_snippet: html.slice(0, 1500),
+                  };
+                }
+            """
+
+        result: Dict[str, Any] = {"marker_text": marker_text}
+
+        # --- Step A: check BEFORE any reload -------------------------------
+        try:
+            scope = await sender._resolve_scope(page)
+            full_sel = f"{scope} [data-testid^='conv-msg-']"
+            result["before_reload"] = await _evaluate(page, _tail_search_js(), [full_sel, marker_text])
+        except Exception as exc:
+            result["before_reload_error"] = str(exc)
+
+        # --- Step B: forced reload with bounded settle-retry ---------------
+        reload_error = None
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(3000)
+        except Exception as exc:
+            reload_error = str(exc)
+        result["reload_error"] = reload_error
+
+        status_after_reload = "SEARCH_FAILED"
+        reload_settle_attempts = []
+        for attempt, extra_wait_ms in enumerate((0, 4000, 6000, 8000)):
+            if extra_wait_ms:
+                await page.wait_for_timeout(extra_wait_ms)
+            status_after_reload = await sender._open_group_chat(page, group_name)
+            reload_settle_attempts.append({"attempt": attempt, "extra_wait_ms": extra_wait_ms, "status": status_after_reload})
+            if status_after_reload == "OPENED":
+                break
+        result["reload_settle_attempts"] = reload_settle_attempts
+        result["status_after_reload"] = status_after_reload
+
+        if status_after_reload == "OPENED":
+            try:
+                await sender._wait_for_chat_ready(page)
+                scope = await sender._resolve_scope(page)
+                full_sel = f"{scope} [data-testid^='conv-msg-']"
+                result["after_reload"] = await _evaluate(page, _tail_search_js(), [full_sel, marker_text])
+            except Exception as exc:
+                result["after_reload_error"] = str(exc)
+
+        marker_ever_found = bool(
+            (result.get("before_reload") or {}).get("found")
+            or (result.get("after_reload") or {}).get("found")
+        )
+
+        # --- Step C: additional read-only checks, only if the marker was
+        # actually found (per the user's instructions) --------------------
+        additional_checks: Dict[str, Any] = {}
+        if marker_ever_found:
+            # Media panel re-check.
+            try:
+                header_sel = None
+                for sel in sender.GROUP_INFO_TRIGGER_SELECTORS:
+                    if await page.locator(sel).count():
+                        header_sel = sel
+                        break
+                if header_sel:
+                    await page.click(header_sel, timeout=5_000)
+                    await asyncio.sleep(0.6)
+                    panel_sel = await sender._find_populated_panel(page, sender.GROUP_INFO_PANEL_SELECTORS)
+                    if panel_sel:
+                        try:
+                            await page.click('text="Media, links and docs"', timeout=5_000)
+                            await asyncio.sleep(1.0)
+                            media_dump = await _evaluate(page, """
+                                () => {
+                                  const imgs = Array.from(document.querySelectorAll('img[src^="blob:"]'));
+                                  return {blob_image_count: imgs.length, total_testid_elements: document.querySelectorAll('[data-testid]').length};
+                                }
+                            """, [])
+                            additional_checks["media_panel_recheck"] = media_dump
+                        except Exception as exc:
+                            additional_checks["media_panel_recheck_error"] = str(exc)
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.2)
+                    await page.keyboard.press("Escape")
+            except Exception as exc:
+                additional_checks["media_panel_error"] = str(exc)
+
+            # In-chat search for a known caption fragment and a known timestamp.
+            for label, query in (
+                ("search_by_caption", "Google Test Take 1"),
+                ("search_by_timestamp", "5:32 PM"),
+            ):
+                try:
+                    search_icon_sel = None
+                    for sel in ('[data-testid="search"]', 'button[aria-label="Search"]', '[aria-label="Search"]', 'span[data-icon="search"]'):
+                        if await page.locator(sel).count():
+                            search_icon_sel = sel
+                            break
+                    if not search_icon_sel:
+                        additional_checks[label] = {"ok": False, "reason": "no in-chat search trigger found"}
+                        continue
+                    await page.click(search_icon_sel, timeout=5_000)
+                    await asyncio.sleep(0.5)
+                    await page.keyboard.type(query)
+                    await asyncio.sleep(1.2)
+                    search_result_js = """
+                        () => {
+                          const text = document.body.innerText || '';
+                          return {
+                            no_results_shown: /no messages found|no results/i.test(text),
+                            visible_result_count_hint: (text.match(/result/gi) || []).length,
+                          };
+                        }
+                    """
+                    additional_checks[label] = await _evaluate(page, search_result_js, [])
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.2)
+                    await page.keyboard.press("Escape")
+                except Exception as exc:
+                    additional_checks[label] = {"ok": False, "error": str(exc)}
+                    try:
+                        await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+
+        result["marker_ever_found"] = marker_ever_found
+        result["additional_checks"] = additional_checks
+
+        return {"results": [result], "session_identity": session_identity}
 
     if probe_type == "session_identity_and_sync_boundary_diagnostic":
         # Diagnostic-only (2026-08-24) — read-only session-identity and

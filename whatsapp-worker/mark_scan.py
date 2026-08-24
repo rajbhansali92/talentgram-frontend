@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1934,6 +1934,112 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "attach_mechanism_full_diagnostic":
+        # Diagnostic-only (2026-08-24) — full before/after investigation of
+        # the CURRENT WhatsApp Web attach mechanism, requested explicitly
+        # before any sender.py change: captures composer-area buttons,
+        # elementsFromPoint at the real attach button's location, and every
+        # file-input/menu-like element BEFORE a real Playwright click on
+        # [data-testid="plus-rounded"], then the SAME inventory AFTER, so a
+        # diff shows exactly what (if anything) the click actually mounts.
+        # Never sends anything — presses Escape at the end either way.
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        _inventory_js = """
+            () => {
+              function describe(el) {
+                if (!el) return null;
+                const rect = el.getBoundingClientRect();
+                return {
+                  tag: el.tagName,
+                  testid: el.getAttribute ? el.getAttribute('data-testid') : null,
+                  aria_label: el.getAttribute ? el.getAttribute('aria-label') : null,
+                  title: el.getAttribute ? el.getAttribute('title') : null,
+                  role: el.getAttribute ? el.getAttribute('role') : null,
+                  text: (el.innerText || '').slice(0, 80),
+                  visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                  rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                };
+              }
+              function collectFileInputs() {
+                return Array.from(document.querySelectorAll('input[type="file"]')).map((el, i) => {
+                  const rect = el.getBoundingClientRect();
+                  let anc = el.parentElement, chain = [];
+                  for (let d = 0; d < 8 && anc; d++) {
+                    const t = anc.getAttribute && anc.getAttribute('data-testid');
+                    if (t) chain.push(t);
+                    anc = anc.parentElement;
+                  }
+                  return {
+                    index: i, id: el.id || null, accept: el.getAttribute('accept'), multiple: el.multiple,
+                    visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                    rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                    ancestor_testids: chain,
+                  };
+                });
+              }
+              function collectMenuLike() {
+                const sels = '[role="menu"], [role="menuitem"], [role="listbox"], [role="option"], [role="dialog"], [data-testid*="menu" i], [data-testid*="popover" i], [data-testid*="dialog" i]';
+                return Array.from(document.querySelectorAll(sels)).map(describe);
+              }
+              function collectComposerButtons() {
+                const box = document.querySelector('[data-testid="conversation-compose-box-input"]');
+                let footer = box;
+                for (let d = 0; d < 8 && footer; d++) {
+                  if (footer.tagName === 'FOOTER') break;
+                  footer = footer.parentElement;
+                }
+                const scope = footer || document;
+                return Array.from(scope.querySelectorAll('button, [role="button"], span[data-testid]')).map(describe);
+              }
+              const attachEl = document.querySelector('[data-testid="plus-rounded"]');
+              const rect = attachEl ? attachEl.getBoundingClientRect() : null;
+              const cx = rect ? Math.round(rect.x + rect.width / 2) : null;
+              const cy = rect ? Math.round(rect.y + rect.height / 2) : null;
+              const stack = (cx !== null) ? document.elementsFromPoint(cx, cy).map(describe) : null;
+              return {
+                attach_button: describe(attachEl),
+                click_point: {x: cx, y: cy},
+                elements_from_point: stack,
+                composer_buttons: collectComposerButtons(),
+                file_inputs: collectFileInputs(),
+                menu_like: collectMenuLike(),
+                total_testid_elements: document.querySelectorAll('[data-testid]').length,
+              };
+            }
+        """
+        try:
+            before = await _evaluate(page, _inventory_js, [])
+        except Exception as exc:
+            before = {"error": str(exc)}
+
+        click_error = None
+        try:
+            await page.click('[data-testid="plus-rounded"]', timeout=10_000)
+            await asyncio.sleep(1.2)
+        except Exception as exc:
+            click_error = str(exc)
+
+        try:
+            after = await _evaluate(page, _inventory_js, [])
+        except Exception as exc:
+            after = {"error": str(exc)}
+
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+        return {"results": [{
+            "ok": True, "group_name": group_name,
+            "chat_ready_error": ready_error, "click_error": click_error,
+            "before": before, "after": after,
         }], "session_identity": session_identity}
 
     if probe_type == "plus_rounded_locations_diagnostic":

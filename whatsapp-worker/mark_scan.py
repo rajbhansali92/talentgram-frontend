@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1933,6 +1933,60 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
+            "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "attach_menu_after_click_diagnostic":
+        # Diagnostic-only (2026-08-24) — follow-up to attach_button_diagnostic:
+        # data-testid="attach-menu-plus" no longer exists anywhere in the DOM;
+        # the actual button is data-testid="plus-rounded". session.py also
+        # defines (unused-in-code) "attach_doc"/"attach_img" testids
+        # ("attach-document"/"attach-image-video"), suggesting the original
+        # flow expected a 2-step menu (click plus -> click a specific
+        # attach-type item) that got collapsed/simplified at some point.
+        # This clicks the REAL plus button, dumps whatever menu appears,
+        # then presses Escape to close it again — never selects a file,
+        # never sends anything.
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+        click_error = None
+        try:
+            await page.click('[data-testid="plus-rounded"]', timeout=10_000)
+            await asyncio.sleep(1.0)
+        except Exception as exc:
+            click_error = str(exc)
+        _js = """
+            () => {
+              const all = Array.from(document.querySelectorAll('[data-testid]'));
+              return {
+                total_testid_elements: all.length,
+                attach_image_video_exists: !!document.querySelector('[data-testid="attach-image-video"]'),
+                attach_document_exists: !!document.querySelector('[data-testid="attach-document"]'),
+                file_input_count: document.querySelectorAll('input[type="file"]').length,
+                menu_like: all
+                  .filter(el => /attach|menu|photo|video|document|camera/i.test(el.getAttribute('data-testid') || ''))
+                  .map(el => ({
+                    testid: el.getAttribute('data-testid'), tag: el.tagName,
+                    visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                    aria_label: el.getAttribute('aria-label'),
+                  })),
+              };
+            }
+        """
+        try:
+            dom_result = await _evaluate(page, _js, [])
+        except Exception as exc:
+            dom_result = {"error": str(exc)}
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return {"results": [{
+            "ok": True, "group_name": group_name,
+            "chat_ready_error": ready_error, "click_error": click_error,
             "dom": dom_result,
         }], "session_identity": session_identity}
 

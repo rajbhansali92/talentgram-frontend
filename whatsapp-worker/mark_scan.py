@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1934,6 +1934,172 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "destination_deep_investigation_diagnostic":
+        # Diagnostic-only (2026-08-24) — the user provided direct screenshot
+        # evidence (WhatsApp's own conversation view AND its Group Info
+        # "Media, links and docs" panel, both showing 6 real media items
+        # sent by "Gunwanti Talentgram Team" into this exact group) proving
+        # delivery genuinely happened, while every prior worker-side read
+        # of the MAIN conversation timeline — including one with a proven-
+        # fresh forced reload — showed zero media. This investigates why,
+        # without sending anything: (A) repeatedly scrolls the message
+        # container to the true bottom (not just once, like raw_tail_ids —
+        # loops until scrollHeight stops growing) re-checking the rendered
+        # message count after each scroll, since WhatsApp's virtualized
+        # list may need more than one scroll pass to actually load the
+        # tail; (B) opens the SAME Group Info -> "Media, links and docs"
+        # panel the screenshot shows, via the exact click path a real user
+        # would use, to see if that separately-loaded view is in sync even
+        # when the main timeline isn't. Never sends, never mutates.
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+
+        scroll_js = """
+            ([sel]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              let container = els[0] || null, maxOverflow = 0;
+              let node = els[0] ? els[0].parentElement : null;
+              for (let d = 0; d < 8 && node; d++) {
+                const overflow = node.scrollHeight - node.clientHeight;
+                if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+                node = node.parentElement;
+              }
+              return {
+                total_rendered: els.length,
+                scrollTop: container ? container.scrollTop : null,
+                scrollHeight: container ? container.scrollHeight : null,
+                clientHeight: container ? container.clientHeight : null,
+                has_container: !!container,
+              };
+            }
+        """
+        scroll_to_bottom_js = """
+            ([sel]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              let container = els[0] || null, maxOverflow = 0;
+              let node = els[0] ? els[0].parentElement : null;
+              for (let d = 0; d < 8 && node; d++) {
+                const overflow = node.scrollHeight - node.clientHeight;
+                if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+                node = node.parentElement;
+              }
+              if (container) container.scrollTop = container.scrollHeight;
+              return !!container;
+            }
+        """
+
+        scroll_snapshots = []
+        try:
+            snap = await _evaluate(page, scroll_js, [full_sel])
+            scroll_snapshots.append({"pass": 0, **snap})
+            prev_height = snap.get("scrollHeight")
+            for i in range(1, 8):
+                did_scroll = await _evaluate(page, scroll_to_bottom_js, [full_sel])
+                if not did_scroll:
+                    break
+                await page.wait_for_timeout(1200)
+                snap = await _evaluate(page, scroll_js, [full_sel])
+                scroll_snapshots.append({"pass": i, **snap})
+                if snap.get("scrollHeight") == prev_height and snap.get("total_rendered") == scroll_snapshots[-2]["total_rendered"]:
+                    break
+                prev_height = snap.get("scrollHeight")
+        except Exception as exc:
+            scroll_snapshots.append({"error": str(exc)})
+
+        # Final full inventory after scroll convergence, same rich capture
+        # as destination_media_inventory_diagnostic.
+        _inventory_js = """
+            ([sel]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              return {
+                total_rendered: els.length,
+                messages: els.map((el, i) => ({
+                  index: i,
+                  data_id: el.getAttribute('data-id'),
+                  inner_text: (el.innerText || '').slice(0, 200),
+                  img_count: el.querySelectorAll('img').length,
+                  video_count: el.querySelectorAll('video').length,
+                  has_media_album: !!el.querySelector('[data-testid="media-album"]'),
+                })),
+              };
+            }
+        """
+        try:
+            final_inventory = await _evaluate(page, _inventory_js, [full_sel])
+        except Exception as exc:
+            final_inventory = {"error": str(exc)}
+
+        # --- Media panel (Group Info -> "Media, links and docs") ---------
+        media_panel: Dict[str, Any] = {"opened": False}
+        try:
+            header_sel = None
+            for sel in sender.GROUP_INFO_TRIGGER_SELECTORS:
+                if await page.locator(sel).count():
+                    header_sel = sel
+                    break
+            if header_sel:
+                await page.click(header_sel, timeout=5_000)
+                await asyncio.sleep(0.6)
+                panel_sel = await sender._find_populated_panel(page, sender.GROUP_INFO_PANEL_SELECTORS)
+                if panel_sel:
+                    media_row_js = """
+                        (panelSel) => {
+                          const panel = document.querySelector(panelSel);
+                          if (!panel) return null;
+                          const rows = Array.from(panel.querySelectorAll('div, span'));
+                          const row = rows.find(el => (el.innerText || '').trim() === 'Media, links and docs');
+                          if (!row) return null;
+                          let clickable = row;
+                          for (let d = 0; d < 5 && clickable; d++) {
+                            if (clickable.getAttribute('role') === 'button' || clickable.tagName === 'BUTTON') break;
+                            clickable = clickable.parentElement;
+                          }
+                          return true;
+                        }
+                    """
+                    row_found = await _evaluate(page, media_row_js, [panel_sel])
+                    if row_found:
+                        try:
+                            await page.click(f'text="Media, links and docs"', timeout=5_000)
+                            await asyncio.sleep(1.0)
+                            media_dump_js = """
+                                () => {
+                                  const imgs = Array.from(document.querySelectorAll('img[src^="blob:"]'));
+                                  return {
+                                    blob_image_count: imgs.length,
+                                    img_srcs: imgs.slice(0, 20).map(im => (im.src || '').slice(0, 30)),
+                                    total_testid_elements: document.querySelectorAll('[data-testid]').length,
+                                    url: location.href,
+                                  };
+                                }
+                            """
+                            media_dump = await _evaluate(page, media_dump_js, [])
+                            media_panel = {"opened": True, "row_found": True, "dump": media_dump}
+                        except Exception as exc:
+                            media_panel = {"opened": False, "row_found": True, "click_error": str(exc)}
+                    else:
+                        media_panel = {"opened": False, "row_found": False, "panel_sel": panel_sel}
+                else:
+                    media_panel = {"opened": False, "reason": "group info panel never populated"}
+            else:
+                media_panel = {"opened": False, "reason": "no group info trigger found"}
+        except Exception as exc:
+            media_panel = {"opened": False, "error": str(exc)}
+        finally:
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.2)
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+        return {"results": [{
+            "ok": True, "group_name": group_name,
+            "scroll_snapshots": scroll_snapshots,
+            "final_inventory": final_inventory,
+            "media_panel": media_panel,
         }], "session_identity": session_identity}
 
     if probe_type == "destination_media_inventory_diagnostic":

@@ -90,6 +90,30 @@ class _FakeLocator:
         return 1
 
 
+class _FakeCaptionLocator:
+    """Locator for one CAPTION_INPUT_SELECTORS entry — count/visible are
+    set per-selector by FakePage so a test can control exactly which
+    selector in the fallback chain "exists" on the fake preview screen."""
+    def __init__(self, count, visible, on_click=None):
+        self._count = count
+        self._visible = visible
+        self._on_click = on_click
+
+    async def count(self):
+        return self._count
+
+    @property
+    def first(self):
+        return self
+
+    async def is_visible(self):
+        return self._visible
+
+    async def click(self, timeout=None):
+        if self._on_click:
+            self._on_click()
+
+
 class _FakeKeyboard:
     def __init__(self):
         self.typed = []
@@ -160,13 +184,27 @@ class _FileChooserCtx:
 
 
 class FakePage:
-    def __init__(self, *, chooser_should_raise=False, attach_click_should_raise=False):
+    def __init__(self, *, chooser_should_raise=False, attach_click_should_raise=False,
+                 caption_selector_that_matches="__default__"):
+        """`caption_selector_that_matches`: which entry of
+        sender.CAPTION_INPUT_SELECTORS "exists and is visible" on this fake
+        preview screen. "__default__" (the sentinel, not a real selector)
+        means the CURRENT real one (index 0) — matching the fixed
+        production behavior. Pass a specific selector string to simulate
+        only the legacy fallback matching, or None to simulate neither
+        matching at all (no caption input found anywhere)."""
         self.clicks = []
         self.keyboard = _FakeKeyboard()
         self.file_choosers = []
         self.evaluate_calls = []
+        self.caption_clicks = []
         self._chooser_should_raise = chooser_should_raise
         self._attach_click_should_raise = attach_click_should_raise
+        self._caption_selector_that_matches = (
+            sender.CAPTION_INPUT_SELECTORS[0]
+            if caption_selector_that_matches == "__default__"
+            else caption_selector_that_matches
+        )
 
     async def click(self, selector, timeout=None):
         if self._attach_click_should_raise and selector == sender.SEL["attach_btn"]:
@@ -180,6 +218,12 @@ class FakePage:
         return _FileChooserCtx(self, should_raise=self._chooser_should_raise)
 
     def locator(self, sel):
+        if sel in sender.CAPTION_INPUT_SELECTORS:
+            matches = sel == self._caption_selector_that_matches
+            return _FakeCaptionLocator(
+                count=1 if matches else 0, visible=matches,
+                on_click=(lambda _sel=sel: self.caption_clicks.append(_sel)) if matches else None,
+            )
         return _FakeLocator()
 
     async def evaluate(self, js, arg=None):
@@ -390,6 +434,94 @@ def test_attach_click_failure_without_diagnostic_meta_still_works():
                 message_body="caption", local_file_path=path,
             ))
         assert len(page.evaluate_calls) == 1
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+# --- caption fix (2026-08-24): media-caption-input-container -----------------
+def test_caption_types_via_the_confirmed_live_selector():
+    """The real selector confirmed via a live diagnostic-only attach+inspect
+    run: data-testid="media-caption-input-container". Default FakePage
+    config simulates exactly this — the fixed production behavior."""
+    page = FakePage()
+    path = _real_temp_file(".jpg")
+    try:
+        result = run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="Ahana Test — Google Test Take 1", local_file_path=path,
+        ))
+        assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+        assert page.caption_clicks == [sender.CAPTION_INPUT_SELECTORS[0]]
+        assert page.keyboard.typed == ["Ahana Test — Google Test Take 1"]
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_caption_falls_back_to_legacy_selector_if_it_ever_matches_again():
+    """CAPTION_INPUT_SELECTORS keeps the old xpath as a last-resort fallback
+    — if some WhatsApp Web build ever renders it again, the caption should
+    still be typed rather than silently dropped."""
+    legacy_xpath = sender.CAPTION_INPUT_SELECTORS[1]
+    page = FakePage(caption_selector_that_matches=legacy_xpath)
+    path = _real_temp_file(".jpg")
+    try:
+        run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="Ahana Test — Google Test Take 2", local_file_path=path,
+        ))
+        assert page.caption_clicks == [legacy_xpath]
+        assert page.keyboard.typed == ["Ahana Test — Google Test Take 2"]
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_caption_missing_never_blocks_the_send():
+    """The real 2026-08-24 bug: when NO caption selector matches, the send
+    must still proceed (matching the pre-existing "never block a send over
+    a caption failure" design) — it just goes out without a caption,
+    logged, not silently pretending to have typed one."""
+    page = FakePage(caption_selector_that_matches=None)
+    path = _real_temp_file(".jpg")
+    try:
+        result = run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="Ahana Test — Google Test Take 3", local_file_path=path,
+        ))
+        assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+        assert page.caption_clicks == []
+        assert page.keyboard.typed == []
+        # send still proceeds — attach + "Photos & videos" + set_files all happened.
+        assert len(page.file_choosers) == 1
+        assert 'button[aria-label="Photos & videos"]' in page.clicks
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_caption_prefers_new_selector_over_legacy_when_both_match():
+    """If both selectors happen to match, the confirmed-live one (index 0)
+    must be tried first — it's listed first in CAPTION_INPUT_SELECTORS for
+    exactly this reason."""
+    class _BothMatchPage(FakePage):
+        def locator(self, sel):
+            if sel in sender.CAPTION_INPUT_SELECTORS:
+                return _FakeCaptionLocator(
+                    count=1, visible=True,
+                    on_click=(lambda _sel=sel: self.caption_clicks.append(_sel)),
+                )
+            return super().locator(sel)
+
+    page = _BothMatchPage()
+    path = _real_temp_file(".jpg")
+    try:
+        run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="Ahana Test — Google Test Intro", local_file_path=path,
+        ))
+        assert page.caption_clicks == [sender.CAPTION_INPUT_SELECTORS[0]]
     finally:
         if os.path.exists(path):
             os.unlink(path)

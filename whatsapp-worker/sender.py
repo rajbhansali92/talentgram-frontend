@@ -190,6 +190,45 @@ async def _find_and_click_send(page: Page) -> str:
     return "keyboard:Enter"
 
 
+# Resilient caption-input fallback chain for the media-preview screen —
+# same rationale as SEND_BUTTON_SELECTORS above. The old bare xpath
+# (`//div[contains(@class, "lexical-rich-text")]`) went stale (2026-08-24
+# live diagnostics on a real disposable send: 0 matches, 5s timeout, the
+# caller's try/except silently swallowed it, so the file attached and sent
+# with NO caption). Confirmed live via a diagnostic-only attach+inspect run
+# (never sent): the real element is data-testid="media-caption-input-container"
+# (role="textbox", aria-label="Type a message", contenteditable="true"). The
+# old xpath is kept as a last-resort fallback in case some WhatsApp Web
+# build still renders it.
+CAPTION_INPUT_SELECTORS = [
+    '[data-testid="media-caption-input-container"]',  # confirmed live (2026-08-24)
+    '//div[contains(@class, "lexical-rich-text")]',   # legacy fallback — now stale on current builds
+]
+
+
+async def _find_and_click_caption_input(page: Page) -> Optional[str]:
+    """Locate and click the media-preview caption input via the fallback
+    chain. Returns the selector that worked, or None if nothing matched —
+    callers must treat None as "no caption input available" and proceed
+    without typing anything, never guessing at a different element."""
+    for sel in CAPTION_INPUT_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            count = await loc.count()
+            if count == 0:
+                logger.info("sender: caption probe %-50s count=0", sel)
+                continue
+            visible = await loc.first.is_visible()
+            logger.info("sender: caption probe %-50s count=%d visible=%s", sel, count, visible)
+            if visible:
+                await loc.first.click(timeout=5_000)
+                logger.info("sender: ✅ caption input CLICKED via %s", sel)
+                return sel
+        except Exception as exc:
+            logger.info("sender: caption probe %-50s error=%s", sel, exc)
+    return None
+
+
 async def _dump_send_dom(page: Page) -> None:
     """Instrumentation: log the live url/title and every visible candidate
     element (data-testid / aria-label / role=button / button / data-icon) so the
@@ -1855,18 +1894,15 @@ async def send_whatsapp_message(
             # In the preview screen, there is a send button: [data-testid="send"]
             # Let's write the message body as the caption!
             if message_body:
-                # In media preview screen, there is a caption input field. Let's find it.
-                # It usually has a placeholder or test-id
-                caption_xpath = '//div[contains(@class, "lexical-rich-text")]'
-                try:
-                    await page.click(caption_xpath, timeout=5_000)
+                # In the media preview screen, there is a caption input field —
+                # located via the same resilient fallback-chain pattern as
+                # _find_and_click_send (see CAPTION_INPUT_SELECTORS above).
+                matched_caption_sel = await _find_and_click_caption_input(page)
+                if matched_caption_sel:
                     await page.keyboard.type(message_body)
                     await asyncio.sleep(0.5)
-                except Exception as e:
-                    logger.warning("sender: could not set caption, sending caption as separate message later: %s", e)
-                    # We will send message_body as a second message if caption fails
-                    # Let's clear message_body so we don't send it as caption AND separate message
-                    # But we'll keep it to send separately.
+                else:
+                    logger.warning("sender: no caption input matched any selector — sending without a caption")
             
             # Click send button on preview page (resilient fallback chain)
             if not await dismiss_blocking_dialogs(page, "send"):

@@ -344,6 +344,186 @@ def main():
     assert page2.keyboard.presses == ["Escape"]  # no close button in dump -> Escape fallback used
     print("19. _close_viewer no button found -> falls back to Escape, still verifies via <video> count")
 
+    # 2026-08-24: WhatsApp's own gallery viewer never mounts for a
+    # media-album (exhaustively proven live this session: real trusted
+    # clicks, keyboard activation, byte-identical DOM/CSS to a working
+    # single photo). _download_photo_album_tile_via_blob bypasses the
+    # viewer entirely, fetching each tile's own already-loaded full-res
+    # blob: URL directly - re-hashing tiles live and requiring an EXACT
+    # match, never trusting album_tile_index as identity (only as a
+    # navigation hint).
+    def _fake_jpeg(width: int, height: int) -> bytes:
+        data = b"\xff\xd8\xff\xc0"
+        data += (17).to_bytes(2, "big")
+        data += bytes([8])
+        data += height.to_bytes(2, "big")
+        data += width.to_bytes(2, "big")
+        data += bytes([1, 1, 0x11, 0])
+        data += b"\x00" * 20
+        return data
+
+    def _photo_tile_html(seed: str) -> str:
+        blob = (seed * 20)[:80]
+        return (
+            f'<div data-testid="image-thumb" aria-label="Open picture">'
+            f'<div style="background-image: url(&quot;data:image/jpeg;base64,{blob}&quot;);"></div></div>'
+        )
+
+    def _hash_of(seed: str) -> str:
+        blob = (seed * 20)[:80]
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    class _FakePhotoTile:
+        def __init__(self, html, full_res):
+            self._html = html
+            self._full_res = full_res
+        async def evaluate(self, js, timeout=None):
+            if js == "(el) => el.outerHTML":
+                return self._html
+            return self._full_res
+
+    class _FakePhotoTilesLocator:
+        def __init__(self, tiles):
+            self._tiles = tiles
+        async def count(self):
+            return len(self._tiles)
+        def nth(self, i):
+            return self._tiles[i]
+
+    class _FakePhotoMessageLocator:
+        def __init__(self, tiles):
+            self._tiles = tiles
+        def locator(self, selector):
+            assert selector == '[data-testid="image-thumb"]'
+            return _FakePhotoTilesLocator(self._tiles)
+
+    class _FakeBlobPage:
+        def __init__(self, bytes_by_src, content_type="image/jpeg"):
+            self._bytes_by_src = bytes_by_src
+            self._content_type = content_type
+        async def evaluate(self, js, arg=None):
+            src = arg[0]
+            data = self._bytes_by_src.get(src)
+            if data is None:
+                return {"ok": False, "reason": "unknown src"}
+            return {"ok": True, "status": 200, "base64": base64.b64encode(data).decode(), "contentType": self._content_type}
+
+    tile_a_jpeg = _fake_jpeg(1076, 1297)
+    tile_a = _FakePhotoTile(
+        _photo_tile_html("TILEA"),
+        {"src": "blob:https://web.whatsapp.com/tile-a", "naturalWidth": 1076, "naturalHeight": 1297, "complete": True},
+    )
+    tile_b_jpeg = _fake_jpeg(1066, 1600)
+    tile_b = _FakePhotoTile(
+        _photo_tile_html("TILEB"),
+        {"src": "blob:https://web.whatsapp.com/tile-b", "naturalWidth": 1066, "naturalHeight": 1600, "complete": True},
+    )
+    message = _FakePhotoMessageLocator([tile_a, tile_b])
+    page = _FakeBlobPage({
+        "blob:https://web.whatsapp.com/tile-a": tile_a_jpeg,
+        "blob:https://web.whatsapp.com/tile-b": tile_b_jpeg,
+    })
+
+    result_a = asyncio.run(mark_scan._download_photo_album_tile_via_blob(message, page, 0, _hash_of("TILEA")))
+    assert result_a["ok"] is True, result_a
+    assert result_a["matched_tile_index"] == 0
+    assert result_a["sha256"] == hashlib.sha256(tile_a_jpeg).hexdigest()
+    assert result_a["parsed_width"] == 1076 and result_a["parsed_height"] == 1297
+    assert result_a["detected_mime"] == "image/jpeg"
+    print("20. exact tile hash matching      -> correct tile located by hash, real bytes fetched and verified")
+
+    result_wrong_hash = asyncio.run(mark_scan._download_photo_album_tile_via_blob(message, page, 0, "0" * 64))
+    assert result_wrong_hash["ok"] is False and result_wrong_hash["stage"] == "hash_match", result_wrong_hash
+    print("21. wrong hash rejection          -> no tile matches -> fails cleanly, never substitutes another tile")
+
+    # album_tile_index is a HINT only, never identity: hint says index 0
+    # but the requested hash actually belongs to tile 1 (simulating
+    # WhatsApp reordering/appending to the album's DOM after interaction,
+    # the same bug class already root-caused for the video path) - must
+    # still find it by scanning every tile.
+    result_reordered = asyncio.run(mark_scan._download_photo_album_tile_via_blob(message, page, 0, _hash_of("TILEB")))
+    assert result_reordered["ok"] is True and result_reordered["matched_tile_index"] == 1, result_reordered
+    print("22. album_tile_index is a hint    -> wrong hint index still finds the correct tile via live hash re-scan")
+
+    result_b = asyncio.run(mark_scan._download_photo_album_tile_via_blob(message, page, 1, _hash_of("TILEB")))
+    assert result_b["ok"] is True, result_b
+    assert result_b["sha256"] == hashlib.sha256(tile_b_jpeg).hexdigest()
+    assert result_b["sha256"] != result_a["sha256"]
+    assert result_b["parsed_width"] == 1066 and result_b["parsed_height"] == 1600
+    print("23. distinct album tiles          -> tile A and tile B download to different SHA-256/dimensions, never the same blob twice")
+
+    tile_no_blob = _FakePhotoTile(
+        _photo_tile_html("NOBLOB"),
+        {"src": "data:image/jpeg;base64,notablob", "naturalWidth": 100, "naturalHeight": 100, "complete": True},
+    )
+    msg_no_blob = _FakePhotoMessageLocator([tile_no_blob])
+    result_no_blob = asyncio.run(mark_scan._download_photo_album_tile_via_blob(msg_no_blob, page, 0, _hash_of("NOBLOB")))
+    assert result_no_blob["ok"] is False and result_no_blob["stage"] == "verify_blob", result_no_blob
+    print("24. missing blob rejection        -> full-res src not blob: -> refuses rather than fetching a placeholder")
+
+    tile_incomplete = _FakePhotoTile(
+        _photo_tile_html("INCOMP"),
+        {"src": "blob:https://web.whatsapp.com/incomplete", "naturalWidth": 1000, "naturalHeight": 1000, "complete": False},
+    )
+    msg_incomplete = _FakePhotoMessageLocator([tile_incomplete])
+    result_incomplete = asyncio.run(mark_scan._download_photo_album_tile_via_blob(msg_incomplete, page, 0, _hash_of("INCOMP")))
+    assert result_incomplete["ok"] is False and result_incomplete["stage"] == "verify_complete", result_incomplete
+    print("25. incomplete image rejection    -> DOM reports complete=false -> refuses rather than fetching a partial image")
+
+    tile_wrong_mime = _FakePhotoTile(
+        _photo_tile_html("WRONGMIME"),
+        {"src": "blob:https://web.whatsapp.com/wrong-mime", "naturalWidth": 500, "naturalHeight": 500, "complete": True},
+    )
+    msg_wrong_mime = _FakePhotoMessageLocator([tile_wrong_mime])
+    page_wrong_mime = _FakeBlobPage({"blob:https://web.whatsapp.com/wrong-mime": b"\x00\x01\x02\x03" * 20})
+    result_wrong_mime = asyncio.run(mark_scan._download_photo_album_tile_via_blob(msg_wrong_mime, page_wrong_mime, 0, _hash_of("WRONGMIME")))
+    assert result_wrong_mime["ok"] is False and result_wrong_mime["stage"] == "mime_validate", result_wrong_mime
+    print("26. invalid JPEG / MIME mismatch  -> bytes with no recognizable image signature -> refuses, never assumes image/jpeg")
+
+    tile_dim_mismatch = _FakePhotoTile(
+        _photo_tile_html("DIMMISMATCH"),
+        {"src": "blob:https://web.whatsapp.com/dim-mismatch", "naturalWidth": 9999, "naturalHeight": 9999, "complete": True},
+    )
+    msg_dim_mismatch = _FakePhotoMessageLocator([tile_dim_mismatch])
+    page_dim_mismatch = _FakeBlobPage({"blob:https://web.whatsapp.com/dim-mismatch": _fake_jpeg(1076, 1297)})
+    result_dim_mismatch = asyncio.run(mark_scan._download_photo_album_tile_via_blob(msg_dim_mismatch, page_dim_mismatch, 0, _hash_of("DIMMISMATCH")))
+    assert result_dim_mismatch["ok"] is False and result_dim_mismatch["stage"] == "dimension_cross_check", result_dim_mismatch
+    print("27. dimension mismatch rejection  -> parsed byte dimensions disagree with DOM naturalWidth/Height -> refuses, never trusts either blindly")
+
+    # image-thumb (2026-08-24 fix): a pure-photo album's tiles never
+    # carried video-content/image-content at all - _hash_album_tiles_live
+    # would have found ZERO tiles for a real photo album before this fix.
+    class _FakeImageThumbTilesLocator:
+        def __init__(self, elements):
+            self._elements = elements
+        async def count(self):
+            return len(self._elements)
+        def nth(self, i):
+            return self._elements[i]
+
+    class _FakeImageThumbMessageLocator:
+        def __init__(self, elements):
+            self._elements = elements
+        def locator(self, selector):
+            assert "image-thumb" in selector
+            return _FakeImageThumbTilesLocator(self._elements)
+
+    def _image_thumb_tile(seed: str):
+        blob = (seed * 20)[:80]
+        html = f'<div data-testid="image-thumb"><div style="background-image: url(&quot;data:image/jpeg;base64,{blob}&quot;);"></div></div>'
+        return _FakeTileElement("image-thumb", html), hashlib.sha256(blob.encode()).hexdigest()
+
+    thumb_elements, thumb_hashes = [], []
+    for seed in ("PTILE1", "PTILE2"):
+        el, h = _image_thumb_tile(seed)
+        thumb_elements.append(el)
+        thumb_hashes.append(h)
+    photo_album_message = _FakeImageThumbMessageLocator(thumb_elements)
+    live_photo_tiles = asyncio.run(mark_scan._hash_album_tiles_live(photo_album_message))
+    assert [t["hash"] for t in live_photo_tiles] == thumb_hashes, live_photo_tiles
+    assert all(t["media_type"] == "image" for t in live_photo_tiles), live_photo_tiles
+    print("28. _hash_album_tiles_live(image-thumb) -> pure-photo albums are found and typed 'image', not silently zero-tiled")
+
 
 if __name__ == "__main__":
     main()

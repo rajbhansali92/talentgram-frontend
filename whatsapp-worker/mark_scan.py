@@ -101,7 +101,7 @@ _PRE_PLAIN_RE = re.compile(r'data-pre-plain-text="(\[[^\]]*\][^"]*):"')
 _IMG_TAG_RE = re.compile(r"data-testid=\"(image-thumb|image-content)\"")
 _VIDEO_TAG_RE = re.compile(r"data-testid=\"(video-thumb|video-content)\"")
 _ALBUM_RE = re.compile(r'data-testid="media-album"')
-_TILE_TYPE_RE = re.compile(r'data-testid="(video-content|image-content)"')
+_TILE_TYPE_RE = re.compile(r'data-testid="(video-content|image-content|image-thumb)"')
 # Grouped-media albums (2026-08-23) — WhatsApp's native multi-select "send
 # together" produces ONE message (one data-id) containing a media-album
 # grid of N tiles, each with its own thumbnail but NO separate data-id.
@@ -226,7 +226,7 @@ def _album_tile_hashes_and_types(html: str) -> List[tuple]:
         if not h:
             continue
         tm = _TILE_TYPE_RE.search(chunk)
-        media_type = "image" if (tm and tm.group(1) == "image-content") else "video"
+        media_type = "image" if (tm and tm.group(1) in ("image-content", "image-thumb")) else "video"
         result.append((h, media_type))
     return result
 
@@ -853,7 +853,13 @@ async def _hash_album_tiles_live(message_locator) -> List[Dict[str, Any]]:
     returned list's length always matches the real, current element
     count; never silently drops an entry the way chunk-based extraction
     could."""
-    tiles = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]')
+    # image-thumb (2026-08-24) — a pure-photo album's tiles carry THIS
+    # testid, not image-content (which never appeared on any real photo
+    # album observed this session; every "video-content"/"image-content"
+    # pair this function was originally written for came from mixed/video
+    # albums). Proven via direct diagnostic: querying only video-content/
+    # image-content against a real photo album returned zero tiles.
+    tiles = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"], [data-testid="image-thumb"]')
     try:
         n = await tiles.count()
     except Exception:
@@ -865,7 +871,7 @@ async def _hash_album_tiles_live(message_locator) -> List[Dict[str, Any]]:
             media_type_attr = await tile.get_attribute("data-testid", timeout=10000)
         except Exception:
             media_type_attr = None
-        media_type = "image" if media_type_attr == "image-content" else "video"
+        media_type = "image" if media_type_attr in ("image-content", "image-thumb") else "video"
         try:
             tile_html = await tile.evaluate("(el) => el.outerHTML", timeout=10000)
         except Exception:
@@ -3251,6 +3257,132 @@ def _parse_image_dimensions(data: bytes) -> Tuple[Optional[int], Optional[int]]:
     return None, None
 
 
+_BLOB_FETCH_JS = """
+async ([src]) => {
+  try {
+    const resp = await fetch(src);
+    const buf = await resp.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return { ok: true, status: resp.status, base64: btoa(binary), contentType: resp.headers.get('content-type') || '' };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message || e) };
+  }
+}
+"""
+
+_LARGEST_IMG_JS = """
+(tile) => {
+  const imgs = Array.from(tile.querySelectorAll('img'));
+  if (imgs.length === 0) return null;
+  const best = imgs.reduce((a, b) => (a.naturalWidth * a.naturalHeight) >= (b.naturalWidth * b.naturalHeight) ? a : b);
+  return { src: best.src, naturalWidth: best.naturalWidth, naturalHeight: best.naturalHeight, complete: best.complete };
+}
+"""
+
+
+async def _download_photo_album_tile_via_blob(message_locator, page, tile_index: Optional[int], expected_hash: str) -> Dict[str, Any]:
+    """Downloads ONE exact photo album tile via its own already-loaded
+    full-resolution blob: URL — proven live (2026-08-24) via
+    blob_tile_download_diagnostic: every image-thumb tile's larger <img>
+    is already a complete, full-resolution blob, no gallery/viewer needed
+    at all. `tile_index` (from the original scan) is used ONLY as a
+    navigation hint — the tried-first candidate — never as identity: this
+    re-hashes tiles live and requires an EXACT match to `expected_hash`
+    (source_thumbnail_hash) before touching anything, falling back to
+    scanning every tile in the album if the hinted index no longer holds
+    the expected content (WhatsApp can reflow/append to an album's DOM
+    after interaction — the same class of bug already root-caused for the
+    video path this session). Never substitutes another tile: if no tile
+    matches, this fails cleanly rather than guessing."""
+    thumbs = message_locator.locator('[data-testid="image-thumb"]')
+    try:
+        count = await thumbs.count()
+    except Exception as exc:
+        return {"ok": False, "stage": "locate_tiles", "reason": str(exc)}
+    if count == 0:
+        return {"ok": False, "stage": "locate_tiles", "reason": "message has no image-thumb tiles"}
+
+    hint = tile_index if (tile_index is not None and 0 <= tile_index < count) else None
+    order = ([hint] if hint is not None else []) + [i for i in range(count) if i != hint]
+
+    matched_tile = None
+    matched_index = None
+    checked: List[Dict[str, Any]] = []
+    for i in order:
+        tile = thumbs.nth(i)
+        try:
+            tile_html = await tile.evaluate("(el) => el.outerHTML", timeout=10000)
+        except Exception as exc:
+            checked.append({"index": i, "error": str(exc)})
+            continue
+        live_hash = _smallest_hash(tile_html)
+        checked.append({"index": i, "hash": live_hash})
+        if live_hash == expected_hash:
+            matched_tile = tile
+            matched_index = i
+            break
+
+    if matched_tile is None:
+        return {
+            "ok": False, "stage": "hash_match",
+            "reason": f"no tile among {count} matched expected_hash {expected_hash!r}",
+            "hint_index": tile_index, "checked": checked,
+        }
+
+    try:
+        full_res = await matched_tile.evaluate(_LARGEST_IMG_JS, timeout=10000)
+    except Exception as exc:
+        return {"ok": False, "stage": "find_full_res", "reason": str(exc), "matched_tile_index": matched_index}
+    if not full_res:
+        return {"ok": False, "stage": "find_full_res", "reason": "no <img> found in matched tile", "matched_tile_index": matched_index}
+    if not (full_res.get("src") or "").startswith("blob:"):
+        return {"ok": False, "stage": "verify_blob", "reason": "full-res image src is not a blob: URL", "matched_tile_index": matched_index, "full_res": full_res}
+    if not full_res.get("complete"):
+        return {"ok": False, "stage": "verify_complete", "reason": "full-res image is not complete", "matched_tile_index": matched_index, "full_res": full_res}
+    if not full_res.get("naturalWidth") or not full_res.get("naturalHeight"):
+        return {"ok": False, "stage": "verify_dimensions", "reason": "full-res image has invalid/zero dimensions", "matched_tile_index": matched_index, "full_res": full_res}
+
+    try:
+        fetch_result = await _evaluate(page, _BLOB_FETCH_JS, [full_res["src"]])
+    except Exception as exc:
+        return {"ok": False, "stage": "fetch", "reason": str(exc), "matched_tile_index": matched_index}
+    if not fetch_result.get("ok"):
+        return {"ok": False, "stage": "fetch", "reason": fetch_result.get("reason"), "matched_tile_index": matched_index}
+    raw = b64mod.b64decode(fetch_result["base64"]) if fetch_result.get("base64") else b""
+    if not raw:
+        return {"ok": False, "stage": "fetch", "reason": "downloaded zero bytes", "matched_tile_index": matched_index}
+
+    detected_mime = _detect_mime_type(raw, "image")
+    if not detected_mime.startswith("image/"):
+        return {
+            "ok": False, "stage": "mime_validate",
+            "reason": f"detected MIME {detected_mime!r} is not an image type",
+            "matched_tile_index": matched_index, "byte_length": len(raw),
+        }
+
+    parsed_w, parsed_h = _parse_image_dimensions(raw)
+    if parsed_w != full_res.get("naturalWidth") or parsed_h != full_res.get("naturalHeight"):
+        return {
+            "ok": False, "stage": "dimension_cross_check",
+            "reason": "parsed byte dimensions do not match the DOM's naturalWidth/naturalHeight",
+            "matched_tile_index": matched_index,
+            "parsed": [parsed_w, parsed_h], "dom": [full_res.get("naturalWidth"), full_res.get("naturalHeight")],
+        }
+
+    return {
+        "ok": True, "matched_tile_index": matched_index, "expected_hash": expected_hash,
+        "byte_length": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+        "detected_mime": detected_mime, "content_type": fetch_result.get("contentType"),
+        "parsed_width": parsed_w, "parsed_height": parsed_h,
+        "_raw_bytes": raw,
+    }
+
+
 async def _upload_one(http: httpx.AsyncClient, target: Dict[str, Any], base64_data: str, content_type: str) -> Dict[str, Any]:
     raw = b64mod.b64decode(base64_data)
     # content_type (the caller's hint, e.g. from a blob: fetch's own HTTP
@@ -3334,9 +3466,39 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
             results.append(upload_result)
             continue
 
-        # Photos: the simpler blob-fetch path — unchanged since Phase 0,
-        # no buffering/viewer-menu complexity has been observed for a
-        # static image the way it was for video.
+        if target.get("album_tile_index") is not None:
+            # Photo album tile (2026-08-24) — WhatsApp's gallery viewer
+            # never mounts for a media-album (proven exhaustively: real
+            # trusted clicks, keyboard activation, byte-identical DOM/CSS
+            # to a working single photo — root cause is inside WhatsApp's
+            # own non-DOM runtime, not anything fixable here). Bypasses
+            # the viewer entirely: each image-thumb tile's full-resolution
+            # photo is already a complete, loaded blob: URL in its own
+            # DOM — fetched directly, with hash-based tile identity
+            # re-verified live (never trusted from album_tile_index alone).
+            dl = await _download_photo_album_tile_via_blob(
+                message, page, target.get("album_tile_index"), target["source_thumbnail_hash"],
+            )
+            if not dl.get("ok"):
+                results.append(_strip_raw_bytes({
+                    "ok": False, "source_message_id": target["source_message_id"],
+                    "error": dl.get("reason") or f"failed at stage {dl.get('stage')}", "detail": dl,
+                }))
+                continue
+            raw = dl.get("_raw_bytes")
+            if not raw:
+                results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
+                continue
+            b64 = b64mod.b64encode(raw).decode()
+            upload_result = await _upload_one(http, target, b64, dl.get("content_type") or "")
+            upload_result["byte_length"] = len(raw)
+            results.append(upload_result)
+            continue
+
+        # Single (non-album) photo: the simpler message-level blob-fetch
+        # path — unchanged since Phase 0, no buffering/viewer-menu
+        # complexity has been observed for a static image the way it was
+        # for video.
         try:
             fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
         except Exception as exc:

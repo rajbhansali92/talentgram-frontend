@@ -1958,7 +1958,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -2659,6 +2659,172 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "final_inventory": final_inventory,
             "media_panel": media_panel,
         }], "session_identity": session_identity}
+
+    if probe_type == "forward_readiness_diagnostic":
+        # Diagnostic-only (2026-08-24) — investigates a proposed SEND
+        # architecture change: native WhatsApp Forward instead of
+        # download+re-upload. NEVER clicks Download or Forward, never
+        # sends anything. Opens each target's viewer using the already-
+        # proven, already-fixed re-resolution logic, then repeatedly (up
+        # to a bounded timeout) captures video/image readiness state AND
+        # the full viewer button inventory — watching specifically for a
+        # control whose aria-label/data-icon/testid/svg-title matches
+        # /forward/i, and whether it tracks the same buffering signal
+        # _wait_for_video_readiness already established for Download.
+        _GENERIC_VIEWER_BUTTONS_JS = """
+            () => {
+              let anchor = document.querySelector('video');
+              let anchorKind = 'video';
+              if (!anchor) {
+                const imgs = Array.from(document.querySelectorAll('img[src^="blob:"]'))
+                  .filter(im => im.offsetWidth > 300 && im.offsetHeight > 300)
+                  .sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight));
+                anchor = imgs[0] || null;
+                anchorKind = 'image';
+              }
+              if (!anchor) return {rootFound: false, buttons: [], reason: 'no video or large opened image found'};
+              let root = anchor;
+              while (root.parentElement && root.parentElement !== document.body) root = root.parentElement;
+              if (!root.parentElement) return {rootFound: false, buttons: [], reason: 'anchor not attached under body'};
+              const btns = Array.from(root.querySelectorAll('button, [role="button"]'));
+              return {
+                rootFound: true, anchorKind: anchorKind,
+                buttons: btns.map(b => {
+                  const r = b.getBoundingClientRect();
+                  const svgTitle = b.querySelector('svg title');
+                  return {
+                    ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
+                    testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
+                    rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+                    visible: !!(b.offsetWidth || b.offsetHeight || b.getClientRects().length),
+                  };
+                }),
+              };
+            }
+        """
+
+        def _classify_buttons(dump):
+            if not dump or not dump.get("rootFound"):
+                return {"forward": None, "download": None}
+            def _match(pattern):
+                for b in dump.get("buttons") or []:
+                    hay = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("testid"), b.get("svgTitle")])).lower()
+                    if re.search(pattern, hay):
+                        return b
+                return None
+            return {"forward": _match(r"forward"), "download": _match(r"download")}
+
+        async def _readiness_checkpoints(page, max_checks=20, interval_s=2.0):
+            checkpoints = []
+            for i in range(max_checks):
+                try:
+                    video_state = await _evaluate(page, _VIDEO_STATE_JS)
+                except Exception as exc:
+                    video_state = {"error": str(exc)}
+                try:
+                    button_dump = await _evaluate(page, _GENERIC_VIEWER_BUTTONS_JS)
+                except Exception as exc:
+                    button_dump = {"error": str(exc)}
+                classified = _classify_buttons(button_dump)
+                checkpoints.append({
+                    "t_s": round(i * interval_s, 1),
+                    "video_state": video_state,
+                    "forward_present": classified["forward"] is not None,
+                    "forward_button": classified["forward"],
+                    "download_present": classified["download"] is not None,
+                    "download_button": classified["download"],
+                    "total_buttons": len((button_dump or {}).get("buttons") or []),
+                })
+                if classified["forward"] is not None:
+                    break
+                await page.wait_for_timeout(int(interval_s * 1000))
+            return checkpoints
+
+        async def _open_and_watch(target_id: str, tile_index: int, is_photo: bool = False):
+            entry: Dict[str, Any] = {"target_id": target_id, "tile_index": tile_index, "is_photo": is_photo}
+            idx = await _find_message_index_by_data_id(page, group_name, target_id)
+            entry["initial_index"] = idx
+            if idx is None:
+                entry["error"] = "message not found in current window"
+                return entry
+            scope = await sender._resolve_scope(page)
+            full_sel = f"{scope} [data-testid^='conv-msg-']"
+
+            if not is_photo:
+                tile, _ = await _resolve_video_tile_locator(page, group_name, target_id, tile_index)
+                if tile is None:
+                    entry["error"] = "video tile re-resolution failed"
+                    return entry
+                try:
+                    await tile.scroll_into_view_if_needed(timeout=5000)
+                    await tile.click(timeout=10000)
+                except Exception as exc:
+                    entry["error"] = f"tile click failed: {exc}"
+                    return entry
+                mounted = False
+                for _ in range(30):
+                    try:
+                        if await page.locator("video").count() > 0:
+                            mounted = True
+                            break
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(500)
+                entry["mounted"] = mounted
+                if not mounted:
+                    entry["error"] = "no <video> mounted within 15s of click"
+                    return entry
+            else:
+                # Single-photo click target: the message's own largest <img>
+                # (no video-content/image-content testid exists for a
+                # non-album photo — confirmed via prior diagnostic).
+                message = page.locator(full_sel).nth(idx)
+                try:
+                    img_click_js = """
+                        (el) => {
+                          const imgs = Array.from(el.querySelectorAll('img'));
+                          const big = imgs.filter(im => im.offsetWidth > 20).sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight))[0];
+                          return !!big;
+                        }
+                    """
+                    has_img = await message.evaluate(img_click_js)
+                    entry["photo_click_target_found"] = has_img
+                    if not has_img:
+                        entry["error"] = "no clickable <img> found on photo message"
+                        return entry
+                    photo_loc = message.locator("img").first
+                    await photo_loc.scroll_into_view_if_needed(timeout=5000)
+                    await photo_loc.click(timeout=10000)
+                except Exception as exc:
+                    entry["error"] = f"photo click failed: {exc}"
+                    return entry
+                await page.wait_for_timeout(1000)
+
+            entry["checkpoints"] = await _readiness_checkpoints(page)
+            try:
+                viewer_buttons_for_close = await _evaluate(page, _GENERIC_VIEWER_BUTTONS_JS)
+            except Exception:
+                viewer_buttons_for_close = {"buttons": []}
+            entry["viewer_closed"] = await _close_viewer(page, viewer_buttons_for_close)
+            return entry
+
+        results: List[Dict[str, Any]] = []
+
+        # A: the exact failed video (source_message_id given).
+        target_id = req.get("probe_message_id") or "3B07252BFE7BC81FB956"
+        results.append(await _open_and_watch(target_id, req.get("tile_index", 0), is_photo=False))
+
+        # B: a known-good, previously-downloaded video, if provided.
+        known_good_video_id = req.get("known_good_video_id")
+        if known_good_video_id:
+            results.append(await _open_and_watch(known_good_video_id, req.get("known_good_video_tile_index", 0), is_photo=False))
+
+        # C: a known-good photo, if provided.
+        known_good_photo_id = req.get("known_good_photo_id")
+        if known_good_photo_id:
+            results.append(await _open_and_watch(known_good_photo_id, 0, is_photo=True))
+
+        return {"results": results, "session_identity": session_identity}
 
     if probe_type == "video_tile_reresolution_live_diagnostic":
         # Diagnostic-only (2026-08-24) — post-deploy verification of the

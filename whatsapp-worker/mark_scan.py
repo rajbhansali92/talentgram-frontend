@@ -1965,7 +1965,10 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
                 total_testid_elements: all.length,
                 attach_image_video_exists: !!document.querySelector('[data-testid="attach-image-video"]'),
                 attach_document_exists: !!document.querySelector('[data-testid="attach-document"]'),
-                file_input_count: document.querySelectorAll('input[type="file"]').length,
+                file_inputs: Array.from(document.querySelectorAll('input[type="file"]')).map((el, i) => ({
+                  index: i, accept: el.getAttribute('accept'), multiple: el.multiple,
+                  visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                })),
                 menu_like: all
                   .filter(el => /attach|menu|photo|video|document|camera/i.test(el.getAttribute('data-testid') || ''))
                   .map(el => ({

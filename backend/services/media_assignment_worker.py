@@ -31,6 +31,7 @@ from typing import Any, Dict, List
 from core import db
 from agents import registry
 from agents.modules import media_assignment
+from agents.modules import media_send
 from agents.modules.whatsapp_campaign_agent import _service_admin
 from routers.whatsapp import BatchIn, ManualContact, SourceParams, create_batch
 
@@ -168,6 +169,39 @@ def _report_upload_result(
     )
 
 
+def _report_already_sent(talent_label: str, project_label: str, destination_group: str, already: List[Dict[str, Any]]) -> str:
+    lines = [
+        media_assignment.role_label(a["media_role"], a.get("take_number"), project_label)
+        for a in already
+    ]
+    return (
+        f"ALREADY SENT\n\nTalent: {talent_label}\nProject: {project_label}\n"
+        f"Destination: {destination_group}\n\n{_fmt_list(lines, True)}\n\nNo duplicate send performed."
+    )
+
+
+def _report_send_result(
+    talent_label: str, project_label: str, destination_group: str,
+    sent_labels: List[str], failed_items: List[Dict[str, str]], already: List[Dict[str, Any]],
+) -> str:
+    already_labels = [
+        media_assignment.role_label(a["media_role"], a.get("take_number"), project_label)
+        for a in already
+    ]
+    total = len(already_labels) + len(sent_labels) + len(failed_items)
+    body_lines = [f"✓ {l}" for l in already_labels + sent_labels]
+    body_lines += [f"✗ {i['label']} — {i['error']}" for i in failed_items]
+    body = "\n".join(body_lines)
+    header = "SEND COMPLETE ✓" if not failed_items else "SEND PARTIAL"
+    return (
+        f"{header}\n\nTalent: {talent_label}\nProject: {project_label}\n"
+        f"Destination: {destination_group}\n\n"
+        f"{len(already_labels) + len(sent_labels)}/{total} sent"
+        + (f", {len(failed_items)} failed" if failed_items else "")
+        + f"\n\n{body}\n\nPipeline stage was NOT changed."
+    )
+
+
 async def _process_scan_done() -> bool:
     doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one_and_update(
         {"status": {"$in": [media_assignment.SCAN_STATUS_DONE, media_assignment.SCAN_STATUS_FAILED]}},
@@ -229,6 +263,62 @@ async def _process_scan_done() -> bool:
         return True
     if outcome.unresolved:
         await _finish(doc["id"], _report_unresolved(talent_label, project_label, outcome.unresolved))
+        return True
+
+    if doc.get("workflow") == "send":
+        # SEND (2026-08-24) — independent of UPLOAD from this point on:
+        # own idempotency collection (media_send.already_sent, never
+        # media_assignment.already_uploaded), own target list
+        # (send_targets, never download_targets/Cloudinary), same shared
+        # candidate validation above.
+        destination_group = doc["destination_group"]
+        already = await media_send.already_sent(talent_id, project_id, destination_group)
+        already_slots = {
+            media_assignment.slot_key(a["media_role"], a.get("take_number"), a.get("source_message_id"), a.get("source_thumbnail_hash"))
+            for a in already
+        }
+        for m in outcome.assignments:
+            await media_send.record_send(
+                talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+                group_name=group_name, group_id=doc.get("group_id"), mark=m, created_by="whatsapp-agent",
+            )
+        to_send = [
+            m for m in outcome.assignments
+            if media_assignment.slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) not in already_slots
+        ]
+        if not to_send:
+            await _finish(doc["id"], _report_already_sent(talent_label, project_label, destination_group, already))
+            return True
+        send_targets = [{
+            "source_message_id": m["resolved_source_message_id"],
+            "media_role": m["media_role"], "take_number": m["take_number"],
+            "source_media_type": m.get("source_media_type"),
+            "source_thumbnail_hash": m.get("quoted_thumbnail_hash"),
+            "album_tile_index": m.get("album_tile_index"),
+            "mark_reply_message_id": m.get("reply_message_id"), "mark_reply_text": m.get("mark_text"),
+            "mark_target_contact_id": m.get("mention_lid"),
+            "destination_group": destination_group,
+            # role_label (not submission_label) — a SEND caption needs
+            # the project name, since it lands in a shared casting
+            # group alongside other talents/projects; submission_label
+            # is for the app's own submission page, where the project is
+            # already implicit.
+            "caption": f"{talent_label} — {media_assignment.role_label(m['media_role'], m['take_number'], project_label)}",
+            "talent_id": talent_id, "project_id": project_id,
+        } for m in to_send]
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": doc["id"]},
+            {"$set": {
+                "mode": "send",
+                "status": media_assignment.DOWNLOAD_STATUS_PENDING,
+                "send_targets": send_targets,
+                "pending_report_context": {
+                    "talent_label": talent_label, "project_label": project_label,
+                    "destination_group": destination_group, "already": already,
+                },
+                "updated_at": _now(),
+            }},
+        )
         return True
 
     already = await media_assignment.already_uploaded(talent_id, project_id)
@@ -307,6 +397,42 @@ async def _process_download_done() -> bool:
             {"id": doc["id"]},
             {"$set": {"status": media_assignment.STATUS_FINISHED, "completed_at": _now()}},
         )
+        return True
+
+    if doc.get("mode") == "send":
+        # SEND completion (2026-08-24) — independent of UPLOAD's own
+        # completion logic below. There is no per-item server-side write
+        # during processing (unlike /media-upload, which marks each item
+        # "uploaded" synchronously) — the worker's mark_scan.py._run_send
+        # builds `download_results` in the SAME order as `send_targets`
+        # (one result per target, always, even on early per-item
+        # failure), so positional pairing is exact, never inferred.
+        ctx = doc.get("pending_report_context") or {}
+        talent_label, project_label = ctx.get("talent_label", ""), ctx.get("project_label", "")
+        destination_group = ctx.get("destination_group") or doc.get("destination_group")
+        talent_id, project_id = doc["talent_id"], doc["project_id"]
+        send_targets = doc.get("send_targets") or []
+        results = doc.get("download_results") or []
+
+        sent_labels: List[str] = []
+        failed_items: List[Dict[str, str]] = []
+        for i, target in enumerate(send_targets):
+            label = f"{talent_label} — {media_assignment.role_label(target['media_role'], target.get('take_number'), project_label)}"
+            result = results[i] if i < len(results) else None
+            ok = bool(result and result.get("ok"))
+            status = media_send.SEND_STATUS_SENT if ok else media_send.SEND_STATUS_FAILED
+            extra = {"sent_at": _now()} if ok else {"error": (result or {}).get("error") or "no result reported"}
+            await media_send.mark_send_status(
+                talent_id, project_id, target["source_message_id"], target.get("source_thumbnail_hash"),
+                destination_group, status, **extra,
+            )
+            if ok:
+                sent_labels.append(label)
+            else:
+                failed_items.append({"label": label, "error": (result or {}).get("error") or "no result reported"})
+
+        report = _report_send_result(talent_label, project_label, destination_group, sent_labels, failed_items, ctx.get("already") or [])
+        await _finish(doc["id"], report)
         return True
 
     ctx = doc.get("pending_report_context") or {}

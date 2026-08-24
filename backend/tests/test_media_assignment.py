@@ -71,9 +71,22 @@ async def _seed_talent(name: str, *, whatsapp_group_name: str = "", email: str =
     tid = f"test-ma-tal-{uuid.uuid4().hex[:8]}"
     await db.talents.insert_one({
         "id": tid, "name": name, "tags": [], "notes": "",
-        "phone": None, "whatsapp_group_name": whatsapp_group_name, "email": email or None,
+        "phone": None, "whatsapp_group_name": whatsapp_group_name,
+        "email": email or None, "normalized_email": (email or "").strip().lower() or None,
     })
     return tid
+
+
+async def _seed_submission(project_id: str, talent_id: str, email: str) -> str:
+    """The project's submission for a talent, keyed on (project_id,
+    talent_email) — the single source of truth
+    resolve_authoritative_talent_for_upload relies on."""
+    sid = f"test-ma-sub-{uuid.uuid4().hex[:8]}"
+    await db.submissions.insert_one({
+        "id": sid, "project_id": project_id, "talent_id": talent_id,
+        "talent_email": email.strip().lower(), "media": [], "created_at": _now(),
+    })
+    return sid
 
 
 async def _cleanup(*, talent_ids=(), project_ids=(), scan_request_ids=(), submission_ids=()):
@@ -373,8 +386,16 @@ async def test_upload_command_creates_scan_request_and_acks_immediately():
     original = await _use_test_config(group)
     phone = "917000600001"
     tag = uuid.uuid4().hex[:6]
+    email = f"ahana.upload.{tag}@example.com"
     project_id = await _seed_project(f"Google Upload {tag}")
-    talent_id = await _seed_talent(f"Ahana Upload {tag}", whatsapp_group_name=f"Ahana Upload {tag} x Talentgram")
+    talent_id = await _seed_talent(
+        f"Ahana Upload {tag}", whatsapp_group_name=f"Ahana Upload {tag} x Talentgram", email=email,
+    )
+    # 2026-08-23: the upload command now requires the project's own
+    # submission (keyed on (project_id, talent_email)) to exist and its
+    # email to resolve back to this exact talent — see
+    # resolve_authoritative_talent_for_upload.
+    submission_id = await _seed_submission(project_id, talent_id, email)
     await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
     try:
         r = await handle_inbound_message(
@@ -392,22 +413,40 @@ async def test_upload_command_creates_scan_request_and_acks_immediately():
         assert req["group_name"] == f"Ahana Upload {tag} x Talentgram"
     finally:
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
-        await _cleanup(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids)
+        await _cleanup(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
         await _restore_config(original)
 
 
 async def test_upload_command_talent_not_found_never_guesses():
+    # 2026-08-23: project is now resolved BEFORE talent (the new
+    # authoritative-talent-resolution step needs project_id) — a real
+    # project is seeded here so this test isolates the talent-not-found
+    # path specifically, rather than incidentally hitting
+    # "ambiguous project"/"project not found" first.
+    #
+    # The name-query below deliberately avoids any real dictionary word
+    # ("Person", "Test", "Talent", ...) — the fuzzy resolver's token-match
+    # tier (casting_pipeline_nlu.py's single-clearing-candidate rule)
+    # correctly auto-resolves a query that shares an exact whole-word
+    # token with exactly one DB candidate, even if the rest of the query
+    # is nonsense. The shared local/dev Mongo used by this suite carries
+    # cross-run leftover talents (e.g. a real "Repro Person" record from
+    # an earlier test file), so a query containing "Person" is NOT a safe
+    # probe for "matches nothing" — it can legitimately match by design.
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Google TalentNotFound {tag}")
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone="917000600002",
-            text="upload - Zzzargled Nonexistent Person - Google",
+            text=f"upload - Zzzargled9942xyz Qwoplectrix{tag} - Google TalentNotFound {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
         assert "no matching" in r.reply.lower() or "couldn't" in r.reply.lower()
     finally:
+        await _cleanup(project_ids=[project_id])
         await _restore_config(original)
 
 
@@ -428,6 +467,150 @@ async def test_upload_command_no_whatsapp_group_reports_clearly():
     finally:
         await _cleanup(talent_ids=[talent_id], project_ids=[project_id])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Authoritative talent resolution for uploads (2026-08-23) — real
+# production risk: an admin manually adds "Ahana Test" (no/different
+# email), and separately the same person later submits a project's public
+# form with their own real email, creating a SECOND "Ahana Test" talent
+# record (routers/submissions.py's submission_finalize looks up by email
+# only, never name — an admin record with no email is invisible to it).
+# Both records can coexist. Name-based resolution (used everywhere else)
+# must NEVER be the thing that decides where audition media lands — only
+# the project's own submission, re-verified via its submitted email, is
+# authoritative.
+# ---------------------------------------------------------------------------
+async def test_upload_command_duplicate_talent_resolves_via_submission_email_not_name():
+    """THE core safety test: two talent records share the exact name
+    "Ahana Test". Record A is the admin-created duplicate (no email, no
+    WhatsApp group — exactly what an admin quick-add looks like). Record B
+    is the submission-associated one (real email, real WhatsApp group —
+    exactly what exists once the talent actually interacts). The upload
+    command must resolve to Record B via the project's submission email,
+    never by picking either one by name."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    name = f"Ahana Dup {tag}"
+    email = f"ahana.dup.{tag}@example.com"
+    project_id = await _seed_project(f"Google Dup {tag}")
+    talent_a = await _seed_talent(name, whatsapp_group_name="", email="")  # admin-created duplicate
+    talent_b = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)  # real, submission-associated
+    submission_id = await _seed_submission(project_id, talent_b, email)
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600010",
+            text=f"upload - {name} - Google Dup {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Scanning" in r.reply, r.reply
+
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"project_id": project_id})
+        assert req is not None
+        assert req["talent_id"] == talent_b, f"expected Record B ({talent_b}), got {req['talent_id']}"
+        assert req["talent_id"] != talent_a
+        assert req["group_name"] == f"{name} x Talentgram"  # the WhatsApp source, from whichever candidate has one
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"project_id": project_id})]
+        await _cleanup(talent_ids=[talent_a, talent_b], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await _restore_config(original)
+
+
+async def test_resolve_authoritative_talent_no_submission_stops():
+    project_id = await _seed_project(f"Google NoSub {uuid.uuid4().hex[:6]}")
+    talent_id = await _seed_talent(f"NoSub Talent {uuid.uuid4().hex[:6]}", email="nosub@example.com")
+    try:
+        result = await ma.resolve_authoritative_talent_for_upload(project_id, [talent_id])
+        assert not result.ok
+        assert result.error == "no_submission_found"
+    finally:
+        await _cleanup(talent_ids=[talent_id], project_ids=[project_id])
+
+
+async def test_resolve_authoritative_talent_ambiguous_submission_stops():
+    """Two DIFFERENT candidate talents each have their own submission for
+    this exact project — genuinely ambiguous, never auto-picked."""
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Google Ambig {tag}")
+    talent_a = await _seed_talent(f"Ambig Talent {tag}", email=f"ambig.a.{tag}@example.com")
+    talent_b = await _seed_talent(f"Ambig Talent {tag}", email=f"ambig.b.{tag}@example.com")
+    sub_a = await _seed_submission(project_id, talent_a, f"ambig.a.{tag}@example.com")
+    sub_b = await _seed_submission(project_id, talent_b, f"ambig.b.{tag}@example.com")
+    try:
+        result = await ma.resolve_authoritative_talent_for_upload(project_id, [talent_a, talent_b])
+        assert not result.ok
+        assert result.error == "ambiguous_submission"
+    finally:
+        await _cleanup(talent_ids=[talent_a, talent_b], project_ids=[project_id], submission_ids=[sub_a, sub_b])
+
+
+async def test_resolve_authoritative_talent_email_maps_to_multiple_talents_stops():
+    # `talents.email`/`normalized_email` are both uniquely indexed in this
+    # database — two talent docs can never literally share the SAME
+    # `email` field. The $or lookup also matches `source.talent_email`
+    # (not uniquely constrained), which is how two distinct talent docs
+    # can genuinely both match the same address in practice.
+    tag = uuid.uuid4().hex[:6]
+    email = f"shared.{tag}@example.com"
+    project_id = await _seed_project(f"Google Shared {tag}")
+    talent_id = await _seed_talent(f"Shared Talent {tag}", email=email)
+    other_id = f"test-ma-tal-{uuid.uuid4().hex[:8]}"
+    await db.talents.insert_one({
+        "id": other_id, "name": f"Someone Else {tag}", "tags": [], "notes": "",
+        "phone": None, "whatsapp_group_name": "", "email": None, "normalized_email": None,
+        "source": {"talent_email": email},
+    })
+    submission_id = await _seed_submission(project_id, talent_id, email)
+    try:
+        result = await ma.resolve_authoritative_talent_for_upload(project_id, [talent_id])
+        assert not result.ok
+        assert result.error == "email_maps_to_multiple_talents"
+    finally:
+        await _cleanup(talent_ids=[talent_id, other_id], project_ids=[project_id], submission_ids=[submission_id])
+
+
+async def test_resolve_authoritative_talent_unexpected_person_stops():
+    """The submission's own email resolves to a talent that isn't even
+    among the name-matched candidates — a different person than the
+    employee's command referred to. Never silently substituted."""
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Google Unexpected {tag}")
+    named_candidate = await _seed_talent(f"Requested Talent {tag}", email="")
+    other_email = f"someone.else.{tag}@example.com"
+    other_talent = await _seed_talent(f"Totally Different Person {tag}", email=other_email)
+    # A submission exists for the requested candidate, but its OWN
+    # submitted email actually belongs to a completely different talent
+    # record — a real data inconsistency, not a normal case, but must
+    # never be silently trusted either way.
+    submission_id = await _seed_submission(project_id, named_candidate, other_email)
+    try:
+        result = await ma.resolve_authoritative_talent_for_upload(project_id, [named_candidate])
+        assert not result.ok
+        assert result.error in ("submission_talent_mismatch", "email_resolved_to_unexpected_talent")
+    finally:
+        await _cleanup(talent_ids=[named_candidate, other_talent], project_ids=[project_id], submission_ids=[submission_id])
+
+
+async def test_resolve_authoritative_talent_ordinary_single_match_succeeds():
+    """The common, non-duplicate case: exactly one talent record, one
+    submission, matching email — must still succeed (this new
+    verification step is not supposed to add friction to the ordinary
+    path, only close the duplicate-record gap)."""
+    tag = uuid.uuid4().hex[:6]
+    email = f"ordinary.{tag}@example.com"
+    project_id = await _seed_project(f"Google Ordinary {tag}")
+    talent_id = await _seed_talent(f"Ordinary Talent {tag}", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email)
+    try:
+        result = await ma.resolve_authoritative_talent_for_upload(project_id, [talent_id])
+        assert result.ok, result.error
+        assert result.talent_id == talent_id
+        assert result.email == email
+    finally:
+        await _cleanup(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
 
 
 # ---------------------------------------------------------------------------

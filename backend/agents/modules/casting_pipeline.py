@@ -77,6 +77,7 @@ from agents import conversation, request_scope, session_context, undo_store
 from agents.parser import parse_confirmation_reply, parse_edit_instructions
 from agents.modules import casting_pipeline_nlu as nlu
 from agents.modules import media_assignment
+from agents.modules import media_send
 
 AGENT_ID = "casting-agent"
 UNDO_WINDOW_MINUTES = 5
@@ -3632,20 +3633,36 @@ def _extract_upload_fields(text: str) -> Dict[str, str]:
     return {"talent_selector": talent_part, "project_query": project_part}
 
 
+_UPLOAD_RESOLUTION_ERROR_MESSAGES = {
+    "no_submission_found": "No {project_label} submission was found for {talent_label} — "
+        "the mark-based upload workflow attaches media to an existing project submission, "
+        "which doesn't exist yet for this talent/project.",
+    "ambiguous_submission": "More than one talent record named {talent_label} has its own "
+        "{project_label} submission. I can't tell which one this upload is for without a "
+        "clearer reference — please check for duplicate talent records.",
+    "no_email_on_submission": "{talent_label}'s {project_label} submission has no email on file — "
+        "the upload destination can't be verified without one.",
+    "email_maps_to_no_talent": "{talent_label}'s {project_label} submission email doesn't match "
+        "any talent record — the upload destination can't be verified.",
+    "email_maps_to_multiple_talents": "{talent_label}'s {project_label} submission email matches "
+        "more than one talent record — the upload destination can't be verified. Please resolve "
+        "the duplicate talent records first.",
+    "submission_talent_mismatch": "{talent_label}'s {project_label} submission's talent_id doesn't "
+        "match the talent its own submitted email resolves to — a data inconsistency. Please check "
+        "this submission before retrying.",
+    "email_resolved_to_unexpected_talent": "{talent_label}'s {project_label} submission's email "
+        "resolves to a different talent record than the one requested — refusing to guess which "
+        "one this upload is for.",
+}
+
+
 async def _upload_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     talent_selector = collected.get("talent_selector") or ""
     project_query = collected.get("project_query") or ""
 
-    talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(talent_selector)
-    if ambiguous:
-        options = "\n".join(f"{i + 1}. {c.label}" for i, c in enumerate(ambiguous))
-        return ExecResult(
-            ok=False, error="ambiguous_talent",
-            message=f"I found multiple talents.\n\n{options}\n\nPlease re-run with the exact full name.",
-        )
-    if not talent_id:
-        return ExecResult(ok=False, error="talent_not_found", message=err or "No matching talent found.")
-
+    # Step 1: resolve the project FIRST — the authoritative-talent lookup
+    # below needs project_id to find "the project's submission for the
+    # talent" (media_assignment.resolve_authoritative_talent_for_upload).
     projects = await _fetch_ongoing_projects()
     with request_scope.stage("fuzzy"):
         match = nlu.resolve_project_by_name(project_query, projects)
@@ -3662,14 +3679,62 @@ async def _upload_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         )
     project = match.project
 
-    talent_doc = await db.talents.find_one({"id": talent_id})
-    group_name = ((talent_doc or {}).get("whatsapp_group_name") or "").strip()
-    if not group_name:
+    # Step 2: name resolution identifies the CANDIDATE SET this upload is
+    # about — never the authoritative destination (see
+    # resolve_authoritative_talent_for_upload's own module note: two
+    # `talents` records can share an identical name during the admin-
+    # manual-add -> talent-submits-their-own-email transition period).
+    # Ambiguous name resolution is NOT an immediate stop here — the
+    # project+email step below can often disambiguate it deterministically
+    # by finding which single candidate actually has this project's
+    # submission.
+    talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(talent_selector)
+    if ambiguous:
+        candidate_ids = [c.id for c in ambiguous]
+        candidate_label = ambiguous[0].label  # display only — all share the searched name
+    elif talent_id:
+        candidate_ids = [talent_id]
+        candidate_label = talent_label
+    else:
+        return ExecResult(ok=False, error="talent_not_found", message=err or "No matching talent found.")
+
+    # Step 3: the WhatsApp SOURCE group — resolved from whichever candidate
+    # talent record(s) actually have one configured. This is deliberately
+    # separate from the authoritative (email-verified) destination below:
+    # the talent record that has interacted over WhatsApp and the talent
+    # record tied to this project's submitted email are not guaranteed to
+    # be the same document during the duplicate-record transition period.
+    candidate_docs = await db.talents.find(
+        {"id": {"$in": candidate_ids}}, {"_id": 0, "id": 1, "whatsapp_group_name": 1},
+    ).to_list(20)
+    group_names = {(d.get("whatsapp_group_name") or "").strip() for d in candidate_docs if (d.get("whatsapp_group_name") or "").strip()}
+    if not group_names:
         return ExecResult(
             ok=False, error="no_whatsapp_group",
-            message=f"{talent_label} has no WhatsApp group configured — the mark-based upload "
-                    "workflow requires one. Add it in Talentgram first.",
+            message=f"{candidate_label} has no WhatsApp group configured — the mark-based "
+                    "upload workflow requires one. Add it in Talentgram first.",
         )
+    if len(group_names) > 1:
+        return ExecResult(
+            ok=False, error="ambiguous_whatsapp_group",
+            message=f"Multiple different WhatsApp groups are configured across talent records named "
+                    f"{candidate_label} — please resolve the duplicate talent records first.",
+        )
+    group_name = next(iter(group_names))
+
+    # Step 4: the project's submission for this talent, re-derived from
+    # the submission's OWN submitted email — the single source of truth
+    # for upload destination. Never the name-resolved talent_id directly.
+    auth = await media_assignment.resolve_authoritative_talent_for_upload(project["id"], candidate_ids)
+    if not auth.ok:
+        template = _UPLOAD_RESOLUTION_ERROR_MESSAGES.get(
+            auth.error, "Could not verify the upload destination for {talent_label} / {project_label} ({error})."
+        )
+        message = template.format(talent_label=candidate_label, project_label=project["label"], error=auth.error)
+        return ExecResult(ok=False, error=f"upload_target_unresolved:{auth.error}", message=message)
+
+    authoritative_talent_id = auth.talent_id
+    authoritative_talent_label = auth.talent_label or candidate_label
 
     identity = await media_assignment.get_gunwanti_identity()
     if not identity or not identity.get("lid"):
@@ -3679,14 +3744,18 @@ async def _upload_executor(collected: dict, ctx: ExecContext) -> ExecResult:
                     "contact an admin before using upload.",
         )
 
+    # The authoritative (email-verified) talent_id is what flows into the
+    # scan/download/upload pipeline from here on — this is what makes
+    # uploaded_media.talent_id == submission.talent_id hold, regardless of
+    # which candidate the WhatsApp group itself came from.
     await media_assignment.create_scan_request(
-        talent_id=talent_id, talent_label=talent_label,
+        talent_id=authoritative_talent_id, talent_label=authoritative_talent_label,
         project_id=project["id"], project_label=project["label"],
         group_name=group_name,
     )
     return ExecResult(
         ok=True,
-        message=f"Scanning {talent_label}'s WhatsApp group for {project['label']} media…\n\n"
+        message=f"Scanning {authoritative_talent_label}'s WhatsApp group for {project['label']} media…\n\n"
                 "I'll report back here once it's done.",
     )
 
@@ -3697,6 +3766,166 @@ UPLOAD_INTENT = IntentDefinition(
     fields=[UPLOAD_TALENT_FIELD, UPLOAD_PROJECT_FIELD],
     executor=_upload_executor,
     extract_fields=_extract_upload_fields,
+    auto_confirm=True,
+)
+
+
+# ---------------------------------------------------------------------------
+# casting.send — "send - Talent - Project" (2026-08-24). An INDEPENDENT
+# consumer of the same @Gunwanti + mark WhatsApp source media UPLOAD
+# resolves — never requires submission.media[], media_assignments, or a
+# prior upload. Talent identity resolution (name candidates -> source
+# WhatsApp group -> email-authoritative talent via
+# media_assignment.resolve_authoritative_talent_for_upload) is IDENTICAL
+# to upload's, reused unchanged — only what happens after resolution
+# differs: SEND creates a scan request marked workflow="send" with an
+# explicit destination_group, which the backend orchestrator
+# (services/media_assignment_worker.py) routes to SEND-specific
+# post-scan handling instead of upload's Cloudinary/submission path.
+# ---------------------------------------------------------------------------
+SEND_TALENT_FIELD = FieldSpec(
+    key="talent_selector", label="Talent",
+    question="Who should I send media for?",
+    validate=_validate_selector, aliases=["talent", "who"],
+)
+
+SEND_PROJECT_FIELD = FieldSpec(
+    key="project_query", label="Project",
+    question="Which project?",
+    validate=_validate_project_query, aliases=["project", "for"],
+)
+
+
+def _extract_send_fields(text: str) -> Dict[str, str]:
+    """"send - Talent - Project" — same standalone two-field hyphen shape
+    as _extract_upload_fields, own trigger ("send")."""
+    _, remainder = nlu._strip_leading_trigger(text or "", ["send"])
+    fields = nlu._split_hyphen_fields(remainder, 2)
+    if not fields:
+        return {}
+    talent_part, project_part = fields
+    return {"talent_selector": talent_part, "project_query": project_part}
+
+
+async def _send_executor(
+    collected: dict, ctx: ExecContext, *, destination_group_override: Optional[str] = None,
+) -> ExecResult:
+    """`destination_group_override` is a test-only seam (never set by the
+    real chat-dispatch path) — lets a disposable E2E point SEND at a
+    throwaway WhatsApp group without touching casting-agent's own
+    production `group_names` config, mirroring how upload's own disposable
+    tests call `_upload_executor` directly rather than through the full
+    chat pipeline."""
+    talent_selector = collected.get("talent_selector") or ""
+    project_query = collected.get("project_query") or ""
+
+    # Step 1: resolve the project FIRST — identical reasoning to upload
+    # (the authoritative-talent lookup needs project_id).
+    projects = await _fetch_ongoing_projects()
+    with request_scope.stage("fuzzy"):
+        match = nlu.resolve_project_by_name(project_query, projects)
+    if match.ambiguous:
+        options = "\n".join(f"{i + 1}. {o['label']}" for i, o in enumerate(match.ambiguous))
+        return ExecResult(
+            ok=False, error="ambiguous_project",
+            message=f"I found multiple projects.\n\n{options}\n\nPlease re-run with the exact project name.",
+        )
+    if not match.project:
+        return ExecResult(
+            ok=False, error="project_not_found",
+            message=f'I couldn\'t find a project matching "{project_query}".',
+        )
+    project = match.project
+
+    # Step 2: name resolution -> candidate set (never the authoritative
+    # destination by itself) — identical to upload's own step 2.
+    talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(talent_selector)
+    if ambiguous:
+        candidate_ids = [c.id for c in ambiguous]
+        candidate_label = ambiguous[0].label
+    elif talent_id:
+        candidate_ids = [talent_id]
+        candidate_label = talent_label
+    else:
+        return ExecResult(ok=False, error="talent_not_found", message=err or "No matching talent found.")
+
+    # Step 3: the WhatsApp SOURCE group — identical to upload's step 3.
+    candidate_docs = await db.talents.find(
+        {"id": {"$in": candidate_ids}}, {"_id": 0, "id": 1, "whatsapp_group_name": 1},
+    ).to_list(20)
+    group_names = {(d.get("whatsapp_group_name") or "").strip() for d in candidate_docs if (d.get("whatsapp_group_name") or "").strip()}
+    if not group_names:
+        return ExecResult(
+            ok=False, error="no_whatsapp_group",
+            message=f"{candidate_label} has no WhatsApp group configured — the mark-based "
+                    "send workflow requires one. Add it in Talentgram first.",
+        )
+    if len(group_names) > 1:
+        return ExecResult(
+            ok=False, error="ambiguous_whatsapp_group",
+            message=f"Multiple different WhatsApp groups are configured across talent records named "
+                    f"{candidate_label} — please resolve the duplicate talent records first.",
+        )
+    group_name = next(iter(group_names))
+
+    # Step 4: email-authoritative talent resolution — the EXACT SAME
+    # function upload uses, unchanged. SEND never resolves its source
+    # solely from name when this relationship is available.
+    auth = await media_assignment.resolve_authoritative_talent_for_upload(project["id"], candidate_ids)
+    if not auth.ok:
+        template = _UPLOAD_RESOLUTION_ERROR_MESSAGES.get(
+            auth.error, "Could not verify the send source for {talent_label} / {project_label} ({error})."
+        )
+        message = template.format(talent_label=candidate_label, project_label=project["label"], error=auth.error)
+        return ExecResult(ok=False, error=f"send_source_unresolved:{auth.error}", message=message)
+
+    authoritative_talent_id = auth.talent_id
+    authoritative_talent_label = auth.talent_label or candidate_label
+
+    identity = await media_assignment.get_gunwanti_identity()
+    if not identity or not identity.get("lid"):
+        return ExecResult(
+            ok=False, error="identity_not_configured",
+            message="The Gunwanti agent identity (WhatsApp LID) is not configured yet — "
+                    "contact an admin before using send.",
+        )
+
+    # Step 5: the DESTINATION — casting-agent's own configured group,
+    # the same group UPLOAD's own completion reports already post into.
+    # Never resolved by name/guess; if it's not configured (or
+    # deliberately suppressed for testing), SEND refuses rather than
+    # picking anything else.
+    if destination_group_override:
+        destination_group = destination_group_override
+    else:
+        cfg = await db.whatsapp_agent_config.find_one({"agent_id": "casting-agent"})
+        dest_names = (cfg or {}).get("group_names") or []
+        if not dest_names:
+            return ExecResult(
+                ok=False, error="destination_not_configured",
+                message="The Casting Pipeline destination group is not configured (or is "
+                        "currently suppressed) — cannot send.",
+            )
+        destination_group = dest_names[0]
+
+    await media_send.create_send_scan_request(
+        talent_id=authoritative_talent_id, talent_label=authoritative_talent_label,
+        project_id=project["id"], project_label=project["label"],
+        group_name=group_name, destination_group=destination_group,
+    )
+    return ExecResult(
+        ok=True,
+        message=f"Sending {authoritative_talent_label}'s marked {project['label']} media to "
+                f"{destination_group}…\n\nI'll report back here once it's done.",
+    )
+
+
+SEND_INTENT = IntentDefinition(
+    intent_id="casting.send",
+    triggers=["send"],
+    fields=[SEND_TALENT_FIELD, SEND_PROJECT_FIELD],
+    executor=_send_executor,
+    extract_fields=_extract_send_fields,
     auto_confirm=True,
 )
 
@@ -3931,7 +4160,7 @@ CASTING_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="Talentgram Casting Pipeline",
     module="casting_pipeline",
-    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, UNDO_INTENT],
+    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, SEND_INTENT, UNDO_INTENT],
     resolve_bare_reply=_resolve_bare_reply,
     # Concurrent Task Engine (2026-08-05) — casting-agent is the first (and
     # so far only) agent to opt into independently-addressable, concurrent

@@ -598,6 +598,8 @@ async def on_startup():
         # media_assignment_worker.py module docstrings.
         from agents.modules import media_assignment as _media_assignment
         await _media_assignment.ensure_indexes()
+        from agents.modules import media_send as _media_send
+        await _media_send.ensure_indexes()
         start_media_assignment_worker()
 
         logger.info("Backend startup completed successfully")

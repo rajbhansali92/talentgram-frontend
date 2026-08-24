@@ -28,7 +28,7 @@ from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from core import db
+from core import db, normalize_email
 from agents.modules import casting_pipeline_nlu as nlu
 
 IDENTITY_COLLECTION = "whatsapp_agent_identity"
@@ -72,6 +72,126 @@ async def get_gunwanti_identity() -> Optional[Dict[str, str]]:
     """{"name", "phone", "lid"} — LID is the only field ever compared
     against a mention; phone is reference metadata only (see plan)."""
     return await db[IDENTITY_COLLECTION].find_one({}, {"_id": 0})
+
+
+# ---------------------------------------------------------------------------
+# Authoritative talent resolution for uploads (2026-08-23) — closes a real
+# data-integrity gap: name-based talent resolution (casting_pipeline.py's
+# _resolve_talent_query_target, used by every other command) identifies
+# WHICH WhatsApp source/workflow an "upload" command is about, but it is
+# NEVER authoritative for where the media actually lands. Two `talents`
+# documents can share an identical name during the admin-manual-add ->
+# talent-submits-their-own-email transition period this app documents
+# (routers/submissions.py's submission_finalize: an admin-created record
+# with no/different email is invisible to the email-based lookup that
+# runs when the talent later submits a project form, so a SECOND talent
+# record gets created for the same person, keyed by their real email).
+# The project's own submission — keyed on (project_id, talent_email) — is
+# the one place that unambiguously says which talent record this specific
+# project's media belongs to. This function is the single source of
+# truth: given a project and the SET of talent_ids a name query matched
+# (even a set of one, for the ordinary non-duplicate case), it finds that
+# project's submission among them, re-derives the talent from the
+# submission's OWN submitted email (never trusting submission.talent_id
+# blindly), and requires that to land back on exactly one of the
+# candidates — never guessing, never picking by name, always stopping on
+# any ambiguity or mismatch.
+# ---------------------------------------------------------------------------
+@dataclass
+class AuthoritativeTalentResolution:
+    ok: bool
+    talent_id: Optional[str] = None
+    talent_label: Optional[str] = None
+    submission_id: Optional[str] = None
+    email: Optional[str] = None
+    error: Optional[str] = None
+    detail: Optional[Dict[str, Any]] = None
+
+
+async def resolve_authoritative_talent_for_upload(
+    project_id: str, candidate_talent_ids: List[str],
+) -> AuthoritativeTalentResolution:
+    """`candidate_talent_ids` is every talent_id a NAME query matched (one
+    element in the common case; more than one during the duplicate-record
+    transition period). Never returns ok=True without an exact,
+    email-verified single match."""
+    if not candidate_talent_ids:
+        return AuthoritativeTalentResolution(ok=False, error="no_candidates")
+
+    submissions = await db.submissions.find(
+        {"project_id": project_id, "talent_id": {"$in": candidate_talent_ids}},
+        {"_id": 0, "id": 1, "talent_id": 1, "talent_email": 1},
+    ).to_list(20)
+    if not submissions:
+        return AuthoritativeTalentResolution(
+            ok=False, error="no_submission_found",
+            detail={"project_id": project_id, "candidate_talent_ids": candidate_talent_ids},
+        )
+    distinct_submission_talent_ids = {s["talent_id"] for s in submissions}
+    if len(submissions) > 1 or len(distinct_submission_talent_ids) > 1:
+        # Either two DIFFERENT candidate talents each have their own
+        # submission for this project (genuinely ambiguous — which one did
+        # the employee mean?), or the same talent somehow has more than one
+        # submission for this project (shouldn't happen given the
+        # (project_id, talent_email) unique index, but never assumed safe
+        # to pick either way).
+        return AuthoritativeTalentResolution(
+            ok=False, error="ambiguous_submission",
+            detail={"submissions": submissions},
+        )
+
+    submission = submissions[0]
+    email = normalize_email(submission.get("talent_email"))
+    if not email:
+        return AuthoritativeTalentResolution(
+            ok=False, error="no_email_on_submission",
+            detail={"submission_id": submission["id"]},
+        )
+
+    # Same $or shape routers/submissions.py's submission_finalize already
+    # uses to look up a talent by submitted email — the established
+    # convention for this exact lookup, not a new one invented here.
+    email_talents = await db.talents.find(
+        {"$or": [{"normalized_email": email}, {"email": email}, {"source.talent_email": email}]},
+        {"_id": 0, "id": 1, "name": 1},
+    ).to_list(10)
+    distinct_ids = {t["id"] for t in email_talents}
+    if len(distinct_ids) == 0:
+        return AuthoritativeTalentResolution(
+            ok=False, error="email_maps_to_no_talent", email=email,
+            detail={"submission_id": submission["id"]},
+        )
+    if len(distinct_ids) > 1:
+        return AuthoritativeTalentResolution(
+            ok=False, error="email_maps_to_multiple_talents", email=email,
+            detail={"submission_id": submission["id"], "talent_ids": sorted(distinct_ids)},
+        )
+    resolved_talent = email_talents[0]
+    resolved_talent_id = resolved_talent["id"]
+
+    if resolved_talent_id != submission["talent_id"]:
+        # The submission's own talent_id disagrees with what its own
+        # submitted email resolves to — a real data inconsistency, never
+        # silently trusted either way.
+        return AuthoritativeTalentResolution(
+            ok=False, error="submission_talent_mismatch", email=email,
+            detail={"submission_talent_id": submission["talent_id"], "email_resolved_talent_id": resolved_talent_id},
+        )
+
+    if resolved_talent_id not in candidate_talent_ids:
+        # The email-verified talent isn't even among the talents the
+        # employee's NAME query matched — a different person than
+        # intended. Never silently substituted.
+        return AuthoritativeTalentResolution(
+            ok=False, error="email_resolved_to_unexpected_talent", email=email,
+            detail={"resolved_talent_id": resolved_talent_id, "resolved_talent_name": resolved_talent.get("name"),
+                    "candidate_talent_ids": candidate_talent_ids},
+        )
+
+    return AuthoritativeTalentResolution(
+        ok=True, talent_id=resolved_talent_id, talent_label=resolved_talent.get("name"),
+        submission_id=submission["id"], email=email,
+    )
 
 
 async def ensure_indexes() -> None:

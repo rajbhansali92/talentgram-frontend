@@ -1,0 +1,312 @@
+"""Regression tests for sender.py's media-attach mechanism (2026-08-24).
+
+Live read-only diagnostics against a real disposable WhatsApp group proved
+that data-testid="attach-menu-plus" (the old SEL["attach_btn"] target) no
+longer exists anywhere in the DOM. The real attach button is
+data-testid="plus-rounded", and the menu it opens ("Document" / "Photos &
+videos" / "Camera" / ...) carries NO data-testid at all on its items — only
+role="menuitem" + aria-label. Clicking "Photos & videos" (via Playwright's
+own page.expect_file_chooser(), the correct non-synthetic mechanism for
+this) resolves to the real input, whose accept attribute
+("image/*,video/mp4,video/3gpp,video/quicktime,video/webm,video/x-matroska")
+covers both photos and videos in one control — see sender.py's attach block
+and session.py's SEL["attach_btn"] comment for the full diagnostic trail.
+
+These tests never touch a real browser: they replace every sender.py helper
+send_whatsapp_message calls before/after the attach block with a fixed-
+result fake (same style as test_group_routing.py), and give it a FakePage
+whose expect_file_chooser() mimics Playwright's real async-context-manager
+contract closely enough to prove the attach sequence itself is correct.
+
+Run:  MONGO_URL=mongodb://x python -m pytest tests/test_sender.py -q
+"""
+import asyncio
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("MONGO_URL", "mongodb://x")
+
+import pytest  # noqa: E402
+
+import sender  # noqa: E402
+
+
+# --- Neutralize every non-attach step of send_whatsapp_message ---------------
+async def _true(*a, **k):
+    return True
+
+
+async def _noop(*a, **k):
+    return None
+
+
+async def _opened(*a, **k):
+    return "OPENED"
+
+
+async def _chat_open(*a, **k):
+    return True, True, True, "Talentgram Casting Test"
+
+
+async def _resolve_scope(*a, **k):
+    return "#main"
+
+
+async def _baselines(*a, **k):
+    return {}
+
+
+async def _not_already_delivered(*a, **k):
+    return False, None
+
+
+async def _sent_via(*a, **k):
+    return "fake_sent_via"
+
+
+async def _verified_delivery(*a, **k):
+    return True, True, "[data-testid=\"msg-outgoing\"]", "fake_msg_id"
+
+
+sender.dismiss_blocking_dialogs = _true
+sender._open_group_chat = _opened
+sender._wait_for_chat_ready = _noop
+sender._p26b_dump = _noop
+sender._verify_chat_open = _chat_open
+sender._resolve_scope = _resolve_scope
+sender._snapshot_msg_baselines = _baselines
+sender._dump_send_dom = _noop
+sender._already_delivered = _not_already_delivered
+sender._find_and_click_send = _sent_via
+sender._safe_screenshot = _noop
+sender._dump_outgoing_dom = _noop
+sender._verify_delivery = _verified_delivery
+sender.asyncio.sleep = _noop
+
+
+class _FakeLocator:
+    async def count(self):
+        return 1
+
+
+class _FakeKeyboard:
+    def __init__(self):
+        self.typed = []
+
+    async def type(self, text):
+        self.typed.append(text)
+
+    async def down(self, key):
+        pass
+
+    async def up(self, key):
+        pass
+
+    async def press(self, key):
+        pass
+
+
+class _FakeFileChooserElement:
+    def __init__(self, accept):
+        self._accept = accept
+
+    async def get_attribute(self, name):
+        return self._accept if name == "accept" else None
+
+    async def is_visible(self):
+        return False
+
+
+class _FakeFileChooser:
+    """Mirrors Playwright's real FileChooser API surface used by sender.py."""
+    def __init__(self, accept="image/*,video/mp4,video/3gpp,video/quicktime,video/webm,video/x-matroska"):
+        self.element = _FakeFileChooserElement(accept)
+        self.set_files_calls = []
+
+    def is_multiple(self):
+        return True
+
+    async def set_files(self, path):
+        self.set_files_calls.append(path)
+
+
+class _FileChooserCtx:
+    """Mirrors page.expect_file_chooser()'s async-context-manager contract:
+    `async with page.expect_file_chooser() as fc_info: <action that opens
+    it>` then `file_chooser = await fc_info.value`."""
+    def __init__(self, page, *, should_raise=False):
+        self._page = page
+        self._should_raise = should_raise
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    @property
+    def value(self):
+        if self._should_raise:
+            async def _raise():
+                raise sender.PlaywrightTimeoutError("no file chooser event fired")
+            return _raise()
+
+        async def _resolve():
+            chooser = _FakeFileChooser()
+            self._page.file_choosers.append(chooser)
+            return chooser
+        return _resolve()
+
+
+class FakePage:
+    def __init__(self, *, chooser_should_raise=False):
+        self.clicks = []
+        self.keyboard = _FakeKeyboard()
+        self.file_choosers = []
+        self._chooser_should_raise = chooser_should_raise
+
+    async def click(self, selector, timeout=None):
+        self.clicks.append(selector)
+
+    def expect_file_chooser(self, timeout=None):
+        return _FileChooserCtx(self, should_raise=self._chooser_should_raise)
+
+    def locator(self, sel):
+        return _FakeLocator()
+
+
+def run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _real_temp_file(suffix):
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    with os.fdopen(fd, "wb") as f:
+        f.write(b"fake media bytes")
+    return path
+
+
+# --- 1/2: JPEG and MP4 attach identically through the real menu click -------
+def test_jpeg_attaches_via_photos_videos_menu():
+    page = FakePage()
+    path = _real_temp_file(".jpg")
+    try:
+        result = run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="Ahana Test — Google Test Take 1", local_file_path=path,
+        ))
+        assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+        assert page.clicks[0] == sender.SEL["attach_btn"]
+        assert 'button[aria-label="Photos & videos"]' in page.clicks
+        assert len(page.file_choosers) == 1
+        assert page.file_choosers[0].set_files_calls == [path]
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_mp4_attaches_via_the_same_menu_no_type_branching():
+    page = FakePage()
+    path = _real_temp_file(".mp4")
+    try:
+        result = run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="Ahana Test — Google Test Take 1", local_file_path=path,
+        ))
+        assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+        # Same exact click sequence as the JPEG case — the real "Photos &
+        # videos" input accepts both, so there is no media-type branching
+        # in the attach code path at all.
+        assert page.clicks[0] == sender.SEL["attach_btn"]
+        assert 'button[aria-label="Photos & videos"]' in page.clicks
+        assert page.file_choosers[0].set_files_calls == [path]
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+# --- 3: local_file_path is never deleted by sender.py itself ----------------
+def test_local_file_path_never_deleted_on_success():
+    page = FakePage()
+    path = _real_temp_file(".jpg")
+    try:
+        run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="caption", local_file_path=path,
+        ))
+        assert os.path.exists(path), "sender.py must never delete a caller-owned local_file_path"
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_local_file_path_never_deleted_even_on_attach_failure():
+    page = FakePage(chooser_should_raise=True)
+    path = _real_temp_file(".jpg")
+    try:
+        with pytest.raises(Exception):
+            run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="caption", local_file_path=path,
+            ))
+        assert os.path.exists(path), "a failed attach must still never delete the caller's file"
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+# --- 4: a failed attachment never reports a sent state ----------------------
+def test_failed_attachment_raises_rather_than_reporting_sent():
+    page = FakePage(chooser_should_raise=True)
+    path = _real_temp_file(".mp4")
+    try:
+        with pytest.raises(sender.PlaywrightTimeoutError):
+            run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="caption", local_file_path=path,
+            ))
+        # The click sequence still happens (menu opens, "Photos & videos" is
+        # clicked) — the failure is that no file chooser EVENT ever resolved
+        # (e.g. WhatsApp's UI didn't respond), so no file was ever attached.
+        assert 'button[aria-label="Photos & videos"]' in page.clicks
+        assert page.file_choosers == [], "a failed chooser must never produce an attached file"
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+# --- bonus: media_url (URL-download) ownership is unaffected by this fix ----
+def test_media_url_path_still_deletes_its_own_temp_file(monkeypatch):
+    """Regression guard: the attach-mechanism fix only replaced the click/
+    file-input lines, not the surrounding owns_temp_file ownership logic —
+    a media_url download must still clean up after itself."""
+    import urllib.request
+
+    class _FakeResponse:
+        def read(self):
+            return b"downloaded bytes"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req: _FakeResponse())
+
+    page = FakePage()
+    result = run(sender.send_whatsapp_message(
+        page=page, destination_type="group", destination="Talentgram Casting Test",
+        message_body="caption", media_url="https://example.com/photo.jpg",
+    ))
+    assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+    assert len(page.file_choosers) == 1
+    sent_path = page.file_choosers[0].set_files_calls[0]
+    assert not os.path.exists(sent_path), "sender.py must delete a media_url temp file it downloaded itself"
+
+
+if __name__ == "__main__":
+    import subprocess
+    raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", __file__, "-q"]))

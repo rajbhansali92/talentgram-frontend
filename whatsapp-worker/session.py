@@ -48,7 +48,14 @@ SEL = {
     "chat_title":   '[data-testid="cell-frame-title"]',
     "msg_box":      '[data-testid="conversation-compose-box-input"]',
     "send_btn":     '[data-testid="send"]',
-    "attach_btn":   '[data-testid="attach-menu-plus"]',
+    # 2026-08-24: "attach-menu-plus" no longer exists in WhatsApp Web's DOM
+    # (confirmed via live read-only diagnostics) — the real button is
+    # "plus-rounded" (aria-label="Attach"). The attach menu it opens no
+    # longer carries any data-testid on its items at all (only
+    # role="menuitem"/aria-label), so "attach_doc"/"attach_img" below are
+    # stale and unused; sender.py now identifies the real file input via
+    # Playwright's own expect_file_chooser() instead of a testid selector.
+    "attach_btn":   '[data-testid="plus-rounded"]',
     "attach_doc":   '[data-testid="attach-document"]',
     "attach_img":   '[data-testid="attach-image-video"]',
     "loading_anim": '[data-testid="startup-screen-loading-animation"]',

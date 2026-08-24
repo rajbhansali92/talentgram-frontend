@@ -1705,20 +1705,28 @@ async def send_whatsapp_message(
 
                 logger.info("sender: downloaded media to %s", temp_file_path)
 
-            # Click attachment button (+)
+            # Click attachment button (+) to open the attach menu, then click
+            # "Photos & videos" and let Playwright's own file-chooser
+            # interception hand us the exact <input> WhatsApp wires up for
+            # it (2026-08-24 fix — read-only diagnostics on a real disposable
+            # group proved: (a) SEL["attach_btn"]'s old testid no longer
+            # exists, the real button is [data-testid="plus-rounded"]; (b)
+            # the attach menu's items carry no data-testid at all, only
+            # role="menuitem"/aria-label, which is why a blind first
+            # `input[type="file"]` on the page previously grabbed one of two
+            # unrelated, image-only inputs elsewhere on the page (a
+            # group-icon-change input and an unrelated main-screen input)
+            # instead of the real one; (c) "Photos & videos" bundles both
+            # media types into a single control —
+            # accept="image/*,video/mp4,video/3gpp,video/quicktime,video/webm,video/x-matroska",
+            # multiple=True — confirmed via page.expect_file_chooser(),
+            # Playwright's own non-synthetic mechanism for this exact case.
             await page.click(SEL["attach_btn"])
-            await asyncio.sleep(1.0)
-            
-            # Use file input. WhatsApp has file inputs for doc or image/video
-            # Let's inspect file type to decide which input to use
-            lower_suffix = suffix.lower()
-            is_image_or_video = lower_suffix in [".jpg", ".jpeg", ".png", ".gif", ".mp4", ".mov", ".webp"]
-            
-            input_selector = 'input[type="file"]'
-            # Playwright allows setting files on input elements directly
-            # We wait for file input to become active
-            file_input = page.locator(input_selector).first
-            await file_input.set_input_files(temp_file_path)
+            await asyncio.sleep(0.5)
+            async with page.expect_file_chooser(timeout=10_000) as fc_info:
+                await page.click('button[aria-label="Photos & videos"]', timeout=10_000)
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(temp_file_path)
             await asyncio.sleep(2.0)
             
             # Wait for the media preview send screen to appear

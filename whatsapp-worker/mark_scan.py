@@ -4308,13 +4308,17 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
 _SEND_SUCCESS_STATES = {"MESSAGE_SENT_AND_VERIFIED", "MESSAGE_SENT_BUT_NOT_VERIFIED"}
 
 
-async def _send_one(page, target: Dict[str, Any], raw: bytes) -> Dict[str, Any]:
+async def _send_one(page, target: Dict[str, Any], raw: bytes, diagnostic_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Writes already-downloaded WhatsApp source bytes to a local temp
     file and sends them via the existing, proven send_whatsapp_message —
     local_file_path skips any URL/Cloudinary round-trip entirely. This
     function owns the temp file's full lifecycle (create, pass, delete) —
     send_whatsapp_message never deletes a local_file_path it didn't
-    create itself (see its own docstring)."""
+    create itself (see its own docstring).
+
+    `diagnostic_meta` (2026-08-24, diagnostic-only): forwarded unchanged
+    to send_whatsapp_message, which logs it ONLY if the attach-button
+    click itself fails — never read here, never affects the result."""
     detected = _detect_mime_type(raw, target.get("source_media_type"))
     ext = _MIME_BY_EXT.get(detected, "bin")
     temp_path = None
@@ -4325,6 +4329,7 @@ async def _send_one(page, target: Dict[str, Any], raw: bytes) -> Dict[str, Any]:
         result = await sender.send_whatsapp_message(
             page=page, destination_type="group", destination=target["destination_group"],
             message_body=target.get("caption") or "", local_file_path=temp_path,
+            diagnostic_meta=diagnostic_meta,
         )
         state = result.get("state")
         if state in _SEND_SUCCESS_STATES:
@@ -4343,13 +4348,18 @@ async def _send_one(page, target: Dict[str, Any], raw: bytes) -> Dict[str, Any]:
 PER_ITEM_SEND_TIMEOUT = 90.0
 
 
-async def _send_one_target(page, group_name: str, target: Dict[str, Any]) -> Dict[str, Any]:
+async def _send_one_target(page, group_name: str, target: Dict[str, Any], item_label: str = "") -> Dict[str, Any]:
     """One SEND item end-to-end: reopen the source group, locate the exact
     marked message, retrieve its original bytes via the same proven
     mechanism its media type requires, then hand off to _send_one. Split
     out from _run_send so each item can be individually time-bounded —
     one truly stuck item must fail on its own, never silently swallow the
-    rest of the batch's already-real results (see _run_send's docstring)."""
+    rest of the batch's already-real results (see _run_send's docstring).
+
+    `item_label` (2026-08-24, diagnostic-only): e.g. "3/6" — folded into
+    the diagnostic_meta passed through to _send_one/send_whatsapp_message,
+    purely for the attach-click-failure evidence log; never affects
+    control flow."""
     status = await sender._open_group_chat(page, group_name)
     if status != "OPENED":
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"source group not open (status={status})"}
@@ -4362,12 +4372,16 @@ async def _send_one_target(page, group_name: str, target: Dict[str, Any]) -> Dic
 
     raw: Optional[bytes] = None
     fetch_error: Optional[str] = None
+    viewer_used = False
+    viewer_closed: Optional[Dict[str, Any]] = None
 
     if target.get("source_media_type") == "video":
+        viewer_used = True
         tile_index = target.get("album_tile_index")
         if tile_index is None:
             tile_index = 0
         dl = await _open_tile_viewer_and_download(page, message, tile_index)
+        viewer_closed = dl.get("viewer_closed")
         if not dl.get("ok"):
             fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
         else:
@@ -4402,7 +4416,18 @@ async def _send_one_target(page, group_name: str, target: Dict[str, Any]) -> Dic
     if raw is None:
         return {"ok": False, "source_message_id": target["source_message_id"], "error": fetch_error or "download failed"}
 
-    send_result = await _send_one(page, target, raw)
+    diagnostic_meta = {
+        "item": item_label,
+        "destination_group": target.get("destination_group"),
+        "source_group": group_name,
+        "source_media_type": target.get("source_media_type"),
+        "media_role": target.get("media_role"),
+        "album_tile_index": target.get("album_tile_index"),
+        "source_retrieval_ok": True,
+        "viewer_used": viewer_used,
+        "viewer_closed": viewer_closed,
+    }
+    send_result = await _send_one(page, target, raw, diagnostic_meta=diagnostic_meta)
     send_result["byte_length"] = len(raw)
     return send_result
 
@@ -4429,10 +4454,12 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     if status != "OPENED":
         return {"error": f"Could not open WhatsApp source group {group_name!r} (status={status})"}
 
+    send_targets = req.get("send_targets") or []
     results = []
-    for target in req.get("send_targets") or []:
+    for i, target in enumerate(send_targets):
+        item_label = f"{i + 1}/{len(send_targets)}"
         try:
-            result = await asyncio.wait_for(_send_one_target(page, group_name, target), timeout=PER_ITEM_SEND_TIMEOUT)
+            result = await asyncio.wait_for(_send_one_target(page, group_name, target, item_label), timeout=PER_ITEM_SEND_TIMEOUT)
         except asyncio.TimeoutError:
             result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"timed out after {PER_ITEM_SEND_TIMEOUT}s"}
         except Exception as exc:

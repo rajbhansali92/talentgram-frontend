@@ -15,7 +15,7 @@ import unicodedata
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from db import get_db
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -221,6 +221,112 @@ async def _dump_send_dom(page: Page) -> None:
             logger.info("sender:   %s", e)
     except Exception as exc:
         logger.info("sender: DOM dump failed: %s", exc)
+
+
+_ATTACH_CLICK_FAILURE_JS = """
+    (selector) => {
+      function describe(el) {
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        const cs = window.getComputedStyle(el);
+        let anc = el.parentElement, chain = [];
+        for (let d = 0; d < 8 && anc; d++) {
+          chain.push({
+            testid: anc.getAttribute && anc.getAttribute('data-testid'),
+            role: anc.getAttribute && anc.getAttribute('role'),
+            tag: anc.tagName,
+            cls: (anc.className || '').toString().slice(0, 60),
+          });
+          anc = anc.parentElement;
+        }
+        return {
+          tag: el.tagName, id: el.id || null,
+          testid: el.getAttribute ? el.getAttribute('data-testid') : null,
+          aria_label: el.getAttribute ? el.getAttribute('aria-label') : null,
+          role: el.getAttribute ? el.getAttribute('role') : null,
+          cls: (el.className || '').toString().slice(0, 160),
+          text: (el.innerText || '').slice(0, 60),
+          rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+          visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+          enabled: !el.disabled,
+          opacity: cs.opacity, pointer_events: cs.pointerEvents, z_index: cs.zIndex,
+          position: cs.position, display: cs.display, visibility: cs.visibility,
+          ancestor_chain: chain,
+        };
+      }
+      const attachEl = document.querySelector(selector);
+      const attachDesc = describe(attachEl);
+      let stack = null, pointFrom = null, cx = null, cy = null, rect0 = null;
+      if (attachEl) {
+        const rect = attachEl.getBoundingClientRect();
+        rect0 = {x: rect.x, y: rect.y, w: rect.width, h: rect.height};
+        cx = Math.round(rect.x + rect.width / 2);
+        cy = Math.round(rect.y + rect.height / 2);
+        pointFrom = describe(document.elementFromPoint(cx, cy));
+        stack = document.elementsFromPoint(cx, cy).map(describe);
+      }
+      function intersectsAttach(el) {
+        if (!rect0) return false;
+        const r = el.getBoundingClientRect();
+        return !(r.right < rect0.x || r.left > rect0.x + rect0.w ||
+                 r.bottom < rect0.y || r.top > rect0.y + rect0.h);
+      }
+      const overlaySel = '[role="dialog"], [role="menu"], [aria-modal="true"]';
+      const overlays = Array.from(document.querySelectorAll(overlaySel))
+        .filter(el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+        .map(describe);
+      const fixedOrAbsoluteIntersecting = Array.from(document.querySelectorAll('div, span'))
+        .filter(el => {
+          const cs = window.getComputedStyle(el);
+          if (cs.position !== 'fixed' && cs.position !== 'absolute') return false;
+          if (!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) return false;
+          return intersectsAttach(el);
+        })
+        .map(describe);
+      let chatTitle = null;
+      const hdr = document.querySelector('#main header span[title]');
+      if (hdr) chatTitle = hdr.getAttribute('title') || hdr.innerText;
+      return {
+        attach_button: attachDesc,
+        click_point: {x: cx, y: cy},
+        element_from_point: pointFrom,
+        elements_from_point: stack,
+        overlays_dialogs_menus: overlays,
+        fixed_or_absolute_intersecting_attach: fixedOrAbsoluteIntersecting,
+        active_element: describe(document.activeElement),
+        chat_title: chatTitle,
+        url: location.href,
+        scroll: {x: window.scrollX, y: window.scrollY},
+        viewport: {w: window.innerWidth, h: window.innerHeight},
+      };
+    }
+"""
+
+
+async def _capture_attach_click_failure_diagnostics(page: Page, exc: Exception, meta: Optional[Dict[str, Any]]) -> None:
+    """Diagnostic-only (2026-08-24) — fired ONLY inside the except branch
+    wrapping the attach-button click, immediately before that exception is
+    re-raised unchanged. Captures the exact live DOM state Playwright saw
+    at the moment of failure (elementFromPoint/elementsFromPoint at the
+    button's own coordinates, any dialog/menu overlays, any fixed/absolute
+    element whose bounding box intersects the button, active element,
+    scroll/viewport) plus whatever caller-supplied metadata is available
+    (source group/media type/role/tile index/item number — see mark_scan.py
+    _send_one). Never retries the click, never clicks anything else, never
+    changes send_whatsapp_message's control flow or return value — this
+    function's own result is only ever logged, never consumed by the
+    caller. A failure inside this diagnostic itself is swallowed so it can
+    never mask or replace the real click failure it's trying to explain."""
+    try:
+        dom = await page.evaluate(_ATTACH_CLICK_FAILURE_JS, SEL["attach_btn"])
+    except Exception as capture_exc:
+        dom = {"error": f"diagnostic capture itself failed: {capture_exc}"}
+    payload = {
+        "meta": meta or {},
+        "playwright_error": str(exc),
+        "dom": dom,
+    }
+    logger.error("sender: ATTACH_CLICK_FAILURE_DIAGNOSTIC %s", _p26b_json.dumps(payload, default=str))
 
 
 async def _safe_screenshot(page: Page, path: str) -> None:
@@ -1456,10 +1562,17 @@ async def send_whatsapp_message(
     local_file_path: Optional[str] = None,
     is_retry: bool = False,
     fast: bool = False,
+    diagnostic_meta: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
     Core automation logic for sending a single WhatsApp message.
     Returns {"state": str, "evidence": dict} with structured decision evidence.
+
+    `diagnostic_meta` (2026-08-24, diagnostic-only): caller-supplied context
+    (source group/media type/role/tile index/item number — see mark_scan.py
+    _send_one) logged alongside a live DOM capture ONLY if the attach-button
+    click itself fails. Purely an evidence side-channel — never read by this
+    function otherwise, never affects control flow or the returned state.
 
     `local_file_path` (2026-08-24, SEND workflow): an alternative to
     `media_url` for a caller that already has the file's bytes on disk
@@ -1721,7 +1834,14 @@ async def send_whatsapp_message(
             # accept="image/*,video/mp4,video/3gpp,video/quicktime,video/webm,video/x-matroska",
             # multiple=True — confirmed via page.expect_file_chooser(),
             # Playwright's own non-synthetic mechanism for this exact case.
-            await page.click(SEL["attach_btn"])
+            try:
+                await page.click(SEL["attach_btn"])
+            except Exception as click_exc:
+                # Diagnostic-only (2026-08-24) — capture live DOM evidence
+                # at the exact instant of a real attach-click failure, then
+                # re-raise the SAME exception unchanged. Never retried here.
+                await _capture_attach_click_failure_diagnostics(page, click_exc, diagnostic_meta)
+                raise
             await asyncio.sleep(0.5)
             async with page.expect_file_chooser(timeout=10_000) as fc_info:
                 await page.click('button[aria-label="Photos & videos"]', timeout=10_000)

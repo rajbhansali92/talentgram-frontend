@@ -160,13 +160,20 @@ class _FileChooserCtx:
 
 
 class FakePage:
-    def __init__(self, *, chooser_should_raise=False):
+    def __init__(self, *, chooser_should_raise=False, attach_click_should_raise=False):
         self.clicks = []
         self.keyboard = _FakeKeyboard()
         self.file_choosers = []
+        self.evaluate_calls = []
         self._chooser_should_raise = chooser_should_raise
+        self._attach_click_should_raise = attach_click_should_raise
 
     async def click(self, selector, timeout=None):
+        if self._attach_click_should_raise and selector == sender.SEL["attach_btn"]:
+            raise sender.PlaywrightTimeoutError(
+                f'Page.click: Timeout {timeout or 30000}ms exceeded.\n'
+                f'  - element intercepts pointer events'
+            )
         self.clicks.append(selector)
 
     def expect_file_chooser(self, timeout=None):
@@ -174,6 +181,22 @@ class FakePage:
 
     def locator(self, sel):
         return _FakeLocator()
+
+    async def evaluate(self, js, arg=None):
+        self.evaluate_calls.append((js, arg))
+        return {
+            "attach_button": {"testid": "plus-rounded", "visible": True},
+            "click_point": {"x": 614, "y": 762},
+            "element_from_point": {"tag": "DIV", "testid": "some-overlay"},
+            "elements_from_point": [{"tag": "DIV", "testid": "some-overlay"}],
+            "overlays_dialogs_menus": [],
+            "fixed_or_absolute_intersecting_attach": [],
+            "active_element": None,
+            "chat_title": "Talentgram Casting Test",
+            "url": "https://web.whatsapp.com/",
+            "scroll": {"x": 0, "y": 0},
+            "viewport": {"w": 1280, "h": 800},
+        }
 
 
 def run(coro):
@@ -305,6 +328,71 @@ def test_media_url_path_still_deletes_its_own_temp_file(monkeypatch):
     assert len(page.file_choosers) == 1
     sent_path = page.file_choosers[0].set_files_calls[0]
     assert not os.path.exists(sent_path), "sender.py must delete a media_url temp file it downloaded itself"
+
+
+# --- diagnostic helper: fires on attach-click failure, never changes flow ---
+def test_attach_click_failure_captures_diagnostics_then_reraises_unchanged():
+    """2026-08-24: when the real attach-button click itself times out
+    ("element intercepts pointer events"), sender.py must capture a live
+    DOM diagnostic (via page.evaluate) BEFORE re-raising the exact same
+    exception — never swallowed, never retried, never replaced."""
+    page = FakePage(attach_click_should_raise=True)
+    path = _real_temp_file(".jpg")
+    try:
+        with pytest.raises(sender.PlaywrightTimeoutError) as exc_info:
+            run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="Ahana Test — Google Test Take 1", local_file_path=path,
+                diagnostic_meta={"item": "1/6", "source_media_type": "video"},
+            ))
+        assert "intercepts pointer events" in str(exc_info.value)
+        # The diagnostic capture ran exactly once (the failure-triggered
+        # page.evaluate call) and nothing was ever attached or sent.
+        assert len(page.evaluate_calls) == 1
+        assert page.file_choosers == []
+        assert 'button[aria-label="Photos & videos"]' not in page.clicks
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_attach_click_failure_diagnostic_capture_itself_failing_does_not_mask_error():
+    """A bug inside the diagnostic capture (e.g. page.evaluate itself
+    raising) must never replace or hide the real click failure it was
+    trying to explain."""
+    class _BrokenEvaluatePage(FakePage):
+        async def evaluate(self, js, arg=None):
+            raise RuntimeError("diagnostic capture blew up")
+
+    page = _BrokenEvaluatePage(attach_click_should_raise=True)
+    path = _real_temp_file(".jpg")
+    try:
+        with pytest.raises(sender.PlaywrightTimeoutError) as exc_info:
+            run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="caption", local_file_path=path,
+            ))
+        assert "intercepts pointer events" in str(exc_info.value)
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_attach_click_failure_without_diagnostic_meta_still_works():
+    """diagnostic_meta is optional — every existing caller (campaign sends
+    via media_url) that never passes it must behave identically."""
+    page = FakePage(attach_click_should_raise=True)
+    path = _real_temp_file(".mp4")
+    try:
+        with pytest.raises(sender.PlaywrightTimeoutError):
+            run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Talentgram Casting Test",
+                message_body="caption", local_file_path=path,
+            ))
+        assert len(page.evaluate_calls) == 1
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
 
 
 if __name__ == "__main__":

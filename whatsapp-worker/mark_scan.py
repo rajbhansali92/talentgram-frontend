@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1934,6 +1934,181 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "attach_interceptor_diagnostic":
+        # Diagnostic-only (2026-08-24) — investigates a NEW failure: the
+        # real SEND E2E downloaded all 6 source items successfully but
+        # every send then failed at the FIRST destination interaction —
+        # page.click([data-testid="plus-rounded"]) itself timed out with
+        # Playwright reporting "element intercepts pointer events". This
+        # is different from the earlier stale-selector problem (already
+        # fixed and proven correct in isolation). Never clicks anything,
+        # never calls set_files, never types a caption, never sends.
+        #
+        # Captures a full elementFromPoint/elementsFromPoint + computed-
+        # style inventory of the attach button's exact click coordinates
+        # at 5 checkpoints: (A) a FRESH destination-group open (baseline),
+        # (B) immediately after a real video-tile retrieval while STILL in
+        # the source group, (C) after switching to the destination
+        # following that video retrieval, (D) immediately after a real
+        # photo-tile retrieval while still in the source group, (E) after
+        # switching to the destination following that photo retrieval —
+        # so a diff between the fresh baseline (A) and the post-retrieval
+        # destination states (C, E) shows exactly what (if anything) the
+        # source-retrieval step leaves behind.
+        source_group = req.get("source_group_name") or "Talentgram MEDIA SPIKE TEST"
+        dest_group = group_name  # already opened by the outer code above
+
+        _inventory_js = """
+            () => {
+              function describe(el) {
+                if (!el) return null;
+                const rect = el.getBoundingClientRect();
+                const cs = window.getComputedStyle(el);
+                let anc = el.parentElement, chain = [];
+                for (let d = 0; d < 10 && anc; d++) {
+                  chain.push({
+                    testid: anc.getAttribute && anc.getAttribute('data-testid'),
+                    role: anc.getAttribute && anc.getAttribute('role'),
+                    tag: anc.tagName,
+                    cls: (anc.className || '').toString().slice(0, 60),
+                  });
+                  anc = anc.parentElement;
+                }
+                return {
+                  tag: el.tagName,
+                  testid: el.getAttribute ? el.getAttribute('data-testid') : null,
+                  aria_label: el.getAttribute ? el.getAttribute('aria-label') : null,
+                  role: el.getAttribute ? el.getAttribute('role') : null,
+                  cls: (el.className || '').toString().slice(0, 120),
+                  text: (el.innerText || '').slice(0, 60),
+                  rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                  visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                  opacity: cs.opacity, pointer_events: cs.pointerEvents, z_index: cs.zIndex,
+                  position: cs.position, display: cs.display, visibility: cs.visibility,
+                  ancestor_chain: chain,
+                };
+              }
+              const attachEl = document.querySelector('[data-testid="plus-rounded"]');
+              const attachDesc = describe(attachEl);
+              let stack = null, pointFrom = null, cx = null, cy = null;
+              if (attachEl) {
+                const rect = attachEl.getBoundingClientRect();
+                cx = Math.round(rect.x + rect.width / 2);
+                cy = Math.round(rect.y + rect.height / 2);
+                pointFrom = describe(document.elementFromPoint(cx, cy));
+                stack = document.elementsFromPoint(cx, cy).map(describe);
+              }
+              const modalSel = '[role="dialog"], [role="presentation"], [aria-modal="true"]';
+              const modals = Array.from(document.querySelectorAll(modalSel)).map(describe);
+              const bigFixed = Array.from(document.querySelectorAll('div')).filter(el => {
+                const cs = window.getComputedStyle(el);
+                if (cs.position !== 'fixed' && cs.position !== 'absolute') return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 300 && r.height > 300;
+              }).map(describe);
+              return {
+                attach_button: attachDesc,
+                click_point: {x: cx, y: cy},
+                element_from_point: pointFrom,
+                elements_from_point: stack,
+                modals_dialogs: modals,
+                large_fixed_or_absolute: bigFixed,
+                active_element: describe(document.activeElement),
+                url: location.href,
+                scroll: {x: window.scrollX, y: window.scrollY},
+                viewport: {w: window.innerWidth, h: window.innerHeight},
+                total_testid_elements: document.querySelectorAll('[data-testid]').length,
+              };
+            }
+        """
+
+        async def _capture(label):
+            try:
+                data = await _evaluate(page, _inventory_js, [])
+            except Exception as exc:
+                data = {"error": str(exc)}
+            return {"checkpoint": label, "data": data}
+
+        captures = []
+        errors = {}
+
+        try:
+            await sender._wait_for_chat_ready(page)
+            captures.append(await _capture("A_fresh_destination_baseline"))
+        except Exception as exc:
+            errors["A"] = str(exc)
+
+        # --- Video retrieval (Take 1) while still in the source group -----
+        try:
+            status = await sender._open_group_chat(page, source_group)
+            if status != "OPENED":
+                errors["source_open_1"] = f"status={status}"
+            else:
+                await sender._wait_for_chat_ready(page)
+                idx = await _find_message_index_by_data_id(page, source_group, "3B2E8E7ECFE51C927D01")
+                if idx is None:
+                    errors["video_locate"] = "Take 1 source message not found in window"
+                else:
+                    scope = await sender._resolve_scope(page)
+                    full_sel = f"{scope} [data-testid^='conv-msg-']"
+                    message = page.locator(full_sel).nth(idx)
+                    dl = await _open_tile_viewer_and_download(page, message, 0)
+                    errors["video_download_ok"] = bool(dl.get("ok"))
+                    if not dl.get("ok"):
+                        errors["video_download_reason"] = dl.get("reason") or dl.get("stage")
+                    captures.append(await _capture("B_after_video_retrieval_still_in_source"))
+        except Exception as exc:
+            errors["B"] = str(exc)
+
+        try:
+            status = await sender._open_group_chat(page, dest_group)
+            if status != "OPENED":
+                errors["dest_reopen_1"] = f"status={status}"
+            else:
+                await sender._wait_for_chat_ready(page)
+                captures.append(await _capture("C_after_video_retrieval_in_destination"))
+        except Exception as exc:
+            errors["C"] = str(exc)
+
+        # --- Photo retrieval (Photo 1) while still in the source group ----
+        try:
+            status = await sender._open_group_chat(page, source_group)
+            if status != "OPENED":
+                errors["source_open_2"] = f"status={status}"
+            else:
+                await sender._wait_for_chat_ready(page)
+                idx = await _find_message_index_by_data_id(page, source_group, "3B97692060C7060F1D5B")
+                if idx is None:
+                    errors["photo_locate"] = "Photos source message not found in window"
+                else:
+                    scope = await sender._resolve_scope(page)
+                    full_sel = f"{scope} [data-testid^='conv-msg-']"
+                    message = page.locator(full_sel).nth(idx)
+                    dl = await _download_photo_album_tile_via_blob(
+                        message, page, 0, "10aee85ac7d6b0294d8e8e833a60ba9d0bc17acc7ec7edd86e8b9345fe02ead8",
+                    )
+                    errors["photo_download_ok"] = bool(dl.get("ok"))
+                    if not dl.get("ok"):
+                        errors["photo_download_reason"] = dl.get("reason") or dl.get("stage")
+                    captures.append(await _capture("D_after_photo_retrieval_still_in_source"))
+        except Exception as exc:
+            errors["D"] = str(exc)
+
+        try:
+            status = await sender._open_group_chat(page, dest_group)
+            if status != "OPENED":
+                errors["dest_reopen_2"] = f"status={status}"
+            else:
+                await sender._wait_for_chat_ready(page)
+                captures.append(await _capture("E_after_photo_retrieval_in_destination"))
+        except Exception as exc:
+            errors["E"] = str(exc)
+
+        return {"results": [{
+            "ok": True, "source_group": source_group, "dest_group": dest_group,
+            "captures": captures, "errors": errors,
         }], "session_identity": session_identity}
 
     if probe_type == "attach_real_file_diagnostic":

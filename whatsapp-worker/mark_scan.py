@@ -1958,7 +1958,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -2659,6 +2659,65 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "final_inventory": final_inventory,
             "media_panel": media_panel,
         }], "session_identity": session_identity}
+
+    if probe_type == "video_tile_reresolution_live_diagnostic":
+        # Diagnostic-only (2026-08-24) — post-deploy verification of the
+        # video-tile re-resolution fix against the EXACT real message that
+        # failed twice (SendTest2 Intro, source_message_id
+        # 3B07252BFE7BC81FB956). This calls the REAL, FIXED
+        # _open_tile_viewer_and_download with group_name/source_message_id
+        # (exercising live re-resolution + bounded retry exactly as
+        # _send_one_target now does), which does open the native WhatsApp
+        # viewer and perform a real local browser download — the same
+        # locally-scoped, non-mutating mechanism already used safely by
+        # every other download_probe in this file (nothing is sent/posted
+        # to anyone; no message is created; no media_sends/casting_pipeline
+        # write occurs here). Reports current index/data-id, the fix's own
+        # outcome, downloaded byte count + sha256, and the mark's known
+        # source_thumbnail_hash for reference.
+        target_id = req.get("probe_message_id") or "3B07252BFE7BC81FB956"
+        expected_thumbnail_hash = req.get("expected_thumbnail_hash")
+
+        idx = await _find_message_index_by_data_id(page, group_name, target_id)
+        result: Dict[str, Any] = {
+            "target_id": target_id, "current_index": idx,
+            "expected_thumbnail_hash": expected_thumbnail_hash,
+        }
+        if idx is None:
+            result["error"] = "target message not found in current window"
+            return {"results": [result], "session_identity": session_identity}
+
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        data_id_at_index = await _evaluate(page, """
+            ([sel, idx]) => {
+              const els = document.querySelectorAll(sel);
+              const el = els[idx];
+              return el ? el.getAttribute('data-id') : null;
+            }
+        """, [full_sel, idx])
+        result["data_id_at_current_index"] = data_id_at_index
+        result["data_id_matches_target"] = data_id_at_index == target_id
+
+        message = page.locator(full_sel).nth(idx)
+        dl = await _open_tile_viewer_and_download(
+            page, message, 0, group_name=group_name, source_message_id=target_id,
+        )
+        result["viewer_ok"] = dl.get("ok")
+        result["stage"] = dl.get("stage")
+        result["reason"] = dl.get("reason")
+        result["click_attempts"] = dl.get("click_attempts")
+        result["viewer_closed"] = dl.get("viewer_closed")
+
+        downloads = dl.get("downloads") or []
+        raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
+        if raw:
+            result["downloaded_byte_length"] = len(raw)
+            result["downloaded_sha256"] = hashlib.sha256(raw).hexdigest()
+        else:
+            result["downloaded_byte_length"] = 0
+
+        return {"results": [_strip_raw_bytes(result)], "session_identity": session_identity}
 
     if probe_type == "video_tile_stability_diagnostic":
         # Diagnostic-only (2026-08-24) — investigates a PERSISTENT (not

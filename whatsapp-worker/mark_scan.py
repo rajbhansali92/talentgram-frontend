@@ -2785,15 +2785,30 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             full_sel = f"{scope} [data-testid^='conv-msg-']"
 
             if not is_photo:
-                tile, _ = await _resolve_video_tile_locator(page, group_name, target_id, tile_index)
-                if tile is None:
-                    entry["error"] = "video tile re-resolution failed"
-                    return entry
-                try:
-                    await tile.scroll_into_view_if_needed(timeout=5000)
-                    await tile.click(timeout=10000)
-                except Exception as exc:
-                    entry["error"] = f"tile click failed: {exc}"
+                # Reuses the SAME bounded-retry click logic already proven
+                # in _open_tile_viewer_and_download (2026-08-24 fix) —
+                # NOT a raw one-shot click, which would just re-hit the
+                # separately-diagnosed tile-instability issue this
+                # investigation isn't about.
+                click_error: Optional[Exception] = None
+                tile = None
+                for attempt in range(MAX_TILE_CLICK_ATTEMPTS):
+                    tile, _ = await _resolve_video_tile_locator(page, group_name, target_id, tile_index)
+                    if tile is None:
+                        click_error = RuntimeError("source message no longer found in window")
+                        break
+                    try:
+                        await tile.scroll_into_view_if_needed(timeout=5000)
+                        await tile.click(timeout=10000)
+                        click_error = None
+                        break
+                    except Exception as exc:
+                        click_error = exc
+                        if "not stable" not in str(exc) and "detached" not in str(exc):
+                            break
+                entry["click_attempts_used"] = attempt + 1
+                if click_error is not None:
+                    entry["error"] = f"tile click failed after retries: {click_error}"
                     return entry
                 mounted = False
                 for _ in range(30):

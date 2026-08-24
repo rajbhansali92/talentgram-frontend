@@ -659,6 +659,18 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             "quoted_smallest_hash": quoted_hash,
             "quoted_html_snippet": quoted_html[:3000],
             "message_html_snippet": html[:1500],
+            # Diagnostic-only, read-only (2026-08-24): investigating why a
+            # bounded quoted-message re-hydration retry sometimes still
+            # fails. Structural fact worth recording precisely: this loop
+            # only ever reaches a message whose _dump_window-captured
+            # quotedHtml was already truthy — so if a candidate later
+            # fails with "no quoted-message block" in the LIVE re-check,
+            # that block existed at INITIAL capture time and must have
+            # been torn down afterward (not "never captured"). These two
+            # extra fields make that comparison exact rather than
+            # inferred from a snippet's length.
+            "initial_html_len": len(html),
+            "initial_quoted_html_len": len(quoted_html),
         })
 
     debug = {

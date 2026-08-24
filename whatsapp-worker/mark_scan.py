@@ -1885,7 +1885,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1935,6 +1935,150 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "send_button_preview_diagnostic":
+        # Diagnostic-only (2026-08-24) — investigates the media-preview
+        # screen's ACTUAL Send control before any verification-behavior
+        # change is implemented. sender.py's existing SEND_BUTTON_SELECTORS
+        # chain was already observed to return count=0 for every entry
+        # during a real SEND, falling through to a raw Enter keypress —
+        # unsafe, since Enter clearing the composer is not proof media was
+        # submitted. Attaches a real disposable local JPEG through the
+        # ALREADY-PROVEN mechanism (plus-rounded -> Photos & videos ->
+        # expect_file_chooser -> set_files), stops BEFORE any Send
+        # interaction, inventories every visible button-like element on
+        # the preview screen (aria-label/testid/data-icon/role/text/
+        # ancestor chain), probes each existing SEND_BUTTON_SELECTORS
+        # entry's count/visibility (without clicking), and — if exactly
+        # one strong candidate is found — captures elementsFromPoint at
+        # its center to confirm it's the unique, real target. Never
+        # clicks Send; cancels via Escape afterward.
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        _tiny_jpeg_b64 = (
+            "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8Q"
+            "EBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"
+            "EBAQEBAQEBD/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QA"
+            "FQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k="
+        )
+        temp_path = None
+        attach_error = None
+        button_inventory: Any = None
+        selector_probe_results: Any = None
+        candidate_efp: Any = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            tmp.write(b64mod.b64decode(_tiny_jpeg_b64))
+            tmp.close()
+            temp_path = tmp.name
+
+            await page.click(sender.SEL["attach_btn"], timeout=10_000)
+            await asyncio.sleep(0.5)
+            async with page.expect_file_chooser(timeout=10_000) as fc_info:
+                await page.click('button[aria-label="Photos & videos"]', timeout=10_000)
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(temp_path)
+            await asyncio.sleep(2.0)
+
+            # Probe each existing SEND_BUTTON_SELECTORS entry — count/visible
+            # only, never click (mirrors _find_and_click_send's own probing
+            # logic exactly, minus the click).
+            selector_probe_results = []
+            for sel in sender.SEND_BUTTON_SELECTORS:
+                try:
+                    loc = page.locator(sel)
+                    count = await loc.count()
+                    visible = await loc.first.is_visible() if count else False
+                    selector_probe_results.append({"selector": sel, "count": count, "visible": visible})
+                except Exception as exc:
+                    selector_probe_results.append({"selector": sel, "error": str(exc)})
+
+            _inventory_js = """
+                () => {
+                  function describe(el) {
+                    const rect = el.getBoundingClientRect();
+                    let anc = el.parentElement, chain = [];
+                    for (let d = 0; d < 6 && anc; d++) {
+                      chain.push({
+                        testid: anc.getAttribute && anc.getAttribute('data-testid'),
+                        role: anc.getAttribute && anc.getAttribute('role'),
+                        tag: anc.tagName,
+                      });
+                      anc = anc.parentElement;
+                    }
+                    return {
+                      tag: el.tagName,
+                      testid: el.getAttribute('data-testid'),
+                      aria_label: el.getAttribute('aria-label'),
+                      data_icon: el.getAttribute('data-icon'),
+                      role: el.getAttribute('role'),
+                      text: (el.innerText || '').slice(0, 40),
+                      rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                      visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                      ancestor_chain: chain,
+                    };
+                  }
+                  const sel = 'button, [role="button"], span[data-icon], [data-testid]';
+                  const all = Array.from(document.querySelectorAll(sel))
+                    .filter(el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                  const sendLike = all.filter(el => {
+                    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                    const icon = (el.getAttribute('data-icon') || '').toLowerCase();
+                    const testid = (el.getAttribute('data-testid') || '').toLowerCase();
+                    return aria.includes('send') || icon.includes('send') || testid.includes('send');
+                  });
+                  return {
+                    total_visible_button_like: all.length,
+                    send_like_candidates: sendLike.map(describe),
+                  };
+                }
+            """
+            button_inventory = await _evaluate(page, _inventory_js, [])
+
+            candidates = (button_inventory or {}).get("send_like_candidates") or []
+            if len(candidates) == 1:
+                c = candidates[0]
+                rect = c.get("rect") or {}
+                cx = rect.get("x", 0) + rect.get("w", 0) // 2
+                cy = rect.get("y", 0) + rect.get("h", 0) // 2
+                efp_js = """
+                    ([cx, cy]) => {
+                      function describe(el) {
+                        return {
+                          tag: el.tagName, testid: el.getAttribute('data-testid'),
+                          aria_label: el.getAttribute('aria-label'), data_icon: el.getAttribute('data-icon'),
+                        };
+                      }
+                      return document.elementsFromPoint(cx, cy).slice(0, 6).map(describe);
+                    }
+                """
+                candidate_efp = await _evaluate(page, efp_js, [cx, cy])
+        except Exception as exc:
+            attach_error = str(exc)
+        finally:
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+
+        return {"results": [{
+            "ok": attach_error is None, "group_name": group_name,
+            "chat_ready_error": ready_error, "attach_error": attach_error,
+            "selector_probe_results": selector_probe_results,
+            "button_inventory": button_inventory,
+            "candidate_elements_from_point": candidate_efp,
         }], "session_identity": session_identity}
 
     if probe_type == "destination_incoming_message_diagnostic":

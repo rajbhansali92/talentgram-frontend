@@ -32,6 +32,7 @@ import logging
 import re
 import subprocess
 import tempfile
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -589,6 +590,8 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             # investigating this live.
             if jump.get("cross_check") is not None:
                 reason = f"{reason} | resolved_index={jump.get('resolved_index')} cross_check={jump.get('cross_check')}"
+            if jump.get("restoration_log"):
+                reason = f"{reason} | restoration_log={jump.get('restoration_log')}"
             candidates.append(_batch_failure_candidate(bc, reason))
             continue
         tile_hashes_and_types = jump["tile_hashes_and_types"]
@@ -910,6 +913,69 @@ MAX_HYDRATION_ATTEMPTS = 3
 HYDRATION_RETRY_DELAY_MS = 900
 
 
+_SCROLL_METRICS_JS = """
+([sel, dataId]) => {
+  const els = document.querySelectorAll(sel);
+  let container = null, maxOverflow = 0;
+  if (els.length) {
+    let node = els[0].parentElement;
+    for (let d = 0; d < 8 && node; d++) {
+      const overflow = node.scrollHeight - node.clientHeight;
+      if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+      node = node.parentElement;
+    }
+  }
+  const target = Array.from(els).find(el => el.getAttribute('data-id') === dataId);
+  const rect = target ? target.getBoundingClientRect() : null;
+  return {
+    scrollTop: container ? container.scrollTop : null,
+    scrollHeight: container ? container.scrollHeight : null,
+    clientHeight: container ? container.clientHeight : null,
+    target_found: !!target,
+    target_own_data_id: target ? target.getAttribute('data-id') : null,
+    target_rect: rect ? [rect.x, rect.y, rect.width, rect.height] : null,
+    target_html_len: target ? target.outerHTML.length : null,
+    quoted_aria_found: target ? !!target.querySelector('[aria-label="Quoted message"]') : false,
+  };
+}
+"""
+
+
+async def _restore_message_to_viewport(page, full_sel: str, reply_data_id: str, reply_message) -> Dict[str, Any]:
+    """State-restoration experiment (2026-08-24) — 5-run evidence proved
+    the target message is ALWAYS fully hydrated in _dump_window's own
+    capture (html_len=4959 in every run, pass or fail); the divergence is
+    that _dump_window's own history-loading scroll always ends scrolled
+    well away from the tail before Pass 2 runs, and the SAME message/
+    data-id later re-renders as a 222-byte virtualized stub on the
+    failing runs. Tests whether actively restoring the message into the
+    active viewport (Playwright's own scroll_into_view_if_needed — the
+    same safe, already-proven mechanism used elsewhere in this file, not
+    a new scroll hack) reliably re-hydrates it, rather than merely
+    waiting in place. Records full before/after scroll-container and
+    target-element metrics for evidence, whether or not it works."""
+    t0 = time.monotonic()
+    try:
+        before = await _evaluate(page, _SCROLL_METRICS_JS, [full_sel, reply_data_id])
+    except Exception as exc:
+        before = {"error": str(exc)}
+    try:
+        await reply_message.scroll_into_view_if_needed(timeout=5000)
+        scroll_error = None
+    except Exception as exc:
+        scroll_error = str(exc)
+    await page.wait_for_timeout(600)
+    try:
+        after = await _evaluate(page, _SCROLL_METRICS_JS, [full_sel, reply_data_id])
+    except Exception as exc:
+        after = {"error": str(exc)}
+    return {
+        "before": before, "after": after, "scroll_error": scroll_error,
+        "elapsed_s": round(time.monotonic() - t0, 3),
+        "data_id_stable": (before.get("target_own_data_id") == after.get("target_own_data_id") == reply_data_id),
+    }
+
+
 async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: str, full_sel: str) -> Dict[str, Any]:
     """Bounded re-hydration wait (2026-08-24) — real evidence (cross_check
     html_len=222 vs. the same message's real ~4959-byte rendered size when
@@ -925,21 +991,28 @@ async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: s
     and never falls back to picking a message by proximity — only ever
     the exact `reply_data_id` requested.
 
-    Returns {"ok": True, "reply_message": <locator>, "quoted": <locator>}
-    once a real quoted-message block is found, or {"ok": False, "reason",
-    "resolved_index", "requested_data_id", "cross_check",
-    "hydration_attempts"} if it never hydrates (a genuine reply-to-a-non-
-    media-message never has one either — this exhausts the same bounded
-    retries and correctly reports failure, not stalls)."""
+    2026-08-24 update: on detecting a stub, actively restores the message
+    into the viewport (_restore_message_to_viewport) instead of merely
+    waiting in place — a targeted experiment, bounded to the same 2
+    retry opportunities this function already had.
+
+    Returns {"ok": True, "reply_message": <locator>, "quoted": <locator>,
+    "restoration_log": [...]} once a real quoted-message block is found,
+    or {"ok": False, "reason", "resolved_index", "requested_data_id",
+    "cross_check", "hydration_attempts", "restoration_log"} if it never
+    hydrates (a genuine reply-to-a-non-media-message never has one
+    either — this exhausts the same bounded retries and correctly
+    reports failure, not stalls)."""
     last_cross_check: Optional[Dict[str, Any]] = None
+    restoration_log: List[Dict[str, Any]] = []
     for attempt in range(MAX_HYDRATION_ATTEMPTS):
         idx = await _find_message_index_by_data_id(page, group_name, reply_data_id)
         if idx is None:
-            return {"ok": False, "reason": f"reply message {reply_data_id!r} not found in scanned window"}
+            return {"ok": False, "reason": f"reply message {reply_data_id!r} not found in scanned window", "restoration_log": restoration_log}
         reply_message = page.locator(full_sel).nth(idx)
         quoted = reply_message.locator('[data-testid="quoted-message"]')
         if await quoted.count() > 0:
-            return {"ok": True, "reply_message": reply_message, "quoted": quoted}
+            return {"ok": True, "reply_message": reply_message, "quoted": quoted, "restoration_log": restoration_log}
         try:
             last_cross_check = await reply_message.evaluate("""
                 (el) => ({
@@ -952,7 +1025,8 @@ async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: s
             last_cross_check = {"cross_check_error": str(exc)}
         is_stub = bool(last_cross_check.get("html_len") is not None and last_cross_check["html_len"] < STUB_HTML_LEN_THRESHOLD)
         if attempt < MAX_HYDRATION_ATTEMPTS - 1 and is_stub:
-            await page.wait_for_timeout(HYDRATION_RETRY_DELAY_MS)
+            restored = await _restore_message_to_viewport(page, full_sel, reply_data_id, reply_message)
+            restoration_log.append(restored)
             continue
         # Either not a stub (genuinely no quoted block — a real reply-to-
         # a-non-media-message case) or retries exhausted: stop, never
@@ -960,9 +1034,9 @@ async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: s
         return {
             "ok": False, "reason": "reply message has no quoted-message block",
             "resolved_index": idx, "requested_data_id": reply_data_id, "cross_check": last_cross_check,
-            "hydration_attempts": attempt + 1,
+            "hydration_attempts": attempt + 1, "restoration_log": restoration_log,
         }
-    return {"ok": False, "reason": "unreachable"}
+    return {"ok": False, "reason": "unreachable", "restoration_log": restoration_log}
 
 
 async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:

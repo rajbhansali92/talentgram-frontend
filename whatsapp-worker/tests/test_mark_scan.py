@@ -547,6 +547,8 @@ def main():
             return _FakeQuotedLocator(self._step["quoted_present"])
         async def evaluate(self, js, timeout=None):
             return self._step["cross_check"]
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
 
     class _FakeLocatorRoot:
         def __init__(self, state, sequence):
@@ -564,6 +566,11 @@ def main():
             return _FakeLocatorRoot(self._state, self._sequence)
         async def wait_for_timeout(self, ms):
             self.waits.append(ms)
+        async def evaluate(self, js, arg=None):
+            # _restore_message_to_viewport's before/after scroll-metrics
+            # capture - a benign no-op snapshot is enough for these tests,
+            # which only assert on the outer retry/hydration behavior.
+            return {"scrollTop": 0, "scrollHeight": 0, "clientHeight": 0, "target_found": True, "target_own_data_id": "REPLY123"}
 
     def _make_fake_find_idx(state, sequence, expected_data_id, received_ids):
         async def fake_find_idx(page, group, data_id):

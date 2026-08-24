@@ -1737,6 +1737,56 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         "generation": getattr(session, "generation", None),
     }
 
+    if probe_type == "reply_quote_diagnostic":
+        # Diagnostic-only (2026-08-24): _resolve_quoted_jump reported
+        # "reply message has no quoted-message block" for a reply the
+        # user has directly confirmed (via screenshot) WAS sent as a
+        # genuine native WhatsApp reply to the photo album, with a
+        # visible quoted-media preview. Dumps the complete raw DOM of the
+        # target message and every reply-related signal (not assuming
+        # the answer is [data-testid="quoted-message"] specifically),
+        # never clicking or navigating anything.
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        try:
+            dump = await message.evaluate("""
+                (el) => {
+                  const html = el.outerHTML;
+                  const testidCounts = {};
+                  (html.match(/data-testid="[^"]+"/g) || []).forEach(m => {
+                    testidCounts[m] = (testidCounts[m] || 0) + 1;
+                  });
+                  const ariaLabels = Array.from(el.querySelectorAll('[aria-label]')).map(e => ({
+                    tag: e.tagName, ariaLabel: e.getAttribute('aria-label'), testid: e.getAttribute('data-testid'), role: e.getAttribute('role'),
+                  }));
+                  const roleButtons = Array.from(el.querySelectorAll('[role="button"]')).map(e => ({
+                    tag: e.tagName, testid: e.getAttribute('data-testid'), ariaLabel: e.getAttribute('aria-label'),
+                    cls: (e.className || '').toString().slice(0, 100),
+                  }));
+                  const quotedMessageEl = el.querySelector('[data-testid="quoted-message"]');
+                  const quoteMentionText = (html.match(/quot/gi) || []).length;
+                  return {
+                    data_id: el.getAttribute('data-id'),
+                    html_len: html.length,
+                    html_full: html,
+                    testid_counts: testidCounts,
+                    aria_labels: ariaLabels.slice(0, 30),
+                    role_buttons: roleButtons.slice(0, 30),
+                    quoted_message_found: !!quotedMessageEl,
+                    quoted_message_html: quotedMessageEl ? quotedMessageEl.outerHTML.slice(0, 2000) : null,
+                    inner_text: (el.innerText || '').slice(0, 500),
+                    quot_substring_count: quoteMentionText,
+                  };
+                }
+            """, timeout=15000)
+        except Exception as exc:
+            return {"results": [{"ok": False, "error": f"evaluate failed: {exc}"}]}
+        return {"results": [dump], "session_identity": session_identity}
+
     if probe_type == "message_text_snapshot":
         # Diagnostic-only (2026-08-23): confirms a specific message's ACTUAL
         # text content by data-id (no reload, no code touching the

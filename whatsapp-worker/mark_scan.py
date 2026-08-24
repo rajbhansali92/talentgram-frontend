@@ -1884,7 +1884,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1934,6 +1934,59 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "attach_photos_videos_filechooser_diagnostic":
+        # Diagnostic-only (2026-08-24) — attach_mechanism_full_diagnostic
+        # found the real attach menu (role="menu", items identified by
+        # aria-label, NO data-testid at all — why the earlier testid-regex
+        # probe found nothing) with a "Photos & videos" item that bundles
+        # BOTH media types into one control. This uses Playwright's own
+        # expect_file_chooser() — the correct, non-synthetic mechanism for
+        # this exact situation — to positively identify which <input> that
+        # menu item wires up, via its accept/multiple attributes. NEVER
+        # calls file_chooser.set_files(...), so no file is ever selected
+        # and nothing is attached to the conversation.
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        open_menu_error = None
+        try:
+            await page.click('[data-testid="plus-rounded"]', timeout=10_000)
+            await asyncio.sleep(0.8)
+        except Exception as exc:
+            open_menu_error = str(exc)
+
+        chooser_error = None
+        chooser_accept = None
+        chooser_multiple = None
+        chooser_input_visible = None
+        try:
+            async with page.expect_file_chooser(timeout=10_000) as fc_info:
+                await page.click('button[aria-label="Photos & videos"]', timeout=10_000)
+            file_chooser = await fc_info.value
+            chooser_multiple = file_chooser.is_multiple()
+            element = file_chooser.element
+            chooser_accept = await element.get_attribute("accept")
+            chooser_input_visible = await element.is_visible()
+        except Exception as exc:
+            chooser_error = str(exc)
+
+        try:
+            await page.keyboard.press("Escape")
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+        return {"results": [{
+            "ok": chooser_error is None, "group_name": group_name,
+            "chat_ready_error": ready_error, "open_menu_error": open_menu_error,
+            "chooser_error": chooser_error,
+            "chooser_accept": chooser_accept, "chooser_multiple": chooser_multiple,
+            "chooser_input_visible": chooser_input_visible,
         }], "session_identity": session_identity}
 
     if probe_type == "attach_mechanism_full_diagnostic":

@@ -1885,7 +1885,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -2586,6 +2586,142 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "final_inventory": final_inventory,
             "media_panel": media_panel,
         }], "session_identity": session_identity}
+
+    if probe_type == "video_tile_stability_diagnostic":
+        # Diagnostic-only (2026-08-24) — investigates a PERSISTENT (not
+        # transient — reproduced twice, identical error) failure clicking
+        # the video tile on one specific source message
+        # (3B07252BFE7BC81FB956, SendTest2 Intro) during
+        # _open_tile_viewer_and_download: "element is not stable... element
+        # was detached from the DOM, retrying". Never clicks the tile,
+        # never opens the viewer, never sends anything — purely inspects
+        # DOM identity/stability of the EXACT locator chain that function
+        # uses (message_locator.locator('[data-testid="video-content"],
+        # [data-testid="image-content"]').nth(tile_index)) over time, to
+        # distinguish a genuine virtualization re-render (the node/index
+        # gets swapped out) from something else entirely (never assumed).
+        target_id = req.get("probe_message_id") or "3B07252BFE7BC81FB956"
+        tile_index = req.get("tile_index", 0)
+
+        def _tile_describe_js():
+            return """
+                ([sel, idx, marker]) => {
+                  function describe(el) {
+                    if (!el) return null;
+                    const rect = el.getBoundingClientRect();
+                    const cs = window.getComputedStyle(el);
+                    let anc = el.parentElement, chain = [];
+                    for (let d = 0; d < 6 && anc; d++) {
+                      chain.push({testid: anc.getAttribute && anc.getAttribute('data-testid'), tag: anc.tagName});
+                      anc = anc.parentElement;
+                    }
+                    return {
+                      tag: el.tagName, testid: el.getAttribute('data-testid'),
+                      aria_label: el.getAttribute('aria-label'),
+                      rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                      visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                      display: cs.display, visibility: cs.visibility, opacity: cs.opacity, pointer_events: cs.pointerEvents,
+                      has_marker: el.getAttribute('data-diag-marker') === marker,
+                      ancestor_chain: chain,
+                    };
+                  }
+                  const msgEls = Array.from(document.querySelectorAll(sel));
+                  const msgEl = msgEls[idx] || null;
+                  const dataId = msgEl ? msgEl.getAttribute('data-id') : null;
+                  let tile = null, pointFrom = null, stack = null, cx = null, cy = null;
+                  if (msgEl) {
+                    const tiles = msgEl.querySelectorAll('[data-testid="video-content"], [data-testid="image-content"]');
+                    tile = tiles[0] || null;
+                  }
+                  const tileDesc = describe(tile);
+                  if (tile) {
+                    const rect = tile.getBoundingClientRect();
+                    cx = Math.round(rect.x + rect.width / 2);
+                    cy = Math.round(rect.y + rect.height / 2);
+                    pointFrom = describe(document.elementFromPoint(cx, cy));
+                    stack = document.elementsFromPoint(cx, cy).slice(0, 5).map(describe);
+                  }
+                  return {
+                    total_rendered: msgEls.length,
+                    index: idx, data_id_at_index: dataId, matches_target: dataId,
+                    tile: tileDesc, click_point: {x: cx, y: cy},
+                    element_from_point: pointFrom, elements_from_point: stack,
+                  };
+                }
+            """
+
+        def _mark_node_js():
+            return """
+                ([sel, idx, marker]) => {
+                  const msgEls = Array.from(document.querySelectorAll(sel));
+                  const msgEl = msgEls[idx];
+                  if (!msgEl) return false;
+                  const tiles = msgEl.querySelectorAll('[data-testid="video-content"], [data-testid="image-content"]');
+                  const tile = tiles[0];
+                  if (!tile) return false;
+                  tile.setAttribute('data-diag-marker', marker);
+                  return true;
+                }
+            """
+
+        marker = f"diag-{uuid.uuid4().hex[:8]}"
+        result: Dict[str, Any] = {"target_id": target_id, "tile_index": tile_index, "marker": marker}
+
+        idx0 = await _find_message_index_by_data_id(page, group_name, target_id)
+        result["initial_index_lookup"] = idx0
+        if idx0 is None:
+            result["error"] = "target message not found in current window at all"
+            return {"results": [result], "session_identity": session_identity}
+
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+
+        # Snapshot 0: immediately after fresh lookup, before any interaction.
+        snap0 = await _evaluate(page, _tile_describe_js(), [full_sel, idx0, marker])
+        result["snapshot_0_immediate"] = snap0
+
+        # Mark the actual DOM node so later snapshots can tell "same node,
+        # still there" apart from "a different node now occupies this slot".
+        marked = await _evaluate(page, _mark_node_js(), [full_sel, idx0, marker])
+        result["marker_applied"] = marked
+
+        # Try scroll_into_view_if_needed on the tile (same call the real
+        # code makes) and re-snapshot immediately after.
+        scroll_error = None
+        try:
+            message_loc = page.locator(full_sel).nth(idx0)
+            tile_loc = message_loc.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile_index)
+            await tile_loc.scroll_into_view_if_needed(timeout=5000)
+        except Exception as exc:
+            scroll_error = str(exc)
+        result["scroll_error"] = scroll_error
+        result["snapshot_1_after_scroll"] = await _evaluate(page, _tile_describe_js(), [full_sel, idx0, marker])
+
+        # Timed checkpoints at 0.5s / 1.5s / 3s after the scroll — same
+        # rough window Playwright's own actionability retry loop spans
+        # before it reports "not stable" / "detached".
+        timed_snapshots = []
+        for wait_s in (0.5, 1.0, 1.5):
+            await page.wait_for_timeout(int(wait_s * 1000))
+            snap = await _evaluate(page, _tile_describe_js(), [full_sel, idx0, marker])
+            fresh_idx = await _find_message_index_by_data_id(page, group_name, target_id)
+            snap["fresh_index_lookup"] = fresh_idx
+            snap["index_shifted"] = fresh_idx != idx0
+            timed_snapshots.append({"elapsed_s": sum((0.5, 1.0, 1.5)[:len(timed_snapshots) + 1]), "snapshot": snap})
+        result["timed_snapshots"] = timed_snapshots
+
+        # --- Comparison targets: the known-good SendTest2 photo, and
+        # whatever else is currently in the tail (read-only, same capture). ---
+        comparisons: Dict[str, Any] = {}
+        for label, cmp_id in (("known_good_photo_SendTest2", "3BA01C460FCEE3DD0B5B"),):
+            cmp_idx = await _find_message_index_by_data_id(page, group_name, cmp_id)
+            if cmp_idx is None:
+                comparisons[label] = {"error": "not found in current window"}
+                continue
+            comparisons[label] = await _evaluate(page, _tile_describe_js(), [full_sel, cmp_idx, "no-marker"])
+        result["comparisons"] = comparisons
+
+        return {"results": [result], "session_identity": session_identity}
 
     if probe_type == "destination_media_inventory_diagnostic":
         # Diagnostic-only (2026-08-24) — the user directly confirmed via a

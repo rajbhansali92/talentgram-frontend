@@ -41,6 +41,7 @@ import httpx
 
 import config
 import sender
+import session as session_module
 
 logger = logging.getLogger(__name__)
 
@@ -1884,7 +1885,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -1934,6 +1935,179 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "dom": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "session_identity_and_sync_boundary_diagnostic":
+        # Diagnostic-only (2026-08-24) — read-only session-identity and
+        # message-sync-boundary investigation. Never re-links, logs out, or
+        # reloads the WhatsApp session. Identity is read via the SAME
+        # existing, already-shipped session.py mechanism
+        # (_read_own_phone_number's exact selectors/logic) already used for
+        # the admin status panel — replicated inline here (not called
+        # directly) because that method acquires session.page_lock
+        # internally, which is already held for the whole duration of this
+        # claimed request; calling it here would deadlock. Never exposes
+        # credentials/tokens/cookies — only whatever phone-shaped text the
+        # account's own profile panel already displays.
+        #
+        # Sync-boundary tests: (a) re-reads the SOURCE group's own tail
+        # (Talentgram MEDIA SPIKE TEST) to prove incoming/other-participant
+        # message visibility still works; (b) sends ONE disposable plain-
+        # text diagnostic message into that SAME source group (never the
+        # destination, never touching media_sends/casting_pipeline) and
+        # immediately re-scans for it, to directly test whether the worker
+        # can see its OWN outgoing messages anywhere at all; (c) re-checks
+        # the destination group once more without a reload; (d) peeks
+        # read-only at one other pre-existing real group's history; (e)
+        # scans visible text for known WhatsApp sync/connection indicators.
+        identity: Dict[str, Any] = {"session_id": getattr(session, "session_id", None), "generation": getattr(session, "generation", None)}
+        try:
+            trigger = None
+            for sel in session_module.PROFILE_TRIGGER_SELECTORS:
+                loc = page.locator(sel)
+                if await loc.count() and await loc.first.is_visible():
+                    trigger = loc.first
+                    break
+            if trigger is None:
+                identity["own_phone_number"] = None
+                identity["phone_read_note"] = "no profile trigger matched any PROFILE_TRIGGER_SELECTORS entry"
+            else:
+                await trigger.click(timeout=3000)
+                panel = None
+                for sel in session_module.PROFILE_PANEL_SELECTORS:
+                    loc = page.locator(sel)
+                    try:
+                        await loc.first.wait_for(state="visible", timeout=2000)
+                        panel = loc.first
+                        break
+                    except Exception:
+                        continue
+                phone = None
+                if panel is not None:
+                    panel_text = await panel.inner_text()
+                    m = session_module._PHONE_LIKE_RE.search(panel_text)
+                    if m:
+                        phone = m.group(0).strip()
+                await page.keyboard.press("Escape")
+                identity["own_phone_number"] = phone
+                identity["phone_read_note"] = "read from profile panel" if phone else "panel opened but no phone-shaped text found"
+        except Exception as exc:
+            identity["own_phone_number"] = None
+            identity["phone_read_note"] = f"read failed: {exc}"
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+        def _tail_snapshot_js():
+            return """
+                ([sel]) => {
+                  const els = Array.from(document.querySelectorAll(sel));
+                  return {
+                    total_rendered: els.length,
+                    last_5: els.slice(-5).map(el => ({
+                      data_id: el.getAttribute('data-id'),
+                      inner_text: (el.innerText || '').slice(0, 100),
+                      img_count: el.querySelectorAll('img').length,
+                    })),
+                  };
+                }
+            """
+
+        source_group = req.get("source_group_name") or "Talentgram MEDIA SPIKE TEST"
+        dest_group = group_name
+        third_group = req.get("third_group_name") or "Talentgram CRM"
+        sync_investigation: Dict[str, Any] = {}
+
+        # (a) source group tail — proves incoming/other-participant visibility.
+        try:
+            status = await sender._open_group_chat(page, source_group)
+            if status != "OPENED":
+                sync_investigation["source_tail_error"] = f"status={status}"
+            else:
+                await sender._wait_for_chat_ready(page)
+                scope = await sender._resolve_scope(page)
+                full_sel = f"{scope} [data-testid^='conv-msg-']"
+                sync_investigation["source_tail_before_test_send"] = await _evaluate(page, _tail_snapshot_js(), [full_sel])
+        except Exception as exc:
+            sync_investigation["source_tail_error"] = str(exc)
+
+        # (b) disposable self-visibility test: send ONE plain-text message
+        # into the SOURCE group (never the destination), then immediately
+        # re-scan for it.
+        marker = f"SYNC DIAGNOSTIC TEST {uuid.uuid4().hex[:8]} — worker self-visibility check, ignore"
+        try:
+            send_result = await sender.send_whatsapp_message(
+                page=page, destination_type="group", destination=source_group,
+                message_body=marker,
+            )
+            sync_investigation["self_test_send_state"] = send_result.get("state")
+        except Exception as exc:
+            sync_investigation["self_test_send_error"] = str(exc)
+
+        try:
+            status = await sender._open_group_chat(page, source_group)
+            if status != "OPENED":
+                sync_investigation["source_tail_after_test_send_error"] = f"status={status}"
+            else:
+                await sender._wait_for_chat_ready(page)
+                scope = await sender._resolve_scope(page)
+                full_sel = f"{scope} [data-testid^='conv-msg-']"
+                after = await _evaluate(page, _tail_snapshot_js(), [full_sel])
+                sync_investigation["source_tail_after_test_send"] = after
+                sync_investigation["self_test_message_visible"] = any(
+                    marker in (m.get("inner_text") or "") for m in (after.get("last_5") or [])
+                )
+        except Exception as exc:
+            sync_investigation["source_tail_after_test_send_error"] = str(exc)
+
+        # (c) destination group, one more time, no reload.
+        try:
+            status = await sender._open_group_chat(page, dest_group)
+            if status != "OPENED":
+                sync_investigation["dest_tail_error"] = f"status={status}"
+            else:
+                await sender._wait_for_chat_ready(page)
+                scope = await sender._resolve_scope(page)
+                full_sel = f"{scope} [data-testid^='conv-msg-']"
+                sync_investigation["dest_tail"] = await _evaluate(page, _tail_snapshot_js(), [full_sel])
+        except Exception as exc:
+            sync_investigation["dest_tail_error"] = str(exc)
+
+        # (d) a third, pre-existing, unrelated real group — read-only peek.
+        try:
+            status = await sender._open_group_chat(page, third_group)
+            if status != "OPENED":
+                sync_investigation["third_group_error"] = f"status={status} (group={third_group!r})"
+            else:
+                await sender._wait_for_chat_ready(page)
+                scope = await sender._resolve_scope(page)
+                full_sel = f"{scope} [data-testid^='conv-msg-']"
+                sync_investigation["third_group_tail"] = await _evaluate(page, _tail_snapshot_js(), [full_sel])
+                sync_investigation["third_group_name"] = third_group
+        except Exception as exc:
+            sync_investigation["third_group_error"] = str(exc)
+
+        # (e) visible sync/connection indicator scan (whole-page text).
+        try:
+            indicator_js = """
+                () => {
+                  const text = (document.body.innerText || '').toLowerCase();
+                  const phrases = [
+                    'connecting', 'reconnecting', 'waiting for this message',
+                    'syncing', 'sync your', 'trying to reach phone',
+                    'phone was not detected', 'this message was not sent',
+                    'trying to connect', 'offline',
+                  ];
+                  return phrases.filter(p => text.includes(p));
+                }
+            """
+            sync_investigation["visible_sync_indicators"] = await _evaluate(page, indicator_js, [])
+        except Exception as exc:
+            sync_investigation["indicator_scan_error"] = str(exc)
+
+        return {"results": [{
+            "ok": True, "identity": identity, "sync_investigation": sync_investigation,
         }], "session_identity": session_identity}
 
     if probe_type == "destination_deep_investigation_diagnostic":

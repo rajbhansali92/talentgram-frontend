@@ -1837,6 +1837,104 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "after_reload": after,
         }], "session_identity": session_identity_after}
 
+    if probe_type == "click_internals_diagnostic":
+        # Diagnostic-only (2026-08-23): the album's tile 0 receives a real,
+        # unblocked, trusted click that mounts nothing, while the single-
+        # photo message's own image-thumb opens a viewer from the exact
+        # same testid/role/aria-label shape. This captures full ancestor-
+        # chain computed styles, the complete elementsFromPoint() stack at
+        # the real click coordinate (not just the topmost hit), and
+        # searches the whole message for any OTHER interactive control
+        # (a separate "open album" wrapper distinct from the per-tile
+        # "Open picture" control) — structural comparison only, no click
+        # performed here (the click+DOM-change test is a separate,
+        # already-proven probe_type).
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        tile_index = req.get("tile_index", 0)
+        thumbs = message.locator('[data-testid="image-thumb"]')
+        try:
+            thumb_count = await thumbs.count()
+        except Exception as exc:
+            return {"results": [{"ok": False, "error": f"count failed: {exc}"}]}
+        if tile_index >= thumb_count:
+            return {"results": [{"ok": False, "error": f"tile_index {tile_index} out of range (count={thumb_count})"}]}
+        tile = thumbs.nth(tile_index)
+        try:
+            await tile.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            pass
+        try:
+            inspection = await tile.evaluate("""
+                (tile) => {
+                  const styleOf = (el) => {
+                    const cs = getComputedStyle(el);
+                    return {
+                      pointerEvents: cs.pointerEvents, cursor: cs.cursor, zIndex: cs.zIndex,
+                      position: cs.position, overflow: cs.overflow, visibility: cs.visibility,
+                      opacity: cs.opacity, display: cs.display,
+                    };
+                  };
+                  const describe = (el) => {
+                    const r = el.getBoundingClientRect();
+                    return {
+                      tag: el.tagName, testid: el.getAttribute('data-testid'), role: el.getAttribute('role'),
+                      ariaLabel: el.getAttribute('aria-label'), tabindex: el.getAttribute('tabindex'),
+                      cls: (el.className || '').toString().slice(0, 100),
+                      rect: [r.x, r.y, r.width, r.height], style: styleOf(el),
+                    };
+                  };
+                  const ancestors = [];
+                  let el = tile;
+                  let hops = 0;
+                  while (el && hops < 15) {
+                    ancestors.push(describe(el));
+                    if (el.getAttribute && el.getAttribute('data-testid') && el.getAttribute('data-testid').startsWith('conv-msg-')) break;
+                    el = el.parentElement;
+                    hops++;
+                  }
+                  const r = tile.getBoundingClientRect();
+                  const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+                  const stack = (document.elementsFromPoint ? document.elementsFromPoint(cx, cy) : []).slice(0, 10).map(describe);
+                  // Search the WHOLE message for any OTHER interactive
+                  // control besides the per-tile "Open picture" buttons —
+                  // a separate "open album" wrapper, if one exists.
+                  let msgRoot = tile;
+                  hops = 0;
+                  while (msgRoot && hops < 15) {
+                    if (msgRoot.getAttribute && msgRoot.getAttribute('data-testid') && msgRoot.getAttribute('data-testid').startsWith('conv-msg-')) break;
+                    msgRoot = msgRoot.parentElement;
+                    hops++;
+                  }
+                  const otherControls = [];
+                  if (msgRoot) {
+                    const candidates = Array.from(msgRoot.querySelectorAll('[role="button"], [role="link"], button, a, [tabindex]'));
+                    for (const c of candidates) {
+                      if (c === tile) continue;
+                      if (c.getAttribute('data-testid') === 'image-thumb') continue;
+                      otherControls.push(describe(c));
+                    }
+                  }
+                  const mediaAlbum = msgRoot ? msgRoot.querySelector('[data-testid="media-album"]') : null;
+                  return {
+                    tileDescribe: describe(tile),
+                    ancestors,
+                    clickPoint: [cx, cy],
+                    elementsFromPointStack: stack,
+                    otherInteractiveControlsInMessage: otherControls.slice(0, 20),
+                    mediaAlbumContainer: mediaAlbum ? describe(mediaAlbum) : null,
+                    getEventListenersAvailable: typeof window.getEventListeners === 'function',
+                  };
+                }
+            """, timeout=15000)
+        except Exception as exc:
+            return {"results": [{"ok": False, "error": f"inspection evaluate failed: {exc}"}]}
+        return {"results": [{"ok": True, "data_id": data_id, "tile_index": tile_index, **inspection}], "session_identity": session_identity}
+
     if probe_type == "album_viewer_diagnostic":
         # Diagnostic-only (2026-08-23): the collapsed 2x2 preview only
         # shows 4 image-thumb slots (one an overflow placeholder) for an

@@ -577,7 +577,19 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
     for bc in batch_candidates:
         jump = await _resolve_quoted_jump(page, group_name, bc["reply_message_id"])
         if not jump.get("ok"):
-            candidates.append(_batch_failure_candidate(bc, jump.get("reason") or "quoted-jump resolution failed"))
+            reason = jump.get("reason") or "quoted-jump resolution failed"
+            # Diagnostic-only enrichment (2026-08-24): a "no quoted-message
+            # block" failure carries a resolved_index/cross_check pair (see
+            # _resolve_quoted_jump) proving whether the same element,
+            # checked via raw JS at the SAME moment, also sees nothing —
+            # distinguishing a genuine DOM absence from a Playwright-
+            # locator-specific miss within this multi-candidate scan
+            # sequence. Folded into the error string (not a schema
+            # change) purely so it surfaces in the real scan report while
+            # investigating this live.
+            if jump.get("cross_check") is not None:
+                reason = f"{reason} | resolved_index={jump.get('resolved_index')} cross_check={jump.get('cross_check')}"
+            candidates.append(_batch_failure_candidate(bc, reason))
             continue
         tile_hashes_and_types = jump["tile_hashes_and_types"]
         if len(tile_hashes_and_types) != bc["item_count"]:

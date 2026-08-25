@@ -933,6 +933,40 @@ def main():
     assert photo_result_41["sha256"] == hashlib.sha256(tile_c_jpeg).hexdigest()
     print("41. photo/blob path unaffected     -> _download_photo_album_tile_via_blob behavior unchanged by the video-tile fix")
 
+    # 42: REGRESSION (2026-08-25 — found via a real live scan against a
+    # genuine no-mention mark, which never appeared in the candidates
+    # list at all). _run_scan's own Pass 2 used to `continue` (silently
+    # drop) any reply with no real @mention BEFORE mark_text was even
+    # checked — a no-mention mark never reached the backend's
+    # validate_candidates at all, making that function's own mention-
+    # optional fix moot. Fixed: mark_text presence (not mention presence)
+    # is now the only gate; mention_lid is captured as None when absent.
+    class _FakeScanSender:
+        async def _open_group_chat(self, page, group_name):
+            return "OPENED"
+
+    orig_sender_scan = mark_scan.sender
+    orig_dump_window = mark_scan._dump_window
+
+    async def _fake_dump_window(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return [{
+            "messageHtml": BARE_MARK_NO_MENTION_HTML,
+            "quotedHtml": QUOTED_PHOTO_BLOCK_HTML,
+        }]
+
+    mark_scan.sender = _FakeScanSender()
+    mark_scan._dump_window = _fake_dump_window
+    try:
+        scan_result_42 = asyncio.run(mark_scan._run_scan(page=object(), req={"group_name": "Talentgram MEDIA SPIKE TEST"}))
+    finally:
+        mark_scan.sender = orig_sender_scan
+        mark_scan._dump_window = orig_dump_window
+    cands_42 = scan_result_42.get("candidates") or []
+    assert len(cands_42) == 1, scan_result_42
+    assert cands_42[0]["mention_lid"] is None, cands_42[0]
+    assert cands_42[0]["mark_text"] == "mark spike take 1", cands_42[0]
+    print("42. no-mention mark reaches backend -> _run_scan captures it as a candidate with mention_lid=None, never silently dropped")
+
 
 if __name__ == "__main__":
     main()

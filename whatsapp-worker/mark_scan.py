@@ -492,11 +492,17 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             "source_sender": _sender_name(html), "window_position": pos,
         }
 
-    # Pass 2: every reply that has BOTH a real mention (any LID) and the
-    # literal word "mark" is a candidate — resolved here if possible, but
-    # reported either way (never silently dropped just because resolution
-    # failed; that's the backend's "MEDIA RESOLUTION FAILED" report, not a
-    # worker-side decision).
+    # Pass 2: every reply to quoted media containing the literal word
+    # "mark" is a candidate — resolved here if possible, but reported
+    # either way (never silently dropped just because resolution failed;
+    # that's the backend's "MEDIA RESOLUTION FAILED" report, not a
+    # worker-side decision). A real @mention (any LID) is captured when
+    # present but is NEVER required to treat the reply as a candidate at
+    # all (2026-08-25 architecture fix) — the quoted/replied media itself
+    # is what establishes source identity; the mention is optional
+    # metadata only, exactly matching validate_candidates' own removal of
+    # the mention-gate on the backend. A no-mention mark that never
+    # reached this point as a candidate would make that backend fix moot.
     candidates: List[Dict[str, Any]] = []
     batch_candidates: List[Dict[str, Any]] = []
     for item in window:
@@ -505,8 +511,6 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             continue
         html = item.get("messageHtml") or ""
         lid = _mention_lid(html)
-        if not lid:
-            continue
         mark_text = _mark_text(html)
         if not mark_text:
             continue

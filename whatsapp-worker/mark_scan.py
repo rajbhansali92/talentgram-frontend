@@ -3462,6 +3462,120 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
 
         return {"results": [result]}
 
+    if probe_type == "scan_reliability_diagnostic":
+        # Read-only investigation (2026-08-25) — marks that scanned
+        # successfully earlier (Google Test 3 take 1/2/photos) stopped
+        # appearing in TWO consecutive scans of the same group, while 23
+        # OTHER marks in the SAME group still scan fine. Hypothesis:
+        # _open_group_chat's fast path ("already open" -> return OPENED
+        # immediately) never re-scrolls to the true bottom, and this
+        # worker's own extensive prior video-viewer open/close cycles
+        # (from UPLOAD hardening diagnostics, all against this SAME
+        # group) may have left the chat scrolled mid-history —
+        # _dump_window's own "tail" checkpoint then captures whatever's
+        # CURRENTLY rendered, not necessarily the true newest messages.
+        # Runs multiple independent scan strategies in ONE pass, never
+        # modifying anything (no marks created/deleted, no messages
+        # sent), and reports each stage's own result so the exact point
+        # of disappearance is visible rather than assumed.
+        target_marker = req.get("target_marker") or "Google Test 3"
+        max_messages = req.get("max_messages") or 300
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+
+        def _extract_marks_from_window(window):
+            marks = []
+            for item in window:
+                if not item.get("quotedHtml"):
+                    continue
+                html = item.get("messageHtml") or ""
+                mark_text = _mark_text(html)
+                if not mark_text:
+                    continue
+                marks.append({"mark_text": mark_text, "mention_lid": _mention_lid(html)})
+            return marks
+
+        def _summarize(window):
+            marks = _extract_marks_from_window(window)
+            return {
+                "total_messages": len(window),
+                "total_marks": len(marks),
+                "target_found": any(target_marker in m["mark_text"] for m in marks),
+                "matching_marks": [m["mark_text"] for m in marks if target_marker in m["mark_text"]],
+                "sample_marks": [m["mark_text"] for m in marks][:8],
+            }
+
+        _SCROLL_TO_BOTTOM_JS = """
+            ([sel]) => {
+              const els = Array.from(document.querySelectorAll(sel));
+              let container = null, maxOverflow = 0;
+              let node = els[0] ? els[0].parentElement : null;
+              for (let d = 0; d < 8 && node; d++) {
+                const overflow = node.scrollHeight - node.clientHeight;
+                if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+                node = node.parentElement;
+              }
+              if (container) container.scrollTop = container.scrollHeight;
+              return !!container;
+            }
+        """
+
+        results: Dict[str, Any] = {"target_marker": target_marker}
+
+        try:
+            results["scroll_state_before_anything"] = await _evaluate(page, _SCROLL_DIAGNOSTIC_JS, [full_sel])
+        except Exception as exc:
+            results["scroll_state_before_anything"] = {"error": str(exc)}
+
+        # Stage A: current DOM scan, exactly as a real scan would see it
+        # RIGHT NOW — no reload, no explicit scroll correction.
+        try:
+            window_now = await _dump_window(page, group_name, max_messages)
+            results["stage_a_current_dom_scan"] = _summarize(window_now)
+        except Exception as exc:
+            results["stage_a_current_dom_scan"] = {"error": str(exc)}
+
+        # Stage B: explicit scroll-to-BOTTOM (the direct test of the
+        # hypothesis above), then scan.
+        try:
+            scrolled = await _evaluate(page, _SCROLL_TO_BOTTOM_JS, [full_sel])
+            await page.wait_for_timeout(1200)
+            results["scroll_to_bottom_attempted"] = scrolled
+            results["scroll_state_after_bottom"] = await _evaluate(page, _SCROLL_DIAGNOSTIC_JS, [full_sel])
+            window_bottom = await _dump_window(page, group_name, max_messages)
+            results["stage_b_after_scroll_to_bottom"] = _summarize(window_bottom)
+        except Exception as exc:
+            results["stage_b_after_scroll_to_bottom"] = {"error": str(exc)}
+
+        # Stage C: re-open the group explicitly (may fast-path — reports
+        # which path it took) then scan again.
+        try:
+            reopen_status = await sender._open_group_chat(page, group_name)
+            results["stage_c_reopen_status"] = reopen_status
+            window_reopen = await _dump_window(page, group_name, max_messages)
+            results["stage_c_after_reopen"] = _summarize(window_reopen)
+        except Exception as exc:
+            results["stage_c_after_reopen"] = {"error": str(exc)}
+
+        # Stage D: forced full page reload (never touches any data — a
+        # plain browser refresh) -> wait for WhatsApp to resettle -> open
+        # the group fresh -> scan. The strongest possible reset: proves
+        # whether the marks are visible AT ALL once every possible stale-
+        # DOM/scroll-position factor from this worker's own long session
+        # is eliminated.
+        try:
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_timeout(6000)
+            reopen_status2 = await sender._open_group_chat(page, group_name)
+            results["stage_d_reload_reopen_status"] = reopen_status2
+            if reopen_status2 == "OPENED":
+                window_reload = await _dump_window(page, group_name, max_messages)
+                results["stage_d_after_reload"] = _summarize(window_reload)
+        except Exception as exc:
+            results["stage_d_after_reload"] = {"error": str(exc)}
+
+        return {"results": [results]}
+
     if probe_type == "upload_download_menu_diagnostic":
         # Diagnostic-only (2026-08-25) — a real UPLOAD E2E for the
         # hardened video path got past hash-verified resolution and full

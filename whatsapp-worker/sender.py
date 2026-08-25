@@ -1019,6 +1019,12 @@ RESULT_TITLE_SELECTORS = [
     '#side [data-testid="cell-frame-title"]',
 ]
 
+# The "All" chat-list filter tab — WhatsApp Web's sidebar search is SCOPED to
+# whichever filter tab (All/Unread/Favourites/a custom Label) is currently
+# selected, and that selection persists across searches/reloads as sticky UI
+# state. id="all-filter" is WhatsApp's own stable id for the unfiltered tab.
+ALL_FILTER_SELECTOR = '#all-filter'
+
 # Clicking the conversation header opens the Group Info drawer. Ordered
 # most-specific first, same convention as SEARCH_BOX_SELECTORS. The group
 # NAME/title text is tried before the whole header bar (2026-08-11,
@@ -1346,6 +1352,49 @@ async def _reset_to_chat_list(page: Page) -> None:
         logger.info("sender: reset-to-chat-list escape error=%s", exc)
 
 
+MAX_ALL_FILTER_ATTEMPTS = 3
+ALL_FILTER_RETRY_DELAY_S = 0.5
+
+
+async def _ensure_all_filter_selected(page: Page) -> None:
+    """Force the sidebar's "All" chat-list filter tab selected before any
+    search. Root cause (2026-08-25, live evidence): the sidebar search is
+    scoped to whichever filter tab is currently active — a live capture
+    showed the search box's own placeholder reading "Search unread chats"
+    (a non-"All" tab, aria-selected=true, was active) while #all-filter's
+    aria-selected was "false". A group with zero unread messages — the
+    normal state for any chat the worker has already read — then produces
+    ZERO candidate rows no matter how many times the search is retried,
+    because the scoped subset structurally excludes it; this looked like a
+    "group not found" or a dead page, but the page was fully live and
+    logged in. Nothing before this fix ever checked or reset the active
+    filter tab. Never assumes the click worked — re-checks aria-selected
+    and retries a bounded number of times; a failure to confirm is logged
+    but not fatal (falls through to search, which may still fail with a
+    now-legible cause instead of an inexplicable empty result set)."""
+    for attempt in range(MAX_ALL_FILTER_ATTEMPTS):
+        try:
+            loc = page.locator(ALL_FILTER_SELECTOR)
+            if not await loc.count():
+                logger.info("sender: all-filter tab not present (attempt %d) — nothing to reset",
+                            attempt + 1)
+                return
+            selected = await loc.first.get_attribute("aria-selected")
+            if selected == "true":
+                if attempt > 0:
+                    logger.info("sender: all-filter confirmed selected after %d attempt(s)", attempt + 1)
+                return
+            logger.info("sender: all-filter NOT selected (aria-selected=%r, attempt %d) — clicking",
+                        selected, attempt + 1)
+            await loc.first.click(timeout=3_000)
+            await asyncio.sleep(ALL_FILTER_RETRY_DELAY_S)
+        except Exception as exc:
+            logger.info("sender: all-filter reset attempt %d error=%s", attempt + 1, exc)
+    logger.warning("sender: all-filter could not be confirmed selected after %d attempts — "
+                   "proceeding anyway (search may be scoped to a non-All tab)",
+                   MAX_ALL_FILTER_ATTEMPTS)
+
+
 async def _capture_open_failure(page: Page, reason: str, extra: Optional[dict] = None) -> None:
     """On any group-open / chat-open failure, save chat_not_opened.png and dump
     URL, page title, activeElement, and #side / #main / header / composer HTML to
@@ -1477,6 +1526,11 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
 
     # Neutral state first — never search relative to a previously-open chat.
     await _reset_to_chat_list(page)
+    # 2026-08-25 fix — the sidebar search is scoped to whichever filter tab
+    # (All/Unread/a Label) is currently active; force "All" before searching
+    # so a chat with zero unread messages can still be found (see
+    # _ensure_all_filter_selected's docstring for the live evidence).
+    await _ensure_all_filter_selected(page)
     if not await dismiss_blocking_dialogs(page, "search"):
         diag["rejection_reason"] = "blocking dialog before search"
         _emit("reset")

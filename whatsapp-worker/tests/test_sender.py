@@ -763,15 +763,42 @@ class _FakeGroupCandidateLocator:
         self.click_count += 1
 
 
+class _FakeAllFilterLocator:
+    """Simulates #all-filter's aria-selected state, toggled by click() —
+    used to test _ensure_all_filter_selected's bounded reset-before-search
+    logic (2026-08-25 fix)."""
+    def __init__(self, initially_selected=True, clicks_to_select=1, never_selects=False):
+        self._selected = initially_selected
+        self._clicks_to_select = clicks_to_select
+        self._never_selects = never_selects
+        self.click_count = 0
+        self.first = self
+
+    async def count(self):
+        return 1
+
+    async def get_attribute(self, name):
+        assert name == "aria-selected"
+        return "true" if self._selected else "false"
+
+    async def click(self, timeout=None):
+        self.click_count += 1
+        if not self._never_selects and self.click_count >= self._clicks_to_select:
+            self._selected = True
+
+
 class _FakeGroupPage:
     """Minimal page for _open_group_chat's own orchestration — every
     lower-level helper it calls (_collect_search_candidates,
     _verify_chat_open, _read_search_value) is monkeypatched directly per
     test instead of being simulated through real DOM selectors, so these
     tests isolate the NEW bounded-retry/verification logic itself."""
-    def __init__(self):
+    def __init__(self, all_filter=None):
         self.keyboard = _FakeKeyboard()
         self.url = "https://web.whatsapp.com/"
+        # Defaults to "already selected" so every pre-existing test in this
+        # file (none of which know about the all-filter fix) is unaffected.
+        self.all_filter = all_filter if all_filter is not None else _FakeAllFilterLocator(initially_selected=True)
 
     async def title(self):
         return "WhatsApp"
@@ -779,6 +806,8 @@ class _FakeGroupPage:
     def locator(self, sel):
         if sel == sender.SEARCH_BOX_SELECTORS[0]:
             return _FakeSearchBoxLocator()
+        if sel == sender.ALL_FILTER_SELECTOR:
+            return self.all_filter
         return _FakeLocator()
 
     async def click(self, selector, timeout=None):
@@ -991,6 +1020,115 @@ def test_open_group_chat_exact_matching_unaffected():
 
     assert result == "NOT_FOUND", result
     assert wrong_row.click_count == 0, wrong_row.click_count  # the near-miss row was never clicked
+
+
+# ---------------------------------------------------------------------------
+# _ensure_all_filter_selected / _open_group_chat all-filter reset
+# (2026-08-25) — root-caused via LIVE worker log correlation (not a new
+# diagnostic dispatch): a real batch-send job's own _open_group_chat call
+# for "Talentgram MEDIA SPIKE TEST" returned zero candidate rows while the
+# page was demonstrably fully loaded and logged in (title, sidebar, header
+# all present) — the search box's OWN placeholder read "Search unread
+# chats" and #all-filter's aria-selected was "false", proving the sidebar
+# search was scoped to a non-"All" tab. A group with no unread messages —
+# the normal state for anything the worker has already read — then can
+# NEVER appear in results, no matter how many bounded retries poll for it.
+# This superseded an earlier (incorrect) theory that WhatsApp Web was
+# periodically reloading mid-operation; the captured "splash_screen_show"/
+# "bootstrapWebSession" JSON blamed for that theory turned out to be
+# WhatsApp's own static server-bootstrap <script> payload, present in the
+# DOM for the entire life of the page, not a live reload signal.
+# ---------------------------------------------------------------------------
+def test_ensure_all_filter_selected_already_selected_no_click():
+    """The common case — "All" is already active — never clicks anything."""
+    flt = _FakeAllFilterLocator(initially_selected=True)
+    page = _FakeGroupPage(all_filter=flt)
+    run(sender._ensure_all_filter_selected(page))
+    assert flt.click_count == 0, flt.click_count
+
+
+def test_ensure_all_filter_selected_clicks_when_not_selected():
+    """"All" is NOT the active tab -> clicked, and confirmed selected
+    afterward (the root-cause scenario from the live evidence)."""
+    flt = _FakeAllFilterLocator(initially_selected=False, clicks_to_select=1)
+    page = _FakeGroupPage(all_filter=flt)
+    run(sender._ensure_all_filter_selected(page))
+    assert flt.click_count == 1, flt.click_count
+    assert flt._selected is True
+
+
+def test_ensure_all_filter_selected_bounded_retry_recovers():
+    """The click doesn't register as selected immediately (a WhatsApp
+    render delay) -> bounded retry recovers within MAX_ALL_FILTER_ATTEMPTS,
+    never an infinite loop."""
+    flt = _FakeAllFilterLocator(initially_selected=False, clicks_to_select=2)
+    page = _FakeGroupPage(all_filter=flt)
+    run(sender._ensure_all_filter_selected(page))
+    assert flt.click_count == 2, flt.click_count
+    assert flt._selected is True
+
+
+def test_ensure_all_filter_selected_exhausted_falls_through_not_fatal():
+    """"All" never confirms selected across every bounded attempt ->
+    the helper logs a warning and returns WITHOUT raising, so a genuinely
+    stuck filter degrades to a legible search failure downstream rather
+    than blocking _open_group_chat outright."""
+    flt = _FakeAllFilterLocator(initially_selected=False, never_selects=True)
+    page = _FakeGroupPage(all_filter=flt)
+    run(sender._ensure_all_filter_selected(page))  # must not raise
+    assert flt.click_count == sender.MAX_ALL_FILTER_ATTEMPTS, flt.click_count
+
+
+def test_open_group_chat_resets_all_filter_before_searching():
+    """End-to-end through the real _open_group_chat: a non-"All" active
+    tab is reset to "All" BEFORE the sidebar search runs, and the group is
+    then found normally — proving the fix actually sits ahead of the
+    search step, not merely unit-tested in isolation."""
+    flt = _FakeAllFilterLocator(initially_selected=False, clicks_to_select=1)
+    page = _FakeGroupPage(all_filter=flt)
+    row = _FakeGroupCandidateLocator()
+
+    verify_calls = {"n": 0}
+    async def _fake_verify(page, expected_name=None):
+        verify_calls["n"] += 1
+        if verify_calls["n"] == 1:
+            return False, False, False, ""  # fast-path: not already open
+        return True, True, True, expected_name  # post-click verify: succeeds
+
+    async def _fake_collect(page):
+        assert flt._selected is True, "search ran before the All filter was confirmed selected"
+        return "sel", [_fake_candidate(GROUP_NAME, row)]
+
+    async def _fake_read_value(page, sel):
+        return True, GROUP_NAME
+
+    orig_verify, orig_collect, orig_read = sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value
+    sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = _fake_verify, _fake_collect, _fake_read_value
+    try:
+        with _real_open_group_chat():
+            result = run(sender._open_group_chat(page, GROUP_NAME))
+    finally:
+        sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = orig_verify, orig_collect, orig_read
+
+    assert result == "OPENED", result
+    assert flt.click_count == 1, flt.click_count
+
+
+def test_open_group_chat_all_filter_absent_is_harmless():
+    """A page/build where #all-filter simply doesn't exist (e.g. a
+    selector drift, or a personal-account UI without custom labels) must
+    never block _open_group_chat — the reset is best-effort."""
+    page = _FakeGroupPage()
+    page.locator = lambda sel: (
+        _FakeSearchBoxLocator() if sel == sender.SEARCH_BOX_SELECTORS[0]
+        else (_NoCountLocator() if sel == sender.ALL_FILTER_SELECTOR else _FakeLocator())
+    )
+    run(sender._ensure_all_filter_selected(page))  # must not raise
+
+
+class _NoCountLocator:
+    async def count(self):
+        return 0
 
 
 if __name__ == "__main__":

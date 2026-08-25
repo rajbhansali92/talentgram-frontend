@@ -6170,6 +6170,28 @@ async def _send_one_target_native_forward(page, group_name: str, target: Dict[st
     return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT", "selector_used": send_result.get("selector_used")}
 
 
+_FORM_SEND_SUCCESS_STATES = {"MESSAGE_SENT_AND_VERIFIED", "MESSAGE_SENT_BUT_NOT_VERIFIED"}
+
+
+async def _send_form_message(page, destination_group: str, message: str) -> Dict[str, Any]:
+    """Sends the approved-submission's text details via the existing,
+    proven send_whatsapp_message — a genuinely different UI surface from
+    native Forward's own dialog (this opens the destination chat directly
+    and types into its normal composer), so it reuses that function
+    wholesale rather than duplicating compose/send logic. strict_send_
+    confirmation=True means MESSAGE_NOT_SENT is the only reachable outcome
+    when no real Send control is found — Enter is never a valid substitute
+    for a positively-clicked Send here either."""
+    result = await sender.send_whatsapp_message(
+        page=page, destination_type="group", destination=destination_group,
+        message_body=message, strict_send_confirmation=True,
+    )
+    state = result.get("state")
+    if state in _FORM_SEND_SUCCESS_STATES:
+        return {"ok": True, "send_state": state}
+    return {"ok": False, "error": f"send state {state!r}", "send_state": state}
+
+
 async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     """SEND workflow (2026-08-25 architecture) — independent of UPLOAD:
     forwards the ORIGINAL WhatsApp source media via WhatsApp's own native
@@ -6178,16 +6200,36 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     resilient: one item's failure never prevents the rest from being
     attempted, and never substitutes another item.
 
+    When present, req["form_message"] (the talent's approved submission
+    details) is sent FIRST, to the destination group directly — before any
+    source group is opened or any media is forwarded, matching the
+    required "form before media" ordering. Its own success/failure is
+    reported independently (form_send_result) and never blocks the media
+    items below from being attempted regardless of its outcome.
+
     Each item runs under its own PER_ITEM_SEND_TIMEOUT bound (2026-08-24
     fix — a real disposable E2E against 6 items hit the OUTER 180s
     mark_scan_loop timeout, which cancels this whole function and reports
     zero results for every item, discarding any that had already
     genuinely sent; a per-item bound means one slow/stuck item is reported
     as its own failure while every other item's real result is preserved)."""
+    form_send_result: Optional[Dict[str, Any]] = None
+    form_message = req.get("form_message")
+    if form_message:
+        try:
+            form_send_result = await asyncio.wait_for(
+                _send_form_message(page, req.get("destination_group"), form_message),
+                timeout=PER_ITEM_SEND_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            form_send_result = {"ok": False, "error": f"timed out after {PER_ITEM_SEND_TIMEOUT}s"}
+        except Exception as exc:
+            form_send_result = {"ok": False, "error": f"form send failed: {exc}"}
+
     group_name = req["group_name"]
     status = await sender._open_group_chat(page, group_name)
     if status != "OPENED":
-        return {"error": f"Could not open WhatsApp source group {group_name!r} (status={status})"}
+        return {"error": f"Could not open WhatsApp source group {group_name!r} (status={status})", "form_send_result": form_send_result}
 
     send_targets = req.get("send_targets") or []
     results = []
@@ -6201,7 +6243,7 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
             result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"item failed: {exc}"}
         results.append(result)
 
-    return {"results": results}
+    return {"results": results, "form_send_result": form_send_result}
 
 
 def _strip_raw_bytes(obj: Any) -> Any:
@@ -6273,11 +6315,15 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                 # generously above the per-item sum so it
                                 # essentially never fires for a real batch.
                                 n_send_targets = len(req.get("send_targets") or [])
-                                send_timeout = 60.0 + PER_ITEM_SEND_TIMEOUT * max(1, n_send_targets)
+                                form_budget = PER_ITEM_SEND_TIMEOUT if req.get("form_message") else 0.0
+                                send_timeout = 60.0 + form_budget + PER_ITEM_SEND_TIMEOUT * max(1, n_send_targets)
                                 result = await asyncio.wait_for(_run_send(page, req), timeout=send_timeout)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
-                                    json={"results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error")},
+                                    json={
+                                        "results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error"),
+                                        "form_send_result": result.get("form_send_result"),
+                                    },
                                     headers=_auth_headers(), timeout=30.0,
                                 )
                             elif req.get("mode") == "download_probe":

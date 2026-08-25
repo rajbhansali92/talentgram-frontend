@@ -823,7 +823,16 @@ async def test_orchestrator_download_done_reports_upload_complete():
         "pending_report_context": {"talent_label": talent_label, "project_label": project_label, "already": []},
         "created_at": _now(), "updated_at": _now(),
     })
-    # Simulate /media-upload having already marked the assignment uploaded.
+    # Simulate /media-upload having already marked the assignment uploaded
+    # AND pushed the matching media onto the submission — reconciliation
+    # (2026-08-25) requires BOTH, matching what /media-upload really does
+    # atomically; a fixture that only wrote the assignment side used to be
+    # (wrongly) enough, which is exactly the gap the real Sharvari incident
+    # exposed.
+    sub_id = await _seed_submission(project_id, talent_id, f"{talent_label.lower()}@test.example")
+    await db.submissions.update_one(
+        {"id": sub_id}, {"$push": {"media": {"id": "m1", "source_message_id": "src-take1", "label": "Take 1"}}}
+    )
     await db[ma.ASSIGNMENTS_COLLECTION].insert_one({
         "assignment_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
         "source_message_id": "src-take1", "media_role": "take", "take_number": 1,
@@ -838,16 +847,22 @@ async def test_orchestrator_download_done_reports_upload_complete():
     finally:
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
         await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await db.submissions.delete_one({"id": sub_id})
 
 
 async def test_orchestrator_already_uploaded_is_idempotent_no_redownload():
     """Running scan_done validation again for a project already fully
-    uploaded must go straight to ALREADY COMPLETED, never queue a fresh
-    download."""
+    uploaded (verified against the REAL submission media, not just the
+    assignment flag) must go straight to ALREADY COMPLETED, never queue a
+    fresh download."""
     tag = uuid.uuid4().hex[:6]
     project_id, project_label = f"p-{tag}", f"Google {tag}"
     talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
     await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    sub_id = await _seed_submission(project_id, talent_id, f"{talent_label.lower()}@test.example")
+    await db.submissions.update_one(
+        {"id": sub_id}, {"$push": {"media": {"id": "m1", "source_message_id": "src-take1", "label": "Take 1"}}}
+    )
     await db[ma.ASSIGNMENTS_COLLECTION].insert_one({
         "assignment_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
         "source_message_id": "src-take1", "media_role": "take", "take_number": 1,
@@ -865,6 +880,97 @@ async def test_orchestrator_already_uploaded_is_idempotent_no_redownload():
         assert final["status"] == ma.STATUS_FINISHED
         assert "ALREADY COMPLETED" in final["report"]
         assert "No duplicate upload performed." in final["report"]
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await db.submissions.delete_one({"id": sub_id})
+
+
+async def test_orchestrator_stale_assignment_without_submission_media_is_reconciled_not_trusted():
+    """Reconciliation fix (2026-08-25, real production incident):
+    assignment_status="uploaded" alone must NEVER be enough to report
+    ALREADY COMPLETED — the row is only trusted if the TARGET SUBMISSION
+    actually contains matching media. A row that claims "uploaded" while
+    the submission has no such media (drift between the two collections,
+    however it happened) must be excluded from `already`, so to_download
+    naturally includes it again for a real retry — never silently
+    reported as already done while the submission stays empty."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    # A submission exists but its media[] is empty — the row below claims
+    # "uploaded" but nothing was ever actually attached to it.
+    sub_id = await _seed_submission(project_id, talent_id, f"{talent_label.lower()}@test.example")
+    await db[ma.ASSIGNMENTS_COLLECTION].insert_one({
+        "assignment_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
+        "source_message_id": "src-take1", "media_role": "take", "take_number": 1,
+        "assignment_status": ma.ASSIGN_STATUS_UPLOADED, "created_at": _now(), "created_by": "test",
+    })
+    req_id = await _insert_scan_done(
+        talent_id=talent_id, talent_label=talent_label, project_id=project_id, project_label=project_label,
+        group_name=f"{talent_label} x Talentgram",
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="src-take1")],
+    )
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    try:
+        assert await orch._process_scan_done()
+        final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        # Reconciled: the stale "uploaded" row is NOT trusted -> queued
+        # for a real download instead of a false ALREADY COMPLETED.
+        assert final["status"] == ma.DOWNLOAD_STATUS_PENDING, final
+        assert final["mode"] == "download"
+        targets = {t["media_role"] for t in final["download_targets"]}
+        assert targets == {"take"}
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await db.submissions.delete_one({"id": sub_id})
+
+
+async def test_orchestrator_no_marks_resolve_to_project_reports_honestly_not_already_completed():
+    """The exact real production incident (2026-08-25, Sharvari Kashid /
+    Tapti AI App (Ananya)): two real marks existed in the WhatsApp group,
+    but their mark text's project fragment did not resolve to the
+    REQUESTED project (a project name mismatch, e.g. informal mark text
+    like "Tapti Ai Test" vs. the real "Tapti AI App (Ananya)") — so
+    validate_candidates correctly excluded them, leaving outcome.assignments
+    empty. The old code treated "nothing left to download" (also true
+    here) as equivalent to "already uploaded", reporting ALREADY COMPLETED
+    with an empty item list while the submission had zero media. This
+    must now report NO MARKED MEDIA FOUND instead — never claim
+    completion of something that was never found or done."""
+    tag = uuid.uuid4().hex[:6]
+    unrelated_tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Tapti AI App (Ananya) {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Sharvari {tag}"
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    # Mark text references a project fragment that does NOT resolve to
+    # project_label at all (mirrors "Tapti Ai Test" vs. "Tapti AI App
+    # (Ananya)") — no @mention, matching the real incident exactly. Uses
+    # its OWN random suffix (not project_label's tag) so nothing in the
+    # mark text accidentally overlaps with the project name.
+    req_id = await _insert_scan_done(
+        talent_id=talent_id, talent_label=talent_label, project_id=project_id, project_label=project_label,
+        group_name=f"{talent_label} x Talentgram",
+        candidates=[
+            {**_mark(mention_lid=None, mark_text=f"Mark Zzyx Qorvex {unrelated_tag} take 1", source_message_id="src-take1", media_type="video")},
+            {**_mark(mention_lid=None, mark_text=f"Mark Zzyx Qorvex {unrelated_tag} intro", source_message_id="src-intro", media_type="video")},
+        ],
+    )
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    try:
+        assert await orch._process_scan_done()
+        final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert final["status"] == ma.STATUS_FINISHED
+        assert "NO MARKED MEDIA FOUND" in final["report"], final["report"]
+        assert "ALREADY COMPLETED" not in final["report"], final["report"]
+        # Never silently created an assignment row for a mark that didn't
+        # resolve to this project.
+        rows = await db[ma.ASSIGNMENTS_COLLECTION].find({"talent_id": talent_id}).to_list(10)
+        assert rows == [], rows
     finally:
         await db.projects.delete_one({"id": project_id})
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})

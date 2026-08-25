@@ -144,6 +144,22 @@ def _report_already_uploaded(talent_label: str, project_label: str, already: Lis
     )
 
 
+def _report_no_marks_found(talent_label: str, project_label: str) -> str:
+    """Completion-invariant fix (2026-08-25 — real production incident):
+    _report_already_uploaded used to fire whenever there was nothing left
+    to download, which is ALSO true when the scan found zero marks for
+    the requested project in the first place — a completely different
+    situation from "everything is genuinely already uploaded", but the
+    two were never distinguished, so an admin got told ALREADY COMPLETED
+    for a submission that had zero media at all. This is the honest,
+    distinct report for that case — never claims completion of anything."""
+    return (
+        f"NO MARKED MEDIA FOUND\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
+        f"No marks in the WhatsApp group resolved to this project. Nothing was uploaded.\n\n"
+        f"Check that the mark text references this project clearly, then retry."
+    )
+
+
 def _report_upload_result(
     talent_label: str, project_label: str, uploaded_labels: List[str], failed_labels: List[str],
     already: List[Dict[str, Any]],
@@ -350,6 +366,20 @@ async def _process_scan_done() -> bool:
         if media_assignment.slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) not in already_slots
     ]
     if not to_download:
+        if not outcome.assignments and not already:
+            # Completion-invariant fix — "nothing left to download" is
+            # ALSO true when the scan found zero marks for this project
+            # at all (never confuse "nothing new because it's done" with
+            # "nothing new because nothing was ever found"). See
+            # _report_no_marks_found's docstring for the real incident
+            # this reproduces exactly (Sharvari Kashid / Tapti AI App
+            # (Ananya), 2026-08-25): two real marks existed in the
+            # WhatsApp group, but their project text didn't resolve to
+            # THIS project, so outcome.assignments came back empty and
+            # the old code reported ALREADY COMPLETED with an empty item
+            # list — while the submission had zero media.
+            await _finish(doc["id"], _report_no_marks_found(talent_label, project_label))
+            return True
         await _finish(doc["id"], _report_already_uploaded(talent_label, project_label, already))
         return True
 

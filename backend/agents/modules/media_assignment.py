@@ -479,10 +479,32 @@ def validate_candidates(
 # assignment_status="uploaded" rows are reported, never re-uploaded.
 # ---------------------------------------------------------------------------
 async def already_uploaded(talent_id: str, project_id: str) -> List[Dict[str, Any]]:
-    return await db[ASSIGNMENTS_COLLECTION].find(
+    """Reconciliation-based (2026-08-25 fix): an assignment row claiming
+    assignment_status="uploaded" is no longer trusted blindly — it must
+    ALSO have a matching entry (by source_message_id) in the TARGET
+    SUBMISSION's own media[] array, which is the actual source of truth
+    an admin/client sees. A row that says "uploaded" but the submission
+    has no matching media (the submission was recreated/reset after the
+    assignment was recorded, a manual admin edit removed it, or any other
+    drift between the two collections) is excluded here — the caller's
+    to_download computation then naturally includes it again for a real
+    retry instead of the system reporting a false ALREADY COMPLETED /
+    UPLOAD COMPLETE while the submission is actually missing the media.
+    Never mutates the stale row itself; a future successful (re-)upload
+    updates it in place via mark_assignment_status's existing update_one."""
+    rows = await db[ASSIGNMENTS_COLLECTION].find(
         {"talent_id": talent_id, "project_id": project_id, "assignment_status": ASSIGN_STATUS_UPLOADED},
         {"_id": 0},
     ).to_list(200)
+    if not rows:
+        return []
+    submission = await db.submissions.find_one(
+        {"talent_id": talent_id, "project_id": project_id}, {"_id": 0, "media": 1}
+    )
+    submitted_source_ids = {
+        m.get("source_message_id") for m in ((submission or {}).get("media") or []) if m.get("source_message_id")
+    }
+    return [r for r in rows if r.get("source_message_id") in submitted_source_ids]
 
 
 async def record_assignment(

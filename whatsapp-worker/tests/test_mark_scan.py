@@ -1318,6 +1318,60 @@ def main():
     assert photo_result_51["sha256"] == hashlib.sha256(tile_51_jpeg).hexdigest()
     print("51. UPLOAD photo path unaffected   -> _download_photo_album_tile_via_blob shares no code with the new hardened video path")
 
+    # 52: REGRESSION (2026-08-25 — found via a real live UPLOAD E2E). The
+    # FIRST plausible menu-trigger candidate opened a message-level
+    # "Reply privately"/"Report <sender>" context menu instead of the
+    # viewer's own Download menu, on the SAME open video viewer. The
+    # (wrong) menu is dismissed via Escape and the NEXT candidate is
+    # tried, which succeeds — self-healing without a blind/unbounded retry.
+    class _FakeDownloadItemLocator:
+        def __init__(self, page):
+            self._page = page
+            self.first = self
+        async def is_visible(self, timeout=None):
+            return self._page.click_count >= 2  # only the SECOND trigger's menu has Download
+        async def click(self, timeout=None):
+            pass
+
+    class _FakeMenuPage:
+        def __init__(self):
+            self.mouse = _FakeMouse()
+            self.keyboard = _FakeKeyboard()
+            self.click_count = 0
+        async def wait_for_timeout(self, ms):
+            pass
+        def locator(self, sel):
+            return _FakeDownloadItemLocator(self)
+
+    wrong_trigger = {"ariaLabel": None, "dataIcon": None, "testid": None, "svgTitle": "menu", "rect": [900, 20, 24, 24]}
+    right_trigger = {"ariaLabel": None, "dataIcon": None, "testid": None, "svgTitle": "menu", "rect": [850, 20, 24, 24]}
+    viewer_buttons_52 = {"buttons": [wrong_trigger, right_trigger]}
+
+    page_52 = _FakeMenuPage()
+    orig_evaluate_menu = mark_scan._evaluate
+    orig_collect_downloads = mark_scan._collect_downloads
+
+    async def _fake_evaluate_menu(page, js, arg=None, timeout=10.0):
+        page.click_count += 1
+        return {"items": [{"text": "Reply privately"}]} if page.click_count == 1 else {"items": [{"text": "Download"}]}
+
+    async def _fake_collect_downloads(page, trigger, window_s=25.0, quiet_s=3.0):
+        await trigger()
+        return [{"ok": True, "_raw_bytes": b"X"}]
+
+    mark_scan._evaluate = _fake_evaluate_menu
+    mark_scan._collect_downloads = _fake_collect_downloads
+    try:
+        result_52 = asyncio.run(mark_scan._click_download_in_open_viewer(page_52, viewer_buttons_52, {"reached": True}))
+    finally:
+        mark_scan._evaluate = orig_evaluate_menu
+        mark_scan._collect_downloads = orig_collect_downloads
+
+    assert result_52["ok"] is True, result_52
+    assert page_52.click_count == 2, page_52.click_count  # wrong candidate tried first, then the right one
+    assert "Escape" in page_52.keyboard.pressed, page_52.keyboard.pressed  # the wrong menu was dismissed before retrying
+    print("52. UPLOAD menu self-heals         -> wrong candidate (no Download) dismissed via Escape, next candidate tried and succeeds")
+
 
 if __name__ == "__main__":
     main()

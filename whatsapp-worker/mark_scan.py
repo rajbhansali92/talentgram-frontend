@@ -1530,76 +1530,96 @@ async def _click_download_in_open_viewer(page, viewer_buttons: Dict[str, Any], r
     Extracted (2026-08-25) from _open_tile_viewer_and_download's own
     inline logic so the new hardened UPLOAD path
     (_open_tile_viewer_and_download_hardened) can reuse it for each
-    close/reopen round without duplicating it — the CALLER still owns
-    opening the tile and closing the viewer on every exit path; this
-    function only owns the menu-trigger -> Download item -> click
-    sequence, unchanged from the original inline version."""
-    menu_trigger = None
+    close/reopen round without duplicating it.
+
+    Tries EVERY plausible menu-trigger button in turn (2026-08-25
+    hardening) — a real E2E found the single first-guess candidate (the
+    first label match, or the top-right positional fallback) can open a
+    DIFFERENT, message-level context menu ("Reply privately"/"Report
+    <sender>") instead of the viewer's own Download menu, on the SAME
+    open video viewer. Rather than trusting one guess, every label-
+    matching candidate is tried first (in DOM order), then every
+    remaining button with a rect (ordered by top-right-ness, the
+    previous single fallback's own ordering) — each wrong menu is
+    dismissed via Escape before the next candidate is tried, and only a
+    menu that actually contains "Download" is used. Bounded to the real,
+    finite number of buttons this ONE dump already found — never an
+    unbounded/blind retry, and never a second live re-query of the DOM."""
+    label_matches = []
+    other_candidates = []
     for b in viewer_buttons.get("buttons", []):
+        if not b.get("rect"):
+            continue
         label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
         if re.search(r"menu|more|option|kebab", label):
-            menu_trigger = b
-            break
-    if menu_trigger is None:
-        # Fallback: the button positioned furthest toward the top-right
-        # of the viewport, matching the user's own description
-        # ("top-right three-dot menu") — measured from real captured
-        # rects, not assumed.
-        candidates = [b for b in viewer_buttons.get("buttons", []) if b.get("rect")]
-        if candidates:
-            menu_trigger = max(candidates, key=lambda b: b["rect"][0] - b["rect"][1])
+            label_matches.append(b)
+        else:
+            other_candidates.append(b)
+    other_candidates.sort(key=lambda b: b["rect"][0] - b["rect"][1], reverse=True)
+    trigger_candidates = label_matches + other_candidates
 
-    if menu_trigger is None:
+    if not trigger_candidates:
         return {
             "ok": False, "stage": "find_menu_trigger", "reason": "video mounted but no plausible menu-trigger button found",
             "readiness": readiness, "viewer_buttons": viewer_buttons,
         }
 
-    mx = menu_trigger["rect"][0] + menu_trigger["rect"][2] / 2
-    my = menu_trigger["rect"][1] + menu_trigger["rect"][3] / 2
-    try:
-        await page.mouse.click(mx, my, button="left")
-    except Exception as exc:
-        return {"ok": False, "stage": "click_menu_trigger", "reason": str(exc), "readiness": readiness, "menu_trigger": menu_trigger}
-
-    await page.wait_for_timeout(600)
-    try:
-        menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
-    except Exception:
-        menu_dump = None
-    if not menu_dump:
+    last_fail: Dict[str, Any] = {}
+    for menu_trigger in trigger_candidates:
+        mx = menu_trigger["rect"][0] + menu_trigger["rect"][2] / 2
+        my = menu_trigger["rect"][1] + menu_trigger["rect"][3] / 2
         try:
-            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
+            await page.mouse.click(mx, my, button="left")
+        except Exception as exc:
+            last_fail = {"ok": False, "stage": "click_menu_trigger", "reason": str(exc), "readiness": readiness, "menu_trigger": menu_trigger}
+            continue
+
+        await page.wait_for_timeout(600)
+        try:
+            menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
         except Exception:
-            body_snapshot = None
+            menu_dump = None
+        if not menu_dump:
+            last_fail = {
+                "ok": False, "stage": "menu_after_trigger_click", "reason": "clicked menu trigger but no menu appeared",
+                "readiness": readiness, "menu_trigger": menu_trigger,
+            }
+            continue
+
+        item = page.locator(
+            '[role="menu"] :text-matches("download", "i"), '
+            '[role="menuitem"]:has-text("Download"), '
+            'li:has-text("Download"), '
+            'div[role="button"]:has-text("Download")'
+        ).first
+        try:
+            visible = await item.is_visible(timeout=3000)
+        except Exception:
+            visible = False
+        if not visible:
+            last_fail = {
+                "ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found",
+                "readiness": readiness, "menu_trigger": menu_trigger, "menu_dump": menu_dump,
+            }
+            try:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(300)
+            except Exception:
+                pass
+            continue
+
+        async def _click_item():
+            await item.click(timeout=5000)
+
+        downloads = await _collect_downloads(page, _click_item)
         return {
-            "ok": False, "stage": "menu_after_trigger_click", "reason": "clicked menu trigger but no menu appeared",
-            "readiness": readiness, "menu_trigger": menu_trigger, "body_snapshot": body_snapshot,
+            "ok": bool(downloads) and any(d.get("ok") for d in downloads),
+            "readiness": readiness, "menu_dump": menu_dump, "downloads": downloads, "menu_trigger": menu_trigger,
         }
 
-    item = page.locator(
-        '[role="menu"] :text-matches("download", "i"), '
-        '[role="menuitem"]:has-text("Download"), '
-        'li:has-text("Download"), '
-        'div[role="button"]:has-text("Download")'
-    ).first
-    try:
-        visible = await item.is_visible(timeout=3000)
-    except Exception:
-        visible = False
-    if not visible:
-        return {
-            "ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found",
-            "readiness": readiness, "menu_dump": menu_dump,
-        }
-
-    async def _click_item():
-        await item.click(timeout=5000)
-
-    downloads = await _collect_downloads(page, _click_item)
-    return {
-        "ok": bool(downloads) and any(d.get("ok") for d in downloads),
-        "readiness": readiness, "menu_dump": menu_dump, "downloads": downloads,
+    return last_fail or {
+        "ok": False, "stage": "find_download_item", "reason": "no candidate menu trigger revealed a Download item",
+        "readiness": readiness,
     }
 
 

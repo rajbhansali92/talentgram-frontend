@@ -288,7 +288,11 @@ async def _process_scan_done() -> bool:
             m for m in outcome.assignments
             if media_assignment.slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) not in already_slots
         ]
-        if not to_send:
+        # A pending form_message must still reach the worker even when
+        # every media item is already sent — SEND's own spec requires the
+        # form to go out independent of media state, never silently
+        # dropped because there was nothing new to forward.
+        if not to_send and not doc.get("form_message"):
             await _finish(doc["id"], _report_already_sent(talent_label, project_label, destination_group, already))
             return True
         send_targets = [{

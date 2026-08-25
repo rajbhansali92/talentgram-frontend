@@ -608,3 +608,41 @@ async def test_send_orchestrator_records_form_send_failure_independent_of_media(
     finally:
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
         await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+async def test_send_orchestrator_dispatches_form_even_when_all_media_already_sent():
+    """Regression (2026-08-25): the "all media already sent" shortcut used
+    to _finish() immediately, which silently dropped a pending
+    form_message — the form must still reach the worker even when there
+    is nothing new to forward."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    await db[ms.MEDIA_SENDS_COLLECTION].insert_one({
+        "send_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
+        "destination_group": DESTINATION_GROUP,
+        "source_message_id": "src-take1", "source_thumbnail_hash": "hash-src-take1",
+        "media_role": "take", "take_number": 1,
+        "send_status": ms.SEND_STATUS_SENT, "created_at": _now(), "created_by": "test",
+    })
+    req_id = await _insert_send_scan_done(
+        talent_id=talent_id, talent_label=talent_label, project_id=project_id, project_label=project_label,
+        group_name=f"{talent_label} x Talentgram", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="src-take1")],
+    )
+    await db[ma.SCAN_REQUESTS_COLLECTION].update_one({"id": req_id}, {"$set": {"form_message": "SUBMISSION DETAILS\n\nTalent:\nAhana"}})
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    try:
+        assert await orch._process_scan_done()
+        mid = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        # Dispatched to the worker (not finished directly) even though the
+        # only media item was already sent.
+        assert mid["mode"] == "send"
+        assert mid["status"] == ma.DOWNLOAD_STATUS_PENDING
+        assert mid["send_targets"] == []
+        assert mid["form_message"] == "SUBMISSION DETAILS\n\nTalent:\nAhana"
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})

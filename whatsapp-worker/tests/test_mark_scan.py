@@ -989,6 +989,335 @@ def main():
     assert cands_42[0]["mark_text"] == "mark spike take 1", cands_42[0]
     print("42. no-mention mark reaches backend -> _run_scan captures it as a candidate with mention_lid=None, never silently dropped")
 
+    # ------------------------------------------------------------------
+    # 43-51: UPLOAD video-retrieval hardening (2026-08-25). Real finding:
+    # UPLOAD's own production call site (_run_download) never actually
+    # wired group_name/source_message_id into _open_tile_viewer_and_download,
+    # so the existing re-resolution+bounded-retry fix was never active for
+    # real UPLOAD runs — the SAME video that native-Forward SEND opened
+    # successfully twice still failed UPLOAD's download with "element is
+    # not stable"/"detached from the DOM". _open_tile_viewer_and_download_hardened
+    # is a NEW, independent entry point (never touches SEND's own
+    # _open_media_and_get_forward_button or _resolve_video_tile_locator)
+    # that adds live tile-hash verification (never trusts tile_index
+    # alone) plus a bounded close/reopen round when Download never
+    # appears, wired into _run_download's real video call site.
+    # ------------------------------------------------------------------
+    def _video_tile_html(seed: str, testid: str = "video-content") -> str:
+        blob = (seed * 20)[:80]
+        return (
+            f'<div data-testid="{testid}">'
+            f'<div style="background-image: url(&quot;data:image/jpeg;base64,{blob}&quot;);"></div></div>'
+        )
+
+    class _FakeHashTile:
+        def __init__(self, testid, html, fail_times=0):
+            self._testid = testid
+            self._html = html
+            self._fail_times = fail_times
+            self.click_count = 0
+        async def get_attribute(self, name, timeout=None):
+            assert name == "data-testid"
+            return self._testid
+        async def evaluate(self, js, timeout=None):
+            assert js == "(el) => el.outerHTML"
+            return self._html
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def click(self, timeout=None):
+            self.click_count += 1
+            if self.click_count <= self._fail_times:
+                raise Exception(
+                    "Locator.click: Timeout 10000ms exceeded.\n"
+                    "  - element is not stable\n"
+                    "  - element was detached from the DOM, retrying"
+                )
+
+    class _FakeHashTilesLocator:
+        def __init__(self, tiles):
+            self._tiles = tiles
+        async def count(self):
+            return len(self._tiles)
+        def nth(self, i):
+            return self._tiles[i]
+
+    class _FakeHashMessageLocator:
+        def __init__(self, tiles):
+            self._tiles = tiles
+        def locator(self, selector):
+            assert "video-content" in selector and "image-content" in selector
+            return _FakeHashTilesLocator(self._tiles)
+
+    class _FakeHashConvLocator:
+        def __init__(self, message_by_index):
+            self._message_by_index = message_by_index
+        def nth(self, idx):
+            return self._message_by_index.get(idx)
+
+    class _FakeHashPage:
+        def __init__(self, message_by_index, video_mounted=False):
+            self._message_by_index = message_by_index
+            self._video_mounted = video_mounted
+            self.waits = 0
+        def locator(self, sel):
+            if sel == "video":
+                return _CountLocator(1 if self._video_mounted else 0)
+            return _FakeHashConvLocator(self._message_by_index)
+        async def wait_for_timeout(self, ms):
+            self.waits += 1
+
+    orig_evaluate_up = mark_scan._evaluate
+    orig_resolve_scope_up = mark_scan.sender._resolve_scope
+    orig_find_idx_up = mark_scan._find_message_index_by_data_id
+
+    async def _fake_evaluate_up(page, js, arg=None, timeout=10.0):
+        return None
+
+    async def _fake_resolve_scope_up(page):
+        return "#main"
+
+    def _make_fake_find_idx_up(index_sequence):
+        calls = {"n": -1}
+        async def fake_find_idx(page, group, data_id):
+            calls["n"] += 1
+            return index_sequence[min(calls["n"], len(index_sequence) - 1)]
+        return fake_find_idx
+
+    mark_scan._evaluate = _fake_evaluate_up
+    mark_scan.sender._resolve_scope = _fake_resolve_scope_up
+
+    # 43: message index changes between initial resolution and click ->
+    # recovery succeeds. The message's CURRENT live index (10) is what
+    # actually gets used — the function never receives, or needs, any
+    # separately-computed positional index at all.
+    tile_43 = _FakeHashTile("video-content", _video_tile_html("VIDEOTILE43"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([10])
+    try:
+        page_43 = _FakeHashPage({10: _FakeHashMessageLocator([tile_43])}, video_mounted=True)
+        orig_readiness = mark_scan._wait_for_video_readiness
+        orig_click_dl = mark_scan._click_download_in_open_viewer
+        orig_close = mark_scan._close_viewer
+        mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+        mark_scan._click_download_in_open_viewer = lambda page, vb, r: asyncio.sleep(0, result={"ok": True, "downloads": [{"ok": True, "_raw_bytes": b"X"}]})
+        mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+        try:
+            dl_43 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+                page_43, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("VIDEOTILE43"), 0,
+            ))
+        finally:
+            mark_scan._wait_for_video_readiness = orig_readiness
+            mark_scan._click_download_in_open_viewer = orig_click_dl
+            mark_scan._close_viewer = orig_close
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_43["ok"] is True, dl_43
+    assert dl_43["resolved_tile_index"] == 0, dl_43
+    assert tile_43.click_count == 1, tile_43.click_count
+    print("43. UPLOAD index drift recovery    -> resolves by current live index, not a stale positional one")
+
+    # 44: video DOM node is detached once -> re-resolution succeeds.
+    tile_44 = _FakeHashTile("video-content", _video_tile_html("VIDEOTILE44"), fail_times=1)
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([5, 5])
+    try:
+        page_44 = _FakeHashPage({5: _FakeHashMessageLocator([tile_44])}, video_mounted=True)
+        orig_readiness = mark_scan._wait_for_video_readiness
+        orig_click_dl = mark_scan._click_download_in_open_viewer
+        orig_close = mark_scan._close_viewer
+        mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+        mark_scan._click_download_in_open_viewer = lambda page, vb, r: asyncio.sleep(0, result={"ok": True, "downloads": [{"ok": True, "_raw_bytes": b"X"}]})
+        mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+        try:
+            dl_44 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+                page_44, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("VIDEOTILE44"), 0,
+            ))
+        finally:
+            mark_scan._wait_for_video_readiness = orig_readiness
+            mark_scan._click_download_in_open_viewer = orig_click_dl
+            mark_scan._close_viewer = orig_close
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_44["ok"] is True, dl_44
+    assert tile_44.click_count == 2, tile_44.click_count  # failed once, retried once, succeeded
+    print("44. UPLOAD tile detaches once      -> re-resolution + bounded retry recovers, same message re-clicked")
+
+    # 45: exact source message disappears -> clean failure, no retry
+    # across rounds (an identity failure is never click-retryable).
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([None])
+    try:
+        page_45 = _FakeHashPage({})
+        dl_45 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            page_45, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("V45"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_45["ok"] is False, dl_45
+    assert dl_45["stage"] == "resolve_tile", dl_45
+    assert dl_45["reason"] == "message_not_found", dl_45
+    assert dl_45["round"] == 0, dl_45  # exactly one attempt — never retried against a message that's simply gone
+    print("45. UPLOAD source message gone     -> clean bounded failure, never an infinite retry loop")
+
+    # 46: wrong neighboring video at the hinted index MUST NOT be
+    # selected -> the real match (elsewhere in the same message) is found
+    # by a full-message hash search instead.
+    wrong_tile_46 = _FakeHashTile("video-content", _video_tile_html("VIDEOWRONG46"))
+    right_tile_46 = _FakeHashTile("video-content", _video_tile_html("VIDEORIGHT46"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([3])
+    try:
+        page_46 = _FakeHashPage({3: _FakeHashMessageLocator([wrong_tile_46, right_tile_46])}, video_mounted=True)
+        orig_readiness = mark_scan._wait_for_video_readiness
+        orig_click_dl = mark_scan._click_download_in_open_viewer
+        orig_close = mark_scan._close_viewer
+        mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+        mark_scan._click_download_in_open_viewer = lambda page, vb, r: asyncio.sleep(0, result={"ok": True, "downloads": [{"ok": True, "_raw_bytes": b"X"}]})
+        mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+        try:
+            dl_46 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+                page_46, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("VIDEORIGHT46"), 0,  # hint says index 0 (wrong)
+            ))
+        finally:
+            mark_scan._wait_for_video_readiness = orig_readiness
+            mark_scan._click_download_in_open_viewer = orig_click_dl
+            mark_scan._close_viewer = orig_close
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_46["ok"] is True, dl_46
+    assert dl_46["resolved_tile_index"] == 1, dl_46  # NOT the hinted index 0
+    assert wrong_tile_46.click_count == 0, "the wrong neighboring tile must never be clicked"
+    assert right_tile_46.click_count == 1, right_tile_46.click_count
+    print("46. UPLOAD wrong neighbor rejected -> hint index ignored once its hash disagrees, correct tile found and clicked instead")
+
+    # 47: hash/source identity mismatch (no tile anywhere in the message
+    # matches) -> MUST NOT proceed, never clicks anything.
+    only_tile_47 = _FakeHashTile("video-content", _video_tile_html("VIDEOONLY47"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([7])
+    try:
+        page_47 = _FakeHashPage({7: _FakeHashMessageLocator([only_tile_47])}, video_mounted=True)
+        dl_47 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            page_47, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("NOTHING_MATCHES_47"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_47["ok"] is False, dl_47
+    assert dl_47["stage"] == "resolve_tile", dl_47
+    assert dl_47["reason"] == "hash_mismatch", dl_47
+    assert only_tile_47.click_count == 0, "must never click when identity can't be verified"
+    print("47. UPLOAD hash mismatch           -> refuses to proceed, never clicks an unverified tile")
+
+    # 48: video not fully buffered -> the hardened path still calls the
+    # SAME bounded readiness wait (never skipped, never a fixed sleep
+    # substituted in its place).
+    tile_48 = _FakeHashTile("video-content", _video_tile_html("VIDEOTILE48"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([1])
+    readiness_calls_48 = []
+    try:
+        page_48 = _FakeHashPage({1: _FakeHashMessageLocator([tile_48])}, video_mounted=True)
+        orig_readiness = mark_scan._wait_for_video_readiness
+        orig_click_dl = mark_scan._click_download_in_open_viewer
+        orig_close = mark_scan._close_viewer
+        async def _fake_readiness_not_reached(page, **kw):
+            readiness_calls_48.append(kw)
+            return {"reached": False, "elapsed_s": 60.0, "state": None}
+        mark_scan._wait_for_video_readiness = _fake_readiness_not_reached
+        mark_scan._click_download_in_open_viewer = lambda page, vb, r: asyncio.sleep(0, result={"ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found"})
+        mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+        try:
+            dl_48 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+                page_48, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("VIDEOTILE48"), 0,
+            ))
+        finally:
+            mark_scan._wait_for_video_readiness = orig_readiness
+            mark_scan._click_download_in_open_viewer = orig_click_dl
+            mark_scan._close_viewer = orig_close
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert len(readiness_calls_48) == mark_scan.MAX_DOWNLOAD_READINESS_ROUNDS, readiness_calls_48  # called every round, never skipped
+    assert dl_48["ok"] is False, dl_48
+    print("48. UPLOAD video not buffered      -> the bounded readiness wait is called every round, never skipped or replaced with a fixed sleep")
+
+    # 49: video fully buffered but Download isn't immediately visible ->
+    # bounded close/reopen round recovers, re-resolving by hash fresh
+    # each time (never reusing the same tile locator across rounds).
+    tile_49_round0 = _FakeHashTile("video-content", _video_tile_html("VIDEOTILE49"))
+    tile_49_round1 = _FakeHashTile("video-content", _video_tile_html("VIDEOTILE49"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([2, 2])
+    close_calls_49 = []
+    try:
+        page_49 = _FakeHashPage(
+            {2: _FakeHashMessageLocator([tile_49_round0])},  # overwritten mid-test below for round 2
+            video_mounted=True,
+        )
+        # Swap the message locator between rounds so round 2 hits a DIFFERENT
+        # (freshly re-resolved) tile object — proving the function
+        # re-resolves rather than reusing the same locator across rounds.
+        call_state = {"n": 0}
+        def _locator_router(sel):
+            if sel == "video":
+                return _CountLocator(1)
+            call_state["n"] += 1
+            tiles = [tile_49_round0] if call_state["n"] == 1 else [tile_49_round1]
+            return _FakeHashConvLocator({2: _FakeHashMessageLocator(tiles)})
+        page_49.locator = _locator_router
+
+        orig_readiness = mark_scan._wait_for_video_readiness
+        orig_click_dl = mark_scan._click_download_in_open_viewer
+        orig_close = mark_scan._close_viewer
+        mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+        click_dl_calls = {"n": 0}
+        async def _fake_click_dl(page, vb, r):
+            click_dl_calls["n"] += 1
+            if click_dl_calls["n"] == 1:
+                return {"ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found"}
+            return {"ok": True, "downloads": [{"ok": True, "_raw_bytes": b"X"}]}
+        mark_scan._click_download_in_open_viewer = _fake_click_dl
+        async def _fake_close(page, vb):
+            close_calls_49.append(True)
+            return {"closed": True}
+        mark_scan._close_viewer = _fake_close
+        try:
+            dl_49 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+                page_49, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("VIDEOTILE49"), 0,
+            ))
+        finally:
+            mark_scan._wait_for_video_readiness = orig_readiness
+            mark_scan._click_download_in_open_viewer = orig_click_dl
+            mark_scan._close_viewer = orig_close
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_49["ok"] is True, dl_49
+    assert dl_49["round"] == 1, dl_49  # succeeded on the SECOND round, not the first
+    assert len(close_calls_49) == 2, close_calls_49  # once to leave the failed round, once more on the successful round's own exit
+    assert tile_49_round0.click_count == 1, tile_49_round0.click_count
+    assert tile_49_round1.click_count == 1, tile_49_round1.click_count  # round 2 clicked a FRESH tile, not round 1's
+    print("49. UPLOAD Download not visible    -> bounded close/reopen round recovers, re-resolving fresh each round")
+
+    # 50: correct Download control is selected — the round-1 success path
+    # returns the real downloads list from _click_download_in_open_viewer
+    # unchanged (already exercised structurally by tests 43/44/46 above;
+    # this confirms the top-level result shape a real caller consumes).
+    assert dl_43["downloads"][0]["_raw_bytes"] == b"X", dl_43
+    assert dl_49["downloads"][0]["ok"] is True, dl_49
+    print("50. UPLOAD correct Download used   -> the real Download result (downloads[]) reaches the top-level return unchanged")
+
+    mark_scan._evaluate = orig_evaluate_up
+    mark_scan.sender._resolve_scope = orig_resolve_scope_up
+
+    # 51: photo/album path is completely unaffected — re-affirms test 41
+    # (_download_photo_album_tile_via_blob is never called from, and
+    # shares no code with, the new hardened video path).
+    tile_51_jpeg = _fake_jpeg(640, 480)
+    tile_51 = _FakePhotoTile(
+        _photo_tile_html("TILE51"),
+        {"src": "blob:https://web.whatsapp.com/tile-51", "naturalWidth": 640, "naturalHeight": 480, "complete": True},
+    )
+    photo_message_51 = _FakePhotoMessageLocator([tile_51])
+    photo_page_51 = _FakeBlobPage({"blob:https://web.whatsapp.com/tile-51": tile_51_jpeg})
+    photo_result_51 = asyncio.run(mark_scan._download_photo_album_tile_via_blob(
+        photo_message_51, photo_page_51, 0, _hash_of("TILE51"),
+    ))
+    assert photo_result_51["ok"] is True, photo_result_51
+    assert photo_result_51["sha256"] == hashlib.sha256(tile_51_jpeg).hexdigest()
+    print("51. UPLOAD photo path unaffected   -> _download_photo_album_tile_via_blob shares no code with the new hardened video path")
+
 
 if __name__ == "__main__":
     main()

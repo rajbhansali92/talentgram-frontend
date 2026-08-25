@@ -1518,82 +1518,265 @@ async def _open_tile_viewer_and_download(
     # tile's open-click fails (proven root cause, 2026-08-23: the real
     # E2E's Take 2/3/Introduction all failed identically at open_tile with
     # "pointer events intercepted" by a background div, because Take 1's
-    # successful download path never closed its viewer at all). Wrapped in
-    # an inner function purely so every early return below still reaches
-    # the shared _close_viewer() call at the bottom, without duplicating it
-    # at each return site.
-    async def _inner() -> Dict[str, Any]:
-        menu_trigger = None
-        for b in viewer_buttons.get("buttons", []):
-            label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
-            if re.search(r"menu|more|option|kebab", label):
-                menu_trigger = b
-                break
-        if menu_trigger is None:
-            # Fallback: the button positioned furthest toward the top-right
-            # of the viewport, matching the user's own description
-            # ("top-right three-dot menu") — measured from real captured
-            # rects, not assumed.
-            candidates = [b for b in viewer_buttons.get("buttons", []) if b.get("rect")]
-            if candidates:
-                menu_trigger = max(candidates, key=lambda b: b["rect"][0] - b["rect"][1])
-
-        if menu_trigger is None:
-            return {
-                "ok": False, "stage": "find_menu_trigger", "reason": "video mounted but no plausible menu-trigger button found",
-                "readiness": readiness, "viewer_buttons": viewer_buttons,
-            }
-
-        mx = menu_trigger["rect"][0] + menu_trigger["rect"][2] / 2
-        my = menu_trigger["rect"][1] + menu_trigger["rect"][3] / 2
-        try:
-            await page.mouse.click(mx, my, button="left")
-        except Exception as exc:
-            return {"ok": False, "stage": "click_menu_trigger", "reason": str(exc), "readiness": readiness, "menu_trigger": menu_trigger}
-
-        await page.wait_for_timeout(600)
-        try:
-            menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
-        except Exception:
-            menu_dump = None
-        if not menu_dump:
-            try:
-                body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
-            except Exception:
-                body_snapshot = None
-            return {
-                "ok": False, "stage": "menu_after_trigger_click", "reason": "clicked menu trigger but no menu appeared",
-                "readiness": readiness, "menu_trigger": menu_trigger, "body_snapshot": body_snapshot,
-            }
-
-        item = page.locator(
-            '[role="menu"] :text-matches("download", "i"), '
-            '[role="menuitem"]:has-text("Download"), '
-            'li:has-text("Download"), '
-            'div[role="button"]:has-text("Download")'
-        ).first
-        try:
-            visible = await item.is_visible(timeout=3000)
-        except Exception:
-            visible = False
-        if not visible:
-            return {
-                "ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found",
-                "readiness": readiness, "menu_dump": menu_dump,
-            }
-
-        async def _click_item():
-            await item.click(timeout=5000)
-
-        downloads = await _collect_downloads(page, _click_item)
-        return {
-            "ok": bool(downloads) and any(d.get("ok") for d in downloads),
-            "readiness": readiness, "menu_dump": menu_dump, "downloads": downloads,
-        }
-
-    result = await _inner()
+    # successful download path never closed its viewer at all).
+    result = await _click_download_in_open_viewer(page, viewer_buttons, readiness)
     result["viewer_closed"] = await _close_viewer(page, viewer_buttons)
     return result
+
+
+async def _click_download_in_open_viewer(page, viewer_buttons: Dict[str, Any], readiness: Dict[str, Any]) -> Dict[str, Any]:
+    """Finds the viewer's own three-dot menu trigger, opens it, finds the
+    "Download" item, clicks it, and collects the resulting download.
+    Extracted (2026-08-25) from _open_tile_viewer_and_download's own
+    inline logic so the new hardened UPLOAD path
+    (_open_tile_viewer_and_download_hardened) can reuse it for each
+    close/reopen round without duplicating it — the CALLER still owns
+    opening the tile and closing the viewer on every exit path; this
+    function only owns the menu-trigger -> Download item -> click
+    sequence, unchanged from the original inline version."""
+    menu_trigger = None
+    for b in viewer_buttons.get("buttons", []):
+        label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
+        if re.search(r"menu|more|option|kebab", label):
+            menu_trigger = b
+            break
+    if menu_trigger is None:
+        # Fallback: the button positioned furthest toward the top-right
+        # of the viewport, matching the user's own description
+        # ("top-right three-dot menu") — measured from real captured
+        # rects, not assumed.
+        candidates = [b for b in viewer_buttons.get("buttons", []) if b.get("rect")]
+        if candidates:
+            menu_trigger = max(candidates, key=lambda b: b["rect"][0] - b["rect"][1])
+
+    if menu_trigger is None:
+        return {
+            "ok": False, "stage": "find_menu_trigger", "reason": "video mounted but no plausible menu-trigger button found",
+            "readiness": readiness, "viewer_buttons": viewer_buttons,
+        }
+
+    mx = menu_trigger["rect"][0] + menu_trigger["rect"][2] / 2
+    my = menu_trigger["rect"][1] + menu_trigger["rect"][3] / 2
+    try:
+        await page.mouse.click(mx, my, button="left")
+    except Exception as exc:
+        return {"ok": False, "stage": "click_menu_trigger", "reason": str(exc), "readiness": readiness, "menu_trigger": menu_trigger}
+
+    await page.wait_for_timeout(600)
+    try:
+        menu_dump = await _evaluate(page, _CONTEXT_MENU_DUMP_JS)
+    except Exception:
+        menu_dump = None
+    if not menu_dump:
+        try:
+            body_snapshot = await _evaluate(page, _BODY_SNAPSHOT_JS)
+        except Exception:
+            body_snapshot = None
+        return {
+            "ok": False, "stage": "menu_after_trigger_click", "reason": "clicked menu trigger but no menu appeared",
+            "readiness": readiness, "menu_trigger": menu_trigger, "body_snapshot": body_snapshot,
+        }
+
+    item = page.locator(
+        '[role="menu"] :text-matches("download", "i"), '
+        '[role="menuitem"]:has-text("Download"), '
+        'li:has-text("Download"), '
+        'div[role="button"]:has-text("Download")'
+    ).first
+    try:
+        visible = await item.is_visible(timeout=3000)
+    except Exception:
+        visible = False
+    if not visible:
+        return {
+            "ok": False, "stage": "find_download_item", "reason": "menu appeared but no 'Download' item found",
+            "readiness": readiness, "menu_dump": menu_dump,
+        }
+
+    async def _click_item():
+        await item.click(timeout=5000)
+
+    downloads = await _collect_downloads(page, _click_item)
+    return {
+        "ok": bool(downloads) and any(d.get("ok") for d in downloads),
+        "readiness": readiness, "menu_dump": menu_dump, "downloads": downloads,
+    }
+
+
+# ---------------------------------------------------------------------------
+# UPLOAD video-retrieval hardening (2026-08-25). Completely independent of
+# SEND's own native-Forward code (_open_media_and_get_forward_button and
+# everything downstream of it) — nothing below is called from, or calls
+# into, that path. Also independent of _resolve_video_tile_locator, which
+# stays byte-for-byte unchanged since SEND depends on it.
+# ---------------------------------------------------------------------------
+MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS = 3
+MAX_DOWNLOAD_READINESS_ROUNDS = 3
+
+
+async def _resolve_video_tile_by_hash(
+    page, group_name: str, source_message_id: str,
+    source_thumbnail_hash: Optional[str], tile_index_hint: int,
+):
+    """UPLOAD-only hardened resolution — re-finds the message fresh by its
+    immutable source_message_id (same identity primitive
+    _resolve_video_tile_locator already uses) AND verifies the target
+    tile's own LIVE hash matches source_thumbnail_hash before ever
+    returning it, mirroring _download_photo_album_tile_via_blob's already-
+    proven photo-tile verification (never trusted from an index alone).
+    tile_index_hint is tried first (the fast path when nothing has
+    reordered) but is never trusted blindly — if its hash doesn't match,
+    every tile in the message is searched for the real match, so a
+    reordered album never silently selects the wrong neighboring video.
+
+    Returns (tile_locator, message_locator, resolved_index, reason) —
+    reason is None on success; otherwise one of "message_not_found",
+    "no_tiles_found", "hash_mismatch", or a "hash_read_failed: ..."
+    detail — never a guessed/substituted tile. When source_thumbnail_hash
+    is falsy (caller has none to check), falls back to trusting
+    tile_index_hint alone, identical to _resolve_video_tile_locator's own
+    behavior — this only ADDS verification, never removes the tile-index
+    fallback for callers that can't supply a hash."""
+    idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+    if idx is None:
+        return None, None, None, "message_not_found"
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    message_locator = page.locator(full_sel).nth(idx)
+
+    if not source_thumbnail_hash:
+        tile = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile_index_hint)
+        return tile, message_locator, tile_index_hint, None
+
+    try:
+        live_tiles = await _hash_album_tiles_live(message_locator)
+    except Exception as exc:
+        return None, None, None, f"hash_read_failed: {exc}"
+    if not live_tiles:
+        return None, None, None, "no_tiles_found"
+
+    resolved_index = None
+    if 0 <= tile_index_hint < len(live_tiles) and live_tiles[tile_index_hint].get("hash") == source_thumbnail_hash:
+        resolved_index = tile_index_hint
+    else:
+        for i, t in enumerate(live_tiles):
+            if t.get("hash") == source_thumbnail_hash:
+                resolved_index = i
+                break
+    if resolved_index is None:
+        return None, None, None, "hash_mismatch"
+
+    tile = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(resolved_index)
+    return tile, message_locator, resolved_index, None
+
+
+async def _open_tile_viewer_and_download_hardened(
+    page, group_name: str, source_message_id: str,
+    source_thumbnail_hash: Optional[str], tile_index: int,
+) -> Dict[str, Any]:
+    """UPLOAD's own hardened video retrieval — a NEW, independent entry
+    point (never calls, and is never called by, _open_tile_viewer_and_download
+    or any SEND code) that adds two things neither the old UPLOAD path nor
+    SEND's own native-Forward path had:
+
+    1. Live tile-hash verification before every click (_resolve_video_tile_by_hash)
+       — never trusts tile_index alone, so a reordered album can never
+       result in the wrong neighboring video being opened.
+    2. A bounded close/reopen recovery round (MAX_DOWNLOAD_READINESS_ROUNDS)
+       when the viewer opens and the video fully buffers but "Download"
+       never appears — mirrors the close/reopen mechanism already proven
+       necessary for SEND's own Forward-readiness, reimplemented here
+       independently (never sharing code with, or altering, that path).
+
+    Each round: resolve+verify by hash -> bounded click retry on
+    "not stable"/"detached" errors only (MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS,
+    re-resolving+re-verifying by hash before every retry, never reusing a
+    stale locator) -> wait for <video> to mount -> wait for FULL buffering
+    (_wait_for_video_readiness, unchanged) -> try the Download menu. If
+    Download isn't available, the viewer is closed and the next round
+    starts from a fresh hash-verified resolution — never assumes waiting
+    longer in the same open viewer will help. Fails cleanly (never
+    substitutes a different message/tile) once resolution itself reports
+    "message_not_found"/"hash_mismatch"."""
+    last_reason: Optional[str] = None
+    last_detail: Dict[str, Any] = {}
+    for round_i in range(MAX_DOWNLOAD_READINESS_ROUNDS):
+        tile = None
+        message_locator = None
+        resolved_index = None
+        resolve_reason: Optional[str] = None
+        click_error: Optional[Exception] = None
+        click_attempts: List[str] = []
+        for attempt in range(MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS):
+            tile, message_locator, resolved_index, resolve_reason = await _resolve_video_tile_by_hash(
+                page, group_name, source_message_id, source_thumbnail_hash, tile_index,
+            )
+            if tile is None:
+                # Identity itself could not be established — never a
+                # click-retryable condition; fails immediately, no
+                # substitution, no further rounds (retrying rounds won't
+                # fix a message that's gone or a hash that never matches).
+                return {
+                    "ok": False, "stage": "resolve_tile", "reason": resolve_reason,
+                    "round": round_i, "attempt": attempt,
+                }
+            try:
+                await tile.scroll_into_view_if_needed(timeout=5000)
+                await tile.click(timeout=10000)
+                click_error = None
+                break
+            except Exception as exc:
+                click_error = exc
+                click_attempts.append(str(exc))
+                is_stability_error = "not stable" in str(exc) or "detached" in str(exc)
+                if not is_stability_error or attempt == MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS - 1:
+                    break
+                # Loop again: re-resolve + re-verify by hash fresh — never
+                # reuse the same (possibly now-detached) locator.
+
+        if click_error is not None:
+            return {
+                "ok": False, "stage": "open_tile", "reason": f"click failed: {click_error}",
+                "click_attempts": click_attempts, "round": round_i, "resolved_tile_index": resolved_index,
+            }
+
+        video_mounted = False
+        elapsed = 0.0
+        while elapsed < 15.0:
+            try:
+                count = await page.locator("video").count()
+            except Exception:
+                count = 0
+            if count > 0:
+                video_mounted = True
+                break
+            await page.wait_for_timeout(500)
+            elapsed += 0.5
+        if not video_mounted:
+            last_reason = "no <video> element mounted within 15s of clicking the tile"
+            last_detail = {"round": round_i, "resolved_tile_index": resolved_index}
+            continue  # nothing to close — the viewer never actually opened
+
+        readiness = await _wait_for_video_readiness(page)
+        try:
+            viewer_buttons = await _evaluate(page, _VIEWER_BUTTONS_JS)
+        except Exception:
+            viewer_buttons = {"rootFound": False, "buttons": []}
+
+        download_result = await _click_download_in_open_viewer(page, viewer_buttons, readiness)
+        if download_result.get("ok"):
+            download_result["viewer_closed"] = await _close_viewer(page, viewer_buttons)
+            download_result["round"] = round_i
+            download_result["resolved_tile_index"] = resolved_index
+            return download_result
+
+        last_reason = download_result.get("reason")
+        last_detail = download_result
+        await _close_viewer(page, viewer_buttons)
+        # Next round re-resolves + re-verifies by hash from scratch —
+        # never assumes the SAME viewer, reopened, will behave differently.
+
+    return {"ok": False, "stage": "download_not_available", "reason": last_reason, "detail": last_detail}
 
 
 async def _close_viewer(page, viewer_buttons: Dict[str, Any]) -> Dict[str, Any]:
@@ -5893,17 +6076,20 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
         message = page.locator(full_sel).nth(idx)
 
         if target.get("source_media_type") == "video":
-            # Proven mechanism (2026-08-23): open the tile/message's own
-            # viewer, wait for the actual <video> to buffer its FULL
-            # duration (readyState alone is not sufficient — see
-            # _wait_for_video_readiness), use the viewer's own native
-            # "Download" item. Tested 4/4 on a real album, restart-stable.
-            # Works uniformly for a single (non-album) video message too —
-            # tile_index 0 addresses that message's own sole media element.
+            # Hardened path (2026-08-25) — _open_tile_viewer_and_download_hardened:
+            # re-resolves + verifies the tile by its own live thumbnail hash
+            # before every click (never trusts tile_index alone), bounded
+            # click retry on DOM-instability errors, and a bounded
+            # close/reopen round when the video buffers fully but Download
+            # never appears. Works uniformly for a single (non-album) video
+            # message too — tile_index 0 addresses that message's own sole
+            # media element.
             tile_index = target.get("album_tile_index")
             if tile_index is None:
                 tile_index = 0
-            dl = await _open_tile_viewer_and_download(page, message, tile_index)
+            dl = await _open_tile_viewer_and_download_hardened(
+                page, group_name, target["source_message_id"], target.get("source_thumbnail_hash"), tile_index,
+            )
             if not dl.get("ok"):
                 results.append(_strip_raw_bytes({
                     "ok": False, "source_message_id": target["source_message_id"],

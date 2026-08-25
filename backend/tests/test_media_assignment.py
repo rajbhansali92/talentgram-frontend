@@ -160,12 +160,16 @@ def _projects():
     return [{"id": "p-google", "label": "Google"}, {"id": "p-netflix", "label": "Netflix"}]
 
 
-def test_validate_candidates_happy_path_filters_wrong_project_and_bad_lid():
+def test_validate_candidates_filters_wrong_project_but_mention_is_never_required():
+    """2026-08-25: MARK is the authoritative media-selection signal — a
+    WhatsApp mention (Gunwanti, someone else, or none at all) is optional
+    metadata only, never a filter. Only project relevance still filters
+    candidates out."""
     candidates = [
         _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 1", source_message_id="src-take1"),
         _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-intro"),
         _mark(mention_lid=GUNWANTI_LID, mark_text="mark netflix take 1", source_message_id="src-netflix-take1"),
-        _mark(mention_lid="999999@lid", mark_text="mark google take 2", source_message_id="src-fake-mention"),
+        _mark(mention_lid="999999@lid", mark_text="mark google take 2", source_message_id="src-other-mention"),
         _mark(mention_lid="", mark_text="mark google take 3", source_message_id="src-no-mention"),
     ]
     outcome = ma.validate_candidates(
@@ -174,7 +178,74 @@ def test_validate_candidates_happy_path_filters_wrong_project_and_bad_lid():
     )
     assert outcome.ok
     slots = {(a["media_role"], a["take_number"]) for a in outcome.assignments}
-    assert slots == {("take", 1), ("intro", None)}
+    # take 1 (Gunwanti mention) + intro (Gunwanti mention) + take 2 (a
+    # DIFFERENT mention) + take 3 (no mention at all) all survive — only
+    # the wrong-project "netflix" mark is excluded.
+    assert slots == {("take", 1), ("intro", None), ("take", 2), ("take", 3)}
+
+
+def test_mark_resolves_identically_with_gunwanti_mention():
+    """A: '@Gunwanti\\nMark Google Test Take 1' — the original, still-valid
+    pattern."""
+    candidates = [_mark(mention_lid=GUNWANTI_LID, mark_text="mark google test take 1", source_message_id="src-a")]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok
+    assert len(outcome.assignments) == 1
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-a"
+
+
+def test_mark_resolves_identically_with_no_mention_at_all():
+    """B: 'Mark Google Test Take 1' — no @mention anywhere in the reply.
+    Must resolve identically to test A — the quoted media, not the
+    mention, establishes source identity."""
+    candidates = [_mark(mention_lid=None, mark_text="mark google test take 1", source_message_id="src-a")]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok
+    assert len(outcome.assignments) == 1
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-a"
+
+
+def test_mark_resolves_identically_with_a_different_persons_mention():
+    """C: '@SomeOtherPerson\\nMark Google Test Take 1' — a real mention,
+    but not Gunwanti's. Must still resolve identically to A and B."""
+    candidates = [_mark(mention_lid="555555555@lid", mark_text="mark google test take 1", source_message_id="src-a")]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok
+    assert len(outcome.assignments) == 1
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-a"
+
+
+def test_mark_album_with_no_mention_resolves_each_photo_independently():
+    """A multi-photo album batch-marked with no mention at all still
+    resolves each distinct photo independently — mention-optionality
+    applies to album/batch marks too, not just single-item marks."""
+    def _photo_mark(source_message_id, tile_hash):
+        m = _mark(mention_lid=None, mark_text="mark google test photos", source_message_id=source_message_id)
+        m["quoted_thumbnail_hash"] = tile_hash
+        m["album_tile_index"] = 0 if tile_hash.endswith("1") else 1
+        m["is_album_tile"] = True
+        return m
+    candidates = [
+        _photo_mark("src-album", "hash-tile-1"),
+        _photo_mark("src-album", "hash-tile-2"),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok
+    assert len(outcome.assignments) == 2
+    hashes = {a["quoted_thumbnail_hash"] for a in outcome.assignments}
+    assert hashes == {"hash-tile-1", "hash-tile-2"}
 
 
 def test_validate_candidates_ambiguous_duplicate_marks_different_source():

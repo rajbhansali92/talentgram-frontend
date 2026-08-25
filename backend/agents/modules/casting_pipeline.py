@@ -3620,17 +3620,29 @@ UPLOAD_PROJECT_FIELD = FieldSpec(
 
 
 def _extract_upload_fields(text: str) -> Dict[str, str]:
-    """"upload - Talent - Project" — a standalone two-field hyphen
-    command, its own trigger ("upload"), needing zero changes to the
-    add/move-only _ACTION_PREFIX_RE in casting_pipeline_nlu.py (confirmed
-    during planning: that regex is private to parse_simple_add_move_command,
-    not a generic hook)."""
+    """"upload - Talent - Project" (hyphen) OR "upload Talent Project"
+    (space-separated, 2026-08-25) — its own trigger ("upload"), needing
+    zero changes to the add/move-only _ACTION_PREFIX_RE in
+    casting_pipeline_nlu.py (confirmed during planning: that regex is
+    private to parse_simple_add_move_command, not a generic hook).
+
+    Space-separated form: this extractor is a pure, sync, DB-free
+    function (see IntentDefinition.extract_fields's contract) so it
+    CANNOT determine here where the talent name ends and the project
+    name begins — that requires real database matching. Both fields are
+    set to the SAME full remainder text as a marker; _upload_executor
+    detects talent_selector == project_query and resolves the actual
+    boundary via _resolve_freeform_talent_project (async, DB-aware)
+    before doing anything else."""
     _, remainder = nlu._strip_leading_trigger(text or "", ["upload"])
-    fields = nlu._split_hyphen_fields(remainder, 2)
-    if not fields:
+    remainder = (remainder or "").strip()
+    if not remainder:
         return {}
-    talent_part, project_part = fields
-    return {"talent_selector": talent_part, "project_query": project_part}
+    fields = nlu._split_hyphen_fields(remainder, 2)
+    if fields:
+        talent_part, project_part = fields
+        return {"talent_selector": talent_part, "project_query": project_part}
+    return {"talent_selector": remainder, "project_query": remainder}
 
 
 _UPLOAD_RESOLUTION_ERROR_MESSAGES = {
@@ -3659,6 +3671,15 @@ _UPLOAD_RESOLUTION_ERROR_MESSAGES = {
 async def _upload_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     talent_selector = collected.get("talent_selector") or ""
     project_query = collected.get("project_query") or ""
+
+    # Space-separated command (2026-08-25) — see _extract_upload_fields:
+    # both fields hold the SAME full remainder text as a marker when no
+    # hyphen was found; resolve the real talent/project boundary here,
+    # against actual database records, before anything else runs.
+    if talent_selector.strip() and talent_selector.strip() == project_query.strip():
+        talent_selector, project_query, freeform_error = await _resolve_freeform_talent_project(talent_selector)
+        if freeform_error is not None:
+            return freeform_error
 
     # Step 1: resolve the project FIRST — the authoritative-talent lookup
     # below needs project_id to find "the project's submission for the
@@ -3797,14 +3818,96 @@ SEND_PROJECT_FIELD = FieldSpec(
 
 
 def _extract_send_fields(text: str) -> Dict[str, str]:
-    """"send - Talent - Project" — same standalone two-field hyphen shape
-    as _extract_upload_fields, own trigger ("send")."""
+    """"send - Talent - Project" (hyphen) OR "send Talent Project"
+    (space-separated) — same shape/rationale as _extract_upload_fields,
+    own trigger ("send")."""
     _, remainder = nlu._strip_leading_trigger(text or "", ["send"])
-    fields = nlu._split_hyphen_fields(remainder, 2)
-    if not fields:
+    remainder = (remainder or "").strip()
+    if not remainder:
         return {}
-    talent_part, project_part = fields
-    return {"talent_selector": talent_part, "project_query": project_part}
+    fields = nlu._split_hyphen_fields(remainder, 2)
+    if fields:
+        talent_part, project_part = fields
+        return {"talent_selector": talent_part, "project_query": project_part}
+    return {"talent_selector": remainder, "project_query": remainder}
+
+
+async def _resolve_freeform_talent_project(
+    full_text: str,
+) -> Tuple[Optional[str], Optional[str], Optional[ExecResult]]:
+    """Space-separated "Talent Project" has no delimiter, so the boundary
+    is determined by trying every word-split point against REAL talent
+    and project records — never guessed, never a fixed word count.
+    Returns (talent_text, project_text, None) once exactly one split
+    point resolves BOTH sides unambiguously, or (None, None, ExecResult)
+    to STOP the caller immediately on failure/ambiguity. The winning
+    split's raw text fragments are returned (not the resolved ids) so
+    the caller's existing, already-proven talent/project resolution code
+    runs exactly once, the same way it does for the hyphen syntax —
+    avoiding two different resolution code paths that could disagree."""
+    words = (full_text or "").split()
+    if len(words) < 2:
+        return None, None, ExecResult(
+            ok=False, error="freeform_too_short",
+            message=f'I couldn\'t tell who and what project you meant in "{full_text}" — '
+                    'try "Talent - Project" or make sure both a talent name and a project name are included.',
+        )
+    projects = await _fetch_ongoing_projects()
+    # Keyed by the RESOLVED (talent_id, project_id) pair, not by which
+    # split text produced it — several split points can independently
+    # fuzzy-match down to the exact same talent/project (e.g. "Ahana",
+    # "Ahana Pocha", and "Ahana Pocha Freeform" can all resolve to the
+    # same talent record). That's the same answer found multiple ways,
+    # never genuine ambiguity; only DISTINCT resolved pairs count as
+    # competing candidates. Among splits sharing a resolved pair, the
+    # one whose raw text is closest to the canonical labels wins — a
+    # short prefix like "Ahana" can fuzzy-resolve to the same talent as
+    # the full "Ahana Pocha Freeform", but the full text is the correct
+    # fragment to hand back to the caller's own resolver.
+    winners_by_id: Dict[Tuple[str, str], Tuple[str, str, str, str]] = {}
+    scores_by_id: Dict[Tuple[str, str], int] = {}
+    for split_at in range(1, len(words)):
+        talent_text = " ".join(words[:split_at])
+        project_text = " ".join(words[split_at:])
+        talent_id, talent_label, talent_err, talent_ambiguous = await _resolve_talent_query_target(talent_text)
+        if talent_err or talent_ambiguous or not talent_id:
+            continue
+        with request_scope.stage("fuzzy"):
+            project_match = nlu.resolve_project_by_name(project_text, projects)
+        if project_match.ambiguous or not project_match.project:
+            continue
+        key = (talent_id, project_match.project["id"])
+        project_label = project_match.project["label"]
+        score = (
+            int(talent_text.strip().lower() == (talent_label or "").strip().lower())
+            + int(project_text.strip().lower() == (project_label or "").strip().lower())
+        )
+        if key not in winners_by_id or score > scores_by_id[key]:
+            winners_by_id[key] = (talent_text, project_text, talent_label or talent_text, project_label)
+            scores_by_id[key] = score
+
+    winners = list(winners_by_id.values())
+    if len(winners) == 1:
+        talent_text, project_text, _, _ = winners[0]
+        return talent_text, project_text, None
+    if not winners:
+        return None, None, ExecResult(
+            ok=False, error="freeform_unresolved",
+            message=f'I couldn\'t determine the talent/project split in "{full_text}" — '
+                    'no combination matched both a real talent and a real project. '
+                    'Try "Talent - Project" to be explicit.',
+        )
+    # More than one split point independently resolves — genuinely
+    # ambiguous, never auto-picked (e.g. a talent name that is itself a
+    # prefix of a longer talent name, both with valid same-named projects).
+    options = "\n".join(
+        f"{i + 1}. {t_label} — {p_label}" for i, (_, _, t_label, p_label) in enumerate(winners)
+    )
+    return None, None, ExecResult(
+        ok=False, error="freeform_ambiguous",
+        message=f'"{full_text}" could mean more than one talent/project combination:\n\n{options}\n\n'
+                'Please use "Talent - Project" to be explicit.',
+    )
 
 
 async def _send_executor(
@@ -3818,6 +3921,12 @@ async def _send_executor(
     chat pipeline."""
     talent_selector = collected.get("talent_selector") or ""
     project_query = collected.get("project_query") or ""
+
+    # Space-separated command (2026-08-25) — see _extract_send_fields.
+    if talent_selector.strip() and talent_selector.strip() == project_query.strip():
+        talent_selector, project_query, freeform_error = await _resolve_freeform_talent_project(talent_selector)
+        if freeform_error is not None:
+            return freeform_error
 
     # Step 1: resolve the project FIRST — identical reasoning to upload
     # (the authoritative-talent lookup needs project_id).

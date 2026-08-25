@@ -361,15 +361,20 @@ def validate_candidates(
     """`candidates` is the worker's raw scan result — every reply in the
     bounded window that contains the literal word "mark", REGARDLESS of
     mention validity (the worker stays a dumb I/O layer; this function
-    owns the identity check, per the module docstring)."""
+    owns the identity check, per the module docstring).
+
+    `gunwanti_lid` (2026-08-25: NO LONGER used to filter candidates — see
+    below). MARK is the authoritative media-selection signal; the reply
+    ITSELF, quoted to a real media message, establishes source identity.
+    Requiring a specific WhatsApp mention was the original Phase-1 design
+    but doesn't hold for every real scenario (a talent with no group, a
+    direct-chat source, a different admin replying) — an admin mention is
+    now optional metadata only (still recorded as mark_target_contact_id
+    on the resulting assignment/send record), never a gate. The parameter
+    is kept for call-site/signature stability; it is simply unused now."""
     valid_marks: List[Dict[str, Any]] = []
     batch_failures: List[Dict[str, Any]] = []
     for c in candidates:
-        if (c.get("mention_lid") or "") != gunwanti_lid:
-            # A bare "Gunwanti"/"Talentgram Team" text mention with no real
-            # WhatsApp @mention, or a mention of someone else entirely,
-            # never qualifies — never falls back to display-name matching.
-            continue
         if c.get("resolution_status") == "BATCH_RESOLUTION_FAILED":
             # A batch mark (e.g. "mark google: take 1, take 2, take 3,
             # intro") the worker could not deterministically resolve to

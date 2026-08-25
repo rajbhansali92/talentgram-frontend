@@ -121,6 +121,32 @@ def _report_unresolved(talent_label: str, project_label: str, unresolved: List[D
     )
 
 
+def _project_advisory_note(
+    project_label: str, mismatches: List[Dict[str, Any]], ambiguous: List[Dict[str, Any]],
+) -> str:
+    """Advisory-only (2026-08-25), never blocking — see validate_candidates'
+    own comment on why project_mismatch/project_ambiguous marks are
+    excluded from assignments but must not stop OTHER, correctly-resolved
+    marks in the same scan from completing normally. Appended to whatever
+    the primary UPLOAD report ends up being; returns "" (no-op) when there
+    is nothing to flag, so callers can always unconditionally append it."""
+    lines: List[str] = []
+    for m in mismatches:
+        lines.append(
+            f"- \"{(m.get('mark_text') or '').strip()}\" confidently matches "
+            f"{m.get('matched_project_label')!r}, not {project_label!r} — not uploaded here."
+        )
+    for a in ambiguous:
+        candidates = ", ".join(p.get("label", "") for p in (a.get("ambiguous_projects") or []))
+        lines.append(
+            f"- \"{(a.get('mark_text') or '').strip()}\" could be for more than one project "
+            f"({candidates}) — not uploaded here, nothing was guessed."
+        )
+    if not lines:
+        return ""
+    return "\n\nNote — not included above:\n" + "\n".join(lines)
+
+
 def _report_batch_failed(talent_label: str, project_label: str, batch_failures: List[Dict[str, Any]]) -> str:
     items = "\n".join(
         f"- {(b.get('mark_text') or '').strip()} ({b.get('batch_resolution_error') or 'could not resolve album tiles'})"
@@ -276,6 +302,12 @@ async def _process_scan_done() -> bool:
     if outcome.batch_failures:
         await _finish(doc["id"], _report_batch_failed(talent_label, project_label, outcome.batch_failures))
         return True
+    # project_mismatch/project_ambiguous (2026-08-25) are advisory, never
+    # blocking — see validate_candidates' own comment. UPLOAD's report
+    # below appends a note for any such mark; SEND's own report (further
+    # down, workflow=="send") is untouched and does not read these fields
+    # at all — this task is UPLOAD-only.
+    upload_advisory = _project_advisory_note(project_label, outcome.project_mismatch, outcome.project_ambiguous)
     if outcome.ambiguous:
         await _finish(doc["id"], _report_ambiguous(talent_label, project_label, outcome.ambiguous))
         return True
@@ -378,9 +410,9 @@ async def _process_scan_done() -> bool:
             # THIS project, so outcome.assignments came back empty and
             # the old code reported ALREADY COMPLETED with an empty item
             # list — while the submission had zero media.
-            await _finish(doc["id"], _report_no_marks_found(talent_label, project_label))
+            await _finish(doc["id"], _report_no_marks_found(talent_label, project_label) + upload_advisory)
             return True
-        await _finish(doc["id"], _report_already_uploaded(talent_label, project_label, already))
+        await _finish(doc["id"], _report_already_uploaded(talent_label, project_label, already) + upload_advisory)
         return True
 
     download_targets = [{
@@ -411,7 +443,7 @@ async def _process_scan_done() -> bool:
             "download_targets": download_targets,
             "pending_report_context": {
                 "talent_label": talent_label, "project_label": project_label,
-                "already": already,
+                "already": already, "upload_advisory": upload_advisory,
             },
             "updated_at": _now(),
         }},
@@ -527,7 +559,7 @@ async def _process_download_done() -> bool:
             failed_labels.append(label)
 
     report = _report_upload_result(talent_label, project_label, uploaded_labels, failed_labels, ctx.get("already") or [])
-    await _finish(doc["id"], report)
+    await _finish(doc["id"], report + (ctx.get("upload_advisory") or ""))
     return True
 
 

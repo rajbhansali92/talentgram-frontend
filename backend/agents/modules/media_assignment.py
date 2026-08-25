@@ -335,6 +335,24 @@ class ValidationOutcome:
     # extract_role_and_project, which only looks for the FIRST role
     # keyword it finds.
     batch_failures: List[Dict[str, Any]] = dataclass_field(default_factory=list)
+    # Project-text safety checks (2026-08-25) — DISTINCT from `ambiguous`
+    # above (which is about two marks claiming the SAME slot). These are
+    # about a single mark's OWN project-fragment text:
+    #   project_mismatch: the fragment confidently matches a REAL project
+    #     that is NOT the one the admin explicitly requested — e.g. a
+    #     mark meant for a different project, still marked in the same
+    #     WhatsApp group. Never silently redirected to the requested
+    #     project; always flagged.
+    #   project_ambiguous: the fragment is tied between multiple real
+    #     projects (could be either) — never guessed, always flagged.
+    # A fragment matching NEITHER of the above (no confident match to
+    # ANYTHING) is NOT an error — see validate_candidates' own comment —
+    # it defaults to the admin-requested project, since the admin already
+    # explicitly resolved the target project via the UPLOAD command
+    # itself; the mark's job is identifying WHICH media, not re-proving
+    # which project.
+    project_mismatch: List[Dict[str, Any]] = dataclass_field(default_factory=list)
+    project_ambiguous: List[Dict[str, Any]] = dataclass_field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -385,6 +403,8 @@ def validate_candidates(
     is kept for call-site/signature stability; it is simply unused now."""
     valid_marks: List[Dict[str, Any]] = []
     batch_failures: List[Dict[str, Any]] = []
+    project_mismatch: List[Dict[str, Any]] = []
+    project_ambiguous: List[Dict[str, Any]] = []
     for c in candidates:
         if c.get("resolution_status") == "BATCH_RESOLUTION_FAILED":
             # A batch mark (e.g. "mark google: take 1, take 2, take 3,
@@ -403,16 +423,54 @@ def validate_candidates(
             parsed_for_relevance = extract_role_and_project(c.get("mark_text") or "")
             if parsed_for_relevance is not None:
                 relevance_match = nlu.resolve_project_by_name(parsed_for_relevance.project_fragment, projects)
-                if not relevance_match.project or relevance_match.project["id"] != requested_project_id:
-                    continue  # this failed batch belongs to a different project — not relevant here
+                # 2026-08-25: a fragment that confidently matches a
+                # DIFFERENT real project is still irrelevant to THIS
+                # request. One that matches nothing at all (informal
+                # text) is no longer treated as "irrelevant" — the admin
+                # already explicitly requested this project via the
+                # UPLOAD command, so an unresolved fragment defaults to
+                # being relevant here too (same reasoning as the
+                # single-mark check below).
+                if relevance_match.project and relevance_match.project["id"] != requested_project_id:
+                    continue  # this failed batch belongs to a different, confidently-matched project
             batch_failures.append(c)
             continue
         parsed = extract_role_and_project(c.get("mark_text") or "")
         if parsed is None:
             continue  # contains "mark" but no recognizable role -> not a candidate at all
         match = nlu.resolve_project_by_name(parsed.project_fragment, projects)
-        if not match.project or match.project["id"] != requested_project_id:
-            continue  # belongs to a different (or unresolved) project -> ignored, never mixed in
+        # Project-text safety rule (2026-08-25 — real production
+        # incident: Sharvari Kashid / Tapti AI App (Ananya). The admin's
+        # UPLOAD command already explicitly resolved the target project;
+        # a mark's job is identifying WHICH media, not re-proving which
+        # project via informal WhatsApp shorthand ("Tapti Ai Test" for
+        # "Tapti AI App (Ananya)"). Four distinct cases, never guessed:
+        #   1. confidently matches the REQUESTED project -> accept.
+        #   2. confidently matches a DIFFERENT real project -> reject,
+        #      flagged as a mismatch (never silently redirected).
+        #   3. tied between multiple real projects -> reject, flagged as
+        #      ambiguous (never guessed).
+        #   4. matches nothing confidently at all -> defaults to the
+        #      admin-requested project (safe: this can only ever resolve
+        #      to the ONE project this whole scan is already scoped to,
+        #      never to a wrong one — cases 2 and 3 already excluded any
+        #      mark that confidently points elsewhere).
+        if match.project:
+            if match.project["id"] != requested_project_id:
+                project_mismatch.append({
+                    **c, "media_role": parsed.media_role, "take_number": parsed.take_number,
+                    "matched_project_label": match.project["label"],
+                })
+                continue
+            # else: confidently matches the requested project -> accept below.
+        elif match.ambiguous:
+            project_ambiguous.append({
+                **c, "media_role": parsed.media_role, "take_number": parsed.take_number,
+                "ambiguous_projects": match.ambiguous,
+            })
+            continue
+        # else: no confident match to anything -> default to the
+        # admin-requested project (case 4 above) -> accept below.
         valid_marks.append({
             **c, "media_role": parsed.media_role, "take_number": parsed.take_number,
         })
@@ -423,7 +481,11 @@ def validate_candidates(
         # employee's intended assignment for (at least) this reply was
         # never established at all; never silently ignored in favor of
         # whatever other marks happened to resolve fine in the same scan.
-        return ValidationOutcome(ok=False, batch_failures=batch_failures)
+        return ValidationOutcome(
+            ok=False, batch_failures=batch_failures,
+            project_mismatch=project_mismatch, project_ambiguous=project_ambiguous,
+        )
+
 
     def _key(m: Dict[str, Any]) -> tuple:
         return slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash"))
@@ -451,11 +513,15 @@ def validate_candidates(
                     "media_role": media_role, "take_number": take_number,
                     "candidates": marks,
                 },
+                project_mismatch=project_mismatch, project_ambiguous=project_ambiguous,
             )
 
     unresolved = [m for m in valid_marks if not m.get("resolved_source_message_id")]
     if unresolved:
-        return ValidationOutcome(ok=False, unresolved=unresolved)
+        return ValidationOutcome(
+            ok=False, unresolved=unresolved,
+            project_mismatch=project_mismatch, project_ambiguous=project_ambiguous,
+        )
 
     # Dedupe identical-slot repeats (e.g. the same mark sent twice by
     # accident) down to one assignment per slot.
@@ -468,7 +534,19 @@ def validate_candidates(
         seen_slots.add(key)
         assignments.append(m)
 
-    return ValidationOutcome(ok=True, assignments=assignments)
+    # project_mismatch/project_ambiguous (2026-08-25) are advisory, NEVER
+    # blocking — a mark confidently belonging to a different real project,
+    # or genuinely ambiguous between two, is excluded from `assignments`
+    # above (never uploaded to the wrong/uncertain place) but must not
+    # stop OTHER, correctly-resolved marks in the SAME scan from
+    # completing normally (a talent's WhatsApp group legitimately
+    # accumulates marks for multiple projects over time; an unrelated
+    # mismatch elsewhere in the same thread must never block a
+    # completely valid upload for the requested project).
+    return ValidationOutcome(
+        ok=True, assignments=assignments,
+        project_mismatch=project_mismatch, project_ambiguous=project_ambiguous,
+    )
 
 
 # ---------------------------------------------------------------------------

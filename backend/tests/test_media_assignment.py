@@ -930,35 +930,20 @@ async def test_orchestrator_stale_assignment_without_submission_media_is_reconci
         await db.submissions.delete_one({"id": sub_id})
 
 
-async def test_orchestrator_no_marks_resolve_to_project_reports_honestly_not_already_completed():
-    """The exact real production incident (2026-08-25, Sharvari Kashid /
-    Tapti AI App (Ananya)): two real marks existed in the WhatsApp group,
-    but their mark text's project fragment did not resolve to the
-    REQUESTED project (a project name mismatch, e.g. informal mark text
-    like "Tapti Ai Test" vs. the real "Tapti AI App (Ananya)") — so
-    validate_candidates correctly excluded them, leaving outcome.assignments
-    empty. The old code treated "nothing left to download" (also true
-    here) as equivalent to "already uploaded", reporting ALREADY COMPLETED
-    with an empty item list while the submission had zero media. This
-    must now report NO MARKED MEDIA FOUND instead — never claim
-    completion of something that was never found or done."""
+async def test_orchestrator_zero_candidates_reports_honestly_not_already_completed():
+    """Completion-invariant fix (2026-08-25): a scan that finds ZERO
+    marks at all for this talent must never be reported as ALREADY
+    COMPLETED (the old bug — "nothing left to download" was also true
+    here, and the two were never distinguished). Must report the new,
+    honest NO MARKED MEDIA FOUND instead."""
     tag = uuid.uuid4().hex[:6]
-    unrelated_tag = uuid.uuid4().hex[:6]
-    project_id, project_label = f"p-{tag}", f"Tapti AI App (Ananya) {tag}"
-    talent_id, talent_label = f"t-{tag}", f"Sharvari {tag}"
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
     await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
-    # Mark text references a project fragment that does NOT resolve to
-    # project_label at all (mirrors "Tapti Ai Test" vs. "Tapti AI App
-    # (Ananya)") — no @mention, matching the real incident exactly. Uses
-    # its OWN random suffix (not project_label's tag) so nothing in the
-    # mark text accidentally overlaps with the project name.
     req_id = await _insert_scan_done(
         talent_id=talent_id, talent_label=talent_label, project_id=project_id, project_label=project_label,
         group_name=f"{talent_label} x Talentgram",
-        candidates=[
-            {**_mark(mention_lid=None, mark_text=f"Mark Zzyx Qorvex {unrelated_tag} take 1", source_message_id="src-take1", media_type="video")},
-            {**_mark(mention_lid=None, mark_text=f"Mark Zzyx Qorvex {unrelated_tag} intro", source_message_id="src-intro", media_type="video")},
-        ],
+        candidates=[],
     )
     await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
     try:
@@ -967,11 +952,163 @@ async def test_orchestrator_no_marks_resolve_to_project_reports_honestly_not_alr
         assert final["status"] == ma.STATUS_FINISHED
         assert "NO MARKED MEDIA FOUND" in final["report"], final["report"]
         assert "ALREADY COMPLETED" not in final["report"], final["report"]
-        # Never silently created an assignment row for a mark that didn't
-        # resolve to this project.
         rows = await db[ma.ASSIGNMENTS_COLLECTION].find({"talent_id": talent_id}).to_list(10)
         assert rows == [], rows
     finally:
         await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+# ---------------------------------------------------------------------------
+# Admin-command-is-authoritative project matching (2026-08-25) — the real
+# production incident's second root cause. The admin's UPLOAD command
+# already explicitly resolves the target project; a mark's job is
+# identifying WHICH media, not re-proving which project via informal
+# WhatsApp shorthand. Four cases, confirmed by the user:
+#   1/2/3. no confident project-text match -> defaults to the
+#      admin-requested project (this is what makes "Mark Tapti Ai Test
+#      take 1" resolve for the real "Tapti AI App (Ananya)").
+#   4. confidently matches a DIFFERENT real project -> excluded,
+#      reported as an advisory note, never uploaded to the wrong project.
+#   5. ambiguous between multiple real projects -> excluded, reported as
+#      an advisory note, never guessed.
+# Cases 4 and 5 are advisory-only (never block OTHER, correctly-resolved
+# marks in the same scan) — a talent's WhatsApp group legitimately
+# accumulates marks for multiple projects over time.
+# ---------------------------------------------------------------------------
+def test_validate_candidates_informal_project_text_defaults_to_requested_project():
+    """Case 1/2 — "Mark Project A Test take 1" for a requested project
+    literally named "Project A" (case 2's shape: the informal mark text
+    doesn't need to exactly reproduce the DB's project name)."""
+    projects = [{"id": "p-a", "label": "Project A (Ananya)"}, {"id": "p-b", "label": "Project B"}]
+    candidates = [_mark(mention_lid=None, mark_text="mark project a test take 1", source_message_id="src-take1")]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-a",
+        requested_project_label="Project A (Ananya)", projects=projects, talent_id="t1",
+    )
+    assert outcome.ok, outcome
+    assert len(outcome.assignments) == 1, outcome
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-take1"
+    assert outcome.project_mismatch == []
+    assert outcome.project_ambiguous == []
+
+
+def test_validate_candidates_real_sharvari_shorthand_defaults_to_requested_project():
+    """Case 2/3, the exact real incident's shape: "Mark Tapti Ai Test
+    take 1"/"...Introduction" against the real "Tapti AI App (Ananya)" —
+    the fragment matches NEITHER Tapti variant confidently, so both
+    default to the admin-requested project rather than being silently
+    dropped."""
+    projects = [
+        {"id": "p-ananya", "label": "Tapti AI App (Ananya)"},
+        {"id": "p-neelam", "label": "Tapti AI App (Neelam)"},
+    ]
+    candidates = [
+        _mark(mention_lid=None, mark_text="Mark Tapti Ai Test take 1", source_message_id="src-take1", media_type="video"),
+        _mark(mention_lid=None, mark_text="Mark Tapti Ai Test Introduction", source_message_id="src-intro", media_type="video"),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-ananya",
+        requested_project_label="Tapti AI App (Ananya)", projects=projects, talent_id="t1",
+    )
+    assert outcome.ok, outcome
+    slots = {(a["media_role"], a["take_number"]) for a in outcome.assignments}
+    assert slots == {("take", 1), ("intro", None)}
+    assert outcome.project_mismatch == []
+    assert outcome.project_ambiguous == []
+
+
+def test_validate_candidates_no_project_match_defaults_to_requested_project():
+    """Case 3 — mark text that matches NO real project at all still
+    defaults to the admin-requested project."""
+    projects = [{"id": "p-a", "label": "Project A"}]
+    candidates = [_mark(mention_lid=None, mark_text="mark random unrelated text take 1", source_message_id="src-take1")]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-a",
+        requested_project_label="Project A", projects=projects, talent_id="t1",
+    )
+    assert outcome.ok, outcome
+    assert len(outcome.assignments) == 1
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-take1"
+
+
+def test_validate_candidates_confident_different_project_excluded_not_uploaded():
+    """Case 4 — a mark confidently matching a DIFFERENT real project must
+    NEVER be uploaded to the requested one, and must not block other,
+    correctly-resolved marks in the same scan."""
+    projects = [{"id": "p-a", "label": "Project A"}, {"id": "p-b", "label": "Project B"}]
+    candidates = [
+        _mark(mention_lid=None, mark_text="mark project a take 1", source_message_id="src-a-take1"),
+        _mark(mention_lid=None, mark_text="mark project b take 1", source_message_id="src-b-take1"),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-a",
+        requested_project_label="Project A", projects=projects, talent_id="t1",
+    )
+    assert outcome.ok, outcome
+    assert len(outcome.assignments) == 1
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-a-take1"
+    assert len(outcome.project_mismatch) == 1
+    assert outcome.project_mismatch[0]["matched_project_label"] == "Project B"
+    assert outcome.project_mismatch[0]["resolved_source_message_id"] == "src-b-take1"
+    assert outcome.project_ambiguous == []
+
+
+def test_validate_candidates_ambiguous_project_reference_excluded_not_guessed():
+    """Case 5 — a mark whose text is tied between multiple real projects
+    is excluded and flagged, never guessed, and must not block other,
+    correctly-resolved marks."""
+    projects = [
+        {"id": "p-a", "label": "Project Test Alpha"},
+        {"id": "p-b", "label": "Project Test Beta"},
+        {"id": "p-c", "label": "Project C"},
+    ]
+    candidates = [
+        _mark(mention_lid=None, mark_text="mark project c take 1", source_message_id="src-c-take1"),
+        _mark(mention_lid=None, mark_text="mark project test take 1", source_message_id="src-ambiguous-take1"),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-c",
+        requested_project_label="Project C", projects=projects, talent_id="t1",
+    )
+    assert outcome.ok, outcome
+    assert len(outcome.assignments) == 1
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-c-take1"
+    assert outcome.project_mismatch == []
+    assert len(outcome.project_ambiguous) == 1
+    assert outcome.project_ambiguous[0]["resolved_source_message_id"] == "src-ambiguous-take1"
+    matched_labels = {p["label"] for p in outcome.project_ambiguous[0]["ambiguous_projects"]}
+    assert matched_labels == {"Project Test Alpha", "Project Test Beta"}
+
+
+async def test_orchestrator_project_mismatch_appends_advisory_note_but_still_completes():
+    """End-to-end: a confidently-different-project mark alongside a
+    valid one must not block the valid upload — the mismatch is reported
+    as an advisory note appended to the normal completion report."""
+    tag = uuid.uuid4().hex[:6]
+    project_a_id, project_a_label = f"pa-{tag}", f"Project A {tag}"
+    project_b_id, project_b_label = f"pb-{tag}", f"Project B {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    req_id = await _insert_scan_done(
+        talent_id=talent_id, talent_label=talent_label, project_id=project_a_id, project_label=project_a_label,
+        group_name=f"{talent_label} x Talentgram",
+        candidates=[
+            _mark(mention_lid=None, mark_text=f"mark {project_b_label} take 1", source_message_id="src-b-take1"),
+        ],
+    )
+    await db.projects.insert_one({"id": project_a_id, "brand_name": project_a_label, "status": "ongoing", "slug": project_a_id})
+    await db.projects.insert_one({"id": project_b_id, "brand_name": project_b_label, "status": "ongoing", "slug": project_b_id})
+    try:
+        assert await orch._process_scan_done()
+        final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert final["status"] == ma.STATUS_FINISHED
+        assert "NO MARKED MEDIA FOUND" in final["report"], final["report"]
+        assert project_b_label in final["report"], final["report"]
+        rows = await db[ma.ASSIGNMENTS_COLLECTION].find({"talent_id": talent_id}).to_list(10)
+        assert rows == [], rows  # the mismatched mark was never recorded as an assignment for Project A
+    finally:
+        await db.projects.delete_many({"id": {"$in": [project_a_id, project_b_id]}})
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
         await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})

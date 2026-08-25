@@ -205,9 +205,15 @@ async def test_send_orchestrator_only_marked_media_becomes_send_targets():
 # project filtering, already proven for upload, exercised here for send).
 # ---------------------------------------------------------------------------
 async def test_send_orchestrator_project_isolation():
+    """2026-08-25: since the admin-command-is-authoritative project-text
+    fix, a mark's text only excludes it when it CONFIDENTLY matches a
+    DIFFERENT REAL project (never merely "doesn't match the requested
+    one" — that case now defaults to the requested project instead, so
+    this test's "other" project must be an actual registered project to
+    still exercise genuine cross-project isolation)."""
     tag = uuid.uuid4().hex[:6]
     project_id, project_label = f"p-{tag}", f"Google {tag}"
-    other_project_label = f"Google Bride Film {tag}"
+    other_project_id, other_project_label = f"p-other-{tag}", f"Google Bride Film {tag}"
     talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
     await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
     req_id = await _insert_send_scan_done(
@@ -218,7 +224,8 @@ async def test_send_orchestrator_project_isolation():
             _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {other_project_label} take 1", source_message_id="src-other-take1"),
         ],
     )
-    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing", "slug": project_id})
+    await db.projects.insert_one({"id": other_project_id, "brand_name": other_project_label, "status": "ongoing", "slug": other_project_id})
     try:
         assert await orch._process_scan_done()
         mid = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
@@ -226,7 +233,7 @@ async def test_send_orchestrator_project_isolation():
         assert len(mid["send_targets"]) == 1
         assert mid["send_targets"][0]["source_message_id"] == "src-take1"
     finally:
-        await db.projects.delete_one({"id": project_id})
+        await db.projects.delete_many({"id": {"$in": [project_id, other_project_id]}})
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
         await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
 

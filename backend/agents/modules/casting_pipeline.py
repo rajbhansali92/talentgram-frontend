@@ -4005,12 +4005,10 @@ async def _send_executor(
     # must stay untouched) and never string-appended from brand_name.
     # If the project has no destination group configured, SEND refuses
     # rather than falling back to anything guessed.
+    project_doc = await db.projects.find_one({"id": project["id"]}, {"_id": 0})
     if destination_group_override:
         destination_group = destination_group_override
     else:
-        project_doc = await db.projects.find_one(
-            {"id": project["id"]}, {"_id": 0, "whatsapp_casting_group_name": 1},
-        )
         destination_group = ((project_doc or {}).get("whatsapp_casting_group_name") or "").strip()
         if not destination_group:
             return ExecResult(
@@ -4019,10 +4017,39 @@ async def _send_executor(
                         "add it to the project before using send.",
             )
 
+    # Step 6: SEND also sends the talent's APPROVED submission details, not
+    # just marked media — an approved form is a hard prerequisite, never a
+    # silently-skipped nice-to-have. Fails safely (never forwards media
+    # anyway) if no approved submission exists for this exact talent/project.
+    submission = await db.submissions.find_one(
+        {"project_id": project["id"], "talent_id": authoritative_talent_id, "decision": "approved"},
+        {"_id": 0}, sort=[("submitted_at", -1), ("created_at", -1)],
+    )
+    if not submission:
+        return ExecResult(
+            ok=False, error="no_approved_submission",
+            message=f"{authoritative_talent_label} has no APPROVED submission for {project['label']} — "
+                    "send requires an approved submission before it will forward anything.",
+        )
+    form_built = media_send.build_form_send_message(
+        submission, project_doc, authoritative_talent_label, project["label"],
+    )
+    form_message: Optional[str] = None
+    already_form = await media_send.already_sent_form(
+        authoritative_talent_id, project["id"], destination_group, form_built["content_hash"],
+    )
+    if not already_form:
+        await media_send.record_form_send(
+            talent_id=authoritative_talent_id, project_id=project["id"], destination_group=destination_group,
+            submission_id=submission["id"], content_hash=form_built["content_hash"], created_by="whatsapp-agent",
+        )
+        form_message = form_built["message"]
+
     await media_send.create_send_scan_request(
         talent_id=authoritative_talent_id, talent_label=authoritative_talent_label,
         project_id=project["id"], project_label=project["label"],
         group_name=group_name, destination_group=destination_group,
+        form_message=form_message, submission_id=submission["id"], content_hash=form_built["content_hash"],
     )
     return ExecResult(
         ok=True,

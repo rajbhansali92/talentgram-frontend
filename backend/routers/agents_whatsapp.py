@@ -190,6 +190,12 @@ class ScanResultIn(BaseModel):
 class DownloadResultIn(BaseModel):
     results: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
+    # form_send_result (2026-08-25, SEND workflow only): the worker's own
+    # outcome for req.get("form_message"), if one was included — None when
+    # no form_message was sent on this request (already sent earlier, or
+    # this isn't a SEND request at all). Kept fully separate from
+    # `results`/media, matching form_sends' independent idempotency.
+    form_send_result: Optional[Dict[str, Any]] = None
 
 
 @router.get("/gunwanti-identity")
@@ -267,6 +273,7 @@ async def report_download_result(
         {"id": request_id},
         {"$set": {
             "status": status, "download_results": payload.results, "download_error": payload.error,
+            "form_send_result": payload.form_send_result,
             "updated_at": datetime.now(timezone.utc),
         }},
     )

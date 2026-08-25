@@ -58,12 +58,15 @@ async def _restore_config(original):
         await db[registry.CONFIG_COLLECTION].replace_one({"agent_id": AGENT_ID}, original, upsert=True)
 
 
-async def _seed_project(brand_name: str) -> str:
+async def _seed_project(brand_name: str, *, whatsapp_casting_group_name: str = "") -> str:
     pid = f"test-ma-proj-{uuid.uuid4().hex[:8]}"
-    await db.projects.insert_one({
+    doc = {
         "id": pid, "brand_name": brand_name, "status": "ongoing", "slug": pid,
         "materials": [], "created_at": _now(),
-    })
+    }
+    if whatsapp_casting_group_name:
+        doc["whatsapp_casting_group_name"] = whatsapp_casting_group_name
+    await db.projects.insert_one(doc)
     return pid
 
 
@@ -77,14 +80,17 @@ async def _seed_talent(name: str, *, whatsapp_group_name: str = "", email: str =
     return tid
 
 
-async def _seed_submission(project_id: str, talent_id: str, email: str) -> str:
+async def _seed_submission(project_id: str, talent_id: str, email: str, *, decision: str = "pending") -> str:
     """The project's submission for a talent, keyed on (project_id,
     talent_email) — the single source of truth
-    resolve_authoritative_talent_for_upload relies on."""
+    resolve_authoritative_talent_for_upload relies on. `decision` defaults
+    to "pending" (SEND's own approval gate requires "approved" explicitly
+    — see test_media_send.py's SEND-workflow tests)."""
     sid = f"test-ma-sub-{uuid.uuid4().hex[:8]}"
     await db.submissions.insert_one({
         "id": sid, "project_id": project_id, "talent_id": talent_id,
-        "talent_email": email.strip().lower(), "media": [], "created_at": _now(),
+        "talent_email": email.strip().lower(), "media": [], "form_data": {},
+        "decision": decision, "created_at": _now(),
     })
     return sid
 

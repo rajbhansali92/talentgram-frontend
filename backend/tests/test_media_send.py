@@ -55,6 +55,10 @@ _sync_client[os.environ["DB_NAME"]][ms.MEDIA_SENDS_COLLECTION].create_index(
     ],
     unique=True, name="uniq_talent_project_source_message_hash_destination",
 )
+_sync_client[os.environ["DB_NAME"]][ms.FORM_SENDS_COLLECTION].create_index(
+    [("talent_id", 1), ("project_id", 1), ("destination_group", 1), ("content_hash", 1)],
+    unique=True, name="uniq_talent_project_destination_content_hash",
+)
 _sync_client.close()
 
 
@@ -74,11 +78,11 @@ async def test_send_command_works_without_any_uploaded_submission_media():
     original = await _use_test_config(group)
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.send.{tag}@example.com"
-    project_id = await _seed_project(f"Google Send {tag}")
+    project_id = await _seed_project(f"Google Send {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
     talent_id = await _seed_talent(
         f"Ahana Send {tag}", whatsapp_group_name=f"Ahana Send {tag} x Talentgram", email=email,
     )
-    submission_id = await _seed_submission(project_id, talent_id, email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
     await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
     await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})  # confirm-clean, not relied upon
     try:
@@ -96,7 +100,7 @@ async def test_send_command_works_without_any_uploaded_submission_media():
         req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
         assert req is not None
         assert req["workflow"] == "send"
-        assert req["destination_group"]  # resolved from casting-agent's own config in this path
+        assert req["destination_group"] == DESTINATION_GROUP  # resolved from the project's own field
         # No media_assignments row was ever touched by SEND.
         assert await db[ma.ASSIGNMENTS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
     finally:
@@ -115,10 +119,10 @@ async def test_send_command_duplicate_talent_resolves_via_submission_email_not_n
     tag = uuid.uuid4().hex[:6]
     name = f"Ahana SendDup {tag}"
     email = f"ahana.senddup.{tag}@example.com"
-    project_id = await _seed_project(f"Google SendDup {tag}")
+    project_id = await _seed_project(f"Google SendDup {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
     talent_a = await _seed_talent(name, whatsapp_group_name="", email="")  # admin-created duplicate
     talent_b = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)
-    submission_id = await _seed_submission(project_id, talent_b, email)
+    submission_id = await _seed_submission(project_id, talent_b, email, decision="approved")
     await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
     try:
         r = await handle_inbound_message(
@@ -332,7 +336,7 @@ async def test_send_orchestrator_download_done_partial_success_reports_correctly
         assert await orch._process_download_done()
         final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
         assert final["status"] == ma.STATUS_FINISHED
-        assert "2/3 sent" in final["report"], final["report"]
+        assert "2/3 media sent" in final["report"], final["report"]
         assert "1 failed" in final["report"], final["report"]
         assert "hash mismatch" in final["report"], final["report"]
         assert "Pipeline stage was NOT changed." in final["report"]
@@ -386,3 +390,221 @@ async def test_send_never_mutates_pipeline_stage():
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
         await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
         await db.casting_pipeline.delete_many({"talent_id": talent_id, "project_id": project_id})
+
+
+# ---------------------------------------------------------------------------
+# Form/submission send (2026-08-25): SEND also sends the talent's APPROVED
+# submission details, gated hard on submissions.decision == "approved" —
+# never silently skipped in favor of forwarding media anyway.
+# ---------------------------------------------------------------------------
+async def test_send_fails_safely_without_approved_submission():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    email = f"ahana.noapprove.{tag}@example.com"
+    project_id = await _seed_project(f"Google NoApprove {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(
+        f"Ahana NoApprove {tag}", whatsapp_group_name=f"Ahana NoApprove {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="pending")  # NOT approved
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600030",
+            text=f"send - Ahana NoApprove {tag} - Google NoApprove {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "approved" in r.reply.lower(), r.reply
+        # SEND refused BEFORE ever creating a scan request — no media forward attempted.
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert req is None
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original)
+
+
+async def test_send_includes_form_message_on_first_send_and_records_marked_row():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    email = f"ahana.formsend.{tag}@example.com"
+    project_id = await _seed_project(f"Google FormSend {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(
+        f"Ahana FormSend {tag}", whatsapp_group_name=f"Ahana FormSend {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db.submissions.update_one({"id": submission_id}, {"$set": {"form_data": {"height": "5'6\""}}})
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600031",
+            text=f"send - Ahana FormSend {tag} - Google FormSend {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sending" in r.reply, r.reply
+
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert req is not None
+        assert req["form_message"], req
+        assert "Ahana FormSend" in req["form_message"]
+        assert "Google FormSend" in req["form_message"]
+        assert req["submission_id"] == submission_id
+        assert req["content_hash"]
+
+        form_row = await db[ms.FORM_SENDS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert form_row is not None
+        assert form_row["send_status"] == ms.SEND_STATUS_MARKED
+        assert form_row["content_hash"] == req["content_hash"]
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+        await _restore_config(original)
+
+
+async def test_send_skips_form_message_when_already_sent_same_content():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    email = f"ahana.formskip.{tag}@example.com"
+    project_id = await _seed_project(f"Google FormSkip {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(
+        f"Ahana FormSkip {tag}", whatsapp_group_name=f"Ahana FormSkip {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        # First send marks the form as sent for this exact content.
+        sub = await db.submissions.find_one({"id": submission_id})
+        project = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        built = ms.build_form_send_message(sub, project, f"Ahana FormSkip {tag}", f"Google FormSkip {tag}")
+        await ms.record_form_send(
+            talent_id=talent_id, project_id=project_id, destination_group=DESTINATION_GROUP,
+            submission_id=submission_id, content_hash=built["content_hash"], created_by="test",
+        )
+        await ms.mark_form_send_status(talent_id, project_id, DESTINATION_GROUP, built["content_hash"], ms.SEND_STATUS_SENT, sent_at=_now())
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600032",
+            text=f"send - Ahana FormSkip {tag} - Google FormSkip {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Sending" in r.reply, r.reply
+
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert req is not None
+        assert req["form_message"] is None  # already sent for this content -> not resent
+        assert req["content_hash"] == built["content_hash"]
+        # Still exactly one form_sends row -> no duplicate created.
+        assert await db[ms.FORM_SENDS_COLLECTION].count_documents({"talent_id": talent_id, "project_id": project_id}) == 1
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+        await _restore_config(original)
+
+
+def test_build_form_send_message_includes_populated_fields_skips_empty():
+    sub = {
+        "id": "sub-x", "form_data": {"height": "5'6\"", "location": "Mumbai", "budget": ""},
+        "talent_name": "Ahana Formatting", "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana Formatting", "Google Format Test")
+    assert "Ahana Formatting" in built["message"]
+    assert "Google Format Test" in built["message"]
+    assert "5'6\"" in built["message"]
+    assert "Mumbai" in built["message"]
+    assert "Budget" not in built["message"]  # empty field never rendered
+    assert built["content_hash"]
+
+
+def test_build_form_send_message_content_hash_changes_when_fields_change():
+    sub_a = {"id": "sub-x", "form_data": {"height": "5'6\""}, "talent_name": "Ahana Hash", "media": []}
+    sub_b = {"id": "sub-x", "form_data": {"height": "5'7\""}, "talent_name": "Ahana Hash", "media": []}
+    built_a = ms.build_form_send_message(sub_a, None, "Ahana Hash", "Google Hash Test")
+    built_b = ms.build_form_send_message(sub_b, None, "Ahana Hash", "Google Hash Test")
+    assert built_a["content_hash"] != built_b["content_hash"]
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator-level form-send result recording — mirrors the media-item
+# pattern (mark_send_status) exactly, fully independent of it.
+# ---------------------------------------------------------------------------
+async def test_send_orchestrator_records_form_send_success():
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
+    req_id = str(uuid.uuid4())
+    content_hash = f"hash-{tag}"
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "send", "status": ma.DOWNLOAD_STATUS_DONE,
+        "talent_id": talent_id, "project_id": project_id, "destination_group": DESTINATION_GROUP,
+        "send_targets": [], "download_results": [], "form_send_result": {"ok": True, "send_state": "MESSAGE_SENT_AND_VERIFIED"},
+        "pending_report_context": {
+            "talent_label": talent_label, "project_label": project_label, "destination_group": DESTINATION_GROUP,
+            "already": [], "submission_id": f"sub-{tag}", "content_hash": content_hash, "form_message_included": True,
+        },
+        "created_at": _now(), "updated_at": _now(),
+    })
+    await db[ms.FORM_SENDS_COLLECTION].insert_one({
+        "form_send_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
+        "destination_group": DESTINATION_GROUP, "submission_id": f"sub-{tag}", "content_hash": content_hash,
+        "send_status": ms.SEND_STATUS_MARKED, "created_at": _now(), "created_by": "test",
+    })
+    try:
+        assert await orch._process_download_done()
+        final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert "Submission details" in final["report"]
+        assert "✓ Submission details" in final["report"]
+
+        form_row = await db[ms.FORM_SENDS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert form_row["send_status"] == ms.SEND_STATUS_SENT
+        assert form_row.get("sent_at")
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+async def test_send_orchestrator_records_form_send_failure_independent_of_media():
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
+    req_id = str(uuid.uuid4())
+    content_hash = f"hash-{tag}"
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "send", "status": ma.DOWNLOAD_STATUS_DONE,
+        "talent_id": talent_id, "project_id": project_id, "destination_group": DESTINATION_GROUP,
+        "send_targets": [{"source_message_id": "src-a", "source_thumbnail_hash": "hash-a", "media_role": "take", "take_number": 1}],
+        "download_results": [{"ok": True, "source_message_id": "src-a"}],  # media succeeds
+        "form_send_result": {"ok": False, "error": "no real Send control found — refusing to guess"},  # form fails
+        "pending_report_context": {
+            "talent_label": talent_label, "project_label": project_label, "destination_group": DESTINATION_GROUP,
+            "already": [], "submission_id": f"sub-{tag}", "content_hash": content_hash, "form_message_included": True,
+        },
+        "created_at": _now(), "updated_at": _now(),
+    })
+    await db[ms.FORM_SENDS_COLLECTION].insert_one({
+        "form_send_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
+        "destination_group": DESTINATION_GROUP, "submission_id": f"sub-{tag}", "content_hash": content_hash,
+        "send_status": ms.SEND_STATUS_MARKED, "created_at": _now(), "created_by": "test",
+    })
+    try:
+        assert await orch._process_download_done()
+        final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert "✗ Submission details" in final["report"]
+        assert "SEND PARTIAL" in final["report"]  # form failure alone still surfaces as partial, even though the media item succeeded
+
+        form_row = await db[ms.FORM_SENDS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert form_row["send_status"] == ms.SEND_STATUS_FAILED
+        # The media item's own success is untouched by the form's failure.
+        media_row_check = await db[ms.MEDIA_SENDS_COLLECTION].find_one({"talent_id": talent_id, "source_message_id": "src-a"})
+        # (no media_sends row exists in this hand-inserted test — mark_send_status's
+        # $set simply matched nothing, same documented pattern as the media-only
+        # partial-success test above; the assertion here is just that this branch
+        # never raises and never conflates form/media state.)
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})

@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from core import db
 from agents import registry
@@ -183,20 +183,22 @@ def _report_already_sent(talent_label: str, project_label: str, destination_grou
 def _report_send_result(
     talent_label: str, project_label: str, destination_group: str,
     sent_labels: List[str], failed_items: List[Dict[str, str]], already: List[Dict[str, Any]],
+    *, form_status_line: Optional[str] = None,
 ) -> str:
     already_labels = [
         media_assignment.role_label(a["media_role"], a.get("take_number"), project_label)
         for a in already
     ]
     total = len(already_labels) + len(sent_labels) + len(failed_items)
-    body_lines = [f"✓ {l}" for l in already_labels + sent_labels]
+    body_lines = ([form_status_line] if form_status_line else []) + [f"✓ {l}" for l in already_labels + sent_labels]
     body_lines += [f"✗ {i['label']} — {i['error']}" for i in failed_items]
     body = "\n".join(body_lines)
-    header = "SEND COMPLETE ✓" if not failed_items else "SEND PARTIAL"
+    form_failed = bool(form_status_line and form_status_line.startswith("✗"))
+    header = "SEND COMPLETE ✓" if not (failed_items or form_failed) else "SEND PARTIAL"
     return (
         f"{header}\n\nTalent: {talent_label}\nProject: {project_label}\n"
         f"Destination: {destination_group}\n\n"
-        f"{len(already_labels) + len(sent_labels)}/{total} sent"
+        f"{len(already_labels) + len(sent_labels)}/{total} media sent"
         + (f", {len(failed_items)} failed" if failed_items else "")
         + f"\n\n{body}\n\nPipeline stage was NOT changed."
     )
@@ -312,9 +314,15 @@ async def _process_scan_done() -> bool:
                 "mode": "send",
                 "status": media_assignment.DOWNLOAD_STATUS_PENDING,
                 "send_targets": send_targets,
+                # form_message rides through unchanged from create_send_scan_request
+                # (already None if this exact submission version was already
+                # sent) — the worker sends it first, before any media forward.
+                "form_message": doc.get("form_message"),
                 "pending_report_context": {
                     "talent_label": talent_label, "project_label": project_label,
                     "destination_group": destination_group, "already": already,
+                    "submission_id": doc.get("submission_id"), "content_hash": doc.get("content_hash"),
+                    "form_message_included": bool(doc.get("form_message")),
                 },
                 "updated_at": _now(),
             }},
@@ -414,6 +422,25 @@ async def _process_download_done() -> bool:
         send_targets = doc.get("send_targets") or []
         results = doc.get("download_results") or []
 
+        # Form-send outcome (2026-08-25) — completely independent of the
+        # media results below; a media item failing never marks the form
+        # failed, and vice versa. `form_message_included` distinguishes
+        # "we sent it and it failed" from "already sent earlier, nothing
+        # attempted this run" (content_hash unchanged -> no re-send).
+        form_status_line: Optional[str] = None
+        if ctx.get("form_message_included"):
+            form_result = doc.get("form_send_result") or {}
+            form_ok = bool(form_result.get("ok"))
+            status = media_send.SEND_STATUS_SENT if form_ok else media_send.SEND_STATUS_FAILED
+            extra = {"sent_at": _now()} if form_ok else {"error": form_result.get("error") or "no result reported"}
+            if ctx.get("submission_id") and ctx.get("content_hash"):
+                await media_send.mark_form_send_status(
+                    talent_id, project_id, destination_group, ctx["content_hash"], status, **extra,
+                )
+            form_status_line = "✓ Submission details" if form_ok else f"✗ Submission details — {extra.get('error')}"
+        elif ctx.get("content_hash"):
+            form_status_line = "✓ Submission details (already sent)"
+
         sent_labels: List[str] = []
         failed_items: List[Dict[str, str]] = []
         for i, target in enumerate(send_targets):
@@ -431,7 +458,10 @@ async def _process_download_done() -> bool:
             else:
                 failed_items.append({"label": label, "error": (result or {}).get("error") or "no result reported"})
 
-        report = _report_send_result(talent_label, project_label, destination_group, sent_labels, failed_items, ctx.get("already") or [])
+        report = _report_send_result(
+            talent_label, project_label, destination_group, sent_labels, failed_items, ctx.get("already") or [],
+            form_status_line=form_status_line,
+        )
         await _finish(doc["id"], report)
         return True
 

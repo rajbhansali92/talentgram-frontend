@@ -3778,6 +3778,215 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
 
         return {"results": [result]}
 
+    if probe_type == "video_viewer_controls_timeline_diagnostic":
+        # Diagnostic-only, READ-ONLY (2026-08-25) — never clicks a menu
+        # trigger or attempts a download. A real UPLOAD E2E hit
+        # "clicked menu trigger but no menu appeared" against a button
+        # labeled "You" (rect near the bottom-left of the viewport) even
+        # though _wait_for_video_readiness had already confirmed full
+        # buffering — proving video-buffering-readiness and viewer-
+        # controls-readiness are two DIFFERENT things this codebase never
+        # distinguished. This captures the SAME button-dump snapshot
+        # (_VIEWER_BUTTONS_JS) plus an ancestry-and-visibility-annotated
+        # full-page dump at FIVE checkpoints:
+        #   A. immediately after the tile click, before readiness is polled
+        #   B. the instant _wait_for_video_readiness reports reached=True
+        #   C. after a further bounded settle period past B
+        #   D. immediately after closing and re-opening the SAME video
+        #      (re-resolved fresh by source_message_id/hash — never a
+        #      different tile, never positional)
+        #   E. after re-polling readiness on the reopened video
+        # Only the already-proven, identity-safe resolve/click/close path
+        # is reused (_resolve_video_tile_by_hash, _wait_for_video_readiness,
+        # _close_viewer) — no new click/resolution logic, and nothing here
+        # ever proceeds past dumping buttons.
+        target_id = req.get("probe_message_id")
+        thumb_hash = req.get("source_thumbnail_hash")
+        tile_index = req.get("tile_index", 0)
+        if not target_id:
+            return {"results": [{"error": "probe_message_id required (a video message)"}]}
+
+        _TIMELINE_BUTTON_DUMP_JS = """
+            () => {
+              const video = document.querySelector('video');
+              let viewerRoot = null;
+              if (video) {
+                let root = video;
+                while (root.parentElement && root.parentElement !== document.body) root = root.parentElement;
+                if (root.parentElement) viewerRoot = root;
+              }
+              const ancestry = (el, depth) => {
+                const chain = [];
+                let cur = el;
+                for (let i = 0; i < depth && cur; i++) {
+                  chain.push({
+                    tag: cur.tagName || null,
+                    id: cur.id || null,
+                    role: cur.getAttribute ? cur.getAttribute('role') : null,
+                    testid: cur.getAttribute ? cur.getAttribute('data-testid') : null,
+                    cls: (typeof cur.className === 'string') ? cur.className.slice(0, 80) : null,
+                  });
+                  cur = cur.parentElement;
+                }
+                return chain;
+              };
+              const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+              const videoState = video ? {
+                readyState: video.readyState, networkState: video.networkState,
+                duration: video.duration, currentTime: video.currentTime,
+                buffered: Array.from({length: video.buffered.length}, (_, i) => [video.buffered.start(i), video.buffered.end(i)]),
+              } : null;
+              return {
+                videoPresent: !!video,
+                videoState,
+                viewerRootInfo: viewerRoot ? {tag: viewerRoot.tagName, id: viewerRoot.id || null, testid: viewerRoot.getAttribute('data-testid')} : null,
+                buttons: btns.map(b => {
+                  const r = b.getBoundingClientRect();
+                  const svgTitle = b.querySelector('svg title');
+                  const style = window.getComputedStyle(b);
+                  return {
+                    ariaLabel: b.getAttribute('aria-label'),
+                    title: b.getAttribute('title'),
+                    dataIcon: b.getAttribute('data-icon'),
+                    testid: b.getAttribute('data-testid'),
+                    svgTitle: svgTitle ? svgTitle.textContent : null,
+                    rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+                    visible: r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none',
+                    insideViewerRoot: !!(viewerRoot && viewerRoot.contains(b)),
+                    ancestry: ancestry(b, 6),
+                  };
+                }),
+              };
+            }
+        """
+
+        async def _dump(checkpoint: str) -> Dict[str, Any]:
+            try:
+                data = await _evaluate(page, _TIMELINE_BUTTON_DUMP_JS)
+            except Exception as exc:
+                data = {"error": str(exc)}
+            data["checkpoint"] = checkpoint
+            return data
+
+        checkpoints: List[Dict[str, Any]] = []
+
+        # Open the video via the SAME proven, hash-verified, identity-safe
+        # resolution + bounded-retry click path UPLOAD itself uses — never
+        # a fresh, ad-hoc click implementation for this diagnostic.
+        click_error = None
+        resolved_index = None
+        for attempt in range(MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS):
+            tile, message_locator, resolved_index, resolve_reason = await _resolve_video_tile_by_hash(
+                page, group_name, target_id, thumb_hash, tile_index,
+            )
+            if tile is None:
+                return {"results": [{"error": f"resolve failed: {resolve_reason}"}]}
+            try:
+                await tile.scroll_into_view_if_needed(timeout=5000)
+                await tile.click(timeout=10000)
+                click_error = None
+                break
+            except Exception as exc:
+                click_error = exc
+                if "not stable" not in str(exc) and "detached" not in str(exc):
+                    break
+        if click_error is not None:
+            return {"results": [{"error": f"click failed: {click_error}", "resolved_tile_index": resolved_index}]}
+
+        video_mounted = False
+        for _ in range(30):
+            try:
+                if await page.locator("video").count() > 0:
+                    video_mounted = True
+                    break
+            except Exception:
+                pass
+            await page.wait_for_timeout(500)
+        if not video_mounted:
+            return {"results": [{"error": "no <video> element mounted within 15s", "resolved_tile_index": resolved_index}]}
+
+        # Checkpoint A — immediately after open, before readiness is polled.
+        checkpoints.append(await _dump("A_immediately_after_open"))
+
+        # Checkpoint B — the instant full-buffering readiness is reached.
+        readiness_1 = await _wait_for_video_readiness(page)
+        b_dump = await _dump("B_readiness_reached")
+        b_dump["readiness"] = readiness_1
+        checkpoints.append(b_dump)
+
+        # Checkpoint C — after a further bounded settle period past B.
+        await page.wait_for_timeout(3000)
+        checkpoints.append(await _dump("C_after_3s_settle"))
+
+        # Close (reusing the proven real-button-based close, never a
+        # positional guess) and re-open the SAME video by identity.
+        try:
+            close_dump = await _evaluate(page, _VIEWER_BUTTONS_JS)
+        except Exception:
+            close_dump = {"buttons": []}
+        close_result = await _close_viewer(page, close_dump)
+
+        reopen_error = None
+        if close_result.get("closed"):
+            reopen_click_error = None
+            for attempt in range(MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS):
+                tile, message_locator, resolved_index, resolve_reason = await _resolve_video_tile_by_hash(
+                    page, group_name, target_id, thumb_hash, tile_index,
+                )
+                if tile is None:
+                    reopen_error = f"reopen resolve failed: {resolve_reason}"
+                    break
+                try:
+                    await tile.scroll_into_view_if_needed(timeout=5000)
+                    await tile.click(timeout=10000)
+                    reopen_click_error = None
+                    break
+                except Exception as exc:
+                    reopen_click_error = exc
+                    if "not stable" not in str(exc) and "detached" not in str(exc):
+                        break
+            if reopen_click_error is not None:
+                reopen_error = f"reopen click failed: {reopen_click_error}"
+        else:
+            reopen_error = f"close failed before reopen: {close_result}"
+
+        if reopen_error:
+            return {"results": [{"checkpoints": checkpoints, "close_result": close_result, "reopen_error": reopen_error}]}
+
+        video_remounted = False
+        for _ in range(30):
+            try:
+                if await page.locator("video").count() > 0:
+                    video_remounted = True
+                    break
+            except Exception:
+                pass
+            await page.wait_for_timeout(500)
+
+        if video_remounted:
+            # Checkpoint D — immediately after close -> reopen the SAME video.
+            checkpoints.append(await _dump("D_after_close_reopen"))
+            # Checkpoint E — after re-polling readiness on the reopened video.
+            readiness_2 = await _wait_for_video_readiness(page)
+            e_dump = await _dump("E_reopened_readiness_reached")
+            e_dump["readiness"] = readiness_2
+            checkpoints.append(e_dump)
+        else:
+            checkpoints.append({"checkpoint": "D_after_close_reopen", "error": "no <video> remounted within 15s"})
+
+        try:
+            final_dump = await _evaluate(page, _VIEWER_BUTTONS_JS)
+        except Exception:
+            final_dump = {"buttons": []}
+        final_close = await _close_viewer(page, final_dump)
+
+        return {"results": [{
+            "resolved_tile_index": resolved_index,
+            "close_result": close_result,
+            "checkpoints": checkpoints,
+            "final_close": final_close,
+        }]}
+
     if probe_type == "video_tile_reresolution_live_diagnostic":
         # Diagnostic-only (2026-08-24) — post-deploy verification of the
         # video-tile re-resolution fix against the EXACT real message that

@@ -3999,23 +3999,25 @@ async def _send_executor(
                     "contact an admin before using send.",
         )
 
-    # Step 5: the DESTINATION — casting-agent's own configured group,
-    # the same group UPLOAD's own completion reports already post into.
-    # Never resolved by name/guess; if it's not configured (or
-    # deliberately suppressed for testing), SEND refuses rather than
-    # picking anything else.
+    # Step 5: the DESTINATION — an explicit, project-level field, never
+    # derived from casting-agent's own global `group_names` config (that
+    # config drives a different, unrelated inbound-listening surface and
+    # must stay untouched) and never string-appended from brand_name.
+    # If the project has no destination group configured, SEND refuses
+    # rather than falling back to anything guessed.
     if destination_group_override:
         destination_group = destination_group_override
     else:
-        cfg = await db.whatsapp_agent_config.find_one({"agent_id": "casting-agent"})
-        dest_names = (cfg or {}).get("group_names") or []
-        if not dest_names:
+        project_doc = await db.projects.find_one(
+            {"id": project["id"]}, {"_id": 0, "whatsapp_casting_group_name": 1},
+        )
+        destination_group = ((project_doc or {}).get("whatsapp_casting_group_name") or "").strip()
+        if not destination_group:
             return ExecResult(
                 ok=False, error="destination_not_configured",
-                message="The Casting Pipeline destination group is not configured (or is "
-                        "currently suppressed) — cannot send.",
+                message=f"{project['label']} has no WhatsApp casting group configured — "
+                        "add it to the project before using send.",
             )
-        destination_group = dest_names[0]
 
     await media_send.create_send_scan_request(
         talent_id=authoritative_talent_id, talent_label=authoritative_talent_label,

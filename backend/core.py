@@ -2472,6 +2472,10 @@ class ProjectIn(BaseModel):
     hide_budget_from_talent: bool = False
     status: str = "ongoing"
     submission_requirements: Optional[Dict[str, Any]] = Field(default_factory=default_submission_requirements)
+    # Explicit WhatsApp destination group for the SEND casting-pipeline
+    # command (native Forward + form send). Never derived from brand_name —
+    # a project with no group set has no valid SEND destination.
+    whatsapp_casting_group_name: Optional[str] = None
 
 
 

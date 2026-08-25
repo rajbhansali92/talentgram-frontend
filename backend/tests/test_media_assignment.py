@@ -33,6 +33,7 @@ from agents.dispatcher import handle_inbound_message  # noqa: E402
 from agents.modules import media_assignment as ma  # noqa: E402
 from agents.modules.casting_pipeline import AGENT_ID  # noqa: E402
 from services import media_assignment_worker as orch  # noqa: E402
+from routers import agents_whatsapp  # noqa: E402
 
 agent_modules.register_all()
 
@@ -1111,4 +1112,147 @@ async def test_orchestrator_project_mismatch_appends_advisory_note_but_still_com
     finally:
         await db.projects.delete_many({"id": {"$in": [project_a_id, project_b_id]}})
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+# ---------------------------------------------------------------------------
+# /media-upload submission-media category contract (2026-08-25, real
+# production incident: Sharvari Kashid / Tapti AI App (Ananya)). The
+# Introduction video downloaded and uploaded to Cloudinary successfully,
+# and submission.media[] genuinely contained it — but its category was
+# written as the bare role name "intro" instead of "intro_video", the
+# ONE value the Submission Review Center / Requirement Engine recognize
+# (verified against every other write path in the codebase). It was
+# invisible in the UI despite existing in the database. These tests call
+# the REAL /media-upload endpoint function directly (Cloudinary itself
+# mocked — no network call) and assert the ACTUAL stored submission
+# media object, not merely that the call succeeded.
+# ---------------------------------------------------------------------------
+class _FakeUploadFile:
+    def __init__(self, data: bytes, filename: str, content_type: str):
+        self.filename = filename
+        self.content_type = content_type
+        self._data = data
+
+    async def read(self) -> bytes:
+        return self._data
+
+
+def _fake_cloudinary_result(media_id: str, resource_type: str) -> dict:
+    return {
+        "url": f"https://res.cloudinary.com/talentgram/{resource_type}/upload/v1/{media_id}",
+        "public_id": f"talentgram/{media_id}",
+        "resource_type": resource_type,
+        "bytes": 12345,
+        "duration": 9.0 if resource_type == "video" else None,
+    }
+
+
+async def _call_media_upload(*, talent_id, project_id, media_role, take_number, original_label, source_message_id):
+    orig_cloudinary_upload = agents_whatsapp.cloudinary_upload
+    media_id_holder = {}
+
+    def _fake_upload(data, *, folder, public_id, resource_type, content_type, keep_original):
+        media_id_holder["public_id"] = public_id
+        return _fake_cloudinary_result(public_id, resource_type)
+
+    agents_whatsapp.cloudinary_upload = _fake_upload
+    try:
+        result = await agents_whatsapp.media_upload(
+            file=_FakeUploadFile(b"fake-bytes", "clip.mp4", "video/mp4"),
+            talent_id=talent_id, project_id=project_id, media_role=media_role,
+            take_number=str(take_number) if take_number else None,
+            original_label=original_label,
+            source_message_id=source_message_id, source_thumbnail_hash=f"hash-{source_message_id}",
+            source_media_type="video",
+            source_group_id=None, source_group_name="Test Group",
+            source_sender=None, source_timestamp=None,
+            mark_reply_message_id=None, mark_reply_text=None,
+            mark_target_phone=None, mark_target_contact_id=None,
+            x_internal_secret=None,
+        )
+    finally:
+        agents_whatsapp.cloudinary_upload = orig_cloudinary_upload
+    return result
+
+
+def _is_recognized_as_intro_video(media_item: dict) -> bool:
+    """The EXACT contract SubmissionReviewCenter.jsx's getCuratedMedia()
+    uses for the "video" group (frontend/src/pages-components/
+    SubmissionReviewCenter.jsx:1243) — mirrored here so the backend's
+    write can be verified against the real UI contract without a JS
+    runtime."""
+    return media_item.get("category") in ("intro_video", "video")
+
+
+async def test_media_upload_endpoint_intro_role_writes_intro_video_category():
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Test Upload Project {tag}")
+    talent_id = await _seed_talent(f"Test Upload Talent {tag}", email=f"testupload{tag}@example.com")
+    try:
+        result = await _call_media_upload(
+            talent_id=talent_id, project_id=project_id, media_role="intro", take_number=None,
+            original_label="Introduction", source_message_id=f"src-intro-{tag}",
+        )
+        sub = await db.submissions.find_one({"id": result["submission_id"]})
+        media = [m for m in sub["media"] if m["id"] == result["media_id"]]
+        assert len(media) == 1, media
+        assert media[0]["category"] == "intro_video", media[0]
+        assert _is_recognized_as_intro_video(media[0]), media[0]
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db.talents.delete_one({"id": talent_id})
+        await db.submissions.delete_many({"project_id": project_id})
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+async def test_media_upload_endpoint_take_role_writes_take_category():
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Test Upload Project {tag}")
+    talent_id = await _seed_talent(f"Test Upload Talent {tag}", email=f"testupload{tag}@example.com")
+    try:
+        result = await _call_media_upload(
+            talent_id=talent_id, project_id=project_id, media_role="take", take_number=1,
+            original_label="Take 1", source_message_id=f"src-take-{tag}",
+        )
+        sub = await db.submissions.find_one({"id": result["submission_id"]})
+        media = [m for m in sub["media"] if m["id"] == result["media_id"]]
+        assert len(media) == 1, media
+        assert media[0]["category"] == "take", media[0]
+        # Take must NOT be (mis)recognized as an intro video.
+        assert not _is_recognized_as_intro_video(media[0]), media[0]
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db.talents.delete_one({"id": talent_id})
+        await db.submissions.delete_many({"project_id": project_id})
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+async def test_media_upload_endpoint_intro_and_take_coexist_correctly_categorized():
+    """End-to-end shape of the real Sharvari incident: both an intro and
+    a take uploaded for the SAME talent/project must each carry their
+    own correct, distinct category — proving one doesn't leak into or
+    overwrite the other's classification."""
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Test Upload Project {tag}")
+    talent_id = await _seed_talent(f"Test Upload Talent {tag}", email=f"testupload{tag}@example.com")
+    try:
+        intro_result = await _call_media_upload(
+            talent_id=talent_id, project_id=project_id, media_role="intro", take_number=None,
+            original_label="Introduction", source_message_id=f"src-intro-{tag}",
+        )
+        take_result = await _call_media_upload(
+            talent_id=talent_id, project_id=project_id, media_role="take", take_number=1,
+            original_label="Take 1", source_message_id=f"src-take-{tag}",
+        )
+        assert intro_result["submission_id"] == take_result["submission_id"]  # same submission, resumed
+        sub = await db.submissions.find_one({"id": intro_result["submission_id"]})
+        assert len(sub["media"]) == 2, sub["media"]
+        by_id = {m["id"]: m for m in sub["media"]}
+        assert by_id[intro_result["media_id"]]["category"] == "intro_video"
+        assert by_id[take_result["media_id"]]["category"] == "take"
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db.talents.delete_one({"id": talent_id})
+        await db.submissions.delete_many({"project_id": project_id})
         await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})

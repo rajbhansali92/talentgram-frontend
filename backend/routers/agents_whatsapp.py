@@ -360,9 +360,24 @@ async def media_upload(
         except ValueError:
             take_number_int = None
 
+    # Submission media category (2026-08-25 fix): must match the ONE
+    # canonical value the Submission Review Center / Requirement Engine
+    # recognize for each media type — verified against every other write
+    # path in the codebase (routers/submissions.py, routers/
+    # applications.py) and the frontend's own getCuratedMedia/
+    # requirementEngine checks. "take" was already correct (media_role
+    # IS the literal string "take"); "intro" was NOT — the recognized
+    # category is "intro_video", not the bare role name. A real
+    # production incident (Sharvari Kashid / Tapti AI App (Ananya))
+    # proved this exactly: the Introduction video uploaded successfully
+    # and had a real Cloudinary asset, but was invisible in Submission
+    # Review Center ("Not submitted") because its category was "intro".
+    # "photos" is intentionally left mapping to itself here — untouched,
+    # out of scope for this fix.
+    SUBMISSION_MEDIA_CATEGORY_BY_ROLE = {"take": "take", "intro": "intro_video"}
     media_obj: Dict[str, Any] = {
         "id": media_id,
-        "category": "take" if media_role == "take" else media_role,
+        "category": SUBMISSION_MEDIA_CATEGORY_BY_ROLE.get(media_role, media_role),
         "url": result["url"],
         "public_id": result["public_id"],
         "resource_type": result["resource_type"],

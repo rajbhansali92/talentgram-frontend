@@ -1548,7 +1548,16 @@ async def _click_download_in_open_viewer(page, viewer_buttons: Dict[str, Any], r
     label_matches = []
     other_candidates = []
     for b in viewer_buttons.get("buttons", []):
-        if not b.get("rect"):
+        rect = b.get("rect")
+        # A rect of [x, y, 0, 0] is a real, invisible/collapsed element —
+        # "truthy" but never actually clickable. Found live (2026-08-25):
+        # clicking such a button's "center" (its own top-left corner,
+        # since width/height are 0) at an off-screen negative-x position
+        # landed nowhere, correctly reporting "no menu appeared" but only
+        # after wasting a full candidate slot on something that was never
+        # a real trigger. Requiring positive width/height filters these
+        # out before they're ever tried.
+        if not rect or len(rect) < 4 or rect[2] <= 0 or rect[3] <= 0:
             continue
         label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
         if re.search(r"menu|more|option|kebab", label):

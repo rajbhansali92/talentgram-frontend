@@ -1372,6 +1372,49 @@ def main():
     assert "Escape" in page_52.keyboard.pressed, page_52.keyboard.pressed  # the wrong menu was dismissed before retrying
     print("52. UPLOAD menu self-heals         -> wrong candidate (no Download) dismissed via Escape, next candidate tried and succeeds")
 
+    # 53: REGRESSION (2026-08-25 — found via a real live UPLOAD E2E). A
+    # zero-size, off-screen phantom button (rect [x, y, 0, 0]) is a real
+    # element but never actually clickable — it must never be tried as a
+    # menu-trigger candidate at all, not even as a last resort.
+    zero_size_trigger = {"ariaLabel": None, "dataIcon": None, "testid": None, "svgTitle": "menu", "rect": [-1160.88, 724.08, 0, 0]}
+    real_trigger_53 = {"ariaLabel": None, "dataIcon": None, "testid": None, "svgTitle": "menu", "rect": [850, 20, 24, 24]}
+    viewer_buttons_53 = {"buttons": [zero_size_trigger, real_trigger_53]}
+
+    class _FakeAlwaysVisibleItemLocator:
+        def __init__(self):
+            self.first = self
+        async def is_visible(self, timeout=None):
+            return True
+        async def click(self, timeout=None):
+            pass
+
+    class _FakeMenuPage53(_FakeMenuPage):
+        def locator(self, sel):
+            return _FakeAlwaysVisibleItemLocator()
+
+    page_53 = _FakeMenuPage53()
+
+    async def _fake_evaluate_menu_53(page, js, arg=None, timeout=10.0):
+        page.click_count += 1
+        return {"items": [{"text": "Download"}]}
+
+    async def _fake_collect_downloads_53(page, trigger, window_s=25.0, quiet_s=3.0):
+        await trigger()
+        return [{"ok": True, "_raw_bytes": b"X"}]
+
+    mark_scan._evaluate = _fake_evaluate_menu_53
+    mark_scan._collect_downloads = _fake_collect_downloads_53
+    try:
+        result_53 = asyncio.run(mark_scan._click_download_in_open_viewer(page_53, viewer_buttons_53, {"reached": True}))
+    finally:
+        mark_scan._evaluate = orig_evaluate_menu
+        mark_scan._collect_downloads = orig_collect_downloads
+
+    assert result_53["ok"] is True, result_53
+    assert page_53.click_count == 1, page_53.click_count  # the zero-size phantom was never tried at all
+    assert result_53["menu_trigger"] == real_trigger_53, result_53
+    print("53. UPLOAD skips phantom buttons   -> a zero-size/off-screen 'button' is never tried as a menu-trigger candidate")
+
 
 if __name__ == "__main__":
     main()

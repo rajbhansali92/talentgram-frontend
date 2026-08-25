@@ -359,6 +359,82 @@ _SCROLL_STEP_JS = """
 }
 """
 
+_SCROLL_TO_BOTTOM_JS = """
+([sel]) => {
+  const els = Array.from(document.querySelectorAll(sel));
+  let container = null, maxOverflow = 0;
+  let node = els[0] ? els[0].parentElement : null;
+  for (let d = 0; d < 8 && node; d++) {
+    const overflow = node.scrollHeight - node.clientHeight;
+    if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+    node = node.parentElement;
+  }
+  if (container) container.scrollTop = container.scrollHeight;
+  return !!container;
+}
+"""
+
+_BOTTOM_READINESS_CHECK_JS = """
+([sel]) => {
+  const els = Array.from(document.querySelectorAll(sel));
+  let container = null, maxOverflow = 0;
+  let node = els[0] ? els[0].parentElement : null;
+  for (let d = 0; d < 8 && node; d++) {
+    const overflow = node.scrollHeight - node.clientHeight;
+    if (overflow > maxOverflow) { maxOverflow = overflow; container = node; }
+    node = node.parentElement;
+  }
+  if (!container) return {hasContainer: false, atBottom: true};
+  const atBottom = (container.scrollTop + container.clientHeight) >= (container.scrollHeight - 5);
+  return {
+    hasContainer: true, atBottom,
+    scrollTop: container.scrollTop, scrollHeight: container.scrollHeight, clientHeight: container.clientHeight,
+  };
+}
+"""
+
+MAX_SCROLL_TO_BOTTOM_ATTEMPTS = 5
+SCROLL_TO_BOTTOM_SETTLE_MS = 400
+
+
+async def _scroll_to_true_bottom(page, full_sel: str) -> Dict[str, Any]:
+    """Explicitly scrolls the message container to its true bottom BEFORE
+    any capture begins. Found live (2026-08-25): _dump_window's own "tail"
+    checkpoint just reads whatever's CURRENTLY rendered, silently assuming
+    the chat is already scrolled to the bottom — but a prior operation
+    (e.g. scrolling an older message into view to open its viewer, part of
+    UPLOAD's own hardened video-retrieval retries) can leave the chat
+    scrolled mid-history, and _open_group_chat's own fast path (group
+    already open) never re-scrolls to correct it. Every scan since then
+    only ever moves UPWARD (toward older history) from wherever the chat
+    happened to be, so any mark sent after that point is permanently
+    invisible to the scanner — this is why older marks kept resolving
+    while newer ones silently disappeared.
+
+    Bounded: at most MAX_SCROLL_TO_BOTTOM_ATTEMPTS scroll+settle+check
+    iterations — WhatsApp can still be lazily rendering height as it
+    scrolls, so one scrollTop assignment isn't always immediately
+    reflected in scrollHeight, hence the readiness check rather than a
+    single blind scroll. Never an unbounded loop; if the true bottom
+    still isn't reached after every attempt, this reports that honestly
+    rather than silently proceeding as if it succeeded."""
+    last_state: Dict[str, Any] = {}
+    for _ in range(MAX_SCROLL_TO_BOTTOM_ATTEMPTS):
+        try:
+            has_container = await _evaluate(page, _SCROLL_TO_BOTTOM_JS, [full_sel])
+        except Exception as exc:
+            return {"ok": False, "reason": f"scroll-to-bottom failed: {exc}"}
+        if not has_container:
+            return {"ok": False, "reason": "no scrollable message container found"}
+        await page.wait_for_timeout(SCROLL_TO_BOTTOM_SETTLE_MS)
+        try:
+            last_state = await _evaluate(page, _BOTTOM_READINESS_CHECK_JS, [full_sel])
+        except Exception as exc:
+            return {"ok": False, "reason": f"bottom readiness check failed: {exc}"}
+        if not last_state.get("hasContainer") or last_state.get("atBottom"):
+            return {"ok": True, "state": last_state}
+    return {"ok": False, "reason": "did not reach true bottom within bounded attempts", "state": last_state}
+
 
 async def _dump_window(
     page, group_name: str, max_messages: int, diagnostic: Optional[Dict[str, Any]] = None, max_steps: int = 10,
@@ -408,6 +484,15 @@ async def _dump_window(
             order.append(data_id)
             new_here += 1
         checkpoints.append({"label": label, "rendered_count": n, "new_unique": new_here, "merged_total": len(merged)})
+
+    # Explicit scroll-to-bottom BEFORE the tail checkpoint (2026-08-25 fix)
+    # — see _scroll_to_true_bottom's own docstring for the full root cause.
+    # Never assumes the chat is already at the bottom; always corrects it
+    # first, so a mark sent after any prior scroll-affecting operation is
+    # never permanently invisible to this scan.
+    bottom_result = await _scroll_to_true_bottom(page, full_sel)
+    if diagnostic is not None:
+        diagnostic["scroll_to_bottom_before_tail"] = bottom_result
 
     await _capture_step("tail")
 

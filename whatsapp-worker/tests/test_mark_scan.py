@@ -1454,6 +1454,248 @@ def main():
     assert tile_54.click_count == 1, tile_54.click_count
     print("54. UPLOAD message rehydration     -> a transient post-close 'not found' recovers within the bounded rehydration retry")
 
+    # ------------------------------------------------------------------
+    # 55-60: mark-scanner scroll-to-bottom fix (2026-08-25). Real finding:
+    # _dump_window's own "tail" checkpoint silently assumed the chat was
+    # already scrolled to the bottom — a prior operation (e.g. UPLOAD's
+    # own hardened video retries scrolling an OLDER message into view)
+    # could leave the chat scrolled mid-history, and _open_group_chat's
+    # fast path never corrects it. Every scan then only moved UPWARD from
+    # wherever the chat happened to be, so a mark sent after that point
+    # was permanently invisible — this is why 23 older marks kept
+    # resolving while brand-new ones silently disappeared. Fix:
+    # _scroll_to_true_bottom runs before the tail checkpoint, with a
+    # bounded readiness loop (never a blind single scroll, never
+    # unbounded). Never touches mark parsing, mention handling, hash
+    # identity, album logic, UPLOAD's download path, or SEND's Forward
+    # path — proven by tests 33-35c/36-54 above still passing unchanged.
+    # ------------------------------------------------------------------
+    class _FakeBottomPage:
+        def __init__(self, has_container=True):
+            self.has_container = has_container
+            self.scroll_attempts = 0
+            self.at_bottom_after_attempt = 1  # becomes true once this many scroll calls have happened
+            self.waits = 0
+        async def wait_for_timeout(self, ms):
+            self.waits += 1
+
+    orig_evaluate_bottom = mark_scan._evaluate
+
+    # 55: starts mid-scroll -> reaches the true bottom in one attempt.
+    page_55 = _FakeBottomPage()
+    async def _fake_evaluate_55(page, js, arg=None, timeout=10.0):
+        if js == mark_scan._SCROLL_TO_BOTTOM_JS:
+            page.scroll_attempts += 1
+            return page.has_container
+        if js == mark_scan._BOTTOM_READINESS_CHECK_JS:
+            at_bottom = page.scroll_attempts >= page.at_bottom_after_attempt
+            return {"hasContainer": True, "atBottom": at_bottom, "scrollTop": 999, "scrollHeight": 1000, "clientHeight": 200}
+        return None
+    mark_scan._evaluate = _fake_evaluate_55
+    try:
+        result_55 = asyncio.run(mark_scan._scroll_to_true_bottom(page_55, "SEL"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_bottom
+    assert result_55["ok"] is True, result_55
+    assert page_55.scroll_attempts == 1, page_55.scroll_attempts
+    print("55. scanner scroll-to-bottom       -> mid-scroll chat reaches the true bottom in one bounded attempt")
+
+    # 56: already at the bottom -> succeeds immediately, still calls the
+    # SAME code path (no special-casing), behavior otherwise unchanged.
+    page_56 = _FakeBottomPage()
+    page_56.at_bottom_after_attempt = 1  # first scroll call already lands at bottom (no-op scroll, already there)
+    async def _fake_evaluate_56(page, js, arg=None, timeout=10.0):
+        if js == mark_scan._SCROLL_TO_BOTTOM_JS:
+            page.scroll_attempts += 1
+            return page.has_container
+        if js == mark_scan._BOTTOM_READINESS_CHECK_JS:
+            return {"hasContainer": True, "atBottom": True, "scrollTop": 800, "scrollHeight": 1000, "clientHeight": 200}
+        return None
+    mark_scan._evaluate = _fake_evaluate_56
+    try:
+        result_56 = asyncio.run(mark_scan._scroll_to_true_bottom(page_56, "SEL"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_bottom
+    assert result_56["ok"] is True, result_56
+    assert page_56.scroll_attempts == 1, page_56.scroll_attempts
+    print("56. scanner already at bottom      -> succeeds on the first check, no behavior change for the already-correct case")
+
+    # 57: no scrollable container found -> fails immediately, never loops.
+    page_57 = _FakeBottomPage(has_container=False)
+    async def _fake_evaluate_57(page, js, arg=None, timeout=10.0):
+        if js == mark_scan._SCROLL_TO_BOTTOM_JS:
+            page.scroll_attempts += 1
+            return False
+        return None
+    mark_scan._evaluate = _fake_evaluate_57
+    try:
+        result_57 = asyncio.run(mark_scan._scroll_to_true_bottom(page_57, "SEL"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_bottom
+    assert result_57["ok"] is False, result_57
+    assert page_57.scroll_attempts == 1, page_57.scroll_attempts  # never retries a genuinely missing container
+    print("57. scanner no container found     -> fails cleanly on the first attempt, never loops against nothing")
+
+    # 58: never reaches bottom -> bounded to MAX_SCROLL_TO_BOTTOM_ATTEMPTS,
+    # then fails cleanly rather than looping forever.
+    page_58 = _FakeBottomPage()
+    async def _fake_evaluate_58(page, js, arg=None, timeout=10.0):
+        if js == mark_scan._SCROLL_TO_BOTTOM_JS:
+            page.scroll_attempts += 1
+            return True
+        if js == mark_scan._BOTTOM_READINESS_CHECK_JS:
+            return {"hasContainer": True, "atBottom": False, "scrollTop": 500, "scrollHeight": 2000, "clientHeight": 200}
+        return None
+    mark_scan._evaluate = _fake_evaluate_58
+    try:
+        result_58 = asyncio.run(mark_scan._scroll_to_true_bottom(page_58, "SEL"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_bottom
+    assert result_58["ok"] is False, result_58
+    assert page_58.scroll_attempts == mark_scan.MAX_SCROLL_TO_BOTTOM_ATTEMPTS, page_58.scroll_attempts
+    print("58. scanner never reaches bottom   -> bounded to MAX_SCROLL_TO_BOTTOM_ATTEMPTS, never an infinite loop")
+
+    # 59/60: full _dump_window + _run_scan integration — a chat scrolled
+    # mid-history (only an OLDER source+mark rendered) reveals a NEWER
+    # source+mark (no @mention) only AFTER the scroll-to-bottom fix runs;
+    # the older mark is still found too, and mention_lid is None for the
+    # no-mention one.
+    def _plain_video_html(data_id, seed):
+        blob = (seed * 20)[:80]
+        return (
+            f'<div data-id="{data_id}" data-testid="conv-msg-{data_id}">'
+            f'<div data-testid="video-content">'
+            f'<div style="background-image: url(&quot;data:image/jpeg;base64,{blob}&quot;);"></div>'
+            f'</div></div>'
+        )
+
+    def _reply_mark_html(data_id, mark_text, quoted_seed):
+        quoted_blob = (quoted_seed * 20)[:80]
+        return (
+            f'<div data-id="{data_id}" data-testid="conv-msg-{data_id}">'
+            f'<span data-testid="selectable-text">{mark_text}</span>'
+            f'</div>',
+            f'<div data-testid="quoted-message">'
+            f'<div style="background-image: url(&quot;data:image/jpeg;base64,{quoted_blob}&quot;);"></div>'
+            f'</div>',
+        )
+
+    old_src_html = _plain_video_html("OLDSRC01", "OLDVIDEOSEED")
+    old_mark_html, old_quoted_html = _reply_mark_html("OLDMARKREPLY01", "mark CleanTest take 1", "OLDVIDEOSEED")
+    new_src_html = _plain_video_html("NEWSRC01", "NEWVIDEOSEED")
+    new_mark_html, new_quoted_html = _reply_mark_html("NEWMARKREPLY01", "mark CleanScan Test Take 1", "NEWVIDEOSEED")
+
+    message_by_id = {
+        "OLDSRC01": {"messageHtml": old_src_html, "quotedHtml": None},
+        "OLDMARKREPLY01": {"messageHtml": old_mark_html, "quotedHtml": old_quoted_html},
+        "NEWSRC01": {"messageHtml": new_src_html, "quotedHtml": None},
+        "NEWMARKREPLY01": {"messageHtml": new_mark_html, "quotedHtml": new_quoted_html},
+    }
+    before_ids = ["OLDSRC01", "OLDMARKREPLY01"]  # mid-scroll: only the OLDER pair is rendered
+    after_ids = ["OLDSRC01", "OLDMARKREPLY01", "NEWSRC01", "NEWMARKREPLY01"]  # true bottom reveals the newer pair too
+
+    class _FakeScrollConvLocator:
+        def __init__(self, page):
+            self._page = page
+        async def count(self):
+            return len(self._page.after_ids if self._page.scrolled else self._page.before_ids)
+
+    class _FakeScrollPage:
+        def __init__(self, before_ids, after_ids):
+            self.before_ids = before_ids
+            self.after_ids = after_ids
+            self.scrolled = False
+            self.scroll_calls = 0
+        def locator(self, sel):
+            return _FakeScrollConvLocator(self)
+        async def wait_for_timeout(self, ms):
+            pass
+
+    async def _fake_evaluate_59(page, js, arg=None, timeout=10.0):
+        if js == mark_scan._SCROLL_TO_BOTTOM_JS:
+            page.scroll_calls += 1
+            page.scrolled = True
+            return True
+        if js == mark_scan._BOTTOM_READINESS_CHECK_JS:
+            return {"hasContainer": True, "atBottom": True}
+        if js == mark_scan._DOM_DUMP_JS:
+            sel, idx = arg
+            ids = page.after_ids if page.scrolled else page.before_ids
+            if idx >= len(ids):
+                return None
+            return message_by_id[ids[idx]]
+        if js == mark_scan._SCROLL_STEP_JS:
+            return {"moved": False}
+        return None
+
+    page_59 = _FakeScrollPage(before_ids, after_ids)
+    orig_resolve_scope_59 = mark_scan.sender._resolve_scope
+    async def _fake_resolve_scope_59(page):
+        return "#main"
+    mark_scan._evaluate = _fake_evaluate_59
+    mark_scan.sender._resolve_scope = _fake_resolve_scope_59
+    try:
+        window_59 = asyncio.run(mark_scan._dump_window(page_59, "Talentgram MEDIA SPIKE TEST", 300))
+    finally:
+        mark_scan._evaluate = orig_evaluate_bottom
+        mark_scan.sender._resolve_scope = orig_resolve_scope_59
+    found_ids_59 = set()
+    for item in window_59:
+        html = item.get("messageHtml") or ""
+        data_id = mark_scan._own_data_id(html)
+        if data_id:
+            found_ids_59.add(data_id)
+    assert page_59.scroll_calls == 1, page_59.scroll_calls  # scrolled to bottom exactly once, before capturing
+    assert found_ids_59 == set(after_ids), found_ids_59  # BOTH the older and the newer pair are found
+    print("59. scanner reveals hidden newer content -> _dump_window scrolls to bottom BEFORE capturing, finds messages invisible before the fix")
+
+    # 60: run the mark-extraction logic (mirroring _run_scan's own Pass
+    # 1/2) over that same window — the older mark AND the newer no-
+    # mention mark both resolve, with the correct source identity/hash,
+    # and mention_lid=None for the no-mention one.
+    sources_by_hash_60: Dict[str, Dict[str, Any]] = {}
+    for item in window_59:
+        html = item.get("messageHtml") or ""
+        if item.get("quotedHtml"):
+            continue
+        data_id = mark_scan._own_data_id(html)
+        if not data_id:
+            continue
+        media_type = mark_scan._media_type(html)
+        if not media_type:
+            continue
+        h = mark_scan._smallest_hash(html)
+        if h:
+            sources_by_hash_60[h] = {"source_message_id": data_id, "source_media_type": media_type}
+    marks_60 = []
+    for item in window_59:
+        quoted_html = item.get("quotedHtml")
+        if not quoted_html:
+            continue
+        html = item.get("messageHtml") or ""
+        mark_text = mark_scan._mark_text(html)
+        if not mark_text:
+            continue
+        quoted_hash = mark_scan._smallest_hash(quoted_html)
+        source = sources_by_hash_60.get(quoted_hash)
+        marks_60.append({
+            "mention_lid": mark_scan._mention_lid(html), "mark_text": mark_text,
+            "resolved_source_message_id": (source or {}).get("source_message_id"),
+            "source_thumbnail_hash": quoted_hash,
+        })
+    by_text_60 = {m["mark_text"]: m for m in marks_60}
+    assert "mark CleanTest take 1" in by_text_60, by_text_60  # older mark still found
+    assert "mark CleanScan Test Take 1" in by_text_60, by_text_60  # newer no-mention mark now found
+    new_mark_60 = by_text_60["mark CleanScan Test Take 1"]
+    assert new_mark_60["mention_lid"] is None, new_mark_60  # no @mention -> mention_lid is None, never required
+    assert new_mark_60["resolved_source_message_id"] == "NEWSRC01", new_mark_60  # exact source_message_id captured
+    assert new_mark_60["source_thumbnail_hash"] is not None, new_mark_60  # exact source_thumbnail_hash captured
+    old_mark_60 = by_text_60["mark CleanTest take 1"]
+    assert old_mark_60["resolved_source_message_id"] == "OLDSRC01", old_mark_60  # older mark's identity unaffected
+    print("60. old + new marks both resolve   -> no-mention mark: mention_lid=None, exact source_message_id/hash captured; older mark unaffected")
+
+    print("61. UPLOAD/SEND untouched          -> tests 33-35c (SEND) and 36-54 (UPLOAD) above pass unchanged; this fix lives entirely in _dump_window")
+
 
 if __name__ == "__main__":
     main()

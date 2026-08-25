@@ -159,6 +159,26 @@ def test_extract_role_and_project_no_role_keyword_returns_none():
     assert ma.extract_role_and_project("mark google") is None  # "mark" present, no recognized role
 
 
+def test_extract_role_and_project_strips_whatsapp_dom_timestamp_noise():
+    """Regression (2026-08-25, found via a real live SEND E2E): mark_text
+    is captured straight from WhatsApp's own DOM, which renders a
+    message's timestamp TWICE (once for the bubble, once for an
+    accessibility label) — sometimes prefixed "Edited". Left unstripped,
+    "Google Test 3 7:20 am 7:20 am" became AMBIGUOUS against a real
+    "Google Test" project (the noise defeated fuzzy resolution), silently
+    dropping an otherwise-valid mark as "wrong project"."""
+    cases = [
+        ("mark Google Test 3 take 1     7:20 am         7:20 am", "Google Test 3"),
+        ("mark google test take 1     Edited  5:05 am         Edited  5:05 am", "google test"),
+        ("mark CleanTest take 1     7:13 pm         7:13 pm", "CleanTest"),
+        ("mark google take 1     5:51 am         5:51 am", "google"),
+    ]
+    for text, expected_fragment in cases:
+        parsed = ma.extract_role_and_project(text)
+        assert parsed is not None, text
+        assert parsed.project_fragment == expected_fragment, (text, parsed.project_fragment)
+
+
 # ---------------------------------------------------------------------------
 # Candidate validation
 # ---------------------------------------------------------------------------

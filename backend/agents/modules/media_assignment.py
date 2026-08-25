@@ -230,6 +230,16 @@ _MARK_KEYWORD_RE = re.compile(r"\bmark\b", re.IGNORECASE)
 _TAKE_RE = re.compile(r"\btake\s*([1-9][0-9]?)\b", re.IGNORECASE)
 _INTRO_RE = re.compile(r"\bintro(?:duction)?\b", re.IGNORECASE)
 _PHOTOS_RE = re.compile(r"\bphotos?\b", re.IGNORECASE)
+# WhatsApp's own DOM renders a message's timestamp text TWICE (once for the
+# bubble, once for an accessibility/tooltip label), sometimes prefixed with
+# "Edited" — e.g. "...take 1     7:20 am         7:20 am" or "...take 1
+# Edited  5:05 am         Edited  5:05 am". mark_text is captured straight
+# from that DOM (see mark_scan.py's _mark_text), so this noise ends up
+# baked into project_fragment unless stripped — found live 2026-08-25: it
+# corrupted fuzzy project resolution (a genuinely unambiguous "Google Test
+# 3" became ambiguous against "Google Test" once "7:20 am 7:20 am" was
+# appended), silently dropping an otherwise-valid mark as "wrong project".
+_TRAILING_TIMESTAMP_RE = re.compile(r"(\s+(?:Edited\s+)?\d{1,2}:\d{2}\s*(?:am|pm))+\s*$", re.IGNORECASE)
 
 
 @dataclass
@@ -260,6 +270,7 @@ def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
     else:
         return None
 
+    working = _TRAILING_TIMESTAMP_RE.sub("", working)
     project_fragment = re.sub(r"\s+", " ", working).strip()
     if not project_fragment:
         return None

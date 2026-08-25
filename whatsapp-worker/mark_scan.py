@@ -2316,7 +2316,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic", "scan_reliability_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic", "scan_reliability_diagnostic", "open_group_chat_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -3560,6 +3560,19 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         result["final_close"] = await _close_viewer(page, viewer_dump)
 
         return {"results": [result]}
+
+    if probe_type == "open_group_chat_diagnostic":
+        # Lightweight, read-only sanity check (2026-08-25) — proves the
+        # hardened _open_group_chat (bounded candidate polling + post-click
+        # verification) against a real source group, a real destination
+        # group, and an intentionally nonexistent one, in a single quick
+        # pass. Never sends anything; never modifies any data.
+        group_names = req.get("group_names") or [group_name]
+        results = []
+        for gn in group_names:
+            status = await sender._open_group_chat(page, gn)
+            results.append({"group_name": gn, "status": status})
+        return {"results": results}
 
     if probe_type == "scan_reliability_diagnostic":
         # Read-only investigation (2026-08-25) — marks that scanned

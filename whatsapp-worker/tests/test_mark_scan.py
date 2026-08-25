@@ -1694,7 +1694,120 @@ def main():
     assert old_mark_60["resolved_source_message_id"] == "OLDSRC01", old_mark_60  # older mark's identity unaffected
     print("60. old + new marks both resolve   -> no-mention mark: mention_lid=None, exact source_message_id/hash captured; older mark unaffected")
 
-    print("61. UPLOAD/SEND untouched          -> tests 33-35c (SEND) and 36-54 (UPLOAD) above pass unchanged; this fix lives entirely in _dump_window")
+    print("61. UPLOAD/SEND untouched (scanner)-> tests 33-35c (SEND) and 36-54 (UPLOAD) above pass unchanged from the _dump_window fix alone")
+
+    # ------------------------------------------------------------------
+    # 62-67: same root cause, shared message-resolution layer (2026-08-25).
+    # A real live UPLOAD run against fresh CleanScan Test marks hit
+    # "message_not_found" inside _open_tile_viewer_and_download_hardened
+    # -> _resolve_video_tile_by_hash -> _find_message_index_by_data_id — a
+    # COMPLETELY SEPARATE function from _dump_window (used by the
+    # scanner), sharing the identical false premise ("the group was just
+    # opened, which WhatsApp scrolls to the bottom by default") in its own
+    # docstring. _find_message_index_by_data_id now calls the SAME
+    # _scroll_to_true_bottom helper before its own "search current tail"
+    # step — no new JS, no duplicated logic, no change to its existing
+    # upward _ensure_history_loaded fallback for genuinely older targets.
+    # This is used by BOTH UPLOAD's hardened retry loop and SEND's own
+    # _resolve_video_tile_locator, so both benefit — SEND's own Forward/
+    # destination/caption/send-click logic is completely untouched (proven
+    # by tests 33-35c above still passing unchanged).
+    # ------------------------------------------------------------------
+    class _FakeIdxTile:
+        def __init__(self, data_id):
+            self._data_id = data_id
+        async def get_attribute(self, name):
+            return f"conv-msg-{self._data_id}"
+
+    class _FakeIdxLocator:
+        def __init__(self, ids):
+            self._ids = ids
+        async def count(self):
+            return len(self._ids)
+        def nth(self, i):
+            return _FakeIdxTile(self._ids[i])
+
+    class _FakeIdxPage:
+        def __init__(self, before_ids, after_ids, older_ids=None):
+            self.before_ids = before_ids
+            self.after_ids = after_ids
+            self.older_ids = older_ids or []  # only revealed via _ensure_history_loaded (scroll UP)
+            self.scrolled_to_bottom = False
+            self.history_loaded = False
+        def locator(self, sel):
+            ids = self.after_ids if self.scrolled_to_bottom else self.before_ids
+            if self.history_loaded:
+                ids = self.older_ids + ids
+            return _FakeIdxLocator(ids)
+        async def wait_for_timeout(self, ms):
+            pass
+
+    orig_resolve_scope_idx = mark_scan.sender._resolve_scope
+    async def _fake_resolve_scope_idx(page):
+        return "#main"
+
+    async def _fake_evaluate_idx(page, js, arg=None, timeout=10.0):
+        if js == mark_scan._SCROLL_TO_BOTTOM_JS:
+            page.scrolled_to_bottom = True
+            return True
+        if js == mark_scan._BOTTOM_READINESS_CHECK_JS:
+            return {"hasContainer": True, "atBottom": True}
+        if js == mark_scan._LOAD_HISTORY_JS:
+            page.history_loaded = True
+            ids = page.older_ids + (page.after_ids if page.scrolled_to_bottom else page.before_ids)
+            return len(ids)
+        return None
+
+    mark_scan.sender._resolve_scope = _fake_resolve_scope_idx
+    mark_scan._evaluate = _fake_evaluate_idx
+
+    # 62: chat starts scrolled mid-history (target only rendered AFTER
+    # scrolling to the bottom) -> resolver moves to bottom and finds it.
+    page_62 = _FakeIdxPage(before_ids=["OLD1", "OLD2"], after_ids=["OLD1", "OLD2", "NEW1"])
+    try:
+        idx_62 = asyncio.run(mark_scan._find_message_index_by_data_id(page_62, "Talentgram MEDIA SPIKE TEST", "NEW1"))
+    finally:
+        pass
+    assert idx_62 == 2, idx_62
+    assert page_62.scrolled_to_bottom is True, "must have scrolled to bottom to find it"
+    print("62. resolver scrolls to bottom     -> mid-scroll chat: target only found after moving to the true bottom")
+
+    # 63: chat already at the bottom (before == after) -> behaves
+    # normally, same result either way.
+    page_63 = _FakeIdxPage(before_ids=["OLD1", "TARGET1"], after_ids=["OLD1", "TARGET1"])
+    idx_63 = asyncio.run(mark_scan._find_message_index_by_data_id(page_63, "Talentgram MEDIA SPIKE TEST", "TARGET1"))
+    assert idx_63 == 1, idx_63
+    print("63. resolver already at bottom     -> no functional difference, target found exactly as before")
+
+    # 64: target is OLDER than the current rendered window (not present
+    # even after scrolling to the true bottom) -> the EXISTING upward
+    # _ensure_history_loaded fallback still finds it, completely unchanged.
+    page_64 = _FakeIdxPage(before_ids=["MID1"], after_ids=["MID1"], older_ids=["ANCIENT1"])
+    idx_64 = asyncio.run(mark_scan._find_message_index_by_data_id(page_64, "Talentgram MEDIA SPIKE TEST", "ANCIENT1"))
+    assert idx_64 == 0, idx_64
+    assert page_64.history_loaded is True, "upward history-load fallback must still have run"
+    print("64. older target still found       -> existing upward _ensure_history_loaded fallback unchanged for genuinely older messages")
+
+    # 65: the SAME data_id sits at a DIFFERENT index than a previous call
+    # would have seen (new messages pushed it down) -> still found by its
+    # own data-id, never a stale/wrong positional index.
+    page_65 = _FakeIdxPage(before_ids=["X1"], after_ids=["A", "B", "C", "TARGET2"])
+    idx_65 = asyncio.run(mark_scan._find_message_index_by_data_id(page_65, "Talentgram MEDIA SPIKE TEST", "TARGET2"))
+    assert idx_65 == 3, idx_65
+    print("65. index drift handled            -> found by its own data-id at whatever index it currently sits, never a stale one")
+
+    # 66: a genuinely missing data_id -> returns None, never substitutes
+    # a neighboring message.
+    page_66 = _FakeIdxPage(before_ids=["A", "B"], after_ids=["A", "B", "C"])
+    idx_66 = asyncio.run(mark_scan._find_message_index_by_data_id(page_66, "Talentgram MEDIA SPIKE TEST", "GENUINELY_MISSING"))
+    assert idx_66 is None, idx_66
+    print("66. genuinely missing target       -> returns None cleanly, never selects a neighboring message")
+
+    mark_scan.sender._resolve_scope = orig_resolve_scope_idx
+    mark_scan._evaluate = orig_evaluate_bottom
+
+    print("67. no-mention Mark unaffected     -> already proven end-to-end in test 60 (mention_lid=None, exact source_message_id/hash)")
+    print("68. UPLOAD/SEND video+photo unaffected -> tests 36-54 (UPLOAD hardening) and 33-35c (SEND) above pass unchanged with this fix applied")
 
 
 if __name__ == "__main__":

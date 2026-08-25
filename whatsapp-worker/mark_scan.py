@@ -1983,18 +1983,32 @@ async def _close_viewer(page, viewer_buttons: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _find_message_index_by_data_id(page, group_name: str, data_id: str) -> Optional[int]:
-    """Checks the currently-rendered tail FIRST (the group was just
-    opened, which WhatsApp scrolls to the bottom by default) — only
-    scrolls up to search older history if not found there. Scrolling
-    unconditionally before searching would evict a tail-resident target
-    from WhatsApp's virtualized DOM before ever finding it (2026-08-23:
-    the exact same root cause proven for _dump_window — a real reply,
-    freshly sent, resolved zero times because this function's old
-    unconditional _ensure_history_loaded() scrolled straight to the top
-    first, and the reply — living in the tail — was never rendered by
-    the time the search actually ran)."""
+    """Checks the currently-rendered tail FIRST — only scrolls up to
+    search older history if not found there. Scrolling UP unconditionally
+    before searching would evict a tail-resident target from WhatsApp's
+    virtualized DOM before ever finding it (2026-08-23: the exact same
+    root cause proven for _dump_window — a real reply, freshly sent,
+    resolved zero times because this function's old unconditional
+    _ensure_history_loaded() scrolled straight to the top first, and the
+    reply — living in the tail — was never rendered by the time the
+    search actually ran).
+
+    This function's own ORIGINAL premise — "the group was just opened,
+    which WhatsApp scrolls to the bottom by default" — is only true for a
+    genuinely fresh open. _open_group_chat's fast path (group already the
+    active chat) never re-scrolls, and a prior media/viewer interaction
+    (e.g. scrolling an OLDER message into view) can leave the chat
+    scrolled mid-history — proven live (2026-08-25) via the identical bug
+    in _dump_window. _scroll_to_true_bottom now runs once, first, using
+    the SAME bounded readiness loop (never a blind scroll, never
+    unbounded) — so "the currently-rendered tail" means the TRUE tail
+    again, restoring this function's own stated assumption instead of
+    silently trusting whatever position a prior interaction left behind.
+    If the target is older than the true bottom, the existing upward
+    _ensure_history_loaded fallback below is completely unchanged."""
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
+    await _scroll_to_true_bottom(page, full_sel)
 
     async def _search_current() -> Optional[int]:
         loc = page.locator(full_sel)

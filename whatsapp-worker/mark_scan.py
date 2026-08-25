@@ -6031,17 +6031,34 @@ _FORWARD_DIALOG_DUMP_JS = """
 
 
 def _find_onscreen_forward_button(dump: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    # Only an on-screen match counts — a persistent OFF-SCREEN "Forward
-    # media" decoy control coexists with the real one for video (proven
-    # 2026-08-24/25 via forward_readiness_diagnostic); never picked here.
+    # A "Forward media" decoy control coexists with the real "Forward"
+    # control for video — originally found persistently OFF-SCREEN
+    # (2026-08-24/25 via forward_readiness_diagnostic), but a real SEND
+    # E2E (2026-08-25) later found it CAN also land on-screen (a small
+    # 26x26 button, part of a message quick-action/reaction bar, not the
+    # viewer's own toolbar) — clicking it opens no destination picker at
+    # all. On-screen alone is therefore not sufficient: the decoy's exact
+    # "Forward media" aria-label is explicitly excluded, and an exact
+    # "Forward" aria-label is preferred whenever one is on-screen; only
+    # falls back to a looser "forward"-substring match (still excluding
+    # the decoy) for resilience against label wording changes.
     if not dump or not dump.get("rootFound"):
         return None
+    exact_match = None
+    loose_match = None
     for b in dump.get("buttons") or []:
+        aria = (b.get("ariaLabel") or "").strip().lower()
+        if aria == "forward media":
+            continue  # the known decoy — never a candidate, on-screen or not
         hay = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("testid"), b.get("svgTitle")])).lower()
         rect = b.get("rect") or [0, 0, 0, 0]
-        if re.search(r"forward", hay) and -50 <= rect[1] <= 3000:
-            return b
-    return None
+        if not (re.search(r"forward", hay) and -50 <= rect[1] <= 3000):
+            continue
+        if aria == "forward" and exact_match is None:
+            exact_match = b
+        elif loose_match is None:
+            loose_match = b
+    return exact_match or loose_match
 
 
 async def _open_media_and_get_forward_button(

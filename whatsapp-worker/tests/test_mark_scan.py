@@ -735,6 +735,28 @@ def main():
     assert result_35b["ok"] is False, result_35b
     print("35b. forward send refuses to guess -> no real Send control found -> ok=False, never a fabricated success")
 
+    # 35c: REGRESSION (2026-08-25 — found via a real SEND E2E). The
+    # "Forward media" decoy CAN land on-screen for video (not always
+    # off-screen as first observed), and clicking it opens no destination
+    # picker at all. _find_onscreen_forward_button must exclude it
+    # outright and prefer an exact "Forward" match when one is present.
+    dump_with_decoy_only = {
+        "rootFound": True,
+        "buttons": [{"ariaLabel": "Forward media", "dataIcon": None, "testid": None, "svgTitle": "ic-fast-forward", "rect": [980, 372, 26, 26]}],
+    }
+    assert mark_scan._find_onscreen_forward_button(dump_with_decoy_only) is None, "decoy alone must never be picked"
+
+    dump_with_both = {
+        "rootFound": True,
+        "buttons": [
+            {"ariaLabel": "Forward media", "dataIcon": None, "testid": None, "svgTitle": "ic-fast-forward", "rect": [980, 372, 26, 26]},
+            {"ariaLabel": "Forward", "dataIcon": None, "testid": None, "svgTitle": "ic-fast-forward", "rect": [1126, 10, 40, 40]},
+        ],
+    }
+    picked = mark_scan._find_onscreen_forward_button(dump_with_both)
+    assert picked is not None and picked["ariaLabel"] == "Forward", picked
+    print("35c. Forward-media decoy excluded  -> exact 'Forward' preferred, decoy never picked even when on-screen")
+
     # ------------------------------------------------------------------
     # 36-40: video-tile re-resolution fix (2026-08-24). Real finding: a
     # live SEND's Playwright error referenced index 3; a diagnostic

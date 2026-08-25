@@ -634,63 +634,106 @@ def main():
     # above already proves both album types remain unaffected by this fix.
     print("32. video/photo batch marking      -> unaffected by the hydration fix (see tests 15 and 28, unchanged)")
 
-    # 2026-08-24: SEND workflow — independent of UPLOAD, sends already-
-    # downloaded WhatsApp bytes DIRECTLY to a destination group, never via
-    # Cloudinary/URL. _send_one owns the temp file's full lifecycle: write
-    # -> pass to the existing proven sender via local_file_path -> delete,
-    # regardless of send outcome. Classification matches worker.py's own
-    # established outbound-job policy exactly (sent+unverified still
-    # counts as genuinely sent, never retried).
-    class _FakeSenderModule:
-        def __init__(self, state, capture):
-            self._state = state
-            self._capture = capture
-        async def send_whatsapp_message(self, **kwargs):
-            self._capture.append(kwargs)
-            if kwargs.get("local_file_path"):
-                # Prove the file genuinely exists and is readable AT the
-                # moment the sender is invoked (not deleted early, not
-                # never-written).
-                with open(kwargs["local_file_path"], "rb") as fh:
-                    self._capture[-1]["_file_contents_at_send_time"] = fh.read()
-            return {"state": self._state, "evidence": {}}
+    # 2026-08-25: native-Forward SEND replaces the old download+reattach
+    # _send_one entirely — SEND now forwards media in place via WhatsApp's
+    # own Forward control, never downloading it. These tests cover the new
+    # destination-picker matching (_select_forward_destination), proven
+    # live via forward_destination_flow_diagnostic: WhatsApp concatenates
+    # each row's icon name + chat name + member list into one text node,
+    # so matching is substring containment (never exact equality), and
+    # every real row renders twice in the DOM (dedupe by shared y-rect).
 
-    orig_sender = mark_scan.sender
+    class _FakeMouse:
+        def __init__(self):
+            self.clicks = []
+        async def click(self, x, y, button="left"):
+            self.clicks.append((x, y, button))
 
-    def _run_send_one_with_state(state):
-        capture = []
-        mark_scan.sender = _FakeSenderModule(state, capture)
-        try:
-            target = {
-                "source_message_id": "SRC123", "destination_group": "Talentgram Casting Test",
-                "caption": "Ahana Test — Google Test Take 1", "source_media_type": "image",
-            }
-            raw = b"\xff\xd8\xff\xe0" + b"\x00" * 32  # real JPEG magic bytes
-            result = asyncio.run(mark_scan._send_one(page=object(), target=target, raw=raw))
-            return result, capture
-        finally:
-            mark_scan.sender = orig_sender
+    class _FakeKeyboard:
+        def __init__(self):
+            self.typed = []
+            self.pressed = []
+        async def type(self, text, delay=None):
+            self.typed.append(text)
+        async def press(self, key):
+            self.pressed.append(key)
 
-    result_ok, capture_ok = _run_send_one_with_state("MESSAGE_SENT_AND_VERIFIED")
-    assert result_ok["ok"] is True, result_ok
-    assert result_ok["source_message_id"] == "SRC123"
-    assert capture_ok[0]["destination_type"] == "group"
-    assert capture_ok[0]["destination"] == "Talentgram Casting Test"
-    assert capture_ok[0]["message_body"] == "Ahana Test — Google Test Take 1"
-    assert capture_ok[0]["_file_contents_at_send_time"] == b"\xff\xd8\xff\xe0" + b"\x00" * 32
-    temp_path_ok = capture_ok[0]["local_file_path"]
-    assert not os.path.exists(temp_path_ok)  # _send_one cleaned up its own temp file
-    print("33. _send_one verified send        -> writes real bytes to a local temp file, passes local_file_path, cleans up after")
+    class _FakeForwardPage:
+        def __init__(self):
+            self.mouse = _FakeMouse()
+            self.keyboard = _FakeKeyboard()
+            self.wait_calls = 0
+        async def wait_for_timeout(self, ms):
+            self.wait_calls += 1
 
-    result_unverified, _ = _run_send_one_with_state("MESSAGE_SENT_BUT_NOT_VERIFIED")
-    assert result_unverified["ok"] is True, result_unverified  # matches worker.py's own retry policy exactly
-    print("34. _send_one unverified send      -> still counts as genuinely sent (matches existing outbound-job policy)")
+    def _dialog_dump(list_items):
+        return {
+            "dialogFound": True,
+            "textboxes": [{"testid": None, "role": "textbox", "text": "", "rect": [490, 121, 296, 20]}],
+            "listItems": list_items,
+        }
 
-    for failure_state in ("CHAT_NOT_OPENED", "MESSAGE_NOT_SENT", "INVALID_DESTINATION"):
-        result_fail, capture_fail = _run_send_one_with_state(failure_state)
-        assert result_fail["ok"] is False, (failure_state, result_fail)
-        assert not os.path.exists(capture_fail[0]["local_file_path"])  # cleaned up even on failure
-    print("35. _send_one failure states       -> never counted as sent, temp file still cleaned up on every outcome")
+    orig_evaluate_fs = mark_scan._evaluate
+
+    async def _fake_evaluate_one_match(page, js, arg=None, timeout=10.0):
+        return _dialog_dump([
+            {"testid": "list-item-2", "role": "listitem",
+             "text": "ic-checkdefault-group-refreshedTalentgram Casting TestMyself, Raj, You", "rect": [422, 300, 436, 72]},
+            {"testid": "cell-frame-container", "role": None,
+             "text": "default-group-refreshedTalentgram Casting TestMyself, Raj, You", "rect": [432, 300, 416, 72]},
+        ])
+    mark_scan._evaluate = _fake_evaluate_one_match
+    try:
+        result_33 = asyncio.run(mark_scan._select_forward_destination(_FakeForwardPage(), "Talentgram Casting Test"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_fs
+    assert result_33["ok"] is True, result_33
+    print("33. forward destination match      -> substring-contains match across duplicate DOM rows dedupes to exactly one, selects it")
+
+    async def _fake_evaluate_zero_match(page, js, arg=None, timeout=10.0):
+        return _dialog_dump([{"testid": "list-item-1", "role": "listitem", "text": "Recent chats", "rect": [422, 228, 436, 72]}])
+    mark_scan._evaluate = _fake_evaluate_zero_match
+    try:
+        result_34 = asyncio.run(mark_scan._select_forward_destination(_FakeForwardPage(), "Talentgram Casting Test"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_fs
+    assert result_34["ok"] is False, result_34
+    assert "found 0" in result_34["reason"], result_34
+    print("34. forward destination zero match -> clean failure, never guesses at a different group")
+
+    async def _fake_evaluate_two_matches(page, js, arg=None, timeout=10.0):
+        return _dialog_dump([
+            {"testid": "list-item-2", "role": "listitem", "text": "Talentgram Casting Test AMyself, Raj, You", "rect": [422, 300, 436, 72]},
+            {"testid": "list-item-3", "role": "listitem", "text": "Talentgram Casting Test BMyself, Raj, You", "rect": [422, 372, 436, 72]},
+        ])
+    mark_scan._evaluate = _fake_evaluate_two_matches
+    try:
+        result_35 = asyncio.run(mark_scan._select_forward_destination(_FakeForwardPage(), "Talentgram Casting Test"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_fs
+    assert result_35["ok"] is False, result_35
+    assert "found 2" in result_35["reason"], result_35
+    print("35. forward destination ambiguous -> two genuinely distinct rows both match -> clean failure, never auto-picks")
+
+    # 35b: _enter_forward_caption_and_send's strict Send contract — success
+    # is ONLY "a real Send selector was matched and clicked" (delegated to
+    # sender._find_and_click_send(allow_enter_fallback=False), covered
+    # directly in test_sender.py); here we confirm the wrapper propagates
+    # that refusal rather than inventing its own success signal when no
+    # real control is found.
+    orig_sender_click = mark_scan.sender._find_and_click_send
+
+    async def _fake_no_send_control(page, allow_enter_fallback=True):
+        assert allow_enter_fallback is False  # SEND must never allow the Enter fallback
+        return None
+
+    mark_scan.sender._find_and_click_send = _fake_no_send_control
+    try:
+        result_35b = asyncio.run(mark_scan._enter_forward_caption_and_send(_FakeForwardPage(), ""))
+    finally:
+        mark_scan.sender._find_and_click_send = orig_sender_click
+    assert result_35b["ok"] is False, result_35b
+    print("35b. forward send refuses to guess -> no real Send control found -> ok=False, never a fabricated success")
 
     # ------------------------------------------------------------------
     # 36-40: video-tile re-resolution fix (2026-08-24). Real finding: a

@@ -5883,151 +5883,300 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
     return {"results": results}
 
 
-# SEND-state success/failure classification (2026-08-24) — matches
-# worker.py's own outbound-job policy exactly: MESSAGE_SENT_AND_VERIFIED
-# and MESSAGE_SENT_BUT_NOT_VERIFIED both mean the send genuinely
-# happened (the same reason worker.py never retries "sent+unverified");
-# everything else is a real failure, safe to retry on a later SEND run.
-_SEND_SUCCESS_STATES = {"MESSAGE_SENT_AND_VERIFIED", "MESSAGE_SENT_BUT_NOT_VERIFIED"}
-
-
-async def _send_one(page, target: Dict[str, Any], raw: bytes, diagnostic_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Writes already-downloaded WhatsApp source bytes to a local temp
-    file and sends them via the existing, proven send_whatsapp_message —
-    local_file_path skips any URL/Cloudinary round-trip entirely. This
-    function owns the temp file's full lifecycle (create, pass, delete) —
-    send_whatsapp_message never deletes a local_file_path it didn't
-    create itself (see its own docstring).
-
-    `diagnostic_meta` (2026-08-24, diagnostic-only): forwarded unchanged
-    to send_whatsapp_message, which logs it ONLY if the attach-button
-    click itself fails — never read here, never affects the result."""
-    detected = _detect_mime_type(raw, target.get("source_media_type"))
-    ext = _MIME_BY_EXT.get(detected, "bin")
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tf:
-            tf.write(raw)
-            temp_path = tf.name
-        result = await sender.send_whatsapp_message(
-            page=page, destination_type="group", destination=target["destination_group"],
-            message_body=target.get("caption") or "", local_file_path=temp_path,
-            diagnostic_meta=diagnostic_meta, strict_send_confirmation=True,
-        )
-        state = result.get("state")
-        if state in _SEND_SUCCESS_STATES:
-            return {"ok": True, "source_message_id": target["source_message_id"], "send_state": state}
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send state {state!r}", "send_state": state}
-    except Exception as exc:
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send failed: {exc}"}
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
-
-
+# Native-Forward SEND (2026-08-25) — replaces the old download+reattach
+# SEND mechanism ENTIRELY. SEND never downloads media at all: it opens the
+# exact marked source, uses WhatsApp's own native Forward control, selects
+# the destination group by exact unique match, enters an optional caption,
+# and clicks the real Send control. This is a completely separate code
+# path from UPLOAD's own _run_download/_open_tile_viewer_and_download/
+# _download_photo_album_tile_via_blob — none of those are called anywhere
+# below, by design, so SEND cannot accidentally route through UPLOAD's
+# downloader.
 PER_ITEM_SEND_TIMEOUT = 90.0
+MAX_FORWARD_READINESS_ROUNDS = 3
+
+_FORWARD_VIEWER_BUTTONS_JS = """
+    () => {
+      let anchor = document.querySelector('video');
+      if (!anchor) {
+        const imgs = Array.from(document.querySelectorAll('img[src^="blob:"]'))
+          .filter(im => im.offsetWidth > 300 && im.offsetHeight > 300)
+          .sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight));
+        anchor = imgs[0] || null;
+      }
+      if (!anchor) return {rootFound: false, buttons: []};
+      let root = anchor;
+      while (root.parentElement && root.parentElement !== document.body) root = root.parentElement;
+      if (!root.parentElement) return {rootFound: false, buttons: []};
+      const btns = Array.from(root.querySelectorAll('button, [role="button"]'));
+      return {rootFound: true, buttons: btns.map(b => {
+        const r = b.getBoundingClientRect();
+        const svgTitle = b.querySelector('svg title');
+        return {
+          ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
+          testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
+          rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+        };
+      })};
+    }
+"""
+
+_FORWARD_DIALOG_DUMP_JS = """
+    () => {
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-animate-modal-body="true"]'));
+      const dialog = dialogs[dialogs.length - 1] || null;
+      if (!dialog) return {dialogFound: false};
+      const textboxes = Array.from(dialog.querySelectorAll('[contenteditable="true"], input[type="text"], [role="textbox"]'));
+      const listItems = Array.from(dialog.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
+      const dump = el => {
+        const r = el.getBoundingClientRect();
+        return {
+          testid: el.getAttribute('data-testid'), role: el.getAttribute('role'),
+          text: (el.textContent || '').trim().slice(0, 160),
+          rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+        };
+      };
+      return {dialogFound: true, textboxes: textboxes.map(dump), listItems: listItems.map(dump)};
+    }
+"""
 
 
-async def _send_one_target(page, group_name: str, target: Dict[str, Any], item_label: str = "") -> Dict[str, Any]:
-    """One SEND item end-to-end: reopen the source group, locate the exact
-    marked message, retrieve its original bytes via the same proven
-    mechanism its media type requires, then hand off to _send_one. Split
-    out from _run_send so each item can be individually time-bounded —
-    one truly stuck item must fail on its own, never silently swallow the
-    rest of the batch's already-real results (see _run_send's docstring).
+def _find_onscreen_forward_button(dump: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    # Only an on-screen match counts — a persistent OFF-SCREEN "Forward
+    # media" decoy control coexists with the real one for video (proven
+    # 2026-08-24/25 via forward_readiness_diagnostic); never picked here.
+    if not dump or not dump.get("rootFound"):
+        return None
+    for b in dump.get("buttons") or []:
+        hay = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("testid"), b.get("svgTitle")])).lower()
+        rect = b.get("rect") or [0, 0, 0, 0]
+        if re.search(r"forward", hay) and -50 <= rect[1] <= 3000:
+            return b
+    return None
 
-    `item_label` (2026-08-24, diagnostic-only): e.g. "3/6" — folded into
-    the diagnostic_meta passed through to _send_one/send_whatsapp_message,
-    purely for the attach-click-failure evidence log; never affects
-    control flow."""
+
+async def _open_media_and_get_forward_button(
+    page, group_name: str, source_message_id: str, tile_index: int, is_photo: bool,
+) -> Dict[str, Any]:
+    """Opens the exact marked source media — re-resolved fresh by identity
+    on every attempt, never a stale positional index — and returns once
+    the real ON-SCREEN Forward control is confirmed present. A video whose
+    Forward control isn't yet on-screen even after full buffering (proven:
+    full-buffer alone does not guarantee immediate Forward availability)
+    is closed and the SAME message reopened, up to
+    MAX_FORWARD_READINESS_ROUNDS times — never a fixed sleep, never a
+    different message. Photos are proven Forward-ready immediately but run
+    through the identical bounded loop rather than being special-cased, so
+    both media types share one safety net."""
+    last_reason = "Forward control never appeared"
+    for _round in range(MAX_FORWARD_READINESS_ROUNDS):
+        if is_photo:
+            idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+            if idx is None:
+                return {"ok": False, "reason": "source message no longer found in window"}
+            scope = await sender._resolve_scope(page)
+            full_sel = f"{scope} [data-testid^='conv-msg-']"
+            message = page.locator(full_sel).nth(idx)
+            try:
+                has_img = await message.evaluate("""
+                    (el) => {
+                      const imgs = Array.from(el.querySelectorAll('img'));
+                      const big = imgs.filter(im => im.offsetWidth > 20).sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight))[0];
+                      return !!big;
+                    }
+                """)
+                if not has_img:
+                    return {"ok": False, "reason": "no clickable <img> found on photo message"}
+                photo_loc = message.locator("img").first
+                await photo_loc.scroll_into_view_if_needed(timeout=5000)
+                await photo_loc.click(timeout=10000)
+            except Exception as exc:
+                return {"ok": False, "reason": f"photo click failed: {exc}"}
+            await page.wait_for_timeout(1000)
+        else:
+            click_error: Optional[str] = None
+            for attempt in range(MAX_TILE_CLICK_ATTEMPTS):
+                tile, _ = await _resolve_video_tile_locator(page, group_name, source_message_id, tile_index)
+                if tile is None:
+                    click_error = "source message no longer found in window"
+                    break
+                try:
+                    await tile.scroll_into_view_if_needed(timeout=5000)
+                    await tile.click(timeout=10000)
+                    click_error = None
+                    break
+                except Exception as exc:
+                    click_error = str(exc)
+                    if "not stable" not in str(exc) and "detached" not in str(exc):
+                        break
+            if click_error:
+                return {"ok": False, "reason": f"tile click failed: {click_error}"}
+            mounted = False
+            for _ in range(30):
+                try:
+                    if await page.locator("video").count() > 0:
+                        mounted = True
+                        break
+                except Exception:
+                    pass
+                await page.wait_for_timeout(500)
+            if not mounted:
+                return {"ok": False, "reason": "no <video> mounted within 15s of click"}
+            await _wait_for_video_readiness(page, min_ready_state=3, timeout_s=60.0)
+
+        forward_btn = None
+        for _ in range(20):
+            try:
+                dump = await _evaluate(page, _FORWARD_VIEWER_BUTTONS_JS)
+            except Exception:
+                dump = None
+            forward_btn = _find_onscreen_forward_button(dump)
+            if forward_btn is not None:
+                break
+            await page.wait_for_timeout(1000)
+
+        if forward_btn is not None:
+            return {"ok": True, "forward_button": forward_btn}
+
+        last_reason = "Forward control not on-screen after readiness wait"
+        try:
+            viewer_dump = await _evaluate(page, _FORWARD_VIEWER_BUTTONS_JS)
+        except Exception:
+            viewer_dump = {"buttons": []}
+        await _close_viewer(page, viewer_dump)
+
+    return {"ok": False, "reason": last_reason}
+
+
+async def _select_forward_destination(page, destination_group: str) -> Dict[str, Any]:
+    """Types destination_group into the forward picker's own search box
+    and selects the exactly-one matching row — proven live 2026-08-25 via
+    forward_destination_flow_diagnostic. WhatsApp concatenates each row's
+    icon name + chat name + member list into one text node, so matching is
+    by case-insensitive SUBSTRING containment (never exact equality), and
+    every real row renders twice in the DOM (the listitem checkbox wrapper
+    + its inner cell-frame-container, sharing the same y/height) so
+    candidates are deduped by that before counting. STOPS — cancels the
+    picker via Escape and returns ok=False — on zero or multiple distinct
+    matches; never guesses."""
+    try:
+        dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+    except Exception as exc:
+        return {"ok": False, "reason": f"picker dump failed: {exc}"}
+    if not (dump or {}).get("dialogFound"):
+        return {"ok": False, "reason": "forward destination picker did not open"}
+    textboxes = dump.get("textboxes") or []
+    search_box = textboxes[0] if textboxes else None
+    if not search_box:
+        return {"ok": False, "reason": "no search box found in picker"}
+    try:
+        sx = search_box["rect"][0] + search_box["rect"][2] / 2
+        sy = search_box["rect"][1] + search_box["rect"][3] / 2
+        await page.mouse.click(sx, sy, button="left")
+        await page.keyboard.type(destination_group, delay=30)
+        await page.wait_for_timeout(1000)
+    except Exception as exc:
+        return {"ok": False, "reason": f"search typing failed: {exc}"}
+    try:
+        dump2 = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+    except Exception as exc:
+        return {"ok": False, "reason": f"post-search dump failed: {exc}"}
+    list_items = (dump2 or {}).get("listItems") or []
+    needle = destination_group.strip().lower()
+    raw_matches = [li for li in list_items if needle in (li.get("text") or "").strip().lower()]
+    deduped: Dict[int, Dict[str, Any]] = {}
+    for li in raw_matches:
+        rect = li.get("rect") or [0, 0, 0, 0]
+        row_key = round(rect[1] / 5) * 5
+        existing = deduped.get(row_key)
+        if existing is None or (li.get("testid") or "").startswith("list-item-"):
+            deduped[row_key] = li
+    matches = list(deduped.values())
+    if len(matches) != 1:
+        return {"ok": False, "reason": f"expected exactly 1 destination match, found {len(matches)}", "matches": matches}
+    li = matches[0]
+    try:
+        lx = li["rect"][0] + li["rect"][2] / 2
+        ly = li["rect"][1] + li["rect"][3] / 2
+        await page.mouse.click(lx, ly, button="left")
+        await page.wait_for_timeout(800)
+    except Exception as exc:
+        return {"ok": False, "reason": f"destination click failed: {exc}"}
+    return {"ok": True}
+
+
+async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
+    """Types an optional caption into the forward composer's own "Add a
+    message..." box (data-testid="append-message-compose-box" — proven
+    live 2026-08-25, DIFFERENT from the attach-flow's own
+    media-caption-input-container) then clicks the real Send control via
+    the SAME strict, no-Enter-fallback selector chain sender.py's own send
+    path already uses. Success is defined ONLY as: a known real Send
+    selector was matched AND the click on it succeeded — never a secondary
+    signal like the composer clearing or the dialog disappearing."""
+    if caption:
+        try:
+            box = page.locator('[data-testid="append-message-compose-box"]').first
+            await box.click(timeout=5000)
+            await box.type(caption, delay=10)
+        except Exception as exc:
+            return {"ok": False, "reason": f"caption entry failed: {exc}"}
+    selector_used = await sender._find_and_click_send(page, allow_enter_fallback=False)
+    if not selector_used:
+        return {"ok": False, "reason": "no real Send control found — refusing to guess"}
+    return {"ok": True, "selector_used": selector_used}
+
+
+async def _send_one_target_native_forward(page, group_name: str, target: Dict[str, Any], item_label: str = "") -> Dict[str, Any]:
+    """One SEND item end-to-end via native Forward — NEVER downloads
+    media. Opens the exact marked source (re-resolved by identity),
+    ensures the real Forward control is available (bounded close/reopen
+    for video), clicks Forward, selects the destination group by exact
+    unique match, enters an optional caption, and clicks the real Send
+    control. `item_label` (e.g. "3/6") is currently unused but kept for
+    parity with _run_send's per-item logging/timeout bookkeeping."""
     status = await sender._open_group_chat(page, group_name)
     if status != "OPENED":
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"source group not open (status={status})"}
-    idx = await _find_message_index_by_data_id(page, group_name, target["source_message_id"])
-    if idx is None:
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": "source message no longer found in window"}
-    scope = await sender._resolve_scope(page)
-    full_sel = f"{scope} [data-testid^='conv-msg-']"
-    message = page.locator(full_sel).nth(idx)
 
-    raw: Optional[bytes] = None
-    fetch_error: Optional[str] = None
-    viewer_used = False
-    viewer_closed: Optional[Dict[str, Any]] = None
+    is_photo = target.get("source_media_type") != "video"
+    tile_index = target.get("album_tile_index") or 0
 
-    if target.get("source_media_type") == "video":
-        viewer_used = True
-        tile_index = target.get("album_tile_index")
-        if tile_index is None:
-            tile_index = 0
-        dl = await _open_tile_viewer_and_download(
-            page, message, tile_index,
-            group_name=group_name, source_message_id=target["source_message_id"],
-        )
-        viewer_closed = dl.get("viewer_closed")
-        if not dl.get("ok"):
-            fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
-        else:
-            downloads = dl.get("downloads") or []
-            raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
-            if not raw:
-                fetch_error = "downloaded zero bytes"
-    elif target.get("album_tile_index") is not None:
-        dl = await _download_photo_album_tile_via_blob(
-            message, page, target.get("album_tile_index"), target["source_thumbnail_hash"],
-        )
-        if not dl.get("ok"):
-            fetch_error = dl.get("reason") or f"failed at stage {dl.get('stage')}"
-        else:
-            raw = dl.get("_raw_bytes")
-            if not raw:
-                fetch_error = "downloaded zero bytes"
-    else:
+    ready = await _open_media_and_get_forward_button(page, group_name, target["source_message_id"], tile_index, is_photo)
+    if not ready.get("ok"):
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"forward not ready: {ready.get('reason')}"}
+
+    forward_btn = ready["forward_button"]
+    try:
+        cx = forward_btn["rect"][0] + forward_btn["rect"][2] / 2
+        cy = forward_btn["rect"][1] + forward_btn["rect"][3] / 2
+        await page.mouse.click(cx, cy, button="left")
+    except Exception as exc:
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"forward click failed: {exc}"}
+    await page.wait_for_timeout(1200)
+
+    select_result = await _select_forward_destination(page, target["destination_group"])
+    if not select_result.get("ok"):
         try:
-            fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
-        except Exception as exc:
-            fetched = None
-            fetch_error = f"download failed: {exc}"
-        if fetched is not None:
-            if not fetched.get("ok"):
-                fetch_error = fetched.get("reason")
-            elif not fetched.get("base64"):
-                fetch_error = "downloaded zero bytes"
-            else:
-                raw = b64mod.b64decode(fetched["base64"])
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"destination selection failed: {select_result.get('reason')}"}
 
-    if raw is None:
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": fetch_error or "download failed"}
+    send_result = await _enter_forward_caption_and_send(page, target.get("caption") or "")
+    if not send_result.get("ok"):
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send failed: {send_result.get('reason')}"}
 
-    diagnostic_meta = {
-        "item": item_label,
-        "destination_group": target.get("destination_group"),
-        "source_group": group_name,
-        "source_media_type": target.get("source_media_type"),
-        "media_role": target.get("media_role"),
-        "album_tile_index": target.get("album_tile_index"),
-        "source_retrieval_ok": True,
-        "viewer_used": viewer_used,
-        "viewer_closed": viewer_closed,
-    }
-    send_result = await _send_one(page, target, raw, diagnostic_meta=diagnostic_meta)
-    send_result["byte_length"] = len(raw)
-    return send_result
+    return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT", "selector_used": send_result.get("selector_used")}
 
 
 async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
-    """SEND workflow (2026-08-24) — independent of UPLOAD: retrieves the
-    ORIGINAL WhatsApp source media using the exact same proven mechanisms
-    (_download_photo_album_tile_via_blob for photo album tiles,
-    _open_tile_viewer_and_download for video/album-video, the plain
-    blob-fetch path for a single non-album photo) and sends the resulting
-    bytes directly to the destination Casting group — never touching
-    Cloudinary, /media-upload, submissions, or media_assignments. Each
-    target is independently resilient: one item's failure never prevents
-    the rest from being attempted, and never substitutes another tile.
+    """SEND workflow (2026-08-25 architecture) — independent of UPLOAD:
+    forwards the ORIGINAL WhatsApp source media via WhatsApp's own native
+    Forward mechanism, never downloading it — see
+    _send_one_target_native_forward. Each target is independently
+    resilient: one item's failure never prevents the rest from being
+    attempted, and never substitutes another item.
 
     Each item runs under its own PER_ITEM_SEND_TIMEOUT bound (2026-08-24
     fix — a real disposable E2E against 6 items hit the OUTER 180s
@@ -6045,7 +6194,7 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     for i, target in enumerate(send_targets):
         item_label = f"{i + 1}/{len(send_targets)}"
         try:
-            result = await asyncio.wait_for(_send_one_target(page, group_name, target, item_label), timeout=PER_ITEM_SEND_TIMEOUT)
+            result = await asyncio.wait_for(_send_one_target_native_forward(page, group_name, target, item_label), timeout=PER_ITEM_SEND_TIMEOUT)
         except asyncio.TimeoutError:
             result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"timed out after {PER_ITEM_SEND_TIMEOUT}s"}
         except Exception as exc:

@@ -646,13 +646,20 @@ def test_non_strict_mode_still_allows_enter_fallback_for_other_callers():
 
 
 def test_strict_mode_unverified_submission_never_produces_sent_status():
-    """4: a caller-level check — mark_scan.py's _SEND_SUCCESS_STATES must
-    never include MESSAGE_NOT_SENT, so an unverified/failed submission can
-    never become send_status="sent" in media_sends."""
-    import mark_scan
-    assert sender.MESSAGE_NOT_SENT not in mark_scan._SEND_SUCCESS_STATES
-    assert sender.MESSAGE_SENT_AND_VERIFIED in mark_scan._SEND_SUCCESS_STATES
-    assert sender.MESSAGE_SENT_BUT_NOT_VERIFIED in mark_scan._SEND_SUCCESS_STATES
+    """4: a caller-level check for native-Forward SEND (2026-08-25) —
+    mark_scan.py's _enter_forward_caption_and_send treats
+    _find_and_click_send(allow_enter_fallback=False) as its ONLY success
+    signal: a real selector matched and clicked, never a secondary signal
+    like the composer clearing or a dialog disappearing. Confirms that
+    contract holds at its actual dependency: with no real Send selector on
+    the page, the strict call returns None (never "keyboard:Enter" or any
+    other falsy-but-truthy value that could be mistaken for success)."""
+    page = FakePage(send_button_selector_that_matches=None)
+    with _real_send_click():
+        result = run(sender._find_and_click_send(page, allow_enter_fallback=False))
+    assert result is None
+    assert "Enter" not in page.keyboard.pressed
+    assert page.send_button_clicks == []
 
 
 def test_successful_submission_is_deterministic_not_incidental():

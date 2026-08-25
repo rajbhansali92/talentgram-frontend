@@ -6063,10 +6063,20 @@ async def _select_forward_destination(page, destination_group: str) -> Dict[str,
     candidates are deduped by that before counting. STOPS — cancels the
     picker via Escape and returns ok=False — on zero or multiple distinct
     matches; never guesses."""
-    try:
-        dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
-    except Exception as exc:
-        return {"ok": False, "reason": f"picker dump failed: {exc}"}
+    # Bounded poll, not a single dump after a fixed sleep — a real E2E
+    # (2026-08-25) found the picker for a VIDEO source takes measurably
+    # longer to render than for a photo, and a fixed 1200ms wait before
+    # the caller's first check was sometimes too short, misreporting a
+    # picker that was still on its way as "did not open".
+    dump: Optional[Dict[str, Any]] = None
+    for _ in range(10):
+        try:
+            dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+        except Exception as exc:
+            return {"ok": False, "reason": f"picker dump failed: {exc}"}
+        if (dump or {}).get("dialogFound"):
+            break
+        await page.wait_for_timeout(500)
     if not (dump or {}).get("dialogFound"):
         return {"ok": False, "reason": "forward destination picker did not open"}
     textboxes = dump.get("textboxes") or []

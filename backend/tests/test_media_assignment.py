@@ -1256,3 +1256,35 @@ async def test_media_upload_endpoint_intro_and_take_coexist_correctly_categorize
         await db.talents.delete_one({"id": talent_id})
         await db.submissions.delete_many({"project_id": project_id})
         await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+def test_validate_candidates_batch_failure_with_no_project_match_is_silently_ignored():
+    """Real production incident (2026-08-26, live SEND E2E): an old,
+    unresolvable batch mark ("mark google: take 1, take 2, take 3,
+    intro") sitting in a WhatsApp group from unrelated earlier testing
+    blocked a completely different, later SEND request for an unrelated
+    project ("CleanScan Test") with BATCH RESOLUTION FAILED. Root cause:
+    the batch-relevance check briefly used the SAME admin-authoritative
+    "default to the requested project" leniency as the single-mark path
+    -- safe for an ACCEPTED single mark, but turns any group with one
+    stale/unresolvable batch mark into a permanent poison pill once
+    applied to something that's presented as a hard BLOCK. A batch mark
+    with NO confident project match at all must be silently ignored,
+    regardless of which project is currently requested -- only a
+    CONFIDENT match to the requested project makes it relevant."""
+    candidates = [{
+        "mention_lid": GUNWANTI_LID,
+        "mark_text": "mark totallyunrelatedxyz: take 1, take 2, take 3, intro",
+        "reply_message_id": "reply-stale-batch",
+        "quoted_thumbnail_hash": None, "resolved_source_message_id": None,
+        "album_tile_index": None, "source_media_type": None, "is_album_tile": False,
+        "resolution_status": "BATCH_RESOLUTION_FAILED",
+        "batch_resolution_error": "jumped-to message is not an album",
+    }]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok, outcome  # the stale batch mark must never block an unrelated request
+    assert outcome.batch_failures == [], outcome.batch_failures
+    assert outcome.assignments == []

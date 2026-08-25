@@ -423,16 +423,27 @@ def validate_candidates(
             parsed_for_relevance = extract_role_and_project(c.get("mark_text") or "")
             if parsed_for_relevance is not None:
                 relevance_match = nlu.resolve_project_by_name(parsed_for_relevance.project_fragment, projects)
-                # 2026-08-25: a fragment that confidently matches a
-                # DIFFERENT real project is still irrelevant to THIS
-                # request. One that matches nothing at all (informal
-                # text) is no longer treated as "irrelevant" — the admin
-                # already explicitly requested this project via the
-                # UPLOAD command, so an unresolved fragment defaults to
-                # being relevant here too (same reasoning as the
-                # single-mark check below).
-                if relevance_match.project and relevance_match.project["id"] != requested_project_id:
-                    continue  # this failed batch belongs to a different, confidently-matched project
+                # Deliberately STRICTER than the single-mark admin-
+                # authoritative default below (2026-08-26 fix — a real
+                # SEND E2E found the exact failure mode this guards
+                # against): a batch mark that can never become a
+                # resolved assignment is surfaced to the admin as a hard
+                # BLOCK ("no upload/send was performed"), not merely
+                # excluded from the accepted set. Defaulting an
+                # unresolvable batch mark with NO confident project match
+                # to "relevant here" turns any WhatsApp group that ever
+                # had ONE such stale/ambiguous batch mark into a
+                # permanent poison pill, blocking every future unrelated
+                # request that happens to scan the same group — proven
+                # live: an old "mark google: take 1, take 2, take 3,
+                # intro" batch mark (unrelated to either project) blocked
+                # a fresh, unrelated SEND for a completely different
+                # project. Only a CONFIDENT match to the requested
+                # project makes a batch failure relevant here; no match
+                # at all is silently ignored, same as before the
+                # single-mark leniency existed.
+                if not relevance_match.project or relevance_match.project["id"] != requested_project_id:
+                    continue  # not confidently for THIS project -> irrelevant, never surfaced as a block
             batch_failures.append(c)
             continue
         parsed = extract_role_and_project(c.get("mark_text") or "")

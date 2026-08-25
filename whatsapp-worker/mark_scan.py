@@ -1629,7 +1629,46 @@ async def _click_download_in_open_viewer(page, viewer_buttons: Dict[str, Any], r
     dismissed via Escape before the next candidate is tried, and only a
     menu that actually contains "Download" is used. Bounded to the real,
     finite number of buttons this ONE dump already found — never an
-    unbounded/blind retry, and never a second live re-query of the DOM."""
+    unbounded/blind retry, and never a second live re-query of the DOM.
+
+    2026-08-25 direct-Download-button fix: a 5-checkpoint read-only
+    diagnostic (video_viewer_controls_timeline_diagnostic) proved this
+    WhatsApp Web build exposes Download as its OWN standalone header
+    button (ariaLabel="Download", svgTitle="ic-download") sitting right
+    alongside "Menu" (ic-more-vert) — NOT hidden inside a menu at all —
+    present, visible, and at the identical position at every checkpoint
+    (immediately after open, at full-buffering readiness, after a 3s
+    settle, and after a close+reopen by the same source_message_id/hash).
+    Clicking it never opens a role="menu" popup (there's nothing to
+    open), so the OLD code's "click trigger -> require menu_dump" loop
+    correctly rejected it as a failed menu-trigger attempt and kept
+    cycling through every other button on the page until exhausted —
+    explaining the "clicked menu trigger but no menu appeared" failures
+    against unrelated buttons (e.g. one labeled "You") seen in real E2Es.
+    This direct button is checked FIRST, by its own aria-label/svg-title
+    identity (never a bare positive-rect fallback) — only when it's
+    genuinely absent does the existing menu-trigger-and-submenu flow run,
+    unchanged, as a defensive fallback for a different WhatsApp UI
+    variant."""
+    for b in viewer_buttons.get("buttons", []):
+        rect = b.get("rect")
+        if not rect or len(rect) < 4 or rect[2] <= 0 or rect[3] <= 0:
+            continue
+        aria = (b.get("ariaLabel") or "").strip().lower()
+        svg = (b.get("svgTitle") or "").strip().lower()
+        if aria == "download" or svg == "ic-download":
+            async def _click_direct_download():
+                cx = b["rect"][0] + b["rect"][2] / 2
+                cy = b["rect"][1] + b["rect"][3] / 2
+                await page.mouse.click(cx, cy, button="left")
+
+            downloads = await _collect_downloads(page, _click_direct_download)
+            return {
+                "ok": bool(downloads) and any(d.get("ok") for d in downloads),
+                "readiness": readiness, "downloads": downloads, "menu_trigger": b,
+                "stage_used": "direct_download_button",
+            }
+
     label_matches = []
     other_candidates = []
     for b in viewer_buttons.get("buttons", []):

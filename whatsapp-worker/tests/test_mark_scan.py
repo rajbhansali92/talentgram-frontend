@@ -1809,6 +1809,166 @@ def main():
     print("67. no-mention Mark unaffected     -> already proven end-to-end in test 60 (mention_lid=None, exact source_message_id/hash)")
     print("68. UPLOAD/SEND video+photo unaffected -> tests 36-54 (UPLOAD hardening) and 33-35c (SEND) above pass unchanged with this fix applied")
 
+    # 69-72: direct Download-button fix (2026-08-25). A read-only 5-checkpoint
+    # diagnostic proved WhatsApp Web exposes Download as its OWN standalone
+    # header button (ariaLabel="Download"/svgTitle="ic-download") sitting
+    # alongside "Menu" — present and stable from the moment the viewer opens
+    # through readiness, a settle period, and a close/reopen — never hidden
+    # inside a submenu. The old code only ever searched for a menu TRIGGER
+    # then required a role="menu" popup to appear; clicking a direct-action
+    # button never produces one, so it kept cycling through every other
+    # button on the page until exhausted (explaining the real E2E's "You"
+    # button failure). These tests exercise the new direct-button check.
+    class _FakeDownloadMouse:
+        def __init__(self):
+            self.clicks = []
+        async def click(self, x, y, button=None):
+            self.clicks.append((x, y, button))
+
+    class _FakeDownloadKeyboard:
+        def __init__(self):
+            self.pressed = []
+        async def press(self, key):
+            self.pressed.append(key)
+
+    class _FakeDownloadPage:
+        def __init__(self):
+            self.mouse = _FakeDownloadMouse()
+            self.keyboard = _FakeDownloadKeyboard()
+        async def wait_for_timeout(self, ms):
+            pass
+        def locator(self, sel):
+            raise AssertionError("menu-trigger/menu-item locator path must not run when a direct Download button exists")
+
+    download_btn_69 = {"ariaLabel": "Download", "dataIcon": None, "testid": None, "svgTitle": "ic-download", "rect": [1126, 10, 40, 40]}
+    menu_btn_69 = {"ariaLabel": "Menu", "dataIcon": None, "testid": None, "svgTitle": "ic-more-vert", "rect": [1174, 10, 40, 40]}
+    viewer_buttons_69 = {"buttons": [menu_btn_69, download_btn_69]}
+
+    page_69 = _FakeDownloadPage()
+
+    async def _evaluate_must_not_run_69(page, js, arg=None, timeout=10.0):
+        raise AssertionError("menu-dump evaluate must not run when a direct Download button is clicked")
+
+    async def _fake_collect_downloads_69(page, trigger, window_s=25.0, quiet_s=3.0):
+        await trigger()
+        return [{"ok": True, "_raw_bytes": b"X"}]
+
+    orig_evaluate_69, orig_collect_69 = mark_scan._evaluate, mark_scan._collect_downloads
+    mark_scan._evaluate, mark_scan._collect_downloads = _evaluate_must_not_run_69, _fake_collect_downloads_69
+    try:
+        result_69 = asyncio.run(mark_scan._click_download_in_open_viewer(page_69, viewer_buttons_69, {"reached": True}))
+    finally:
+        mark_scan._evaluate, mark_scan._collect_downloads = orig_evaluate_69, orig_collect_69
+
+    assert result_69["ok"] is True, result_69
+    assert result_69["stage_used"] == "direct_download_button", result_69
+    assert result_69["menu_trigger"] == download_btn_69, result_69
+    assert page_69.mouse.clicks == [(1146.0, 30.0, "left")], page_69.mouse.clicks  # clicked the Download button's own center, not Menu's
+    print("69. UPLOAD direct Download button  -> clicked directly by identity (ariaLabel=Download); menu-trigger/menu-dump path never runs")
+
+    # 70: the direct-Download-button check must fall through to the
+    # EXISTING menu-trigger-and-submenu flow, completely unchanged, when no
+    # such button exists (a different WhatsApp UI variant) — reusing the
+    # exact same fixture shape as test 52's self-healing scenario.
+    class _FakeItemLocator70:
+        def __init__(self):
+            self.first = self
+        async def is_visible(self, timeout=None):
+            return True
+        async def click(self, timeout=None):
+            pass
+
+    class _FakeMenuOnlyPage70:
+        def __init__(self):
+            self.mouse = _FakeDownloadMouse()
+            self.keyboard = _FakeDownloadKeyboard()
+        async def wait_for_timeout(self, ms):
+            pass
+        def locator(self, sel):
+            return _FakeItemLocator70()
+
+    menu_only_trigger_70 = {"ariaLabel": None, "dataIcon": None, "testid": None, "svgTitle": "menu", "rect": [850, 20, 24, 24]}
+    viewer_buttons_70 = {"buttons": [menu_only_trigger_70]}  # no Download-labeled button at all
+
+    page_70 = _FakeMenuOnlyPage70()
+
+    async def _fake_evaluate_70(page, js, arg=None, timeout=10.0):
+        return {"items": [{"text": "Download"}]}
+
+    async def _fake_collect_downloads_70(page, trigger, window_s=25.0, quiet_s=3.0):
+        await trigger()
+        return [{"ok": True, "_raw_bytes": b"X"}]
+
+    orig_evaluate_70, orig_collect_70 = mark_scan._evaluate, mark_scan._collect_downloads
+    mark_scan._evaluate, mark_scan._collect_downloads = _fake_evaluate_70, _fake_collect_downloads_70
+    try:
+        result_70 = asyncio.run(mark_scan._click_download_in_open_viewer(page_70, viewer_buttons_70, {"reached": True}))
+    finally:
+        mark_scan._evaluate, mark_scan._collect_downloads = orig_evaluate_70, orig_collect_70
+
+    assert result_70["ok"] is True, result_70
+    assert "stage_used" not in result_70, result_70  # took the OLD menu-trigger path, not the new direct one
+    print("70. UPLOAD menu-trigger fallback    -> unchanged when no direct Download button exists (defensive fallback for a different UI variant)")
+
+    # 71: a zero-size/off-screen "Download"-labeled element is a real DOM
+    # node but never actually clickable — must be skipped by the SAME
+    # positive-rect filter as every other candidate, never clicked, and
+    # must still fall through correctly to the menu-trigger flow.
+    phantom_download_71 = {"ariaLabel": "Download", "dataIcon": None, "testid": None, "svgTitle": "ic-download", "rect": [-100, 700, 0, 0]}
+    menu_trigger_71 = {"ariaLabel": None, "dataIcon": None, "testid": None, "svgTitle": "menu", "rect": [850, 20, 24, 24]}
+    viewer_buttons_71 = {"buttons": [phantom_download_71, menu_trigger_71]}
+
+    page_71 = _FakeMenuOnlyPage70()
+
+    async def _fake_evaluate_71(page, js, arg=None, timeout=10.0):
+        return {"items": [{"text": "Download"}]}
+
+    async def _fake_collect_downloads_71(page, trigger, window_s=25.0, quiet_s=3.0):
+        await trigger()
+        return [{"ok": True, "_raw_bytes": b"X"}]
+
+    orig_evaluate_71, orig_collect_71 = mark_scan._evaluate, mark_scan._collect_downloads
+    mark_scan._evaluate, mark_scan._collect_downloads = _fake_evaluate_71, _fake_collect_downloads_71
+    try:
+        result_71 = asyncio.run(mark_scan._click_download_in_open_viewer(page_71, viewer_buttons_71, {"reached": True}))
+    finally:
+        mark_scan._evaluate, mark_scan._collect_downloads = orig_evaluate_71, orig_collect_71
+
+    assert result_71["ok"] is True, result_71
+    assert "stage_used" not in result_71, result_71  # the phantom was skipped, real work happened via the menu-trigger path
+    assert (-100.0, 700.0, "left") not in page_71.mouse.clicks, page_71.mouse.clicks  # the phantom's own coordinates were never clicked
+    assert page_71.mouse.clicks == [(862.0, 32.0, "left")], page_71.mouse.clicks  # only the real menu trigger was clicked
+    print("71. UPLOAD skips phantom Download   -> a zero-size/off-screen 'Download'-labeled element is never clicked; falls through cleanly")
+
+    # 72: a button whose label merely CONTAINS "download" (e.g. an album's
+    # "Download all") is NOT an exact identity match and must never be
+    # substituted for the real per-item Download button — only an exact
+    # aria-label "Download" or svg-title "ic-download" qualifies.
+    download_all_72 = {"ariaLabel": "Download all", "dataIcon": None, "testid": None, "svgTitle": None, "rect": [1126, 10, 40, 40]}
+    menu_trigger_72 = {"ariaLabel": None, "dataIcon": None, "testid": None, "svgTitle": "menu", "rect": [850, 20, 24, 24]}
+    viewer_buttons_72 = {"buttons": [download_all_72, menu_trigger_72]}
+
+    page_72 = _FakeMenuOnlyPage70()
+
+    async def _fake_evaluate_72(page, js, arg=None, timeout=10.0):
+        return {"items": [{"text": "Download"}]}
+
+    async def _fake_collect_downloads_72(page, trigger, window_s=25.0, quiet_s=3.0):
+        await trigger()
+        return [{"ok": True, "_raw_bytes": b"X"}]
+
+    orig_evaluate_72, orig_collect_72 = mark_scan._evaluate, mark_scan._collect_downloads
+    mark_scan._evaluate, mark_scan._collect_downloads = _fake_evaluate_72, _fake_collect_downloads_72
+    try:
+        result_72 = asyncio.run(mark_scan._click_download_in_open_viewer(page_72, viewer_buttons_72, {"reached": True}))
+    finally:
+        mark_scan._evaluate, mark_scan._collect_downloads = orig_evaluate_72, orig_collect_72
+
+    assert result_72["ok"] is True, result_72
+    assert "stage_used" not in result_72, result_72  # "Download all" is not an exact match -> old menu-trigger path handled it instead
+    assert (1146.0, 30.0, "left") not in page_72.mouse.clicks, page_72.mouse.clicks  # "Download all"'s own coordinates never clicked directly
+    print("72. UPLOAD exact-match only         -> a 'Download all' label is never treated as the direct per-item Download button")
+
 
 if __name__ == "__main__":
     main()

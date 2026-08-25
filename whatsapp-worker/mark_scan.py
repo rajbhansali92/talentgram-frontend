@@ -1761,6 +1761,17 @@ async def _open_tile_viewer_and_download_hardened(
     last_reason: Optional[str] = None
     last_detail: Dict[str, Any] = {}
     for round_i in range(MAX_DOWNLOAD_READINESS_ROUNDS):
+        # Re-verify the conversation is still the right one before every
+        # round, not just the caller's own targets loop — the SAME
+        # defensive re-open _run_download already uses between DIFFERENT
+        # targets ("a prior tile's viewer-open/Escape cycle can leave the
+        # DOM in a state where a fresh index lookup misses"), applied here
+        # between ROUNDS of the SAME target. Found live (2026-08-25): a
+        # message that resolved successfully in round 0 could not
+        # re-resolve at all in round 1 (even with the bounded rehydration
+        # retry) — a cheap, idempotent fast-path when already open.
+        if round_i > 0:
+            await sender._open_group_chat(page, group_name)
         tile = None
         message_locator = None
         resolved_index = None

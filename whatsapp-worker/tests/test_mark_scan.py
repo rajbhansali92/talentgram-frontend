@@ -1261,6 +1261,7 @@ def main():
         orig_readiness = mark_scan._wait_for_video_readiness
         orig_click_dl = mark_scan._click_download_in_open_viewer
         orig_close = mark_scan._close_viewer
+        orig_open_group_49 = mark_scan.sender._open_group_chat
         mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
         click_dl_calls = {"n": 0}
         async def _fake_click_dl(page, vb, r):
@@ -1273,6 +1274,11 @@ def main():
             close_calls_49.append(True)
             return {"closed": True}
         mark_scan._close_viewer = _fake_close
+        reopen_calls_49 = []
+        async def _fake_reopen_49(page, group_name):
+            reopen_calls_49.append(group_name)
+            return "OPENED"
+        mark_scan.sender._open_group_chat = _fake_reopen_49
         try:
             dl_49 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
                 page_49, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("VIDEOTILE49"), 0,
@@ -1281,11 +1287,13 @@ def main():
             mark_scan._wait_for_video_readiness = orig_readiness
             mark_scan._click_download_in_open_viewer = orig_click_dl
             mark_scan._close_viewer = orig_close
+            mark_scan.sender._open_group_chat = orig_open_group_49
     finally:
         mark_scan._find_message_index_by_data_id = orig_find_idx_up
     assert dl_49["ok"] is True, dl_49
     assert dl_49["round"] == 1, dl_49  # succeeded on the SECOND round, not the first
     assert len(close_calls_49) == 2, close_calls_49  # once to leave the failed round, once more on the successful round's own exit
+    assert reopen_calls_49 == ["Talentgram MEDIA SPIKE TEST"], reopen_calls_49  # re-verified the group before round 1, never before round 0
     assert tile_49_round0.click_count == 1, tile_49_round0.click_count
     assert tile_49_round1.click_count == 1, tile_49_round1.click_count  # round 2 clicked a FRESH tile, not round 1's
     print("49. UPLOAD Download not visible    -> bounded close/reopen round recovers, re-resolving fresh each round")

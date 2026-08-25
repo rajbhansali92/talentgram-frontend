@@ -2957,12 +2957,12 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         # forward_readiness_diagnostic uses for its photo case).
         target_id = req.get("probe_message_id")
         if not target_id:
-            return {"error": "probe_message_id required (a photo message)"}
+            return {"results": [{"error": "probe_message_id required (a photo message)"}]}
         idx = await _find_message_index_by_data_id(page, group_name, target_id)
         result["initial_index"] = idx
         if idx is None:
             result["error"] = "message not found in current window"
-            return result
+            return {"results": [result]}
         scope = await sender._resolve_scope(page)
         full_sel = f"{scope} [data-testid^='conv-msg-']"
         message = page.locator(full_sel).nth(idx)
@@ -2978,13 +2978,13 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             result["photo_click_target_found"] = has_img
             if not has_img:
                 result["error"] = "no clickable <img> found on photo message"
-                return result
+                return {"results": [result]}
             photo_loc = message.locator("img").first
             await photo_loc.scroll_into_view_if_needed(timeout=5000)
             await photo_loc.click(timeout=10000)
         except Exception as exc:
             result["error"] = f"photo click failed: {exc}"
-            return result
+            return {"results": [result]}
         await page.wait_for_timeout(1000)
 
         # Step 2: find + click the real on-screen Forward control (same
@@ -3013,7 +3013,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             """)
         except Exception as exc:
             result["error"] = f"viewer button dump failed: {exc}"
-            return result
+            return {"results": [result]}
         result["viewer_buttons"] = viewer_dump
         forward_btn = None
         for b in (viewer_dump or {}).get("buttons", []):
@@ -3028,7 +3028,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
                 await page.keyboard.press("Escape")
             except Exception:
                 pass
-            return result
+            return {"results": [result]}
         result["forward_button"] = forward_btn
         try:
             cx = forward_btn["rect"][0] + forward_btn["rect"][2] / 2
@@ -3036,7 +3036,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             await page.mouse.click(cx, cy, button="left")
         except Exception as exc:
             result["error"] = f"forward click failed: {exc}"
-            return result
+            return {"results": [result]}
         await page.wait_for_timeout(1200)
 
         # Step 3: dump the destination picker BEFORE any search text.
@@ -3100,7 +3100,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         except Exception as exc:
             result["dialog_present_after_escape"] = f"check failed: {exc}"
 
-        return result
+        return {"results": [result]}
 
     if probe_type == "video_tile_reresolution_live_diagnostic":
         # Diagnostic-only (2026-08-24) — post-deploy verification of the

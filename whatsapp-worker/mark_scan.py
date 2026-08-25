@@ -3409,17 +3409,26 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         if not target_id:
             return {"results": [{"error": "probe_message_id required (a video message)"}]}
 
-        tile, message_locator, resolved_index, resolve_reason = await _resolve_video_tile_by_hash(
-            page, group_name, target_id, thumb_hash, tile_index,
-        )
-        if tile is None:
-            return {"results": [{"error": f"resolve failed: {resolve_reason}"}]}
+        click_error = None
+        resolved_index = None
+        for attempt in range(MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS):
+            tile, message_locator, resolved_index, resolve_reason = await _resolve_video_tile_by_hash(
+                page, group_name, target_id, thumb_hash, tile_index,
+            )
+            if tile is None:
+                return {"results": [{"error": f"resolve failed: {resolve_reason}"}]}
+            try:
+                await tile.scroll_into_view_if_needed(timeout=5000)
+                await tile.click(timeout=10000)
+                click_error = None
+                break
+            except Exception as exc:
+                click_error = exc
+                if "not stable" not in str(exc) and "detached" not in str(exc):
+                    break
         result: Dict[str, Any] = {"resolved_tile_index": resolved_index}
-        try:
-            await tile.scroll_into_view_if_needed(timeout=5000)
-            await tile.click(timeout=10000)
-        except Exception as exc:
-            return {"results": [{"error": f"click failed: {exc}", **result}]}
+        if click_error is not None:
+            return {"results": [{"error": f"click failed: {click_error}", **result}]}
 
         video_mounted = False
         for _ in range(30):

@@ -71,6 +71,11 @@ async def _verified_delivery(*a, **k):
 
 
 sender.dismiss_blocking_dialogs = _true
+# Saved BEFORE the fake overwrite below — the _open_group_chat tests
+# (2026-08-25, near the end of this file) restore the REAL implementation
+# for their duration, since they exercise its actual bounded-polling and
+# post-click-verification logic directly.
+_REAL_OPEN_GROUP_CHAT = sender._open_group_chat
 sender._open_group_chat = _opened
 sender._wait_for_chat_ready = _noop
 sender._p26b_dump = _noop
@@ -727,6 +732,265 @@ def test_local_file_path_survives_strict_mode_not_sent_path():
     finally:
         if os.path.exists(path):
             os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# _open_group_chat (2026-08-25) — real evidence (whatsapp_dom_snapshots,
+# reason="group_not_found") showed zero candidate rows for SEVERAL
+# DIFFERENT groups (including this worker's own concurrent inbound-
+# listener searches) within the same narrow multi-second window, with the
+# search box itself having focused/typed/read-back correctly every time —
+# WhatsApp's own results simply hadn't rendered yet under load, and the
+# old code checked exactly once. These tests exercise the REAL
+# implementation directly (restored via _real_open_group_chat() below),
+# never the file-wide `_opened` stub every other test in this file relies
+# on.
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _real_open_group_chat():
+    sender._open_group_chat = _REAL_OPEN_GROUP_CHAT
+    try:
+        yield
+    finally:
+        sender._open_group_chat = _opened
+
+
+class _FakeGroupCandidateLocator:
+    def __init__(self):
+        self.click_count = 0
+
+    async def click(self, timeout=None):
+        self.click_count += 1
+
+
+class _FakeGroupPage:
+    """Minimal page for _open_group_chat's own orchestration — every
+    lower-level helper it calls (_collect_search_candidates,
+    _verify_chat_open, _read_search_value) is monkeypatched directly per
+    test instead of being simulated through real DOM selectors, so these
+    tests isolate the NEW bounded-retry/verification logic itself."""
+    def __init__(self):
+        self.keyboard = _FakeKeyboard()
+        self.url = "https://web.whatsapp.com/"
+
+    async def title(self):
+        return "WhatsApp"
+
+    def locator(self, sel):
+        if sel == sender.SEARCH_BOX_SELECTORS[0]:
+            return _FakeSearchBoxLocator()
+        return _FakeLocator()
+
+    async def click(self, selector, timeout=None):
+        pass
+
+    async def type(self, selector, text, delay=None):
+        pass
+
+    async def evaluate(self, js, arg=None):
+        if "document.activeElement" in js:
+            return {"tag": "input", "id": "_r_a_", "in_side": True, "in_main": False, "value": "Test Group", "path": "#_r_a_"}
+        return {}
+
+
+class _FakeSearchBoxLocator:
+    def __init__(self):
+        self.first = self
+
+    async def count(self):
+        return 1
+
+    async def is_visible(self):
+        return True
+
+
+GROUP_NAME = "Test Group"
+
+
+def _fake_candidate(title, locator):
+    return {"index": 0, "locator": locator, "title": title, "raw": title, "norm": sender._norm_group(title)}
+
+
+def test_open_group_chat_bounded_candidate_polling_recovers():
+    """Candidates take a few rounds to render (simulating the real
+    evidence: search succeeds, results are momentarily empty under load)
+    -> bounded polling recovers rather than concluding NOT_FOUND
+    prematurely."""
+    page = _FakeGroupPage()
+    row = _FakeGroupCandidateLocator()
+
+    verify_calls = {"n": 0}
+    async def _fake_verify(page, expected_name=None):
+        verify_calls["n"] += 1
+        if verify_calls["n"] == 1:
+            return False, False, False, ""  # fast-path: not already open
+        return True, True, True, expected_name  # post-click verify: succeeds
+
+    collect_calls = {"n": 0}
+    async def _fake_collect(page):
+        collect_calls["n"] += 1
+        if collect_calls["n"] < 3:
+            return None, []
+        return "sel", [_fake_candidate(GROUP_NAME, row)]
+
+    async def _fake_read_value(page, sel):
+        return True, GROUP_NAME
+
+    orig_verify, orig_collect, orig_read = sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value
+    sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = _fake_verify, _fake_collect, _fake_read_value
+    try:
+        with _real_open_group_chat():
+            result = run(sender._open_group_chat(page, GROUP_NAME))
+    finally:
+        sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = orig_verify, orig_collect, orig_read
+
+    assert result == "OPENED", result
+    assert collect_calls["n"] == 3, collect_calls  # took 3 bounded attempts to find candidates
+    assert row.click_count == 1, row.click_count
+
+
+def test_open_group_chat_bounded_candidate_polling_exhausted_is_not_found():
+    """Candidates never render across every bounded attempt (a genuinely
+    absent group) -> NOT_FOUND, never an infinite retry."""
+    page = _FakeGroupPage()
+
+    async def _fake_verify(page, expected_name=None):
+        return False, False, False, ""
+
+    collect_calls = {"n": 0}
+    async def _fake_collect(page):
+        collect_calls["n"] += 1
+        return None, []
+
+    async def _fake_read_value(page, sel):
+        return True, GROUP_NAME
+
+    orig_verify, orig_collect, orig_read = sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value
+    sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = _fake_verify, _fake_collect, _fake_read_value
+    try:
+        with _real_open_group_chat():
+            result = run(sender._open_group_chat(page, GROUP_NAME))
+    finally:
+        sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = orig_verify, orig_collect, orig_read
+
+    assert result == "NOT_FOUND", result
+    assert collect_calls["n"] == sender.MAX_CANDIDATE_COLLECT_ATTEMPTS, collect_calls
+
+
+def test_open_group_chat_post_click_verification_recovers():
+    """The clicked chat's header takes a moment to render -> bounded
+    post-click verification recovers rather than failing immediately."""
+    page = _FakeGroupPage()
+    row = _FakeGroupCandidateLocator()
+
+    verify_calls = {"n": 0}
+    async def _fake_verify(page, expected_name=None):
+        verify_calls["n"] += 1
+        if verify_calls["n"] <= 2:  # call 1 = fast-path (not open); call 2 = first post-click attempt (not yet rendered)
+            return False, False, False, ""
+        return True, True, True, expected_name
+
+    async def _fake_collect(page):
+        return "sel", [_fake_candidate(GROUP_NAME, row)]
+
+    async def _fake_read_value(page, sel):
+        return True, GROUP_NAME
+
+    orig_verify, orig_collect, orig_read = sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value
+    sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = _fake_verify, _fake_collect, _fake_read_value
+    try:
+        with _real_open_group_chat():
+            result = run(sender._open_group_chat(page, GROUP_NAME))
+    finally:
+        sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = orig_verify, orig_collect, orig_read
+
+    assert result == "OPENED", result
+    assert verify_calls["n"] == 3, verify_calls  # fast-path + 2 post-click attempts
+
+
+def test_open_group_chat_never_verifies_is_search_failed_not_opened():
+    """The clicked chat's header never verifies as the requested group
+    (e.g. clicked the wrong row, or WhatsApp never rendered it) -> the
+    click is NEVER blindly trusted; returns SEARCH_FAILED (retryable),
+    not a false OPENED."""
+    page = _FakeGroupPage()
+    row = _FakeGroupCandidateLocator()
+
+    async def _fake_verify(page, expected_name=None):
+        return False, False, False, ""  # never verifies, on any call
+
+    async def _fake_collect(page):
+        return "sel", [_fake_candidate(GROUP_NAME, row)]
+
+    async def _fake_read_value(page, sel):
+        return True, GROUP_NAME
+
+    orig_verify, orig_collect, orig_read = sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value
+    sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = _fake_verify, _fake_collect, _fake_read_value
+    try:
+        with _real_open_group_chat():
+            result = run(sender._open_group_chat(page, GROUP_NAME))
+    finally:
+        sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = orig_verify, orig_collect, orig_read
+
+    assert result == "SEARCH_FAILED", result
+    assert row.click_count == 1, row.click_count  # the row WAS clicked — verification is what refused to trust it
+
+
+def test_open_group_chat_already_open_fast_path_unaffected():
+    """The requested group is already the active chat -> the fast path
+    still short-circuits straight to OPENED, without ever touching
+    candidate collection at all (completely unchanged by this fix)."""
+    page = _FakeGroupPage()
+
+    async def _fake_verify(page, expected_name=None):
+        return True, True, True, expected_name  # already open on the very first (fast-path) call
+
+    collect_calls = {"n": 0}
+    async def _fake_collect(page):
+        collect_calls["n"] += 1
+        return "sel", []
+
+    orig_verify, orig_collect = sender._verify_chat_open, sender._collect_search_candidates
+    sender._verify_chat_open, sender._collect_search_candidates = _fake_verify, _fake_collect
+    try:
+        with _real_open_group_chat():
+            result = run(sender._open_group_chat(page, GROUP_NAME))
+    finally:
+        sender._verify_chat_open, sender._collect_search_candidates = orig_verify, orig_collect
+
+    assert result == "OPENED", result
+    assert collect_calls["n"] == 0, collect_calls  # fast path never reaches candidate collection at all
+
+
+def test_open_group_chat_exact_matching_unaffected():
+    """A near-miss candidate title (e.g. a DIFFERENT group sharing a
+    prefix) is never treated as a match — only an exact normalized-title
+    equality opens a chat, completely unchanged by the bounded-polling
+    fix (which only changes WHEN candidates are collected, never HOW
+    they're matched)."""
+    page = _FakeGroupPage()
+    wrong_row = _FakeGroupCandidateLocator()
+
+    async def _fake_verify(page, expected_name=None):
+        return False, False, False, ""
+
+    async def _fake_collect(page):
+        return "sel", [_fake_candidate("Test Group Extra", wrong_row)]  # NOT an exact match for "Test Group"
+
+    async def _fake_read_value(page, sel):
+        return True, GROUP_NAME
+
+    orig_verify, orig_collect, orig_read = sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value
+    sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = _fake_verify, _fake_collect, _fake_read_value
+    try:
+        with _real_open_group_chat():
+            result = run(sender._open_group_chat(page, GROUP_NAME))
+    finally:
+        sender._verify_chat_open, sender._collect_search_candidates, sender._read_search_value = orig_verify, orig_collect, orig_read
+
+    assert result == "NOT_FOUND", result
+    assert wrong_row.click_count == 0, wrong_row.click_count  # the near-miss row was never clicked
 
 
 if __name__ == "__main__":

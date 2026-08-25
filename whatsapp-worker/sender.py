@@ -1397,11 +1397,23 @@ async def _capture_open_failure(page: Page, reason: str, extra: Optional[dict] =
         logger.info("sender: OPEN-FAILURE snapshot store error=%s", exc)
 
 
+MAX_CANDIDATE_COLLECT_ATTEMPTS = 4
+CANDIDATE_COLLECT_RETRY_DELAY_S = 0.8
+MAX_POST_CLICK_VERIFY_ATTEMPTS = 4
+POST_CLICK_VERIFY_DELAY_S = 0.5
+
+
 async def _open_group_chat(page: Page, group_name: str) -> str:
     """Open a group conversation deterministically. Returns:
-      'OPENED'        — group chat opened
-      'NOT_FOUND'     — searched correctly, group genuinely absent (terminal)
-      'SEARCH_FAILED' — could not focus/operate the sidebar search (retryable)
+      'OPENED'        — group chat opened AND its header/title verified to
+                        actually match the requested group
+      'NOT_FOUND'     — search box focus/type/read-back all succeeded, and
+                        candidate rows were given bounded time to render
+                        (MAX_CANDIDATE_COLLECT_ATTEMPTS), but no row's
+                        title equals the requested group (terminal)
+      'SEARCH_FAILED' — could not focus/operate the sidebar search, OR the
+                        clicked row's chat never verified as the requested
+                        group within bounded attempts (retryable)
 
     Every attempt emits a structured diagnostic record (Investigation 6). On
     NOT_FOUND a DOM snapshot is stored. The search box is ALWAYS inside #side, so
@@ -1415,6 +1427,20 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     (several hundred ms to a few seconds); checking whether the right chat is
     already open costs a handful of cheap locator reads. Skip straight to
     'OPENED' when it is.
+
+    2026-08-25 fix: real evidence (whatsapp_dom_snapshots, reason=
+    "group_not_found") showed zero candidate rows for SEVERAL DIFFERENT
+    groups — including this worker's own concurrent inbound-listener
+    searches — within the same narrow multi-second window, with the
+    search box itself having focused/typed/read-back correctly every
+    time. The old code collected candidates exactly once after a fixed
+    sleep; under load, WhatsApp's own results simply hadn't rendered yet,
+    and that single check wrongly concluded the group was genuinely
+    absent. Candidate collection is now bounded-polled
+    (MAX_CANDIDATE_COLLECT_ATTEMPTS), and the click itself is no longer
+    trusted blindly — the opened chat's own header/title is verified
+    (reusing the same _verify_chat_open the fast-path already relies on)
+    before OPENED is ever returned.
     """
     try:
         already_ready, hdr_found, _, _ = await _verify_chat_open(page, group_name)
@@ -1560,9 +1586,25 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
                        "collection (sidebar focus verified; candidate match still gates click)")
 
     # 5) Collect candidates, log them (raw + normalized), match deterministically.
+    # Bounded polling (2026-08-25 fix), not a single collect-and-decide —
+    # real evidence (whatsapp_dom_snapshots, reason="group_not_found"):
+    # zero candidate rows were found for SEVERAL DIFFERENT groups
+    # (including this worker's own concurrent inbound-listener searches)
+    # within the same narrow multi-second window, with search-box
+    # focus/type/read-back all having already succeeded — i.e. WhatsApp's
+    # results simply hadn't rendered yet under load, and the old code
+    # made exactly one collection attempt with no retry. A group that is
+    # genuinely absent still fails cleanly once every attempt comes back
+    # empty; this only prevents a transient rendering delay from being
+    # misclassified as the terminal NOT_FOUND.
     diag["worker_stage"] = "await_results"
     await _p26b_search_evidence(page, "group_after_settle", search_sel, group_name)  # PHASE26B
     result_sel, candidates = await _collect_search_candidates(page)
+    for _ in range(MAX_CANDIDATE_COLLECT_ATTEMPTS - 1):
+        if candidates:
+            break
+        await asyncio.sleep(CANDIDATE_COLLECT_RETRY_DELAY_S)
+        result_sel, candidates = await _collect_search_candidates(page)
     diag["candidates"] = [c["title"] for c in candidates]
     diag["candidates_norm"] = [c["norm"] for c in candidates]
     logger.info("sender: STEP 4 candidate rows collected count=%d via %s",
@@ -1609,8 +1651,29 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
             return "SEARCH_FAILED"
     logger.info("sender: STEP 6 candidate clicked")
     await _safe_screenshot(page, "/tmp/after_click.png")
-    await asyncio.sleep(1.0)
-    await _p26b_dump(page, "group_after_select", extra={"selected": match["title"]})  # PHASE26B
+
+    # 7) Verify the opened chat's own header/title actually matches the
+    # requested group BEFORE ever returning OPENED (2026-08-25 fix) — the
+    # old code blindly slept 1s after the click and claimed success with
+    # no check at all. Reuses the SAME _verify_chat_open the fast-path
+    # check at the top of this function already trusts, bounded (never
+    # unbounded) in case WhatsApp is still rendering the conversation pane.
+    verified = False
+    for _ in range(MAX_POST_CLICK_VERIFY_ATTEMPTS):
+        await asyncio.sleep(POST_CLICK_VERIFY_DELAY_S)
+        try:
+            ready, hdr_found, _, _ = await _verify_chat_open(page, group_name)
+        except Exception as exc:
+            logger.info("sender: post-click verify error (advisory): %s", exc)
+            ready, hdr_found = False, False
+        if ready and hdr_found:
+            verified = True
+            break
+    await _p26b_dump(page, "group_after_select", extra={"selected": match["title"], "verified": verified})  # PHASE26B
+    if not verified:
+        logger.warning("sender: clicked %r but the opened chat's header never matched — refusing to claim OPENED", match["title"])
+        await _store_dom_snapshot(page, "group_open_unverified", {"group": group_name, "selected": match["title"]})
+        return "SEARCH_FAILED"
     return "OPENED"
 
 

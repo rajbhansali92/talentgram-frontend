@@ -2896,6 +2896,212 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
 
         return {"results": results, "session_identity": session_identity}
 
+    if probe_type == "forward_destination_flow_diagnostic":
+        # Diagnostic-only (2026-08-25) — investigates the native-Forward
+        # destination-picker/composer/caption/Send flow BEFORE any of it is
+        # implemented. Opens a source photo (Forward-ready immediately, no
+        # readiness state machine needed to reach this part of the flow),
+        # clicks the real on-screen Forward control, dumps the destination
+        # picker's DOM, searches for the intended group by name, SELECTS it
+        # (a reversible checkbox toggle — never a send), dumps the resulting
+        # composer/caption state and every candidate "confirm/send" control
+        # for later identification, then cancels the ENTIRE forward flow via
+        # Escape (never clicking anything that could itself be the real Send
+        # control) so nothing is ever actually forwarded during this probe.
+        destination_name = req.get("destination_group_name") or "Talentgram Casting Test"
+
+        def _json_safe(obj):
+            if isinstance(obj, float) and not math.isfinite(obj):
+                return None
+            if isinstance(obj, dict):
+                return {k: _json_safe(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_json_safe(v) for v in obj]
+            return obj
+
+        _DIALOG_DUMP_JS = """
+            () => {
+              const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-animate-modal-body="true"]'));
+              const dialog = dialogs[dialogs.length - 1] || null;
+              if (!dialog) return {dialogFound: false};
+              const textboxes = Array.from(dialog.querySelectorAll('[contenteditable="true"], input[type="text"], [role="textbox"]'));
+              const listItems = Array.from(dialog.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
+              const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
+              const checkboxes = Array.from(dialog.querySelectorAll('input[type="checkbox"], [role="checkbox"]'));
+              const dump = el => {
+                const r = el.getBoundingClientRect();
+                const svgTitle = el.querySelector && el.querySelector('svg title');
+                return {
+                  ariaLabel: el.getAttribute('aria-label'), dataIcon: el.getAttribute('data-icon'),
+                  testid: el.getAttribute('data-testid'), role: el.getAttribute('role'),
+                  svgTitle: svgTitle ? svgTitle.textContent : null,
+                  text: (el.textContent || '').trim().slice(0, 120),
+                  rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+                  checked: el.getAttribute('aria-checked') || (el.checked !== undefined ? String(el.checked) : null),
+                };
+              };
+              return {
+                dialogFound: true,
+                dialogAriaLabel: dialog.getAttribute('aria-label'),
+                textboxes: textboxes.map(dump),
+                listItems: listItems.map(dump),
+                buttons: buttons.map(dump),
+                checkboxes: checkboxes.map(dump),
+              };
+            }
+        """
+
+        result: Dict[str, Any] = {"destination_name": destination_name, "session_identity": session_identity}
+
+        # Step 1: open a single photo (same click mechanism the
+        # forward_readiness_diagnostic uses for its photo case).
+        target_id = req.get("probe_message_id")
+        if not target_id:
+            return {"error": "probe_message_id required (a photo message)"}
+        idx = await _find_message_index_by_data_id(page, group_name, target_id)
+        result["initial_index"] = idx
+        if idx is None:
+            result["error"] = "message not found in current window"
+            return result
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        try:
+            img_click_js = """
+                (el) => {
+                  const imgs = Array.from(el.querySelectorAll('img'));
+                  const big = imgs.filter(im => im.offsetWidth > 20).sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight))[0];
+                  return !!big;
+                }
+            """
+            has_img = await message.evaluate(img_click_js)
+            result["photo_click_target_found"] = has_img
+            if not has_img:
+                result["error"] = "no clickable <img> found on photo message"
+                return result
+            photo_loc = message.locator("img").first
+            await photo_loc.scroll_into_view_if_needed(timeout=5000)
+            await photo_loc.click(timeout=10000)
+        except Exception as exc:
+            result["error"] = f"photo click failed: {exc}"
+            return result
+        await page.wait_for_timeout(1000)
+
+        # Step 2: find + click the real on-screen Forward control (same
+        # classification logic already proven in forward_readiness_diagnostic).
+        try:
+            viewer_dump = await _evaluate(page, """
+                () => {
+                  const imgs = Array.from(document.querySelectorAll('img[src^="blob:"]'))
+                    .filter(im => im.offsetWidth > 300 && im.offsetHeight > 300)
+                    .sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight));
+                  const anchor = imgs[0];
+                  if (!anchor) return {rootFound: false, buttons: []};
+                  let root = anchor;
+                  while (root.parentElement && root.parentElement !== document.body) root = root.parentElement;
+                  const btns = Array.from(root.querySelectorAll('button, [role="button"]'));
+                  return {rootFound: true, buttons: btns.map(b => {
+                    const r = b.getBoundingClientRect();
+                    const svgTitle = b.querySelector('svg title');
+                    return {
+                      ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
+                      testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
+                      rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+                    };
+                  })};
+                }
+            """)
+        except Exception as exc:
+            result["error"] = f"viewer button dump failed: {exc}"
+            return result
+        result["viewer_buttons"] = viewer_dump
+        forward_btn = None
+        for b in (viewer_dump or {}).get("buttons", []):
+            hay = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("testid"), b.get("svgTitle")])).lower()
+            rect = b.get("rect") or [0, 0, 0, 0]
+            if re.search(r"forward", hay) and -50 <= rect[1] <= 3000:
+                forward_btn = b
+                break
+        if forward_btn is None:
+            result["error"] = "no on-screen Forward control found"
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return result
+        result["forward_button"] = forward_btn
+        try:
+            cx = forward_btn["rect"][0] + forward_btn["rect"][2] / 2
+            cy = forward_btn["rect"][1] + forward_btn["rect"][3] / 2
+            await page.mouse.click(cx, cy, button="left")
+        except Exception as exc:
+            result["error"] = f"forward click failed: {exc}"
+            return result
+        await page.wait_for_timeout(1200)
+
+        # Step 3: dump the destination picker BEFORE any search text.
+        try:
+            result["picker_before_search"] = _json_safe(await _evaluate(page, _DIALOG_DUMP_JS))
+        except Exception as exc:
+            result["picker_before_search"] = {"error": str(exc)}
+
+        # Step 4: type the destination group name into whatever textbox the
+        # picker exposes, then re-dump to see the filtered list.
+        try:
+            textboxes = (result["picker_before_search"] or {}).get("textboxes") or []
+            search_box = textboxes[0] if textboxes else None
+            if search_box:
+                sx = search_box["rect"][0] + search_box["rect"][2] / 2
+                sy = search_box["rect"][1] + search_box["rect"][3] / 2
+                await page.mouse.click(sx, sy, button="left")
+                await page.keyboard.type(destination_name, delay=30)
+                await page.wait_for_timeout(1000)
+            result["search_box_found"] = bool(search_box)
+        except Exception as exc:
+            result["search_error"] = str(exc)
+        try:
+            result["picker_after_search"] = _json_safe(await _evaluate(page, _DIALOG_DUMP_JS))
+        except Exception as exc:
+            result["picker_after_search"] = {"error": str(exc)}
+
+        # Step 5: click the list item matching the destination name exactly
+        # (case-insensitive) — a checkbox toggle only, never a send. STOPS
+        # (never guesses) if zero or more than one item matches.
+        list_items = (result["picker_after_search"] or {}).get("listItems") or []
+        matches = [li for li in list_items if (li.get("text") or "").strip().lower() == destination_name.strip().lower()]
+        result["destination_matches_count"] = len(matches)
+        if len(matches) == 1:
+            try:
+                li = matches[0]
+                lx = li["rect"][0] + li["rect"][2] / 2
+                ly = li["rect"][1] + li["rect"][3] / 2
+                await page.mouse.click(lx, ly, button="left")
+                await page.wait_for_timeout(800)
+                result["picker_after_selection"] = _json_safe(await _evaluate(page, _DIALOG_DUMP_JS))
+            except Exception as exc:
+                result["selection_error"] = str(exc)
+        else:
+            result["selection_skipped_reason"] = "zero or multiple exact-text matches — see picker_after_search for raw candidates"
+
+        # Step 6: cancel the ENTIRE forward flow via Escape — never clicking
+        # any button that could itself be the real Send/confirm control.
+        # This is the diagnostic's own hard safety boundary: nothing is
+        # ever actually forwarded by this probe, regardless of what was
+        # found above.
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(500)
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(500)
+        except Exception:
+            pass
+        try:
+            result["dialog_present_after_escape"] = (await _evaluate(page, _DIALOG_DUMP_JS) or {}).get("dialogFound")
+        except Exception as exc:
+            result["dialog_present_after_escape"] = f"check failed: {exc}"
+
+        return result
+
     if probe_type == "video_tile_reresolution_live_diagnostic":
         # Diagnostic-only (2026-08-24) — post-deploy verification of the
         # video-tile re-resolution fix against the EXACT real message that

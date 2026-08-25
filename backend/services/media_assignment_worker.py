@@ -511,7 +511,17 @@ async def _process_download_done() -> bool:
 # reaper is the backend-side backstop: anything still "processing" well
 # past any plausible worker-side bound gets forced to a terminal failed
 # state so it can never block a queue or wait forever.
-STUCK_CLAIM_TIMEOUT_S = 360
+#
+# 2026-08-25: UPLOAD's own hardened video-retrieval path
+# (mark_scan.py's PER_VIDEO_DOWNLOAD_TIMEOUT=500s, up to
+# MAX_DOWNLOAD_READINESS_ROUNDS close/reopen rounds) legitimately needs up
+# to `60 + 500*n_video_targets` seconds for a "download" request — a real
+# single-video UPLOAD E2E was reaped here at 360s while still genuinely
+# working (elapsed ~400s, well within its own worker-side budget). Sized
+# for a realistic worst-case batch (4 videos: 3 takes + intro) with
+# headroom, not an arbitrary bump — still comfortably bounded, never
+# "forever".
+STUCK_CLAIM_TIMEOUT_S = 2100
 _REAP_INTERVAL_S = 60.0
 _last_reap = 0.0
 

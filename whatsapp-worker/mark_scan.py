@@ -3123,6 +3123,91 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
 
         return {"results": [result]}
 
+    if probe_type == "video_forward_dialog_diagnostic":
+        # Diagnostic-only (2026-08-25) — a real SEND E2E against a VIDEO
+        # source got "forward destination picker did not open" from
+        # _select_forward_destination even after a bounded poll, while the
+        # IDENTICAL mechanism worked for a photo moments earlier. Reuses
+        # the real, already-proven _open_media_and_get_forward_button +
+        # Forward click (the SAME code path SEND itself uses — not a
+        # separate hand-rolled click), then dumps EVERYTHING broadly (not
+        # scoped to [role="dialog"], in case video's post-Forward surface
+        # doesn't use that role at all) so the actual cause is seen rather
+        # than guessed. Never selects a destination, never sends.
+        target_id = req.get("probe_message_id")
+        if not target_id:
+            return {"results": [{"error": "probe_message_id required (a video message)"}]}
+        tile_index = req.get("tile_index", 0)
+
+        ready = await _open_media_and_get_forward_button(page, group_name, target_id, tile_index, is_photo=False)
+        if not ready.get("ok"):
+            return {"results": [{"error": f"forward not ready: {ready.get('reason')}", "ready_detail": ready}]}
+
+        forward_btn = ready["forward_button"]
+        result: Dict[str, Any] = {"forward_button": forward_btn}
+        try:
+            cx = forward_btn["rect"][0] + forward_btn["rect"][2] / 2
+            cy = forward_btn["rect"][1] + forward_btn["rect"][3] / 2
+            await page.mouse.click(cx, cy, button="left")
+        except Exception as exc:
+            return {"results": [{"error": f"forward click failed: {exc}"}]}
+
+        _BROAD_DUMP_JS = """
+            () => {
+              const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+              const modalBodies = Array.from(document.querySelectorAll('[data-animate-modal-body]'));
+              const anyOverlay = Array.from(document.querySelectorAll('[data-testid], [aria-label]'))
+                .filter(el => {
+                  const r = el.getBoundingClientRect();
+                  return r.width > 200 && r.height > 200;
+                })
+                .slice(0, 20)
+                .map(el => {
+                  const r = el.getBoundingClientRect();
+                  return {
+                    tag: el.tagName, testid: el.getAttribute('data-testid'),
+                    ariaLabel: el.getAttribute('aria-label'), role: el.getAttribute('role'),
+                    rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+                    textSnippet: (el.textContent || '').trim().slice(0, 80),
+                  };
+                });
+              return {
+                dialogCount: dialogs.length,
+                modalBodyCount: modalBodies.length,
+                dialogAriaLabels: dialogs.map(d => d.getAttribute('aria-label')),
+                videoStillPresent: !!document.querySelector('video'),
+                largeElements: anyOverlay,
+                bodyTextSnapshot: (document.body.innerText || '').slice(0, 500),
+              };
+            }
+        """
+        checkpoints = []
+        for i in range(10):
+            try:
+                dump = await _evaluate(page, _BROAD_DUMP_JS)
+            except Exception as exc:
+                dump = {"error": str(exc)}
+            checkpoints.append({"t_ms": i * 500, "dump": dump})
+            if (dump or {}).get("dialogCount"):
+                break
+            await page.wait_for_timeout(500)
+        result["checkpoints"] = checkpoints
+
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(500)
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(500)
+        except Exception:
+            pass
+        try:
+            viewer_dump = await _evaluate(page, _FORWARD_VIEWER_BUTTONS_JS)
+        except Exception:
+            viewer_dump = {"buttons": []}
+        result["final_close"] = await _close_viewer(page, viewer_dump)
+
+        return {"results": [result]}
+
     if probe_type == "video_tile_reresolution_live_diagnostic":
         # Diagnostic-only (2026-08-24) — post-deploy verification of the
         # video-tile re-resolution fix against the EXACT real message that

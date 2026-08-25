@@ -1633,6 +1633,20 @@ async def _click_download_in_open_viewer(page, viewer_buttons: Dict[str, Any], r
 MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS = 3
 MAX_DOWNLOAD_READINESS_ROUNDS = 3
 
+# Real worst-case duration of ONE _open_tile_viewer_and_download_hardened
+# call, computed (not guessed) from its own bounded sub-timeouts, per
+# round: click retry (3 attempts x (5s scroll + 10s click) = 45s) + video
+# mount wait (15s) + full readiness wait (60s) + menu-candidate search
+# (up to ~8 candidates x ~4s each = ~33s) + close_viewer (8s) = ~161s;
+# x MAX_DOWNLOAD_READINESS_ROUNDS(3) = ~483s. Found live (2026-08-25): a
+# real UPLOAD E2E's video item legitimately used close to the full
+# 3-round budget and got cut off by the OUTER 180s mark_scan_loop
+# timeout, which (like SEND's own pre-existing PER_ITEM_SEND_TIMEOUT fix)
+# wraps the WHOLE batch, discarding every already-succeeded item's result
+# along with the slow one. This bounds each video individually so one
+# slow item can never wipe out the rest of the batch.
+PER_VIDEO_DOWNLOAD_TIMEOUT = 500.0
+
 
 async def _resolve_video_tile_by_hash(
     page, group_name: str, source_message_id: str,
@@ -6197,9 +6211,19 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
             tile_index = target.get("album_tile_index")
             if tile_index is None:
                 tile_index = 0
-            dl = await _open_tile_viewer_and_download_hardened(
-                page, group_name, target["source_message_id"], target.get("source_thumbnail_hash"), tile_index,
-            )
+            try:
+                dl = await asyncio.wait_for(
+                    _open_tile_viewer_and_download_hardened(
+                        page, group_name, target["source_message_id"], target.get("source_thumbnail_hash"), tile_index,
+                    ),
+                    timeout=PER_VIDEO_DOWNLOAD_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                results.append({
+                    "ok": False, "source_message_id": target["source_message_id"],
+                    "error": f"timed out after {PER_VIDEO_DOWNLOAD_TIMEOUT}s",
+                })
+                continue
             if not dl.get("ok"):
                 results.append(_strip_raw_bytes({
                     "ok": False, "source_message_id": target["source_message_id"],
@@ -6707,7 +6731,19 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                     headers=_auth_headers(), timeout=30.0,
                                 )
                             elif req.get("mode") == "download":
-                                result = await asyncio.wait_for(_run_download(page, http, req), timeout=180.0)
+                                # Outer safety net only — normal completion
+                                # happens well inside this via each video
+                                # item's own PER_VIDEO_DOWNLOAD_TIMEOUT
+                                # bound (2026-08-25 fix — mirrors SEND's
+                                # own PER_ITEM_SEND_TIMEOUT reasoning
+                                # exactly: a real E2E's single slow video
+                                # hit the OLD fixed 180s here, which
+                                # cancelled the whole batch and discarded
+                                # every already-downloaded item's result
+                                # along with it).
+                                n_download_targets = len(req.get("download_targets") or [])
+                                download_timeout = 60.0 + PER_VIDEO_DOWNLOAD_TIMEOUT * max(1, n_download_targets)
+                                result = await asyncio.wait_for(_run_download(page, http, req), timeout=download_timeout)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
                                     json={"results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error")},

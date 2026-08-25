@@ -1656,6 +1656,9 @@ MAX_DOWNLOAD_READINESS_ROUNDS = 3
 # slow item can never wipe out the rest of the batch.
 PER_VIDEO_DOWNLOAD_TIMEOUT = 500.0
 
+MESSAGE_REHYDRATION_ATTEMPTS = 3
+MESSAGE_REHYDRATION_DELAY_MS = 800
+
 
 async def _resolve_video_tile_by_hash(
     page, group_name: str, source_message_id: str,
@@ -1679,8 +1682,22 @@ async def _resolve_video_tile_by_hash(
     is falsy (caller has none to check), falls back to trusting
     tile_index_hint alone, identical to _resolve_video_tile_locator's own
     behavior — this only ADDS verification, never removes the tile-index
-    fallback for callers that can't supply a hash."""
-    idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+    fallback for callers that can't supply a hash. A "not found" lookup
+    is retried a SMALL bounded number of times (MESSAGE_REHYDRATION_ATTEMPTS)
+    before being treated as final — found live (2026-08-25): a message
+    resolved successfully in one round can briefly not re-resolve
+    immediately after a close/reopen (WhatsApp's chat list settling after
+    the media-viewer overlay closes), the exact same DOM-virtualization-
+    transience class _wait_for_quoted_message_block already retries for a
+    different call site. A message that's genuinely gone still fails
+    cleanly once every attempt comes back empty."""
+    idx = None
+    for attempt in range(MESSAGE_REHYDRATION_ATTEMPTS):
+        idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+        if idx is not None:
+            break
+        if attempt < MESSAGE_REHYDRATION_ATTEMPTS - 1:
+            await page.wait_for_timeout(MESSAGE_REHYDRATION_DELAY_MS)
     if idx is None:
         return None, None, None, "message_not_found"
     scope = await sender._resolve_scope(page)

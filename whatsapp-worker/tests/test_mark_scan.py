@@ -1415,6 +1415,37 @@ def main():
     assert result_53["menu_trigger"] == real_trigger_53, result_53
     print("53. UPLOAD skips phantom buttons   -> a zero-size/off-screen 'button' is never tried as a menu-trigger candidate")
 
+    # 54: REGRESSION (2026-08-25 — found via a real live UPLOAD E2E). A
+    # message that resolved successfully moments earlier briefly failed
+    # to re-resolve immediately after a close/reopen round. A bounded
+    # rehydration retry (MESSAGE_REHYDRATION_ATTEMPTS) recovers rather
+    # than treating the first "not found" as final.
+    tile_54 = _FakeHashTile("video-content", _video_tile_html("VIDEOTILE54"))
+    # Sequence: None (miss), None (miss), then 4 (found) — the THIRD
+    # attempt succeeds, still within the bounded retry budget.
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([None, None, 4])
+    try:
+        page_54 = _FakeHashPage({4: _FakeHashMessageLocator([tile_54])}, video_mounted=True)
+        orig_readiness = mark_scan._wait_for_video_readiness
+        orig_click_dl = mark_scan._click_download_in_open_viewer
+        orig_close = mark_scan._close_viewer
+        mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+        mark_scan._click_download_in_open_viewer = lambda page, vb, r: asyncio.sleep(0, result={"ok": True, "downloads": [{"ok": True, "_raw_bytes": b"X"}]})
+        mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+        try:
+            dl_54 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+                page_54, "Talentgram MEDIA SPIKE TEST", "3B07252BFE7BC81FB956", _hash_of("VIDEOTILE54"), 0,
+            ))
+        finally:
+            mark_scan._wait_for_video_readiness = orig_readiness
+            mark_scan._click_download_in_open_viewer = orig_click_dl
+            mark_scan._close_viewer = orig_close
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_54["ok"] is True, dl_54
+    assert tile_54.click_count == 1, tile_54.click_count
+    print("54. UPLOAD message rehydration     -> a transient post-close 'not found' recovers within the bounded rehydration retry")
+
 
 if __name__ == "__main__":
     main()

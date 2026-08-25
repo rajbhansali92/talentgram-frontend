@@ -93,6 +93,27 @@ async def get_agent_config(agent_id: str) -> Optional[dict]:
     return await db[CONFIG_COLLECTION].find_one({"agent_id": agent_id})
 
 
+async def find_agents_with_empty_group_names() -> List[str]:
+    """Read-only health check (2026-08-25, production incident) — an
+    `active: True` agent whose group_names is empty is functionally dead
+    (resolve_agent_for_group can never match ANY group for it) but was
+    never flagged anywhere: seed_agent_config() only writes a default on
+    first creation and deliberately never overwrites an existing doc, so a
+    config that drifted to an empty list (however that happened — an admin
+    edit, a diagnostic script, manual DB surgery) stays silently broken
+    across every future restart. A real command sent into that agent's
+    intended WhatsApp group then produces no reply and no error anywhere.
+    Called from ensure_agents_ready() on every startup so this state is
+    visible in logs immediately rather than discovered by a user's message
+    going unanswered."""
+    broken = []
+    cursor = db[CONFIG_COLLECTION].find({"active": True})
+    async for cfg in cursor:
+        if not (cfg.get("group_names") or []):
+            broken.append(cfg["agent_id"])
+    return broken
+
+
 async def resolve_agent_for_group(group_name: str) -> Optional[Tuple[AgentDefinition, dict]]:
     """Given the WhatsApp group a message arrived in, find the (agent,
     config) it should route to, or None if no active agent owns that

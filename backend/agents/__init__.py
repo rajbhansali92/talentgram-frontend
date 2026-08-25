@@ -101,4 +101,23 @@ async def ensure_agents_ready() -> None:
     except Exception:
         logger.exception("whatsapp agent platform index creation failed (non-fatal)")
 
+    # Production incident (2026-08-25) — casting-agent's config had
+    # group_names=[] for an unknown period, which resolve_agent_for_group
+    # treats as "no groups configured", so no message from any group
+    # (including its real, intended one) could ever route to it. Nothing
+    # logged or flagged this — the admin only found out when a real
+    # message produced no reply at all. This check makes that state
+    # impossible to miss on every future startup.
+    try:
+        broken = await registry.find_agents_with_empty_group_names()
+        if broken:
+            logger.error(
+                "WhatsApp agent platform: %d active agent(s) have EMPTY group_names "
+                "and cannot receive ANY WhatsApp message: %s — set whatsapp_agent_config."
+                "group_names for these agent(s) or they will silently drop every command.",
+                len(broken), broken,
+            )
+    except Exception:
+        logger.exception("whatsapp agent platform empty-group-names health check failed (non-fatal)")
+
     logger.info("WhatsApp agent platform ready: %d agent(s) registered", len(registry.list_agents()))

@@ -5695,3 +5695,76 @@ async def test_whitespace_tolerant_stage_move_end_to_end():
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Production incident (2026-08-25) — casting-agent's whatsapp_agent_config
+# doc had group_names=[] in production (created_at == updated_at, never
+# touched since creation), which is silently valid per resolve_agent_for_group
+# ("no groups configured" == "matches nothing"), so a real message sent into
+# the actual "Talentgram Casting Pipeline" group produced NO reply at all —
+# not a parser/dispatcher/executor bug, the message never even reached
+# routing. seed_agent_config() never overwrites an existing doc (by design,
+# to protect admin edits), so once a config drifts to an empty group list it
+# stays broken across every future restart until someone notices and fixes
+# the data directly. This test reproduces the exact silent-drop behavior
+# against a disposable config (never touches the real casting-agent doc),
+# so a future change to make empty-group_names behave differently is a
+# deliberate, visible decision, not an accidental regression.
+# ---------------------------------------------------------------------------
+async def test_empty_group_names_silently_drops_every_message():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": AGENT_ID})
+    doc = {
+        "agent_id": AGENT_ID,
+        "group_names": [],  # the exact production incident's broken state
+        "allowed_senders": [],
+        "security_mode": "group_members",
+        "active": True,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    await db[registry.CONFIG_COLLECTION].replace_one({"agent_id": AGENT_ID}, doc, upsert=True)
+    phone = _phone()
+    try:
+        resolved = await registry.resolve_agent_for_group(group)
+        assert resolved is None, "an agent with group_names=[] must never resolve for ANY group name"
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text="Show Ask To Test",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled is False, r
+        assert not r.reply, r  # completely silent — no reply text at all
+    finally:
+        await _restore_config(original)
+
+
+async def test_agent_config_health_check_flags_empty_group_names():
+    """The systemic gap the production incident exposed: an active agent
+    with an empty group list is functionally dead but was never flagged
+    anywhere — the admin only finds out by a real command going silently
+    unanswered. registry.find_agents_with_empty_group_names() is the
+    lightweight, read-only health check ensure_agents_ready() now logs a
+    warning from on every backend startup, so this state is visible in
+    logs immediately instead of persisting unnoticed indefinitely."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": AGENT_ID})
+    doc = {
+        "agent_id": AGENT_ID,
+        "group_names": [],
+        "allowed_senders": [],
+        "security_mode": "group_members",
+        "active": True,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    await db[registry.CONFIG_COLLECTION].replace_one({"agent_id": AGENT_ID}, doc, upsert=True)
+    try:
+        broken = await registry.find_agents_with_empty_group_names()
+        assert AGENT_ID in broken, broken
+    finally:
+        await _restore_config(original)
+        broken_after = await registry.find_agents_with_empty_group_names()
+        assert AGENT_ID not in broken_after, broken_after

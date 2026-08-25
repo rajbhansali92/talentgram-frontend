@@ -3064,12 +3064,29 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         except Exception as exc:
             result["picker_after_search"] = {"error": str(exc)}
 
-        # Step 5: click the list item matching the destination name exactly
-        # (case-insensitive) — a checkbox toggle only, never a send. STOPS
-        # (never guesses) if zero or more than one item matches.
+        # Step 5: click the list item whose row text CONTAINS the destination
+        # name (case-insensitive) — a checkbox toggle only, never a send.
+        # WhatsApp concatenates the row's icon name + chat name + member
+        # list into one text node (e.g. "ic-check...Talentgram Casting
+        # TestMyself, Raj, You"), so containment is used rather than exact
+        # equality. Each real row renders twice in the DOM — once as the
+        # role="listitem" checkbox wrapper, once as its inner
+        # "cell-frame-container" — both sharing the same y/height, so rows
+        # are deduped by that before counting candidates; STOPS (never
+        # guesses) if zero or more than one DISTINCT row matches.
         list_items = (result["picker_after_search"] or {}).get("listItems") or []
-        matches = [li for li in list_items if (li.get("text") or "").strip().lower() == destination_name.strip().lower()]
+        needle = destination_name.strip().lower()
+        raw_matches = [li for li in list_items if needle in (li.get("text") or "").strip().lower()]
+        deduped_by_row: Dict[int, Dict[str, Any]] = {}
+        for li in raw_matches:
+            rect = li.get("rect") or [0, 0, 0, 0]
+            row_key = round(rect[1] / 5) * 5
+            existing = deduped_by_row.get(row_key)
+            if existing is None or (li.get("testid") or "").startswith("list-item-"):
+                deduped_by_row[row_key] = li
+        matches = list(deduped_by_row.values())
         result["destination_matches_count"] = len(matches)
+        result["destination_matches_raw"] = raw_matches
         if len(matches) == 1:
             try:
                 li = matches[0]

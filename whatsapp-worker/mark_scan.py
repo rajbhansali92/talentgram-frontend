@@ -3391,6 +3391,87 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
 
         return {"results": [result]}
 
+    if probe_type == "upload_download_menu_diagnostic":
+        # Diagnostic-only (2026-08-25) — a real UPLOAD E2E for the
+        # hardened video path got past hash-verified resolution and full
+        # readiness cleanly (both proven working), then found a "..."
+        # menu whose only items were "Reply privately"/"Report <sender>" —
+        # a MESSAGE-level context menu, not the open viewer's own
+        # Download menu. Reuses UPLOAD's own real resolve+click (never
+        # SEND's code) then dumps the FULL _VIEWER_BUTTONS_JS candidate
+        # list (not just whichever one the menu-trigger heuristic guessed)
+        # so the real Download-menu trigger can be identified from
+        # evidence. Read-only beyond that: never proceeds to click
+        # anything after the dump.
+        target_id = req.get("probe_message_id")
+        thumb_hash = req.get("source_thumbnail_hash")
+        tile_index = req.get("tile_index", 0)
+        if not target_id:
+            return {"results": [{"error": "probe_message_id required (a video message)"}]}
+
+        tile, message_locator, resolved_index, resolve_reason = await _resolve_video_tile_by_hash(
+            page, group_name, target_id, thumb_hash, tile_index,
+        )
+        if tile is None:
+            return {"results": [{"error": f"resolve failed: {resolve_reason}"}]}
+        result: Dict[str, Any] = {"resolved_tile_index": resolved_index}
+        try:
+            await tile.scroll_into_view_if_needed(timeout=5000)
+            await tile.click(timeout=10000)
+        except Exception as exc:
+            return {"results": [{"error": f"click failed: {exc}", **result}]}
+
+        video_mounted = False
+        for _ in range(30):
+            try:
+                if await page.locator("video").count() > 0:
+                    video_mounted = True
+                    break
+            except Exception:
+                pass
+            await page.wait_for_timeout(500)
+        result["video_mounted"] = video_mounted
+        if not video_mounted:
+            return {"results": [result]}
+
+        result["readiness"] = await _wait_for_video_readiness(page)
+        try:
+            result["viewer_buttons"] = await _evaluate(page, _VIEWER_BUTTONS_JS)
+        except Exception as exc:
+            result["viewer_buttons"] = {"error": str(exc)}
+
+        # Also capture a broader, non-root-scoped dump in case the real
+        # Download-menu trigger lives OUTSIDE the video-rooted subtree
+        # _VIEWER_BUTTONS_JS walks (exactly the kind of thing that would
+        # explain a message-level menu being found instead).
+        _FULL_PAGE_BUTTONS_JS = """
+            () => {
+              const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+              return btns.map(b => {
+                const r = b.getBoundingClientRect();
+                const svgTitle = b.querySelector('svg title');
+                if (r.width === 0 || r.height === 0) return null;
+                return {
+                  ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
+                  testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
+                  rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+                };
+              }).filter(Boolean);
+            }
+        """
+        try:
+            result["full_page_buttons"] = await _evaluate(page, _FULL_PAGE_BUTTONS_JS)
+        except Exception as exc:
+            result["full_page_buttons"] = {"error": str(exc)}
+
+        try:
+            viewer_dump = await _evaluate(page, _VIEWER_BUTTONS_JS)
+        except Exception:
+            viewer_dump = {"buttons": []}
+        result["closed"] = await _close_viewer(page, viewer_dump)
+
+        return {"results": [result]}
+
     if probe_type == "video_tile_reresolution_live_diagnostic":
         # Diagnostic-only (2026-08-24) — post-deploy verification of the
         # video-tile re-resolution fix against the EXACT real message that

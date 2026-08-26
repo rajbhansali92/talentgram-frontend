@@ -181,6 +181,79 @@ def test_extract_role_and_project_strips_whatsapp_dom_timestamp_noise():
 
 
 # ---------------------------------------------------------------------------
+# Regression (2026-08-27, real production incident — Siddhi Bankhele / TVS
+# Jupiter): a bare "Take" mark (admin never gave a take number) immediately
+# followed by WhatsApp's appended timestamp noise was parsed as "Take 7" --
+# _TAKE_RE's unbounded \s* let it reach across "Take     7:26 am" and treat
+# the time's leading digit as the take number. Confirmed live via a
+# read-only scan_probe before any send was attempted; caught and fixed
+# before ever reaching production dispatch.
+# ---------------------------------------------------------------------------
+def test_extract_role_and_project_bare_take_with_timestamp_never_becomes_a_number():
+    parsed = ma.extract_role_and_project("Mark Tvs Jupiter Take     7:26 am         7:26 am")
+    assert parsed is not None
+    assert parsed.media_role == "take"
+    assert parsed.take_number is None, "the timestamp's digit must never become take_number"
+    assert parsed.project_fragment == "Tvs Jupiter"
+
+
+def test_extract_role_and_project_numbered_take_with_timestamp_still_resolves():
+    parsed = ma.extract_role_and_project("Mark Tvs Jupiter Take 1     7:26 am         7:26 am")
+    assert parsed is not None
+    assert parsed.media_role == "take"
+    assert parsed.take_number == 1
+    assert parsed.project_fragment == "Tvs Jupiter"
+
+
+def test_extract_role_and_project_numbered_take_without_timestamp_unaffected():
+    parsed = ma.extract_role_and_project("Mark Tvs Jupiter Take 2")
+    assert parsed is not None
+    assert parsed.media_role == "take"
+    assert parsed.take_number == 2
+    assert parsed.project_fragment == "Tvs Jupiter"
+
+
+def test_extract_role_and_project_bare_intro_with_timestamp_unaffected():
+    parsed = ma.extract_role_and_project("Mark Tvs Jupiter Intro     7:26 am         7:26 am")
+    assert parsed is not None
+    assert parsed.media_role == "intro"
+    assert parsed.take_number is None
+    assert parsed.project_fragment == "Tvs Jupiter"
+
+
+def test_extract_role_and_project_legitimate_take_number_survives_various_timestamps():
+    """A real take number must never be stripped merely because SOME
+    timestamp trails it -- covers several distinct hour/minute values,
+    not just the one from the live incident (9:05 pm, 11:59 am, 12:01 pm:
+    single-digit hour, two-digit hour, and a boundary-looking value)."""
+    cases = [
+        ("Mark Tvs Jupiter Take 3     9:05 pm         9:05 pm", 3),
+        ("Mark Tvs Jupiter Take 4     11:59 am         11:59 am", 4),
+        ("Mark Tvs Jupiter Take 5     12:01 pm         12:01 pm", 5),
+    ]
+    for text, expected_take in cases:
+        parsed = ma.extract_role_and_project(text)
+        assert parsed is not None, text
+        assert parsed.media_role == "take"
+        assert parsed.take_number == expected_take, (text, parsed.take_number)
+        assert parsed.project_fragment == "Tvs Jupiter"
+
+
+def test_extract_role_and_project_ordinary_parsing_without_timestamp_noise_unchanged():
+    """Existing behavior (no timestamp noise at all) must be byte-for-byte
+    unaffected by reordering the timestamp strip earlier."""
+    for text, expected_take in [
+        ("mark google take 1", 1), ("MARK GOOGLE TAKE 1", 1),
+        ("Mark Google Take 1", 1), ("mark google take2", 2),
+    ]:
+        parsed = ma.extract_role_and_project(text)
+        assert parsed is not None, text
+        assert parsed.media_role == "take"
+        assert parsed.take_number == expected_take
+        assert parsed.project_fragment.lower() == "google"
+
+
+# ---------------------------------------------------------------------------
 # Candidate validation
 # ---------------------------------------------------------------------------
 def _projects():

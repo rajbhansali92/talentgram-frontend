@@ -228,6 +228,11 @@ async def ensure_indexes() -> None:
 # ---------------------------------------------------------------------------
 _MARK_KEYWORD_RE = re.compile(r"\bmark\b", re.IGNORECASE)
 _TAKE_RE = re.compile(r"\btake\s*([1-9][0-9]?)\b", re.IGNORECASE)
+# A bare "take" with no number at all (2026-08-27) — distinct from _TAKE_RE
+# (which requires a digit): the admin marked this as a take, they just
+# didn't say which one. Never guessed/defaulted to 1 here; take_number
+# stays None all the way through, same as intro/photos already do.
+_TAKE_BARE_RE = re.compile(r"\btake\b", re.IGNORECASE)
 _INTRO_RE = re.compile(r"\bintro(?:duction)?\b", re.IGNORECASE)
 _PHOTOS_RE = re.compile(r"\bphotos?\b", re.IGNORECASE)
 # WhatsApp's own DOM renders a message's timestamp text TWICE (once for the
@@ -256,11 +261,24 @@ def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
     if not raw_mark_text or not _MARK_KEYWORD_RE.search(raw_mark_text):
         return None
     working = _MARK_KEYWORD_RE.sub(" ", raw_mark_text, count=1)
+    # Strip WhatsApp's trailing timestamp DOM noise BEFORE any role/take-
+    # number extraction runs (2026-08-27 fix) — _TAKE_RE's \btake\s*(\d+)\b
+    # has no bound on how much whitespace it crosses, so a bare "Take"
+    # immediately followed by an appended "...     7:26 am         7:26 am"
+    # timestamp was matching the "7" from the time as if it were the
+    # admin's own take number. The original ordering only stripped this
+    # noise AFTER take/intro/photos extraction, which was late enough to
+    # protect project_fragment matching (its original purpose) but not
+    # early enough to protect take_number itself.
+    working = _TRAILING_TIMESTAMP_RE.sub("", working)
 
     take_m = _TAKE_RE.search(working)
     if take_m:
         media_role, take_number = "take", int(take_m.group(1))
         working = _TAKE_RE.sub(" ", working, count=1)
+    elif _TAKE_BARE_RE.search(working):
+        media_role, take_number = "take", None
+        working = _TAKE_BARE_RE.sub(" ", working, count=1)
     elif _INTRO_RE.search(working):
         media_role, take_number = "intro", None
         working = _INTRO_RE.sub(" ", working, count=1)
@@ -270,7 +288,6 @@ def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
     else:
         return None
 
-    working = _TRAILING_TIMESTAMP_RE.sub("", working)
     project_fragment = re.sub(r"\s+", " ", working).strip()
     if not project_fragment:
         return None

@@ -59,6 +59,7 @@ const empty = {
     medium_usage: "",
     director: "",
     production_house: "",
+    whatsapp_casting_group_name: "",
     additional_details: "",
     video_links: [],
     competitive_brand_enabled: false,
@@ -850,6 +851,18 @@ export default function ProjectEdit() {
                                 onChange={(v) => updateProject({ production_house: v })}
                                 disabled={!isEditing}
                             />
+                            <div>
+                                <TextField
+                                    label="WhatsApp Casting Group"
+                                    value={project.whatsapp_casting_group_name}
+                                    onChange={(v) => updateProject({ whatsapp_casting_group_name: v })}
+                                    disabled={!isEditing}
+                                    placeholder="e.g. Acme Brand — Casting Pipeline"
+                                />
+                                <p className="text-[10px] text-black/35 mt-1.5 tg-mono">
+                                    WhatsApp group where approved SEND auditions will be forwarded.
+                                </p>
+                            </div>
                         </div>
                         <div className="mt-6 border-t border-[#eaeaea] pt-6">
                             <div className="flex items-center justify-between mb-4">

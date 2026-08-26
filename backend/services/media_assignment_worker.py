@@ -28,11 +28,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from core import db
+from core import db, SubmissionDecisionIn
 from agents import registry
 from agents.modules import media_assignment
 from agents.modules import media_send
 from agents.modules.whatsapp_campaign_agent import _service_admin
+from routers.submissions import set_decision
 from routers.whatsapp import BatchIn, ManualContact, SourceParams, create_batch
 
 logger = logging.getLogger(__name__)
@@ -225,7 +226,7 @@ def _report_already_sent(talent_label: str, project_label: str, destination_grou
 def _report_send_result(
     talent_label: str, project_label: str, destination_group: str,
     sent_labels: List[str], failed_items: List[Dict[str, str]], already: List[Dict[str, Any]],
-    *, form_status_line: Optional[str] = None,
+    *, form_status_line: Optional[str] = None, marker_status_line: Optional[str] = None,
 ) -> str:
     already_labels = [
         media_assignment.role_label(a["media_role"], a.get("take_number"), project_label)
@@ -234,9 +235,12 @@ def _report_send_result(
     total = len(already_labels) + len(sent_labels) + len(failed_items)
     body_lines = ([form_status_line] if form_status_line else []) + [f"✓ {l}" for l in already_labels + sent_labels]
     body_lines += [f"✗ {i['label']} — {i['error']}" for i in failed_items]
+    if marker_status_line:
+        body_lines.append(marker_status_line)
     body = "\n".join(body_lines)
     form_failed = bool(form_status_line and form_status_line.startswith("✗"))
-    header = "SEND COMPLETE ✓" if not (failed_items or form_failed) else "SEND PARTIAL"
+    marker_failed = bool(marker_status_line and marker_status_line.startswith("✗"))
+    header = "SEND COMPLETE ✓" if not (failed_items or form_failed or marker_failed) else "SEND PARTIAL"
     return (
         f"{header}\n\nTalent: {talent_label}\nProject: {project_label}\n"
         f"Destination: {destination_group}\n\n"
@@ -336,11 +340,45 @@ async def _process_scan_done() -> bool:
             m for m in outcome.assignments
             if media_assignment.slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) not in already_slots
         ]
+        # Fixed ordering (Phase 5, 2026-08-26) — Takes (ascending take
+        # number) -> Introduction -> Pictures, never scan/discovery order.
+        # The FORM itself is not a "target" in this list at all; its
+        # position is carried separately as form_insert_index (the count
+        # of items below that belong BEFORE it), so it always lands
+        # between Intro and Pictures regardless of which of those two
+        # groups is present or empty.
+        _role_order = {"take": 0, "intro": 1, "photos": 2}
+        # An unnumbered take ("Mark <project> Take" with no digit — see
+        # media_assignment.py's extract_role_and_project) sorts AFTER every
+        # numbered take, never before (2026-08-27 fix) — `m.get("take_number")
+        # or 0` previously treated None the same as an explicit 0, which
+        # would have jumped an unnumbered take ahead of "Take 1" whenever
+        # both existed for the same talent/project. Sorting on
+        # "is it unnumbered" first, then the number, keeps Take 1/2/3...
+        # in strict ascending order with the unknown one trailing.
+        to_send.sort(key=lambda m: (
+            _role_order.get(m["media_role"], 99),
+            m.get("take_number") is None,
+            m.get("take_number") or 0,
+        ))
+        form_insert_index = sum(1 for m in to_send if m["media_role"] in ("take", "intro"))
+
+        marker_already_sent = await media_send.already_sent_marker(talent_id, project_id, destination_group)
+        # This run closes the gap to full completion exactly when every
+        # remaining media item (to_send) and the form (if not already
+        # sent) are about to be attempted — nothing marked for this
+        # talent/project is ever left outside to_send ∪ already, so
+        # succeeding at all of to_send + form is equivalent to succeeding
+        # at everything.
+        send_marker_on_success = not marker_already_sent
+
         # A pending form_message must still reach the worker even when
         # every media item is already sent — SEND's own spec requires the
         # form to go out independent of media state, never silently
-        # dropped because there was nothing new to forward.
-        if not to_send and not doc.get("form_message"):
+        # dropped because there was nothing new to forward. Likewise, the
+        # ☑️ marker alone (nothing left to forward, form already sent)
+        # still needs one more worker pass if it hasn't gone out yet.
+        if not to_send and not doc.get("form_message") and marker_already_sent:
             await _finish(doc["id"], _report_already_sent(talent_label, project_label, destination_group, already))
             return True
         send_targets = [{
@@ -366,15 +404,19 @@ async def _process_scan_done() -> bool:
                 "mode": "send",
                 "status": media_assignment.DOWNLOAD_STATUS_PENDING,
                 "send_targets": send_targets,
+                "form_insert_index": form_insert_index,
+                "send_marker_on_success": send_marker_on_success,
                 # form_message rides through unchanged from create_send_scan_request
                 # (already None if this exact submission version was already
-                # sent) — the worker sends it first, before any media forward.
+                # sent) — the worker sends it at form_insert_index, between
+                # Intro and Pictures.
                 "form_message": doc.get("form_message"),
                 "pending_report_context": {
                     "talent_label": talent_label, "project_label": project_label,
                     "destination_group": destination_group, "already": already,
                     "submission_id": doc.get("submission_id"), "content_hash": doc.get("content_hash"),
                     "form_message_included": bool(doc.get("form_message")),
+                    "marker_attempted": send_marker_on_success,
                 },
                 "updated_at": _now(),
             }},
@@ -524,9 +566,57 @@ async def _process_download_done() -> bool:
             else:
                 failed_items.append({"label": label, "error": (result or {}).get("error") or "no result reported"})
 
+        # Completion marker (Phase 5/7, 2026-08-26) — independent row from
+        # media_sends/form_sends; recorded only when the worker actually
+        # attempted it (marker_attempted) AND it genuinely succeeded. A
+        # withheld or failed marker means the overall operation is still
+        # incomplete — the approval snapshot stays "approved" (not
+        # "completed"), so the next attempt naturally resumes and retries
+        # the marker rather than silently treating this as done.
+        marker_status_line: Optional[str] = None
+        if ctx.get("marker_attempted"):
+            marker_result = doc.get("marker_result") or {}
+            marker_ok = bool(marker_result.get("ok"))
+            if marker_ok:
+                await media_send.record_marker_sent(talent_id, project_id, destination_group, created_by="whatsapp-agent")
+                await media_send.complete_send_approval(talent_id, project_id, destination_group)
+                # Post-SEND approval transition (2026-08-27) — ONLY reached
+                # when every required item (takes/intro/form/pictures) has
+                # already succeeded this run AND the ☑️ marker itself just
+                # succeeded; a withheld/failed marker means this line is
+                # never reached, so a partial SEND never approves anything.
+                # Deliberately reuses the REAL production approval
+                # mechanism (routers.submissions.set_decision) rather than
+                # a raw decision write — that function already owns
+                # decided_at/status_history/pipeline-sync/notification,
+                # and set_decision is itself idempotent (a no-op when the
+                # submission is already "approved" and linked to a
+                # talent), so calling it again on a later, unrelated SEND
+                # for the same talent/project never double-fires a
+                # transition or duplicate notification.
+                submission_id = ctx.get("submission_id")
+                if submission_id:
+                    try:
+                        admin = await _service_admin()
+                        await set_decision(
+                            project_id, submission_id,
+                            SubmissionDecisionIn(decision="approved", note="Auto-approved after successful SEND completion"),
+                            admin,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "media_assignment_worker: SEND completed but the post-SEND approval "
+                            "transition failed for submission %r (project %r) — media/form/marker "
+                            "were still sent successfully; this does not roll them back.",
+                            submission_id, project_id,
+                        )
+                marker_status_line = "✓ ☑️ (complete)"
+            else:
+                marker_status_line = f"✗ ☑️ — {marker_result.get('error') or 'not sent'}"
+
         report = _report_send_result(
             talent_label, project_label, destination_group, sent_labels, failed_items, ctx.get("already") or [],
-            form_status_line=form_status_line,
+            form_status_line=form_status_line, marker_status_line=marker_status_line,
         )
         await _finish(doc["id"], report)
         return True

@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
-from core import db, parse_height_to_inches
+from core import db, parse_height_to_inches, _submission_to_client_shape
 
 from routers.casting_pipeline import (
     LEGACY_STAGE_ALIASES,
@@ -3817,6 +3817,28 @@ SEND_PROJECT_FIELD = FieldSpec(
 )
 
 
+def _validate_passthrough(v: str) -> ValidationResult:
+    return ValidationResult(ok=True, value=v)
+
+
+# A hidden, never-prompted-for (required=False) field (Phase 2, 2026-08-26)
+# — the real state an outgoing-form edit changes (the admin's field
+# overrides) lives in media_send.SEND_APPROVALS_COLLECTION, a durable
+# record keyed on (talent, project, destination), NOT in this generic
+# `collected` dict. But the dispatcher's own edit-loop
+# (agents/dispatcher.py's _collect_or_advance/_advance_task) silently
+# drops any key parse_edits_async returns that isn't a declared
+# IntentDefinition.fields key, and treats a genuinely EMPTY edits dict as
+# "I didn't understand that" — so _send_parse_edits_async returns this
+# field's key (set to any non-empty sentinel) whenever it successfully
+# applied a form-field edit, purely so the generic engine recognizes the
+# turn as understood; nothing ever reads this key back out of `collected`.
+SEND_FORM_EDIT_FIELD = FieldSpec(
+    key="_send_form_edit_marker", label="Form Edit", question="",
+    validate=_validate_passthrough, required=False,
+)
+
+
 def _extract_send_fields(text: str) -> Dict[str, str]:
     """"send - Talent - Project" (hyphen) OR "send Talent Project"
     (space-separated) — same shape/rationale as _extract_upload_fields,
@@ -3910,10 +3932,21 @@ async def _resolve_freeform_talent_project(
     )
 
 
-async def _send_executor(
-    collected: dict, ctx: ExecContext, *, destination_group_override: Optional[str] = None,
-) -> ExecResult:
-    """`destination_group_override` is a test-only seam (never set by the
+async def _resolve_send_target(
+    collected: dict, *, destination_group_override: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[ExecResult]]:
+    """Shared resolution steps for casting.send (2026-08-26 approval-flow
+    refactor) — used identically by _build_send_confirmation (rendering/
+    refreshing the outgoing-form preview), _send_parse_edits_async
+    (validating an edit against the CURRENT resolved talent/project), and
+    _send_executor (re-verified fresh at approval time — same reasoning as
+    _move_executor re-checking _resolve_move_selection rather than
+    trusting whatever the confirmation card last saw). Returns
+    (resolved-context-dict, None) on success or (None, ExecResult) with the
+    exact error to show, unchanged from the original single-function
+    _send_executor this was extracted from.
+
+    `destination_group_override` is a test-only seam (never set by the
     real chat-dispatch path) — lets a disposable E2E point SEND at a
     throwaway WhatsApp group without touching casting-agent's own
     production `group_names` config, mirroring how upload's own disposable
@@ -3926,7 +3959,7 @@ async def _send_executor(
     if talent_selector.strip() and talent_selector.strip() == project_query.strip():
         talent_selector, project_query, freeform_error = await _resolve_freeform_talent_project(talent_selector)
         if freeform_error is not None:
-            return freeform_error
+            return None, freeform_error
 
     # Step 1: resolve the project FIRST — identical reasoning to upload
     # (the authoritative-talent lookup needs project_id).
@@ -3935,12 +3968,12 @@ async def _send_executor(
         match = nlu.resolve_project_by_name(project_query, projects)
     if match.ambiguous:
         options = "\n".join(f"{i + 1}. {o['label']}" for i, o in enumerate(match.ambiguous))
-        return ExecResult(
+        return None, ExecResult(
             ok=False, error="ambiguous_project",
             message=f"I found multiple projects.\n\n{options}\n\nPlease re-run with the exact project name.",
         )
     if not match.project:
-        return ExecResult(
+        return None, ExecResult(
             ok=False, error="project_not_found",
             message=f'I couldn\'t find a project matching "{project_query}".',
         )
@@ -3956,7 +3989,7 @@ async def _send_executor(
         candidate_ids = [talent_id]
         candidate_label = talent_label
     else:
-        return ExecResult(ok=False, error="talent_not_found", message=err or "No matching talent found.")
+        return None, ExecResult(ok=False, error="talent_not_found", message=err or "No matching talent found.")
 
     # Step 3: the WhatsApp SOURCE group — identical to upload's step 3.
     candidate_docs = await db.talents.find(
@@ -3964,13 +3997,13 @@ async def _send_executor(
     ).to_list(20)
     group_names = {(d.get("whatsapp_group_name") or "").strip() for d in candidate_docs if (d.get("whatsapp_group_name") or "").strip()}
     if not group_names:
-        return ExecResult(
+        return None, ExecResult(
             ok=False, error="no_whatsapp_group",
             message=f"{candidate_label} has no WhatsApp group configured — the mark-based "
                     "send workflow requires one. Add it in Talentgram first.",
         )
     if len(group_names) > 1:
-        return ExecResult(
+        return None, ExecResult(
             ok=False, error="ambiguous_whatsapp_group",
             message=f"Multiple different WhatsApp groups are configured across talent records named "
                     f"{candidate_label} — please resolve the duplicate talent records first.",
@@ -3986,14 +4019,14 @@ async def _send_executor(
             auth.error, "Could not verify the send source for {talent_label} / {project_label} ({error})."
         )
         message = template.format(talent_label=candidate_label, project_label=project["label"], error=auth.error)
-        return ExecResult(ok=False, error=f"send_source_unresolved:{auth.error}", message=message)
+        return None, ExecResult(ok=False, error=f"send_source_unresolved:{auth.error}", message=message)
 
     authoritative_talent_id = auth.talent_id
     authoritative_talent_label = auth.talent_label or candidate_label
 
     identity = await media_assignment.get_gunwanti_identity()
     if not identity or not identity.get("lid"):
-        return ExecResult(
+        return None, ExecResult(
             ok=False, error="identity_not_configured",
             message="The Gunwanti agent identity (WhatsApp LID) is not configured yet — "
                     "contact an admin before using send.",
@@ -4011,49 +4044,210 @@ async def _send_executor(
     else:
         destination_group = ((project_doc or {}).get("whatsapp_casting_group_name") or "").strip()
         if not destination_group:
-            return ExecResult(
+            return None, ExecResult(
                 ok=False, error="destination_not_configured",
                 message=f"{project['label']} has no WhatsApp casting group configured — "
                         "add it to the project before using send.",
             )
 
-    # Step 6: SEND also sends the talent's APPROVED submission details, not
-    # just marked media — an approved form is a hard prerequisite, never a
-    # silently-skipped nice-to-have. Fails safely (never forwards media
-    # anyway) if no approved submission exists for this exact talent/project.
+    # Step 6 (2026-08-26 revision): SEND sends the talent's submission
+    # details — the submission's OWN `decision` (pending/approved/etc.) is
+    # NOT a prerequisite here. The two concepts are deliberately kept
+    # separate: submission.decision reflects the recruiter's ordinary
+    # review workflow, while SEND has its own explicit approval gate (the
+    # admin approving the outgoing form/SEND operation itself — see
+    # _build_send_confirmation/_send_parse_edits_async). A submission
+    # must still EXIST (there is no data to build a form from otherwise),
+    # but its decision can be "pending" — the admin approving the SEND
+    # form is what makes this safe, not a prior submission-review verdict.
+    # Once the full SEND operation succeeds, the submission's decision is
+    # transitioned to "approved" via the real production mechanism (see
+    # services/media_assignment_worker.py's SEND completion branch) —
+    # never before, and never merely because form/media prep succeeded.
     submission = await db.submissions.find_one(
-        {"project_id": project["id"], "talent_id": authoritative_talent_id, "decision": "approved"},
+        {"project_id": project["id"], "talent_id": authoritative_talent_id},
         {"_id": 0}, sort=[("submitted_at", -1), ("created_at", -1)],
     )
     if not submission:
-        return ExecResult(
-            ok=False, error="no_approved_submission",
-            message=f"{authoritative_talent_label} has no APPROVED submission for {project['label']} — "
-                    "send requires an approved submission before it will forward anything.",
+        return None, ExecResult(
+            ok=False, error="no_submission",
+            message=f"{authoritative_talent_label} has no submission for {project['label']} — "
+                    "send requires a submission to build the outgoing form from.",
         )
-    form_built = media_send.build_form_send_message(
-        submission, project_doc, authoritative_talent_label, project["label"],
+
+    return {
+        "project": project, "project_doc": project_doc,
+        "authoritative_talent_id": authoritative_talent_id,
+        "authoritative_talent_label": authoritative_talent_label,
+        "group_name": group_name, "destination_group": destination_group,
+        "submission": submission,
+    }, None
+
+
+def _send_approval_overrides(existing: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """A "completed" approval is a terminal record of a PAST SEND
+    operation — a fresh "send" invocation for the same talent/project
+    (e.g. new media marked afterward) must start from the submission's own
+    values again, not silently inherit a previous operation's edits."""
+    if not existing or existing.get("status") == media_send.SEND_APPROVAL_STATUS_COMPLETED:
+        return {}
+    return dict(existing.get("overrides") or {})
+
+
+async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
+    """Phase 2 (2026-08-26) — the required explicit approval step: renders
+    the EXACT outgoing SEND form (Project Name/Name/Age/.../Budget, nothing
+    else — see media_send.build_form_send_message) as the confirmation
+    card itself, so "show the form to the admin" and "ask the admin to
+    approve/edit/cancel" are the same generic confirm/edit/cancel gate
+    every other intent already uses. Never sends anything — approval only
+    happens in _send_executor, once the admin replies 1."""
+    target, err = await _resolve_send_target(collected)
+    if err is not None:
+        return err.message
+
+    talent_id = target["authoritative_talent_id"]
+    project_id = target["project"]["id"]
+    destination_group = target["destination_group"]
+
+    existing = await media_send.get_send_approval(talent_id, project_id, destination_group)
+    if existing and existing.get("status") == media_send.SEND_APPROVAL_STATUS_APPROVED:
+        # Already approved on an earlier turn (e.g. resuming after a
+        # worker-side failure) — reuse the FROZEN message verbatim rather
+        # than regenerating it, so a retry never shows/sends different
+        # wording than what was actually approved.
+        header = "SEND FORM — already approved (resuming)"
+        message = existing["message"]
+    else:
+        overrides = _send_approval_overrides(existing)
+        built = media_send.build_form_send_message(
+            target["submission"], target["project_doc"],
+            target["authoritative_talent_label"], target["project"]["label"], overrides,
+        )
+        await media_send.save_send_approval_draft(
+            talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+            submission_id=target["submission"]["id"], overrides=overrides,
+            message=built["message"], content_hash=built["content_hash"],
+        )
+        header = "SEND FORM PREVIEW"
+        message = built["message"]
+
+    return (
+        f"{header}\n\n{message}\n\n"
+        'Edit any field with e.g. "Age = 24" (one or more lines).\n\n'
+        "Reply:\n1 → Approve\n2 → Edit\n3 → Cancel"
     )
+
+
+_EDIT_LINE_RE = re.compile(r"^\s*(.+?)\s*[:=]\s*(.*)$")
+
+
+async def _send_parse_edits_async(
+    text: str, collected: Dict[str, str], fields: List[FieldSpec], ctx: ExecContext,
+) -> Dict[str, str]:
+    """Phase 2/4 (2026-08-26) — "Age = 24" (any number of lines, any of
+    the outgoing form's editable fields or a project's own custom
+    question text) rewrites the DRAFT approval snapshot in
+    media_send.SEND_APPROVALS_COLLECTION directly; it never touches the
+    underlying submission (Phase 4's explicit requirement). Falls back to
+    the generic "Key = value" parser (e.g. "Talent = ...") for the
+    intent's own declared fields when no form-field edit is recognized."""
+    target, err = await _resolve_send_target(collected)
+    if err is None:
+        talent_id = target["authoritative_talent_id"]
+        project_id = target["project"]["id"]
+        destination_group = target["destination_group"]
+
+        existing = await media_send.get_send_approval(talent_id, project_id, destination_group)
+        overrides = _send_approval_overrides(existing)
+
+        shape = _submission_to_client_shape(target["submission"], project=target["project_doc"])
+        label_to_key: Dict[str, str] = {v.lower(): k for k, v in media_send.OVERRIDABLE_FIELD_LABELS.items()}
+        for qa in (shape.get("custom_answers") or []):
+            question = (qa.get("question") or "").strip()
+            if question:
+                label_to_key[question.lower()] = question
+
+        applied = False
+        for line in (text or "").splitlines():
+            m = _EDIT_LINE_RE.match(line)
+            if not m:
+                continue
+            override_key = label_to_key.get(m.group(1).strip().lower())
+            if override_key is None:
+                continue
+            overrides[override_key] = m.group(2).strip()
+            applied = True
+
+        if applied:
+            built = media_send.build_form_send_message(
+                target["submission"], target["project_doc"],
+                target["authoritative_talent_label"], target["project"]["label"], overrides,
+            )
+            await media_send.save_send_approval_draft(
+                talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+                submission_id=target["submission"]["id"], overrides=overrides,
+                message=built["message"], content_hash=built["content_hash"],
+            )
+            return {"_send_form_edit_marker": "1"}
+
+    explicit = parse_edit_instructions(text, fields)
+    if explicit:
+        return explicit
+    return {}
+
+
+async def _send_executor(
+    collected: dict, ctx: ExecContext, *, destination_group_override: Optional[str] = None,
+) -> ExecResult:
+    """Runs ONLY once the admin has explicitly approved the outgoing form
+    (Phase 2) — never merely because the underlying submission itself is
+    approved. Re-resolves talent/project/destination/submission fresh
+    (same reasoning as _move_executor not trusting the confirmation
+    card's own snapshot), then freezes whatever draft/overrides exist as
+    the approved snapshot (Phase 4) before dispatching."""
+    target, err = await _resolve_send_target(collected, destination_group_override=destination_group_override)
+    if err is not None:
+        return err
+
+    talent_id = target["authoritative_talent_id"]
+    talent_label = target["authoritative_talent_label"]
+    project = target["project"]
+    destination_group = target["destination_group"]
+    submission = target["submission"]
+
+    existing = await media_send.get_send_approval(talent_id, project["id"], destination_group)
+    overrides = _send_approval_overrides(existing)
+    form_built = media_send.build_form_send_message(
+        submission, target["project_doc"], talent_label, project["label"], overrides,
+    )
+    await media_send.save_send_approval_draft(
+        talent_id=talent_id, project_id=project["id"], destination_group=destination_group,
+        submission_id=submission["id"], overrides=overrides,
+        message=form_built["message"], content_hash=form_built["content_hash"],
+    )
+    await media_send.approve_send_form(talent_id, project["id"], destination_group, approved_by=ctx.sender_phone)
+
     form_message: Optional[str] = None
     already_form = await media_send.already_sent_form(
-        authoritative_talent_id, project["id"], destination_group, form_built["content_hash"],
+        talent_id, project["id"], destination_group, form_built["content_hash"],
     )
     if not already_form:
         await media_send.record_form_send(
-            talent_id=authoritative_talent_id, project_id=project["id"], destination_group=destination_group,
+            talent_id=talent_id, project_id=project["id"], destination_group=destination_group,
             submission_id=submission["id"], content_hash=form_built["content_hash"], created_by="whatsapp-agent",
         )
         form_message = form_built["message"]
 
     await media_send.create_send_scan_request(
-        talent_id=authoritative_talent_id, talent_label=authoritative_talent_label,
+        talent_id=talent_id, talent_label=talent_label,
         project_id=project["id"], project_label=project["label"],
-        group_name=group_name, destination_group=destination_group,
+        group_name=target["group_name"], destination_group=destination_group,
         form_message=form_message, submission_id=submission["id"], content_hash=form_built["content_hash"],
     )
     return ExecResult(
         ok=True,
-        message=f"Sending {authoritative_talent_label}'s marked {project['label']} media to "
+        message=f"Approved — sending {talent_label}'s marked {project['label']} media to "
                 f"{destination_group}…\n\nI'll report back here once it's done.",
     )
 
@@ -4061,10 +4255,12 @@ async def _send_executor(
 SEND_INTENT = IntentDefinition(
     intent_id="casting.send",
     triggers=["send"],
-    fields=[SEND_TALENT_FIELD, SEND_PROJECT_FIELD],
+    fields=[SEND_TALENT_FIELD, SEND_PROJECT_FIELD, SEND_FORM_EDIT_FIELD],
     executor=_send_executor,
     extract_fields=_extract_send_fields,
-    auto_confirm=True,
+    build_confirmation=_build_send_confirmation,
+    parse_edits_async=_send_parse_edits_async,
+    auto_confirm=False,
 )
 
 

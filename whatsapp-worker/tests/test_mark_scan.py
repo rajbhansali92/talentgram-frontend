@@ -19,6 +19,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://x")
 os.environ.setdefault("AGENTS_BACKEND_URL", "https://api.example.test")
 
 import mark_scan  # noqa: E402
+import sender  # noqa: E402
 
 PHOTO_MESSAGE_HTML = (
     '<div tabindex="-1" class="x1n2onr6 xa0aww2" data-id="3B6637D11A63081B8712" '
@@ -1968,6 +1969,145 @@ def main():
     assert "stage_used" not in result_72, result_72  # "Download all" is not an exact match -> old menu-trigger path handled it instead
     assert (1146.0, 30.0, "left") not in page_72.mouse.clicks, page_72.mouse.clicks  # "Download all"'s own coordinates never clicked directly
     print("72. UPLOAD exact-match only         -> a 'Download all' label is never treated as the direct per-item Download button")
+
+    # ------------------------------------------------------------------
+    # 73-77: SEND ordering/idempotency/speed (2026-08-26, Phase 5/6/7) —
+    # _run_send is the single continuous operation that sequences Takes ->
+    # Intro -> Form -> Pictures -> completion marker; the backend
+    # orchestrator (services/media_assignment_worker.py, tested separately
+    # in backend/tests/test_media_send.py) pre-sorts send_targets and
+    # computes form_insert_index/send_marker_on_success, so these tests
+    # only need to prove _run_send OBEYS those instructions faithfully.
+    # ------------------------------------------------------------------
+
+    class _FakePage73:
+        pass
+
+    def _install_send_fakes(*, forward_results=None, text_results=None):
+        """Records call order across native-forward items and text
+        (form/marker) sends into one shared list, `calls`, so ordering can
+        be asserted directly — mirrors the module-attribute monkeypatch
+        style every other test in this file already uses."""
+        calls = []
+        forward_results = forward_results or {}
+        text_results = text_results or {}
+
+        async def _fake_open_group_chat(page, group_name):
+            calls.append(("open_group", group_name))
+            return "OPENED"
+
+        async def _fake_forward(page, group_name, target, item_label=""):
+            calls.append(("forward", target["source_message_id"]))
+            result = forward_results.get(target["source_message_id"], {"ok": True})
+            return {"source_message_id": target["source_message_id"], **result}
+
+        async def _fake_text(page, destination_group, message):
+            calls.append(("text", message))
+            return text_results.get(message, {"ok": True})
+
+        return calls, _fake_open_group_chat, _fake_forward, _fake_text
+
+    def _send_target(mid, role, take=None):
+        return {
+            "source_message_id": mid, "media_role": role, "take_number": take,
+            "source_media_type": "image", "album_tile_index": 0, "destination_group": "Dest Group",
+            "caption": mid,
+        }
+
+    # 73: fixed ordering — Takes then Intro, FORM inserted at
+    # form_insert_index (between Intro and Pictures), Pictures last, then
+    # the ☑️ marker — never scan/discovery order.
+    calls_73, open_73, forward_73, text_73 = _install_send_fakes()
+    orig_open_73, orig_forward_73, orig_text_73 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_73, forward_73, text_73
+    try:
+        req_73 = {
+            "group_name": "Source Group", "destination_group": "Dest Group",
+            "send_targets": [
+                _send_target("take1", "take", 1), _send_target("intro1", "intro"), _send_target("pic1", "photos"),
+            ],
+            "form_insert_index": 2, "form_message": "SEND FORM TEXT", "send_marker_on_success": True,
+        }
+        result_73 = asyncio.run(mark_scan._run_send(_FakePage73(), req_73))
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_73, orig_forward_73, orig_text_73
+
+    assert all(r["ok"] for r in result_73["results"]), result_73
+    assert result_73["form_send_result"]["ok"] is True, result_73
+    assert result_73["marker_result"]["ok"] is True, result_73
+    assert calls_73 == [
+        ("open_group", "Source Group"),
+        ("forward", "take1"), ("forward", "intro1"),
+        ("text", "SEND FORM TEXT"),
+        ("forward", "pic1"),
+        ("text", mark_scan.SEND_MARKER_TEXT),
+    ], calls_73
+    print("73. SEND fixed ordering             -> Takes -> Intro -> Form -> Pictures -> marker, form/marker never reshuffled relative to media")
+
+    # 74: no takes, no intro (form_insert_index=0) and no pictures at all
+    # — form still sends (at position 0) and the marker still sends last,
+    # even though send_targets is completely empty. The source group is
+    # never opened when there is nothing to forward.
+    calls_74, open_74, forward_74, text_74 = _install_send_fakes()
+    orig_open_74, orig_forward_74, orig_text_74 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_74, forward_74, text_74
+    try:
+        req_74 = {
+            "group_name": "Source Group", "destination_group": "Dest Group",
+            "send_targets": [], "form_insert_index": 0, "form_message": "ONLY THE FORM", "send_marker_on_success": True,
+        }
+        result_74 = asyncio.run(mark_scan._run_send(_FakePage73(), req_74))
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_74, orig_forward_74, orig_text_74
+
+    assert result_74["results"] == [], result_74
+    assert result_74["form_send_result"]["ok"] is True, result_74
+    assert result_74["marker_result"]["ok"] is True, result_74
+    assert calls_74 == [("text", "ONLY THE FORM"), ("text", mark_scan.SEND_MARKER_TEXT)], calls_74
+    assert not any(c[0] == "open_group" for c in calls_74), calls_74  # source group never opened -- nothing to forward
+    print("74. SEND skips source group          -> no media to forward means the source group is never opened, only form+marker sent")
+
+    # 75: one media item fails -> the marker is WITHHELD even though
+    # send_marker_on_success=True and the form succeeded — a single
+    # failure anywhere in the run means the marker is never sent early.
+    calls_75, open_75, forward_75, text_75 = _install_send_fakes(forward_results={"take1": {"ok": False, "error": "boom"}})
+    orig_open_75, orig_forward_75, orig_text_75 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_75, forward_75, text_75
+    try:
+        req_75 = {
+            "group_name": "Source Group", "destination_group": "Dest Group",
+            "send_targets": [_send_target("take1", "take", 1)],
+            "form_insert_index": 0, "form_message": "FORM", "send_marker_on_success": True,
+        }
+        result_75 = asyncio.run(mark_scan._run_send(_FakePage73(), req_75))
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_75, orig_forward_75, orig_text_75
+
+    assert result_75["results"][0]["ok"] is False, result_75
+    assert result_75["form_send_result"]["ok"] is True, result_75
+    assert result_75["marker_result"] is None, result_75  # withheld -- never sent when a media item failed
+    assert not any(c == ("text", mark_scan.SEND_MARKER_TEXT) for c in calls_75), calls_75
+    print("75. SEND marker withheld on failure  -> one failed media item means the ☑️ marker is never sent this run")
+
+    # 76: send_marker_on_success=False (backend already recorded the
+    # marker as sent in an earlier attempt) -> never sent again even
+    # though everything else succeeds this run.
+    calls_76, open_76, forward_76, text_76 = _install_send_fakes()
+    orig_open_76, orig_forward_76, orig_text_76 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_76, forward_76, text_76
+    try:
+        req_76 = {
+            "group_name": "Source Group", "destination_group": "Dest Group",
+            "send_targets": [_send_target("pic1", "photos")],
+            "form_insert_index": 0, "form_message": None, "send_marker_on_success": False,
+        }
+        result_76 = asyncio.run(mark_scan._run_send(_FakePage73(), req_76))
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_76, orig_forward_76, orig_text_76
+
+    assert result_76["marker_result"] is None, result_76
+    assert not any(c == ("text", mark_scan.SEND_MARKER_TEXT) for c in calls_76), calls_76
+    print("76. SEND marker not re-sent          -> send_marker_on_success=False means the marker is never sent again, idempotent across retries")
 
 
 if __name__ == "__main__":

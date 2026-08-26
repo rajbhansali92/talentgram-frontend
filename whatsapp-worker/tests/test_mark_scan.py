@@ -2109,6 +2109,129 @@ def main():
     assert not any(c == ("text", mark_scan.SEND_MARKER_TEXT) for c in calls_76), calls_76
     print("76. SEND marker not re-sent          -> send_marker_on_success=False means the marker is never sent again, idempotent across retries")
 
+    # ------------------------------------------------------------------
+    # 77-78 (2026-08-27, real production incident — Siddhi Bankhele / TVS
+    # Jupiter live SEND): the forward composer's caption box occasionally
+    # isn't mounted yet on the very first check (video forward dialogs
+    # render measurably slower), and a caption/send failure was leaving
+    # the Forward dialog open, which then made the UNRELATED next
+    # operation (opening the destination chat to send the form) fail too.
+    # ------------------------------------------------------------------
+    class _FakeLocator77:
+        def __init__(self, click_results):
+            self._click_results = list(click_results)
+            self.click_calls = 0
+            self.typed = None
+
+        @property
+        def first(self):
+            return self
+
+        async def click(self, timeout=5000):
+            self.click_calls += 1
+            result = self._click_results[min(self.click_calls, len(self._click_results)) - 1]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        async def type(self, text, delay=10):
+            self.typed = text
+
+    class _FakePage77:
+        def __init__(self, locator):
+            self._locator = locator
+
+        def locator(self, selector):
+            return self._locator
+
+        async def wait_for_timeout(self, ms):
+            pass
+
+    # 77: the caption box's click fails twice (simulating a not-yet-mounted
+    # composer), then succeeds on the third bounded attempt -- overall
+    # result is still success, proving this is a retry loop, not a
+    # single shot.
+    locator_77 = _FakeLocator77([TimeoutError("not ready"), TimeoutError("not ready"), None])
+    page_77 = _FakePage77(locator_77)
+
+    async def _fake_find_and_click_send_77(page, allow_enter_fallback=False):
+        return "[aria-label^=\"Send\"][role=\"button\"]"
+
+    orig_send_77 = sender._find_and_click_send
+    sender._find_and_click_send = _fake_find_and_click_send_77
+    try:
+        result_77 = asyncio.run(mark_scan._enter_forward_caption_and_send(page_77, "a caption"))
+    finally:
+        sender._find_and_click_send = orig_send_77
+
+    assert result_77["ok"] is True, result_77
+    assert locator_77.click_calls == 3, locator_77.click_calls  # two failures, then success -- not a single shot
+    assert locator_77.typed == "a caption", locator_77.typed
+    print("77. SEND caption entry retries      -> a not-yet-mounted composer box is retried up to 3 bounded attempts, not a single 5s shot")
+
+    # 78: a native-forward item whose caption/send step fails presses
+    # Escape before returning the error -- a stuck Forward dialog must
+    # never be left open to poison the NEXT unrelated operation (proven
+    # live: this exact gap made the form's own destination-chat-open fail
+    # right after an intro forward's caption entry failed).
+    class _FakePage78:
+        def __init__(self):
+            self.escape_pressed = False
+            self.keyboard = self
+
+        async def press(self, key):
+            if key == "Escape":
+                self.escape_pressed = True
+
+        async def evaluate(self, *a, **k):
+            return None
+
+        async def wait_for_timeout(self, ms):
+            pass
+
+        class _Mouse:
+            async def click(self, *a, **k):
+                pass
+        mouse = _Mouse()
+
+        def locator(self, *a, **k):
+            raise AssertionError("locator() should not be reached in this failure path")
+
+    async def _fake_open_group_chat_78(page, group_name):
+        return "OPENED"
+
+    async def _fake_ready_78(page, group_name, source_message_id, tile_index, is_photo):
+        return {"ok": True, "forward_button": {"rect": [0, 0, 10, 10]}}
+
+    async def _fake_select_dest_78(page, destination_group):
+        return {"ok": True}
+
+    async def _fake_caption_send_78(page, caption):
+        return {"ok": False, "reason": "send failed simulated"}
+
+    page_78 = _FakePage78()
+    orig_open_78 = sender._open_group_chat
+    orig_ready_78 = mark_scan._open_media_and_get_forward_button
+    orig_select_78 = mark_scan._select_forward_destination
+    orig_caption_78 = mark_scan._enter_forward_caption_and_send
+    sender._open_group_chat = _fake_open_group_chat_78
+    mark_scan._open_media_and_get_forward_button = _fake_ready_78
+    mark_scan._select_forward_destination = _fake_select_dest_78
+    mark_scan._enter_forward_caption_and_send = _fake_caption_send_78
+    try:
+        result_78 = asyncio.run(mark_scan._send_one_target_native_forward(
+            page_78, "Source Group", {"source_message_id": "src-x", "source_media_type": "video", "destination_group": "Dest Group"},
+        ))
+    finally:
+        sender._open_group_chat = orig_open_78
+        mark_scan._open_media_and_get_forward_button = orig_ready_78
+        mark_scan._select_forward_destination = orig_select_78
+        mark_scan._enter_forward_caption_and_send = orig_caption_78
+
+    assert result_78["ok"] is False, result_78
+    assert page_78.escape_pressed is True, "a failed caption/send must press Escape to close the stuck Forward dialog"
+    print("78. SEND cleans up on send failure  -> Escape is pressed after a failed caption/send, so the next operation never inherits a stuck dialog")
+
 
 if __name__ == "__main__":
     main()

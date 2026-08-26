@@ -7067,9 +7067,27 @@ async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
     selector was matched AND the click on it succeeded — never a secondary
     signal like the composer clearing or the dialog disappearing."""
     if caption:
+        # Bounded retry, not a single 5s shot (2026-08-27 fix — a real
+        # production SEND hit exactly this: the video-forward composer
+        # (proven elsewhere in this file to render measurably slower than
+        # the photo one) hadn't finished mounting the caption box within
+        # one 5s attempt, right after a back-to-back prior item). Each
+        # attempt gets its own bounded timeout; failure only after all
+        # rounds are exhausted.
+        last_exc: Optional[Exception] = None
+        box_ready = False
+        for _round in range(3):
+            try:
+                box = page.locator('[data-testid="append-message-compose-box"]').first
+                await box.click(timeout=3000)
+                box_ready = True
+                break
+            except Exception as exc:
+                last_exc = exc
+                await page.wait_for_timeout(500)
+        if not box_ready:
+            return {"ok": False, "reason": f"caption entry failed: {last_exc}"}
         try:
-            box = page.locator('[data-testid="append-message-compose-box"]').first
-            await box.click(timeout=5000)
             await box.type(caption, delay=10)
         except Exception as exc:
             return {"ok": False, "reason": f"caption entry failed: {exc}"}
@@ -7117,6 +7135,18 @@ async def _send_one_target_native_forward(page, group_name: str, target: Dict[st
 
     send_result = await _enter_forward_caption_and_send(page, target.get("caption") or "")
     if not send_result.get("ok"):
+        # Escape cleanup on failure (2026-08-27 fix) — mirrors the
+        # destination-selection failure path above. A real production SEND
+        # found that leaving the Forward dialog open after a caption/send
+        # failure poisoned the VERY NEXT operation (opening the
+        # destination group directly to send the form text) — the stuck
+        # modal blocked the sidebar search from working at all, surfacing
+        # as an unrelated-looking "chat not opened" failure on a
+        # completely different item.
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send failed: {send_result.get('reason')}"}
 
     return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT", "selector_used": send_result.get("selector_used")}

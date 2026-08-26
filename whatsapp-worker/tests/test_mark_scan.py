@@ -2169,6 +2169,46 @@ def main():
     assert locator_77.typed == "a caption", locator_77.typed
     print("77. SEND caption entry retries      -> a not-yet-mounted composer box is retried up to 3 bounded attempts, not a single 5s shot")
 
+    # 77b (2026-08-27, real production incident): a video whose forward
+    # preview already carries SOME existing caption shows a "Remove
+    # caption" (X) control instead of our expected empty compose box --
+    # confirmed via a real dialog dump (no append-message-compose-box at
+    # all). The retry loop must clear it (once) and then find the box.
+    class _FakePage77b(_FakePage77):
+        def __init__(self, locator):
+            super().__init__(locator)
+            self.clicks = []
+
+        class _Mouse:
+            def __init__(self, outer):
+                self._outer = outer
+
+            async def click(self, x, y, button="left"):
+                self._outer.clicks.append((x, y, button))
+
+    locator_77b = _FakeLocator77([TimeoutError("no compose box yet"), None])
+    page_77b = _FakePage77b(locator_77b)
+    page_77b.mouse = _FakePage77b._Mouse(page_77b)
+    remove_caption_dump = {"dialogFound": True, "buttons": [{"ariaLabel": "Remove caption", "testid": None, "rect": [818, 595, 32, 32]}]}
+
+    async def _fake_evaluate_77b(page, js, arg=None, timeout=10.0):
+        return remove_caption_dump
+
+    orig_evaluate_77b = mark_scan._evaluate
+    orig_send_77b = sender._find_and_click_send
+    mark_scan._evaluate = _fake_evaluate_77b
+    sender._find_and_click_send = _fake_find_and_click_send_77
+    try:
+        result_77b = asyncio.run(mark_scan._enter_forward_caption_and_send(page_77b, "a caption"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_77b
+        sender._find_and_click_send = orig_send_77b
+
+    assert result_77b["ok"] is True, result_77b
+    assert page_77b.clicks == [(834.0, 611.0, "left")], page_77b.clicks  # center of the Remove caption button's rect
+    assert locator_77b.typed == "a caption", locator_77b.typed
+    print("77b. SEND clears existing caption   -> a 'Remove caption' control is cleared once, revealing the real compose box, before retrying")
+
     # 78-80 (2026-08-27): _ensure_forward_dialog_closed -- a failed
     # caption/send must never leave the Forward dialog open to poison the
     # NEXT unrelated operation (proven live: this exact gap made the

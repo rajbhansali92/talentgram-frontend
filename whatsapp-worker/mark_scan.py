@@ -7062,6 +7062,13 @@ async def _select_forward_destination(page, destination_group: str) -> Dict[str,
     return {"ok": True}
 
 
+def _find_remove_caption_button(dump: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for b in (dump or {}).get("buttons") or []:
+        if "remove caption" in (b.get("ariaLabel") or "").strip().lower():
+            return b
+    return None
+
+
 async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
     """Types an optional caption into the forward composer's own "Add a
     message..." box (data-testid="append-message-compose-box" — proven
@@ -7073,14 +7080,16 @@ async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
     signal like the composer clearing or the dialog disappearing."""
     if caption:
         # Bounded retry, not a single 5s shot (2026-08-27 fix — a real
-        # production SEND hit exactly this: the video-forward composer
-        # (proven elsewhere in this file to render measurably slower than
-        # the photo one) hadn't finished mounting the caption box within
-        # one 5s attempt, right after a back-to-back prior item). Each
-        # attempt gets its own bounded timeout; failure only after all
-        # rounds are exhausted.
+        # production SEND hit exactly this: a video whose forward preview
+        # already carries SOME existing caption content (confirmed via a
+        # real production dialog dump: no "append-message-compose-box" at
+        # all — instead a "Remove caption" (X) control sits over the
+        # video). Our own compose box only ever appears once that existing
+        # caption is cleared, so the retry loop clears it (once) the first
+        # time the box isn't found, then keeps polling for the box itself.
         last_exc: Optional[Exception] = None
         box_ready = False
+        removed_existing_caption = False
         for _round in range(3):
             try:
                 box = page.locator('[data-testid="append-message-compose-box"]').first
@@ -7089,6 +7098,20 @@ async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
                 break
             except Exception as exc:
                 last_exc = exc
+                if not removed_existing_caption:
+                    try:
+                        dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+                    except Exception:
+                        dump = None
+                    remove_btn = _find_remove_caption_button(dump)
+                    if remove_btn is not None:
+                        removed_existing_caption = True  # only ever try this once, whether or not the click itself succeeds
+                        try:
+                            cx = remove_btn["rect"][0] + remove_btn["rect"][2] / 2
+                            cy = remove_btn["rect"][1] + remove_btn["rect"][3] / 2
+                            await page.mouse.click(cx, cy, button="left")
+                        except Exception:
+                            pass
                 await page.wait_for_timeout(500)
         if not box_ready:
             # Diagnostic capture (2026-08-27) — a real production SEND hit

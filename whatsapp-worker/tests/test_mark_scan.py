@@ -2169,68 +2169,97 @@ def main():
     assert locator_77.typed == "a caption", locator_77.typed
     print("77. SEND caption entry retries      -> a not-yet-mounted composer box is retried up to 3 bounded attempts, not a single 5s shot")
 
-    # 78: a native-forward item whose caption/send step fails presses
-    # Escape before returning the error -- a stuck Forward dialog must
-    # never be left open to poison the NEXT unrelated operation (proven
-    # live: this exact gap made the form's own destination-chat-open fail
-    # right after an intro forward's caption entry failed).
+    # 78-80 (2026-08-27): _ensure_forward_dialog_closed -- a failed
+    # caption/send must never leave the Forward dialog open to poison the
+    # NEXT unrelated operation (proven live: this exact gap made the
+    # form's own destination-chat-open fail right after an intro
+    # forward's caption entry failed -- a single unverified Escape press
+    # was not enough, the dialog was still open 40+ seconds later).
     class _FakePage78:
-        def __init__(self):
-            self.escape_pressed = False
+        def __init__(self, dump_sequence):
+            self._dump_sequence = list(dump_sequence)
+            self.dump_calls = 0
+            self.escape_presses = 0
+            self.clicks = []
             self.keyboard = self
 
         async def press(self, key):
             if key == "Escape":
-                self.escape_pressed = True
-
-        async def evaluate(self, *a, **k):
-            return None
+                self.escape_presses += 1
 
         async def wait_for_timeout(self, ms):
             pass
 
         class _Mouse:
-            async def click(self, *a, **k):
-                pass
-        mouse = _Mouse()
+            def __init__(self, outer):
+                self._outer = outer
 
-        def locator(self, *a, **k):
-            raise AssertionError("locator() should not be reached in this failure path")
+            async def click(self, x, y, button="left"):
+                self._outer.clicks.append((x, y, button))
 
-    async def _fake_open_group_chat_78(page, group_name):
-        return "OPENED"
+        def _next_dump(self):
+            idx = min(self.dump_calls, len(self._dump_sequence) - 1)
+            self.dump_calls += 1
+            return self._dump_sequence[idx]
 
-    async def _fake_ready_78(page, group_name, source_message_id, tile_index, is_photo):
-        return {"ok": True, "forward_button": {"rect": [0, 0, 10, 10]}}
+    def _make_page_78(dump_sequence):
+        p = _FakePage78(dump_sequence)
+        p.mouse = _FakePage78._Mouse(p)
+        return p
 
-    async def _fake_select_dest_78(page, destination_group):
-        return {"ok": True}
+    # 78: a real "Close" button is found in the dialog's own button dump
+    # -> clicked by identity (never Escape, mirroring _close_viewer's own
+    # proven "find by identity, click it" pattern) -- and the close is
+    # VERIFIED (a second dump call reporting no dialog) rather than assumed.
+    close_button_dump = {"dialogFound": True, "buttons": [{"ariaLabel": "Close", "testid": None, "rect": [10, 20, 30, 30]}]}
+    gone_dump = {"dialogFound": False}
+    page_78 = _make_page_78([close_button_dump, gone_dump])
 
-    async def _fake_caption_send_78(page, caption):
-        return {"ok": False, "reason": "send failed simulated"}
+    async def _fake_evaluate_78(page, js, arg=None, timeout=10.0):
+        return page._next_dump()
 
-    page_78 = _FakePage78()
-    orig_open_78 = sender._open_group_chat
-    orig_ready_78 = mark_scan._open_media_and_get_forward_button
-    orig_select_78 = mark_scan._select_forward_destination
-    orig_caption_78 = mark_scan._enter_forward_caption_and_send
-    sender._open_group_chat = _fake_open_group_chat_78
-    mark_scan._open_media_and_get_forward_button = _fake_ready_78
-    mark_scan._select_forward_destination = _fake_select_dest_78
-    mark_scan._enter_forward_caption_and_send = _fake_caption_send_78
+    orig_evaluate_78 = mark_scan._evaluate
+    mark_scan._evaluate = _fake_evaluate_78
     try:
-        result_78 = asyncio.run(mark_scan._send_one_target_native_forward(
-            page_78, "Source Group", {"source_message_id": "src-x", "source_media_type": "video", "destination_group": "Dest Group"},
-        ))
+        closed_78 = asyncio.run(mark_scan._ensure_forward_dialog_closed(page_78))
     finally:
-        sender._open_group_chat = orig_open_78
-        mark_scan._open_media_and_get_forward_button = orig_ready_78
-        mark_scan._select_forward_destination = orig_select_78
-        mark_scan._enter_forward_caption_and_send = orig_caption_78
+        mark_scan._evaluate = orig_evaluate_78
 
-    assert result_78["ok"] is False, result_78
-    assert page_78.escape_pressed is True, "a failed caption/send must press Escape to close the stuck Forward dialog"
-    print("78. SEND cleans up on send failure  -> Escape is pressed after a failed caption/send, so the next operation never inherits a stuck dialog")
+    assert closed_78 is True, closed_78
+    assert page_78.clicks == [(25.0, 35.0, "left")], page_78.clicks  # center of the close button's rect
+    assert page_78.escape_presses == 0, "a real close button must be used instead of Escape when one is found"
+    print("78. SEND dialog-close prefers real button -> a real Close control is clicked by identity, never Escape, when one exists")
+
+    # 79: no close/cancel button in the dump (e.g. a plain Escape-only
+    # dialog variant) -> falls back to Escape, still verified afterward.
+    no_button_dump = {"dialogFound": True, "buttons": [{"ariaLabel": "Send", "testid": None, "rect": [0, 0, 10, 10]}]}
+    page_79 = _make_page_78([no_button_dump, gone_dump])
+    mark_scan._evaluate = _fake_evaluate_78
+    try:
+        closed_79 = asyncio.run(mark_scan._ensure_forward_dialog_closed(page_79))
+    finally:
+        mark_scan._evaluate = orig_evaluate_78
+
+    assert closed_79 is True, closed_79
+    assert page_79.escape_presses == 1, page_79.escape_presses
+    assert page_79.clicks == [], "must never click an unrelated button (e.g. Send) as if it were a close control"
+    print("79. SEND dialog-close falls back to Escape -> only when no real close/cancel control is found in the dump")
+
+    # 80: the dialog genuinely never closes (stuck through every bounded
+    # round) -> reports False rather than pretending success; the caller
+    # (_send_one_target_native_forward) folds this into its own error
+    # message rather than silently proceeding into a guaranteed failure.
+    stuck_dump = {"dialogFound": True, "buttons": []}
+    page_80 = _make_page_78([stuck_dump])
+    mark_scan._evaluate = _fake_evaluate_78
+    try:
+        closed_80 = asyncio.run(mark_scan._ensure_forward_dialog_closed(page_80))
+    finally:
+        mark_scan._evaluate = orig_evaluate_78
+
+    assert closed_80 is False, closed_80
+    assert page_80.escape_presses == 5, page_80.escape_presses  # all 5 bounded rounds attempted, never an infinite retry
+    print("80. SEND dialog-close bounded and honest -> a genuinely stuck dialog is reported as NOT closed, never assumed fixed")
 
 
 if __name__ == "__main__":

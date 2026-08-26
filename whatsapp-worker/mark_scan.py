@@ -6853,15 +6853,20 @@ _FORWARD_DIALOG_DUMP_JS = """
       if (!dialog) return {dialogFound: false};
       const textboxes = Array.from(dialog.querySelectorAll('[contenteditable="true"], input[type="text"], [role="textbox"]'));
       const listItems = Array.from(dialog.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
+      const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
       const dump = el => {
         const r = el.getBoundingClientRect();
         return {
           testid: el.getAttribute('data-testid'), role: el.getAttribute('role'),
+          ariaLabel: el.getAttribute('aria-label'),
           text: (el.textContent || '').trim().slice(0, 160),
           rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
         };
       };
-      return {dialogFound: true, textboxes: textboxes.map(dump), listItems: listItems.map(dump)};
+      return {
+        dialogFound: true, textboxes: textboxes.map(dump), listItems: listItems.map(dump),
+        buttons: buttons.map(dump),
+      };
     }
 """
 
@@ -7097,6 +7102,60 @@ async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
     return {"ok": True, "selector_used": selector_used}
 
 
+def _find_dialog_close_button(dump: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for b in (dump or {}).get("buttons") or []:
+        label = " ".join(filter(None, [b.get("ariaLabel"), b.get("testid")])).lower()
+        if re.search(r"\bclose\b|\bcancel\b|\bback\b", label):
+            return b
+    return None
+
+
+async def _ensure_forward_dialog_closed(page) -> bool:
+    """Closes a still-open Forward dialog and VERIFIES it's actually gone,
+    instead of a single fire-and-forget Escape press (2026-08-27 fix — a
+    real production SEND proved a bare Escape does not reliably close
+    WhatsApp's own "Forward message to" dialog; it was still fully open,
+    caption and destination intact, over 40s after a failed caption-entry
+    pressed Escape exactly once and moved on. That stuck dialog then made
+    the UNRELATED next operation — opening the destination chat directly
+    to send the form text — fail too, since sender.py's
+    dismiss_blocking_dialogs correctly refuses to guess at an unrecognized
+    dialog).
+
+    Mirrors _close_viewer's own proven approach: prefer a REAL close/
+    cancel control found by identity in the dialog's own button dump,
+    Escape only as a fallback when no such control is found. Bounded at 5
+    rounds; returns whether the dialog is confirmed closed, so the caller
+    can decide whether to still attempt the next step or report this
+    loudly."""
+    for _ in range(5):
+        try:
+            dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+        except Exception:
+            dump = None
+        if not (dump or {}).get("dialogFound"):
+            return True
+        close_btn = _find_dialog_close_button(dump)
+        if close_btn is not None:
+            try:
+                cx = close_btn["rect"][0] + close_btn["rect"][2] / 2
+                cy = close_btn["rect"][1] + close_btn["rect"][3] / 2
+                await page.mouse.click(cx, cy, button="left")
+            except Exception:
+                pass
+        else:
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+        await page.wait_for_timeout(400)
+    try:
+        dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+    except Exception:
+        dump = None
+    return not (dump or {}).get("dialogFound")
+
+
 async def _send_one_target_native_forward(page, group_name: str, target: Dict[str, Any], item_label: str = "") -> Dict[str, Any]:
     """One SEND item end-to-end via native Forward — NEVER downloads
     media. Opens the exact marked source (re-resolved by identity),
@@ -7127,27 +7186,26 @@ async def _send_one_target_native_forward(page, group_name: str, target: Dict[st
 
     select_result = await _select_forward_destination(page, target["destination_group"])
     if not select_result.get("ok"):
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"destination selection failed: {select_result.get('reason')}"}
+        closed = await _ensure_forward_dialog_closed(page)
+        reason = select_result.get("reason")
+        if not closed:
+            reason = f"{reason} (also: Forward dialog would not close afterward)"
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"destination selection failed: {reason}"}
 
     send_result = await _enter_forward_caption_and_send(page, target.get("caption") or "")
     if not send_result.get("ok"):
-        # Escape cleanup on failure (2026-08-27 fix) — mirrors the
+        # Verified cleanup on failure (2026-08-27 fix) — mirrors the
         # destination-selection failure path above. A real production SEND
         # found that leaving the Forward dialog open after a caption/send
         # failure poisoned the VERY NEXT operation (opening the
-        # destination group directly to send the form text) — the stuck
-        # modal blocked the sidebar search from working at all, surfacing
-        # as an unrelated-looking "chat not opened" failure on a
-        # completely different item.
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send failed: {send_result.get('reason')}"}
+        # destination group directly to send the form text) — a single
+        # unverified Escape press was not reliable enough (see
+        # _ensure_forward_dialog_closed's own docstring).
+        closed = await _ensure_forward_dialog_closed(page)
+        reason = send_result.get("reason")
+        if not closed:
+            reason = f"{reason} (also: Forward dialog would not close afterward)"
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send failed: {reason}"}
 
     return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT", "selector_used": send_result.get("selector_used")}
 

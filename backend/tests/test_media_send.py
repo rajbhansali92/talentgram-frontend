@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import db, _now  # noqa: E402
 from agents import modules as agent_modules  # noqa: E402
 from agents.dispatcher import handle_inbound_message  # noqa: E402
+from agents.models import ExecContext  # noqa: E402
+from agents.modules import casting_pipeline as cp  # noqa: E402
 from agents.modules import media_assignment as ma  # noqa: E402
 from agents.modules import media_send as ms  # noqa: E402
 from services import media_assignment_worker as orch  # noqa: E402
@@ -653,3 +655,111 @@ async def test_send_orchestrator_dispatches_form_even_when_all_media_already_sen
         await db.projects.delete_one({"id": project_id})
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
         await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+# ---------------------------------------------------------------------------
+# destination_group_override (2026-08-26) — a pre-existing, deliberately
+# test-only seam on _send_executor (never reachable from the real chat-
+# dispatch path: the dispatcher's generic executor contract only ever
+# calls executor(collected, ctx), with no way to supply a third keyword
+# argument). Lets a disposable E2E point SEND at a throwaway destination
+# WITHOUT ever reading or writing the project's own whatsapp_casting_
+# group_name field — needed for real talents/projects (e.g. a genuine
+# production project with an approved submission and clean, real marks)
+# whose own destination has legitimately never been configured, without
+# fabricating a fake value into their real project document.
+# ---------------------------------------------------------------------------
+async def test_send_executor_override_used_as_destination_without_project_field():
+    """The override becomes the actual destination_group on the created
+    scan request, even though the project has NO whatsapp_casting_group_name
+    at all — proving requirement 2 and 3 (override works; project field is
+    not required when the override is supplied)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    tag = uuid.uuid4().hex[:6]
+    email = f"ahana.override.{tag}@example.com"
+    # Deliberately NO whatsapp_casting_group_name on this project.
+    project_id = await _seed_project(f"Override Project {tag}")
+    talent_id = await _seed_talent(
+        f"Ahana Override {tag}", whatsapp_group_name=f"Ahana Override {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        project_before = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        assert not project_before.get("whatsapp_casting_group_name")
+
+        ctx = ExecContext(agent_id="casting-agent", group_name=group, sender_phone="917000600099", sender_name="Raj")
+        result = await cp._send_executor(
+            {"talent_selector": f"Ahana Override {tag}", "project_query": f"Override Project {tag}"},
+            ctx, destination_group_override=DESTINATION_GROUP,
+        )
+        assert result.ok, result.message
+        assert "Sending" in result.message, result.message
+
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert req is not None
+        assert req["workflow"] == "send"
+        assert req["destination_group"] == DESTINATION_GROUP
+
+        # Requirement 4: the project document itself was never touched.
+        project_after = await db.projects.find_one({"id": project_id}, {"_id": 0})
+        assert project_after == project_before, (project_before, project_after)
+        assert not project_after.get("whatsapp_casting_group_name")
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+
+
+async def test_send_executor_no_override_still_uses_project_configured_destination():
+    """Requirement 5 (unchanged production behavior, part 1): with NO
+    override, a project that DOES have whatsapp_casting_group_name set is
+    resolved exactly as before — the override parameter changes nothing
+    when omitted."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    tag = uuid.uuid4().hex[:6]
+    email = f"ahana.nooverride.{tag}@example.com"
+    project_id = await _seed_project(f"NoOverride Project {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(
+        f"Ahana NoOverride {tag}", whatsapp_group_name=f"Ahana NoOverride {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        ctx = ExecContext(agent_id="casting-agent", group_name=group, sender_phone="917000600098", sender_name="Raj")
+        result = await cp._send_executor(
+            {"talent_selector": f"Ahana NoOverride {tag}", "project_query": f"NoOverride Project {tag}"}, ctx,
+        )
+        assert result.ok, result.message
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert req is not None
+        assert req["destination_group"] == DESTINATION_GROUP
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+
+
+async def test_send_executor_no_override_missing_destination_still_refuses():
+    """Requirement 5 (unchanged production behavior, part 2): with NO
+    override AND no project destination configured, SEND still refuses
+    with destination_not_configured — the override never weakens this
+    fail-closed guard for real, unconfigured projects."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    tag = uuid.uuid4().hex[:6]
+    email = f"ahana.nodest.{tag}@example.com"
+    project_id = await _seed_project(f"NoDest Project {tag}")  # no destination field
+    talent_id = await _seed_talent(
+        f"Ahana NoDest {tag}", whatsapp_group_name=f"Ahana NoDest {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        ctx = ExecContext(agent_id="casting-agent", group_name=group, sender_phone="917000600097", sender_name="Raj")
+        result = await cp._send_executor(
+            {"talent_selector": f"Ahana NoDest {tag}", "project_query": f"NoDest Project {tag}"}, ctx,
+        )
+        assert result.ok is False, result.message
+        assert result.error == "destination_not_configured", result.error
+        # No scan request was ever created for this refused attempt.
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])

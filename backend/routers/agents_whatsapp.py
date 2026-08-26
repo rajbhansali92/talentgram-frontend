@@ -196,6 +196,12 @@ class DownloadResultIn(BaseModel):
     # this isn't a SEND request at all). Kept fully separate from
     # `results`/media, matching form_sends' independent idempotency.
     form_send_result: Optional[Dict[str, Any]] = None
+    # marker_result (2026-08-27, SEND workflow only): the worker's own
+    # outcome for the ☑️ completion marker, if it attempted one this run
+    # (req["send_marker_on_success"] was true and every media/form item in
+    # this run succeeded). None when the marker was withheld/not
+    # attempted — never confused with an attempted-and-failed marker.
+    marker_result: Optional[Dict[str, Any]] = None
 
 
 @router.get("/gunwanti-identity")
@@ -274,6 +280,7 @@ async def report_download_result(
         {"$set": {
             "status": status, "download_results": payload.results, "download_error": payload.error,
             "form_send_result": payload.form_send_result,
+            "marker_result": payload.marker_result,
             "updated_at": datetime.now(timezone.utc),
         }},
     )

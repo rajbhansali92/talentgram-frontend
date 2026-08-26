@@ -1465,3 +1465,32 @@ async def test_approval_lifecycle_test_g_exact_approved_form_is_what_is_sent():
         await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
         await db[ms.SEND_APPROVALS_COLLECTION].delete_many({"talent_id": talent_id})
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Regression (2026-08-27, real production incident — Siddhi Bankhele / TVS
+# Jupiter): the worker's /scan-requests/{id}/download-result report already
+# carried marker_result, but DownloadResultIn never declared the field and
+# the endpoint's own $set never wrote it -- Pydantic silently dropped it,
+# so a genuinely-successful marker send was never recorded, and a fully
+# resolved SEND could never reach "completed"/never trigger the post-SEND
+# approval. Caught live, before any incorrect data was written -- the
+# marker was simply never attempted a second time, nothing corrupted.
+# ---------------------------------------------------------------------------
+async def test_download_result_endpoint_persists_marker_result():
+    from routers.agents_whatsapp import report_download_result, DownloadResultIn
+
+    req_id = str(uuid.uuid4())
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "send", "status": ma.DOWNLOAD_STATUS_PENDING,
+        "created_at": _now(), "updated_at": _now(),
+    })
+    try:
+        payload = DownloadResultIn(results=[], error=None, form_send_result=None, marker_result={"ok": True})
+        await report_download_result(req_id, payload, x_internal_secret=None)
+
+        doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id}, {"_id": 0})
+        assert doc["marker_result"] == {"ok": True}, doc.get("marker_result")
+        assert doc["status"] == ma.DOWNLOAD_STATUS_DONE
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})

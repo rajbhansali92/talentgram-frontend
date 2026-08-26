@@ -7091,6 +7091,16 @@ async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
                 last_exc = exc
                 await page.wait_for_timeout(500)
         if not box_ready:
+            # Diagnostic capture (2026-08-27) — a real production SEND hit
+            # this consistently (not a one-off flake) for one specific
+            # video item across two separate attempts; dump what's
+            # actually in the dialog so the real fix can be selector-
+            # accurate instead of another guess.
+            try:
+                diag_dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+            except Exception as diag_exc:
+                diag_dump = {"dump_failed": str(diag_exc)}
+            logger.warning("mark_scan: caption box not found — dialog dump: %r", diag_dump)
             return {"ok": False, "reason": f"caption entry failed: {last_exc}"}
         try:
             await box.type(caption, delay=10)

@@ -1668,6 +1668,24 @@ def parse_simple_add_move_command(
                     "action": action, "talent_part": talent_part,
                     "project_part": rest, "pipeline_part": stage_label(stage_key),
                 }
+            # Bare 2-field ADD (2026-08-27 fix, Command Specification V1
+            # Phase 3C) — "Add-Talent-Project" (no third hyphen field, no
+            # stage word anywhere in `tail` to recover) previously matched
+            # NOTHING here (the branch above requires a recoverable
+            # stage_key) and fell through to natural-language extraction,
+            # which then mis-split the still-hyphen-glued text. Only for a
+            # pure "add" action — never bare "move" (which always needs an
+            # explicit target stage to mean anything) and never
+            # "add_move"/send combos (which explicitly asked for a move,
+            # so a missing stage there should keep failing rather than
+            # silently dropping the move the admin asked for). No
+            # `pipeline_part` at all in the returned dict — the
+            # translator below already knows to emit a plain "Add X to Y"
+            # sentence (no "and move to Z" clause) when it's absent,
+            # identical to the already-proven space-separated "Add Talent
+            # to Project" natural form.
+            if action == "add" and talent_part and tail.strip():
+                return {"action": action, "talent_part": talent_part, "project_part": tail.strip()}
 
     return None
 
@@ -1703,11 +1721,20 @@ def translate_simple_command_to_natural_language(parsed: Dict[str, str]) -> str:
     action = parsed["action"]
     talent = parsed["talent_part"]
     project = parsed["project_part"]
-    target = _extract_simple_pipeline_target(parsed["pipeline_part"])
+    pipeline_part = parsed.get("pipeline_part")
     if action == "move":
+        target = _extract_simple_pipeline_target(pipeline_part)
         sentence = f"Move {talent} to {target} in {project}"
-    else:
+    elif pipeline_part:
+        target = _extract_simple_pipeline_target(pipeline_part)
         sentence = f"Add {talent} to {project} and move to {target}"
+    else:
+        # Bare 2-field ADD (2026-08-27 fix) — no stage was given at all
+        # ("Add-Talent-Project"), so there is no move clause to append;
+        # extract_add_fields's own existing "Add X to Y" natural-language
+        # path (unchanged) takes it from here — same default-stage
+        # behavior as any other add with no explicit pipeline.
+        sentence = f"Add {talent} to {project}"
     template_part = parsed.get("template_part")
     if template_part:
         sentence += SEND_TEMPLATE_MARKER + template_part

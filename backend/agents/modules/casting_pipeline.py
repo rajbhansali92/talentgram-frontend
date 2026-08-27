@@ -1045,6 +1045,26 @@ async def _handle_talent_stage_query(
             message=f"Which pipeline did you mean?\n{bullets}", needs_clarification=True,
         )
 
+    # Natural-language bulk HAS TESTED (2026-08-27, Command Specification
+    # V1 Phase 3A) — "has A,B tested for X,Y" previously only ever
+    # resolved a single talent (a comma-joined string handed whole to the
+    # single-name resolver below, which correctly refused to guess but
+    # also never fanned it out). Reuses _handle_testing_check UNCHANGED —
+    # the exact same one-or-many-talents x one-or-many-projects grouping
+    # "testing? - A,B - X,Y" already provides — rather than teaching this
+    # function a second bulk implementation. Scoped narrowly to the
+    # "tested" stage family (ask_to_test/already_tested — the only stage
+    # words this specific natural phrasing ever maps to; see
+    # _STAGE_SHORTHAND) so a genuinely single-item, non-"tested" stage
+    # question ("Is X approved for Y?") is completely untouched, even if
+    # it happens to mention multiple names for some other reason.
+    if classification.stage_key in ("ask_to_test", "already_tested") and (
+        "," in raw_talent_ref or "," in (classification.project_name_query or "")
+    ):
+        return await _handle_testing_check(
+            ctx, raw_talent_ref, classification.project_name_query or "",
+        )
+
     talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(raw_talent_ref)
     if err:
         if ambiguous:
@@ -2737,8 +2757,42 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
                         bulk_move_by_talent_ids(r.project_id, split.actionable_ids, r.target_stage)
                     )
                     moved = write_result["moved"]
+                    # Compound-plan UNDO (2026-08-27) — a MOVE step inside a
+                    # plan (Add,Move / Add,Move,Send) is the exact same
+                    # pipeline write _move_executor makes standalone, so it
+                    # records undo the exact same way: same undo_store, same
+                    # dict shape, same 5-minute TTL. Only ever called here
+                    # once the write above has actually succeeded (moved
+                    # talent_ids is non-empty) — a step that errored or found
+                    # "already in that stage" never reaches this line, so no
+                    # misleading undo record is ever created for a partial or
+                    # no-op step. The compound ADD half of this same plan is
+                    # deliberately NOT given its own undo record — reverting
+                    # "added to the pipeline" (removing the row entirely) is
+                    # a materially different operation from "reverting a
+                    # stage", which is all undo_store/casting.undo currently
+                    # model; scope stays exactly what the existing MOVE undo
+                    # already covers. A plan's own optional "send" leg (a
+                    # WhatsApp campaign message) has no undo concept in this
+                    # system at all and is untouched by this change.
+                    plan_operation_id = str(uuid.uuid4())
+                    await undo_store.store_undo(
+                        AGENT_ID, ctx.sender_phone,
+                        {
+                            "operation_id": plan_operation_id,
+                            "project_id": r.project_id,
+                            "project_label": r.project_label,
+                            "new_stage": r.target_stage,
+                            "previous_stage_by_id": split.previous_stage_by_id,
+                            "approved_by": ctx.sender_phone,
+                            "approved_by_name": ctx.sender_name,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                        ttl_minutes=UNDO_WINDOW_MINUTES,
+                    )
                     summary_lines += [
                         f"✓ {label}", "", f"{moved} talent{'' if moved == 1 else 's'} moved", "",
+                        f"Reply UNDO within {UNDO_WINDOW_MINUTES} minutes to restore the previous stage.", "",
                     ]
                     any_success = True
                     if step.get("send_template"):
@@ -4614,22 +4668,35 @@ HELP_TEXT = (
     "testing? - Ayushi,Priya - Toyota,Nykaa\n\n"
     "Show pipeline\n\n"
     "show - Toyota,Nykaa - Follow Up,Approved\n\n"
+    "Move everyone in a stage at once (no talent named):\n\n"
+    "move - Toyota Glanza - Ask To Test to Follow Up\n\n"
+    "UPLOAD — pulls a talent's @Gunwanti-marked WhatsApp media (takes/intro/"
+    "photos) into their Talentgram submission (Cloudinary), for the app's "
+    "own review pages — different from SEND below, which forwards on "
+    "WhatsApp and never touches Cloudinary:\n\n"
+    "upload - Ayushi - Toyota Glanza\n\n"
     "SEND — forwards a talent's marked WhatsApp media (Takes → "
     "Introduction → Form → Pictures → ☑️) to a casting WhatsApp group. "
     "ALWAYS shows a preview first and needs an explicit approval — "
     "nothing is ever sent automatically:\n\n"
     "send - Ayushi - Toyota Glanza\n\n"
     "1 → Approve   2 → Edit a field   3 → Cancel\n\n"
+    "Multiple talents/projects also work here (send - Ayushi,Priya - "
+    "Toyota,Nykaa) — each pairing sends independently.\n\n"
     "Undo the last move (within 5 minutes):\n\n"
     "undo\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "Multiple commands: put each on its own line (a blank line between "
-    "them is fine but not required), or comma-separate the action words "
-    "themselves (Add,Move,Send).\n\n"
+    "them is fine but not required — \"/\" also works as a separator), or "
+    "comma-separate the action words themselves (Add,Move,Send).\n\n"
     "Finish with:\n\n"
     "and confirm\n\n"
     "to run every command immediately, no approval step (SEND always "
     "still requires its own explicit approval regardless).\n\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "Talent search (e.g. \"Find actors in Mumbai\") and picking from a "
+    "list (Select 1,3,5 / Select first 5 / Select all, then \"Add "
+    "selected to Toyota Glanza\") still work exactly as before.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "GENERAL\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
@@ -4640,9 +4707,7 @@ HELP_TEXT = (
     "• Minor spelling mistakes are tolerated\n"
     "• If a name is ambiguous, I'll ask which one you meant — just reply "
     "with your answer (e.g. \"2\" or the full name); you don't need to "
-    "repeat the whole command\n\n"
-    "Talent search, selection (Select 1,3,5), and Undo still work exactly "
-    "as before — the commands above are just the fast way in."
+    "repeat the whole command"
 )
 
 CASTING_AGENT = AgentDefinition(

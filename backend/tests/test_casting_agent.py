@@ -4339,9 +4339,33 @@ async def test_simple_parse_missing_hyphen_recovery_requires_stage_order():
     assert _snlu.parse_simple_add_move_command("Add - Riya Patel - Toyota Campaign Follow Up") is None
 
 
-async def test_simple_parse_missing_hyphen_recovery_declines_when_no_recognizable_stage():
-    assert _snlu.parse_simple_add_move_command(
+async def test_simple_parse_bare_2field_add_with_no_recognizable_stage_is_a_plain_add():
+    """Command Specification V1 Phase 3C (2026-08-27) — a 2-field "Add -
+    Talent - Project" with nothing stage-like in the trailing text is no
+    longer declined outright: for a pure "add" action (never bare "move",
+    which still requires an explicit stage — see the sibling test below),
+    this is now recognized as a plain "just add them, no explicit stage"
+    command, matching the already-proven space-separated "Add Talent to
+    Project" natural form's own default-stage behavior. No pipeline_part
+    at all in the result — this is the signal translate_simple_command_
+    to_natural_language uses to emit a plain "Add X to Y" sentence."""
+    parsed = _snlu.parse_simple_add_move_command(
         "Add - Riya Patel - Some Ambiguous Trailing Words", stage_order=list(_SIMPLE_STAGE_ORDER),
+    )
+    assert parsed is not None
+    assert parsed["action"] == "add"
+    assert parsed["talent_part"] == "Riya Patel"
+    assert parsed["project_part"] == "Some Ambiguous Trailing Words"
+    assert "pipeline_part" not in parsed
+
+
+async def test_simple_parse_bare_2field_move_still_declines_no_stage_to_guess():
+    """The same fix must NOT extend to a bare "move" action — MOVE always
+    needs an explicit target stage to mean anything, so a 2-field "Move -
+    Talent - X" with no recognizable stage in X still declines cleanly
+    (falls through to natural-language parsing, unchanged)."""
+    assert _snlu.parse_simple_add_move_command(
+        "Move - Riya Patel - Some Ambiguous Trailing Words", stage_order=list(_SIMPLE_STAGE_ORDER),
     ) is None
 
 
@@ -5970,3 +5994,145 @@ def test_whatsapp_campaign_agent_uses_group_members_security_mode():
     idx = src.index('"whatsapp-campaign-agent"')
     call_src = src[idx:idx + 800]
     assert 'security_mode="group_members"' in call_src, call_src
+
+
+# ---------------------------------------------------------------------------
+# Compound-plan UNDO (2026-08-27, Command Specification V1 Phase 2) — the
+# confirmed P1 gap: an "Add,Move" (or "Add,Move,Send") plan step never
+# created an undo record, unlike a standalone MOVE. Fixed by having
+# _execute_plan's own move sub-step call the EXACT SAME undo_store.
+# store_undo used by _move_executor — no second undo system, no change to
+# plain MOVE/UNDO's own behavior (already covered by the many existing
+# undo tests above, all still passing unchanged).
+# ---------------------------------------------------------------------------
+async def test_compound_add_move_creates_undo_record_and_undo_reverts_it():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"CompoundUndo Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"CompoundUndo Talent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add,Move - CompoundUndo Talent {tag} - {label} - Shortlisted and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "shortlisted", doc
+        assert "Reply UNDO" in r.reply, r.reply
+
+        pending = await undo_store.get_undo(AGENT_ID, phone)
+        assert pending is not None, "Add,Move must now record an undo entry, same as a standalone MOVE"
+        assert pending["operation"]["project_id"] == project_id
+        assert pending["operation"]["previous_stage_by_id"].get(talent_id) == "ask_to_test"
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="undo",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Undo complete" in r2.reply, r2.reply
+        doc_after = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        # Reverts the STAGE (back to what ADD itself set moments earlier) —
+        # never removes the talent from the pipeline entirely; that would be
+        # a materially different operation this fix deliberately does not
+        # attempt (see the module comment on the store_undo call site).
+        assert doc_after["stage"] == "ask_to_test", doc_after
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_compound_add_move_noop_step_never_creates_misleading_undo():
+    """A move sub-step that's already at its target stage (skipped, no
+    write) must never create/overwrite an undo record — only a step that
+    actually wrote something may."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"NoopUndo Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"NoopUndo Talent {tag}")
+    try:
+        before = await undo_store.get_undo(AGENT_ID, phone)
+        assert before is None
+        # ADD defaults to "Ask To Test" — moving to that same stage right
+        # after is a genuine no-op for the move sub-step.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add,Move - NoopUndo Talent {tag} - {label} - Ask To Test and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        after = await undo_store.get_undo(AGENT_ID, phone)
+        assert after is None, "a no-op move step must never fabricate an undo record"
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Natural-language bulk HAS TESTED (2026-08-27, Command Specification V1
+# Phase 3A) — "has A,B tested for X" now fans out via the existing
+# _handle_testing_check, exactly like the structured "testing? - A,B - X"
+# form already did; the single-item natural form (test_talent_stage_query*
+# elsewhere in this file) is completely unaffected.
+# ---------------------------------------------------------------------------
+async def test_natural_language_has_tested_bulk_talents():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"BulkQProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    ta = await _seed_talent(f"Priyanka Bulkq {tag}")
+    tb = await _seed_talent(f"Rohan Bulkq {tag}")
+    await _seed_pipeline_row(project_id, ta, "shortlisted")
+    # tb has no pipeline row at all -> never tested
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"has Priyanka Bulkq {tag},Rohan Bulkq {tag} tested for {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert f"Priyanka Bulkq {tag}" in r.reply and "Shortlisted" in r.reply, r.reply
+        assert f"Rohan Bulkq {tag}" in r.reply and "Not tested" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[ta, tb])
+        await _restore_config(original)
+
+
+async def test_bare_hyphen_no_space_add_end_to_end():
+    """The exact originally-reported failure (Command Specification V1
+    Phase 3C): "Add-Talent-Project" with no spaces around either hyphen
+    and no pipeline segment must add the talent at the default stage,
+    not mis-split into a confusing "which project?" prompt."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"BareHyphenProj{tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"BareHyphenTalent{tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add-BareHyphenTalent{tag}-{label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Which project" not in r.reply, r.reply
+        assert "You are about to add" in r.reply, r.reply
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "ask_to_test", (r2.reply, doc)
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)

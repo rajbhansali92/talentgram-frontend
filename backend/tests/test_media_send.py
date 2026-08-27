@@ -1305,6 +1305,84 @@ async def test_approval_lifecycle_test_a_no_send_approval_means_nothing_sent():
         await _restore_config(original)
 
 
+async def test_approval_lifecycle_full_state_transition_trace():
+    """End-to-end regression (2026-08-27) matching the exact live production
+    re-verification: traces every state transition through the REAL
+    chat-dispatch path (handle_inbound_message — never the executor
+    directly) and proves, in one continuous flow:
+
+      1. Zero scan_requests exist after the bare "send" command.
+      2. The admin's reply IS the proposed form (not a bare ack).
+      3. Editing a field before approval leaves the draft "pending" and
+         changes zero database state beyond the draft itself.
+      4. The edited value is exactly what the frozen snapshot contains.
+      5. Approving freezes that exact (edited) snapshot as "approved".
+      6. The worker cannot reach mode="send" before step 5 (checked before
+         AND after the edit, both times zero).
+      7. Re-issuing the same "send" command after approval resumes the
+         SAME frozen snapshot ("already approved") rather than bypassing
+         approval or silently regenerating a different one.
+    """
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    email = f"ahana.fulltrace.{tag}@example.com"
+    project_id = await _seed_project(f"Google FullTrace {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(
+        f"Ahana FullTrace {tag}", whatsapp_group_name=f"Ahana FullTrace {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="pending")
+    await db.submissions.update_one({"id": submission_id}, {"$set": {"form_data": {"height": "5'4\""}}})
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    phone = "917000600060"
+    try:
+        # 1+2: bare command -> zero scan_requests, form IS the reply.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - Ahana FullTrace {tag} - Google FullTrace {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "SEND FORM PREVIEW" in r.reply, r.reply
+        assert "5'4\"" in r.reply, r.reply
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+
+        # 3+4+6: edit before approval -> draft stays pending, edited value
+        # reflected, still zero scan_requests.
+        await handle_inbound_message(group_name=group, sender_phone=phone, text="2", sender_name="Raj", sender_is_group_member=True)
+        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="Height = 6'0\"", sender_name="Raj", sender_is_group_member=True)
+        assert "6'0\"" in r.reply, r.reply
+        draft = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": talent_id}, {"_id": 0})
+        assert draft["status"] == ms.SEND_APPROVAL_STATUS_PENDING
+        assert draft["overrides"]["height"] == "6'0\""
+        assert "6'0\"" in draft["message"] and "5'4\"" not in draft["message"]
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+
+        # 5: approve -> exact edited snapshot frozen as "approved".
+        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="1", sender_name="Raj", sender_is_group_member=True)
+        assert "Approved" in r.reply, r.reply
+        approved = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": talent_id}, {"_id": 0})
+        assert approved["status"] == ms.SEND_APPROVAL_STATUS_APPROVED
+        assert "6'0\"" in approved["message"]
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id}, {"_id": 0})
+        assert req is not None, "only AFTER approval may a scan_request exist"
+
+        # 7: resuming shows the SAME frozen snapshot, not a fresh/bypassed one.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - Ahana FullTrace {tag} - Google FullTrace {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "already approved" in r2.reply.lower(), r2.reply
+        assert "6'0\"" in r2.reply, r2.reply
+        approved_after_resume = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": talent_id}, {"_id": 0})
+        assert approved_after_resume["content_hash"] == approved["content_hash"], "resuming must never regenerate a different snapshot"
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+        await _restore_config(original)
+
+
 async def test_approval_lifecycle_test_c_full_success_approves_submission():
     """TEST C: all media + form + ☑️ succeed -> submission becomes approved."""
     tag = uuid.uuid4().hex[:6]

@@ -39,7 +39,16 @@ from routers.whatsapp import BatchIn, ManualContact, SourceParams, create_batch
 logger = logging.getLogger(__name__)
 
 _worker_task = None
-POLL_SEC = 2.0
+# 2026-08-27 (SEND speed investigation): reduced from 2.0s. This interval
+# only governs how long the orchestrator can sit idle before re-checking
+# for scan_done/download_done work — it never touches WhatsApp at all
+# (pure Mongo poll), so tightening it is risk-free for both UPLOAD and
+# SEND; it directly shrinks the "form/scan finished but nothing noticed
+# yet" gap a real production SEND showed taking several real seconds on
+# the scan_result -> send_dispatched transition. The loop already
+# fast-cycles to 0.2s right after any poll that found work — this constant
+# only matters for the FIRST check after a period of true idleness.
+POLL_SEC = 0.5
 
 
 def _now() -> datetime:

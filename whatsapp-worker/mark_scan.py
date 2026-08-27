@@ -46,7 +46,13 @@ import session as session_module
 
 logger = logging.getLogger(__name__)
 
-POLL_SEC = 3.0
+# 2026-08-27 (SEND speed investigation): reduced from 3.0s. This is a
+# cheap HTTP claim-check against the backend when idle — it never touches
+# WhatsApp itself (the claimed request's mode branch below does that) —
+# a claimed request is always processed immediately (`continue`, no
+# sleep) regardless of this constant; it only bounds how long a NEWLY
+# available request can sit unclaimed after a period of true idleness.
+POLL_SEC = 1.0
 MAX_MESSAGES_SCANNED_DEFAULT = 300
 HTML_TRUNCATE = 60000
 

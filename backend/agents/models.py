@@ -45,6 +45,21 @@ class ExecResult:
     # already gets via build_confirmation. Default False preserves every
     # existing auto_confirm executor's behaviour unchanged.
     needs_clarification: bool = False
+    # Compound Actions hand-off (2026-08-27) — set by casting-agent's
+    # ADD/MOVE/SHARE plan executor when the SAME compound command also
+    # named a trailing SEND (the real media-forwarding intent, with its
+    # own multi-step approval — see casting.send's build_confirmation/
+    # executor). dispatcher.py normally clears the conversation
+    # unconditionally right after calling an executor; when this is set
+    # instead, it REPLACES the conversation with a fresh one for the
+    # named intent/collected fields (step="confirming") — exactly as if
+    # the user had just typed that command fresh and its confirmation
+    # card were already shown (which the executor's own `message` is
+    # expected to include). Shape: {"intent_id": str, "collected":
+    # Dict[str, str]}. None (the default) preserves the existing
+    # unconditional-clear behaviour for every other intent/executor
+    # across all three agents, unaffected.
+    next_conversation: Optional[Dict[str, Any]] = None
 
 
 @dataclass

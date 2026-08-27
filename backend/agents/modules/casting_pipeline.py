@@ -2638,6 +2638,28 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
         last_group = group
         if step.get("send_template"):
             group_send_template = step["send_template"]
+        # Compound Actions (2026-08-27) — casting.share/casting.send steps
+        # have a fundamentally different shape (no talent/project cross-
+        # product the way ADD/MOVE's own _resolve_one_plan_step expects),
+        # so they're handled here directly instead of being routed through
+        # it. Both still read from — and casting.share also still adds
+        # to — the SAME touched_pairs accumulator, so an implicit/pronoun
+        # reference ("with her", "for TVS Jupiter" left unnamed) inherits
+        # from whatever this SAME group's earlier ADD/MOVE steps touched.
+        if step.get("intent_id") == "casting.share":
+            share_res = await _resolve_share_step_for_plan(step.get("raw_text") or "", touched_pairs)
+            resolved_steps.append({
+                "intent_id": "casting.share", "raw_text": step.get("raw_text") or "",
+                "label": None, "resolved": None, "error": None, "share_resolution": share_res,
+            })
+            continue
+        if step.get("intent_id") == "casting.send":
+            send_fields = _resolve_send_step_for_plan(step.get("raw_text") or "", touched_pairs)
+            resolved_steps.append({
+                "intent_id": "casting.send", "raw_text": step.get("raw_text") or "",
+                "label": None, "resolved": None, "error": None, "send_fields": send_fields,
+            })
+            continue
         resolved = await _resolve_one_plan_step(step, ctx, touched_pairs)
         resolved_steps.extend(resolved)
         if step.get("send_template"):
@@ -2655,6 +2677,25 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
 
     lines = ["You are about to run this plan:", ""]
     for i, rs in enumerate(resolved_steps, start=1):
+        if rs["intent_id"] == "casting.share":
+            sr = rs.get("share_resolution")
+            if sr is not None and sr.ok:
+                recipients_desc = "pipeline" if sr.is_pipeline_target else ", ".join(sr.talent_labels)
+                projects_desc = ", ".join(sr.project_labels)
+                lines.append(f"{i}. Share {sr.template_label} for {projects_desc} with {recipients_desc}")
+            else:
+                err = sr.error if sr is not None else "Could not resolve this step."
+                lines.append(f"{i}. {rs['raw_text']} — {err}")
+            continue
+        if rs["intent_id"] == "casting.send":
+            sf = rs.get("send_fields") or {}
+            talent_desc = sf.get("talent_selector") or "?"
+            project_desc = sf.get("project_query") or "?"
+            lines.append(
+                f"{i}. Send {talent_desc}'s submission for {project_desc} "
+                "— a separate approval will follow"
+            )
+            continue
         r = rs["resolved"]
         if r is not None:
             names = ", ".join(r.talent_labels)
@@ -2698,6 +2739,7 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
     last_group: Optional[Any] = None
     group_send_template: Optional[str] = None
     group_send_data: Dict[str, _GroupSendBucket] = {}
+    pending_send_fields: Optional[Dict[str, str]] = None
 
     for step in steps:
         group = step.get("group", 0)
@@ -2710,6 +2752,46 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
         last_group = group
         if step.get("send_template"):
             group_send_template = step["send_template"]
+
+        # Compound Actions (2026-08-27) — see _build_plan_confirmation's
+        # identical branch.
+        if step.get("intent_id") == "casting.share":
+            try:
+                share_res = await _resolve_share_step_for_plan(step.get("raw_text") or "", touched_pairs)
+            except Exception:
+                logger.exception("plan share step resolution failed raw_text=%r", step.get("raw_text"))
+                summary_lines += [f"✗ {step.get('raw_text', 'share')}", "", "Something went wrong resolving this step.", ""]
+                continue
+            if not share_res.ok:
+                summary_lines += [f"✗ Share — {step.get('raw_text', '')}", "", share_res.error or "Could not resolve this step.", ""]
+                continue
+            try:
+                body_lines, total_queued = await _run_share_sends(share_res)
+            except Exception:
+                logger.exception("plan share step send failed raw_text=%r", step.get("raw_text"))
+                summary_lines += [f"✗ Share {share_res.template_label}", "", "Something went wrong sending this.", ""]
+                continue
+            summary_lines += [
+                f"✓ Share {share_res.template_label}",
+            ] + body_lines + [
+                "", f"{total_queued} WhatsApp message{'' if total_queued == 1 else 's'} queued.", "",
+            ]
+            any_success = any_success or total_queued > 0
+            continue
+
+        if step.get("intent_id") == "casting.send":
+            # Deliberately NOT executed here — casting.send has its own
+            # multi-step, admin-approval-gated workflow (build form → show
+            # → allow edits → explicit approval → freeze → send) that must
+            # never be bypassed just because it arrived as the tail of a
+            # compound command (see SEND_INTENT/_build_send_confirmation/
+            # _send_executor, all unchanged). The LAST such step in the
+            # plan wins (there is normally only one); handed off to a
+            # fresh casting.send conversation once every other step has
+            # run — see the hand-off after this loop.
+            pending_send_fields = _resolve_send_step_for_plan(step.get("raw_text") or "", touched_pairs)
+            continue
+
         try:
             sub_steps = await _resolve_one_plan_step(step, ctx, touched_pairs)
         except Exception:
@@ -2808,7 +2890,34 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
                 summary_lines += [f"✗ {label}", "", "Something went wrong executing this step.", ""]
 
     await _flush_group_send(summary_lines, group_send_template, group_send_data, is_dry_run=False)
-    return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
+
+    if pending_send_fields is None:
+        return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
+
+    # Compound Actions SEND hand-off (2026-08-27) — everything else in
+    # this plan has run; now hand off into casting.send's OWN, completely
+    # unmodified conversation flow (build form → show → allow edits →
+    # explicit approval → freeze → send), by rendering its confirmation
+    # card directly and asking dispatcher.py to open a fresh casting.send
+    # conversation instead of clearing this one (see ExecResult.
+    # next_conversation / agents/dispatcher.py's _clear_or_handoff — the
+    # exact same reply the user would get from a fresh "send - Talent -
+    # Project" command). Never auto-approved: the next "1" the admin
+    # sends is a genuine, distinct approval of THIS card, not inherited
+    # from the plan's own "1".
+    send_collected = dict(pending_send_fields)
+    try:
+        send_card = await _build_send_confirmation(send_collected, ctx)
+    except Exception:
+        logger.exception("plan send hand-off build_confirmation failed fields=%r", pending_send_fields)
+        summary_lines += ["", "✗ Send — something went wrong preparing the send form."]
+        return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
+
+    summary_lines += ["", send_card]
+    return ExecResult(
+        ok=any_success, message="\n".join(summary_lines).rstrip(),
+        next_conversation={"intent_id": "casting.send", "collected": send_collected},
+    )
 
 
 async def _move_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
@@ -3877,8 +3986,18 @@ SHARE_TRIGGERS = ["share"]
 _SHARE_CASTING_CALL_RE = re.compile(r"\bcasting\s*calls?\b", re.IGNORECASE)
 _SHARE_TEMPLATE_WORD_RE = re.compile(r"\btemplates?\b", re.IGNORECASE)
 _SHARE_TO_RECIPIENT_RE = re.compile(r"\b(?:to|with)\b\s+(.+)$", re.IGNORECASE | re.DOTALL)
-_SHARE_LEADING_CONNECTOR_RE = re.compile(r"^\s*(?:for|of)\s+", re.IGNORECASE)
+_SHARE_LEADING_CONNECTOR_RE = re.compile(
+    r"^\s*(?:(?:the|this|that|a|an|same)\s+)?(?:for|of)\s+", re.IGNORECASE
+)
 _SHARE_PIPELINE_RECIPIENT_RE = re.compile(r"^\s*(?:the\s+)?pipelines?\s*$", re.IGNORECASE)
+# Compound Actions (2026-08-27) — "SHARE the casting call with her" leaves
+# a bare "the" behind once "casting call" is stripped out of the head; a
+# project reference that reduces to nothing but filler like this means
+# none was actually named (as opposed to a real name, which never reduces
+# to just one of these words) — treated as empty so the compound-plan
+# resolver knows to inherit the project from context instead of treating
+# "the" as a literal (nonexistent) project name.
+_SHARE_PROJECT_FILLER_ONLY_RE = re.compile(r"^\s*(?:the|this|that|a|an|same)\s*$", re.IGNORECASE)
 
 
 def _extract_share_fields(text: str) -> Dict[str, str]:
@@ -3922,6 +4041,8 @@ def _extract_share_fields(text: str) -> Dict[str, str]:
             # template_query is the signal, never guessed here).
             project_part = _SHARE_TEMPLATE_WORD_RE.sub("", project_part)
         project_part = _SHARE_LEADING_CONNECTOR_RE.sub("", project_part.strip()).strip(" ,")
+        if _SHARE_PROJECT_FILLER_ONLY_RE.match(project_part):
+            project_part = ""
 
         out = {"recipient_query": recipient_part, "project_query": project_part}
         if is_casting_call:
@@ -4071,6 +4192,59 @@ async def _resolve_share(collected: dict) -> _ShareResolution:
     )
 
 
+def _share_recipient_is_implicit(recipient_raw: str) -> bool:
+    """True when a SHARE step's own recipient clause names no one of its
+    own — empty, or a pronoun ("her"/"him"/"them"/"both"/...) — reusing
+    the SAME pronoun vocabulary MOVE's own implicit-continuation already
+    recognizes (nlu.parse_talent_selector), not a second pronoun list.
+    "pipeline" is a real, explicit SHARE target (Part 10/18), never
+    implicit, so it's excluded here even though it isn't a name either."""
+    if not recipient_raw:
+        return True
+    if _SHARE_PIPELINE_RECIPIENT_RE.match(recipient_raw):
+        return False
+    selector = nlu.parse_talent_selector(recipient_raw)
+    return bool(selector.ok and selector.name_query == nlu.PRONOUN_LAST_MARKER)
+
+
+async def _resolve_share_step_for_plan(
+    raw_text: str, touched_pairs: List[Dict[str, str]]
+) -> "_ShareResolution":
+    """Resolves one 'casting.share' plan step (Compound Actions,
+    2026-08-27) — reuses _extract_share_fields/_resolve_share UNCHANGED;
+    the only new behaviour is inheriting an implicit/pronoun project or
+    recipient from `touched_pairs` (the SAME plan-wide accumulator MOVE's
+    own PRONOUN_LAST_MARKER fan-out already uses — see
+    _resolve_one_plan_segment) before handing off to the ordinary
+    resolver. An EXPLICIT project/recipient named on the SHARE clause
+    itself (Part 4: "SHARE the casting call with Siddhi" naming someone
+    OTHER than who was just added/moved) always wins — inheritance only
+    ever fills in what the clause left unsaid."""
+    fields = _extract_share_fields(raw_text)
+    project_raw = (fields.get("project_query") or "").strip()
+    recipient_raw = (fields.get("recipient_query") or "").strip()
+    template_query = fields.get("template_query") or ""
+
+    if _share_recipient_is_implicit(recipient_raw) and touched_pairs:
+        seen: List[str] = []
+        for pair in touched_pairs:
+            if pair["talent_label"] not in seen:
+                seen.append(pair["talent_label"])
+        recipient_raw = ",".join(seen)
+
+    if not project_raw and touched_pairs:
+        seen_p: List[str] = []
+        for pair in touched_pairs:
+            if pair["project_label"] not in seen_p:
+                seen_p.append(pair["project_label"])
+        project_raw = ",".join(seen_p)
+
+    collected = {"project_query": project_raw, "recipient_query": recipient_raw}
+    if template_query:
+        collected["template_query"] = template_query
+    return await _resolve_share(collected)
+
+
 async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
     resolved = await _resolve_share(collected)
     if not resolved.ok:
@@ -4103,11 +4277,14 @@ async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
     return "\n".join(lines)
 
 
-async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
-    resolved = await _resolve_share(collected)
-    if not resolved.ok:
-        return ExecResult(ok=False, error="share_resolution_failed", message=resolved.error)
-
+async def _run_share_sends(resolved: "_ShareResolution") -> Tuple[List[str], int]:
+    """The actual WhatsApp send loop for an already-resolved SHARE —
+    factored out of _share_executor so the Compound Actions plan engine's
+    "casting.share" step (_execute_plan) can reuse the EXACT same send
+    logic instead of a second copy. Returns (body_lines, total_queued);
+    the caller wraps these in whatever header/footer its own context
+    needs (a standalone "Shared." message vs. one line item inside a
+    combined plan summary)."""
     from agents.modules import whatsapp_campaign_agent as wa
     admin = await wa._service_admin()
 
@@ -4156,6 +4333,15 @@ async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
                         "or no phone/WhatsApp group on file — not sent"
                     )
         total_queued += len(jobs)
+    return body_lines, total_queued
+
+
+async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    resolved = await _resolve_share(collected)
+    if not resolved.ok:
+        return ExecResult(ok=False, error="share_resolution_failed", message=resolved.error)
+
+    body_lines, total_queued = await _run_share_sends(resolved)
 
     header = ["Shared.", "", f"Content: {resolved.template_label}"]
     footer = ["", f"{total_queued} WhatsApp message{'' if total_queued == 1 else 's'} queued."]
@@ -4239,9 +4425,11 @@ SEND_FORM_EDIT_FIELD = FieldSpec(
 
 
 def _extract_send_fields(text: str) -> Dict[str, str]:
-    """"send - Talent - Project" (hyphen) OR "send Talent Project"
-    (space-separated) — same shape/rationale as _extract_upload_fields,
-    own trigger ("send")."""
+    """"send - Talent - Project" (hyphen), "SEND Talent for Project"
+    (canonical natural language, 2026-08-27 — the explicit "for" connector
+    checked first, same regex the compound-plan SEND step uses), or "send
+    Talent Project" (space-separated, boundary resolved later via the
+    DB-aware _resolve_freeform_talent_project) — own trigger ("send")."""
     _, remainder = nlu._strip_leading_trigger(text or "", ["send"])
     remainder = (remainder or "").strip()
     if not remainder:
@@ -4250,7 +4438,74 @@ def _extract_send_fields(text: str) -> Dict[str, str]:
     if fields:
         talent_part, project_part = fields
         return {"talent_selector": talent_part, "project_query": project_part}
+    m = _SEND_STEP_FOR_PROJECT_RE.match(remainder)
+    if m:
+        return {"talent_selector": m.group(1).strip(), "project_query": m.group(2).strip()}
     return {"talent_selector": remainder, "project_query": remainder}
+
+
+# Compound Actions (2026-08-27) — "SEND her for TVS Jupiter" as a plan
+# step's own raw_text. Deliberately separate from _extract_send_fields
+# above (which handles the STANDALONE hyphen/space-separated forms, the
+# latter resolved via the DB-querying _resolve_freeform_talent_project) —
+# a compound-plan SEND clause always has an explicit "for" connector once
+# translated to natural language, so a small dedicated regex is enough;
+# no new DB-aware boundary-guessing needed.
+_SEND_STEP_FOR_PROJECT_RE = re.compile(r"^(.*?)\s+for\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_send_fields_for_plan(raw_text: str) -> Dict[str, str]:
+    _, remainder = nlu._strip_leading_trigger(raw_text or "", ["send"])
+    remainder = (remainder or "").strip()
+    if not remainder:
+        return {}
+    m = _SEND_STEP_FOR_PROJECT_RE.match(remainder)
+    if m:
+        return {"talent_selector": m.group(1).strip(), "project_query": m.group(2).strip()}
+    return {"talent_selector": remainder, "project_query": ""}
+
+
+def _plan_selector_is_implicit(raw: str) -> bool:
+    """True when a compound-plan clause's own talent/recipient reference
+    names no one of its own — empty, or a pronoun ("her"/"them"/"both"/
+    ...) — reusing the SAME pronoun vocabulary MOVE's own implicit-
+    continuation already recognizes (nlu.parse_talent_selector), not a
+    second pronoun list. Shared by the SHARE and SEND plan-step
+    resolvers below."""
+    if not raw:
+        return True
+    selector = nlu.parse_talent_selector(raw)
+    return bool(selector.ok and selector.name_query == nlu.PRONOUN_LAST_MARKER)
+
+
+def _resolve_send_step_for_plan(raw_text: str, touched_pairs: List[Dict[str, str]]) -> Dict[str, str]:
+    """Resolves one 'casting.send' plan step's talent/project text —
+    inheriting an implicit/pronoun reference from `touched_pairs` (the
+    SAME plan-wide accumulator MOVE's own PRONOUN_LAST_MARKER fan-out and
+    _resolve_share_step_for_plan both use), exactly like SHARE's plan-step
+    resolver. Returns raw {"talent_selector", "project_query"} text —
+    NOT yet resolved against the database; casting.send's own existing
+    build_confirmation/executor do that unchanged, via the normal
+    conversation hand-off (see _execute_plan's casting.send branch)."""
+    fields = _extract_send_fields_for_plan(raw_text)
+    talent_raw = (fields.get("talent_selector") or "").strip()
+    project_raw = (fields.get("project_query") or "").strip()
+
+    if _plan_selector_is_implicit(talent_raw) and touched_pairs:
+        seen: List[str] = []
+        for pair in touched_pairs:
+            if pair["talent_label"] not in seen:
+                seen.append(pair["talent_label"])
+        talent_raw = ",".join(seen)
+
+    if not project_raw and touched_pairs:
+        seen_p: List[str] = []
+        for pair in touched_pairs:
+            if pair["project_label"] not in seen_p:
+                seen_p.append(pair["project_label"])
+        project_raw = ",".join(seen_p)
+
+    return {"talent_selector": talent_raw, "project_query": project_raw}
 
 
 async def _resolve_freeform_talent_project(
@@ -5030,12 +5285,18 @@ HELP_TEXT = (
     "undo\n\n"
     "9. HELP — show this manual.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "COMBINING ADD + MOVE + SEND\n"
+    "COMMANDS CAN BE COMBINED\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
+    "ADD, MOVE, SHARE, and SEND can all be chained in one message — each "
+    "runs in the order you wrote it, and an unnamed talent/project (e.g. "
+    "\"her\", \"both\") is understood as whoever the earlier steps just "
+    "touched:\n\n"
+    "Add Ayushi to Toyota Glanza, Move her to Shortlisted, Share the "
+    "casting call with her\n\n"
+    "SEND inside a combined command still shows its own separate form and "
+    "still needs its own explicit approval — never bundled into the rest.\n\n"
     "Add,Move - Ayushi - Toyota Glanza - Follow Up\n\n"
     "Add,Move,Send - Ayushi - Casting Call - Toyota Glanza - Follow Up\n\n"
-    "Natural language works too, in any order of verbs:\n\n"
-    "Add and move Ayushi, Priya to Toyota, Nykaa to Follow Up and confirm\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "BULK COMMANDS\n"
     "━━━━━━━━━━━━━━━━━━\n\n"

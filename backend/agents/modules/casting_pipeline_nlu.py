@@ -342,7 +342,7 @@ FORCE_GLOBAL_MARKER = "__force_global__"
 # referent, for both mid-clarification corrections
 # and cross-command follow-ups.
 PRONOUN_LAST_MARKER = "__last_referenced_talent__"
-_PRONOUN_WORDS = {"him", "her", "them", "this one", "that one", "this", "that"}
+_PRONOUN_WORDS = {"him", "her", "them", "this one", "that one", "this", "that", "both"}
 
 # Phase 2 (Talent Selection & Add to Project, 2026-08-10) — "select" is
 # already a live casting.move trigger ("Select Priya to Approved" is a real
@@ -1004,17 +1004,33 @@ def _starts_with_any_trigger(line: str, triggers: List[str]) -> bool:
     )
 
 
+# Casting Pipeline Compound Actions (2026-08-27) — ADD/MOVE/SHARE/SEND
+# combinable in one instruction. SHARE's own trigger word lives in
+# casting_pipeline.py (SHARE_TRIGGERS) and casting.send's in SEND_INTENT's
+# own triggers=["send"] — both are single bare words with zero existing
+# vocabulary elsewhere in this file, so they're referenced directly here
+# rather than importing casting_pipeline.py (which would be circular —
+# that module already imports FROM this one).
+_SHARE_CHUNK_TRIGGERS = ["share"]
+_SEND_CHUNK_TRIGGERS = ["send"]
+
+
 def classify_chunk_intent(chunk_text: str) -> Optional[str]:
     """Which intent a split_actions chunk belongs to, based on which
-    trigger vocabulary its leading verb matches — "casting.move" or
-    "casting.add", or None if it starts with neither (defensive; not
-    reachable via split_actions's own chunking, which only ever starts a
-    new chunk at a recognized trigger)."""
+    trigger vocabulary its leading verb matches — "casting.add",
+    "casting.move", "casting.share", or "casting.send" — or None if it
+    starts with none of them (defensive; not reachable via split_actions's
+    own chunking, which only ever starts a new chunk at a recognized
+    trigger)."""
     first_line = (chunk_text or "").strip().split("\n", 1)[0]
     if _starts_with_any_trigger(first_line, [t.lower() for t in ADD_TRIGGERS]):
         return "casting.add"
     if _starts_with_any_trigger(first_line, [t.lower() for t in MOVE_TRIGGERS]):
         return "casting.move"
+    if _starts_with_any_trigger(first_line, _SHARE_CHUNK_TRIGGERS):
+        return "casting.share"
+    if _starts_with_any_trigger(first_line, _SEND_CHUNK_TRIGGERS):
+        return "casting.send"
     return None
 
 
@@ -1068,7 +1084,14 @@ def split_actions_grouped(text: str) -> "List[Tuple[int, str]]":
     commands: "Add A to X and move to Follow Up\\n\\nAdd B to Y and move
     to Shortlisted" must never let the second command's implicit trailing
     move fan out across the FIRST command's talents too."""
-    all_triggers = sorted({t.lower() for t in (MOVE_TRIGGERS + ADD_TRIGGERS)}, key=len, reverse=True)
+    # Casting Pipeline Compound Actions (2026-08-27) — "share"/"send" join
+    # "add"/"move" as chunk-starting/chaining trigger words, so ADD, MOVE,
+    # SHARE, and SEND can all be combined in one instruction (see
+    # classify_chunk_intent and _split_and_chained's comma-chaining below).
+    all_triggers = sorted(
+        {t.lower() for t in (MOVE_TRIGGERS + ADD_TRIGGERS + _SHARE_CHUNK_TRIGGERS + _SEND_CHUNK_TRIGGERS)},
+        key=len, reverse=True,
+    )
     lines = (text or "").split("\n")
 
     chunks: List[List[str]] = [[]]
@@ -1098,8 +1121,25 @@ def split_actions_grouped(text: str) -> "List[Tuple[int, str]]":
 
 
 def _split_and_chained(text: str, all_triggers: List[str]) -> List[str]:
+    """Splits on " and <trigger>" (unchanged) and, additively (Command
+    Combining, 2026-08-27), on a bare comma before a trigger too — "ADD X
+    to Y, MOVE X to Z, SHARE ... with X" chains exactly like its " and "-
+    joined equivalent, reusing this SAME splitter rather than a second one.
+
+    The comma branch is guarded by a negative lookbehind excluding "add"/
+    "move" immediately before the comma — this is what an existing
+    combined-trigger STRING ("add,move", "add,move,send", ...) always
+    looks like at its internal comma(s); those are recognized and
+    translated to natural language long before this function ever runs
+    (see _extract_add_fields/_extract_move_fields's
+    translate_simple_commands_in_text call), so in practice this guard is
+    a defensive belt-and-suspenders check, not a commonly-hit path — but it
+    means a comma immediately after a bare "Add"/"Move" can never be
+    misread as a new chained command even if that translation is ever
+    bypassed."""
+    trigger_alt = "|".join(re.escape(t) for t in all_triggers)
     pattern = re.compile(
-        r"\s+and\s+(?=(?:" + "|".join(re.escape(t) for t in all_triggers) + r")\b)",
+        r"(?<!\badd)(?<!\bmove)(?:\s*,\s*(?:and\s+)?|\s+and\s+)(?=(?:" + trigger_alt + r")\b)",
         re.IGNORECASE,
     )
     parts = [p.strip() for p in pattern.split(text) if p.strip()]

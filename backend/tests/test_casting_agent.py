@@ -20,6 +20,19 @@ from agents import registry, request_scope, session_context, undo_store
 from agents.dispatcher import handle_inbound_message
 from routers import casting_pipeline as pipeline_router
 
+# Compound Actions (2026-08-27) — reusing the SAME proven SEND-gate seeding
+# helpers test_media_send.py itself reuses from test_media_assignment.py
+# (test-only cross-file coupling, already established precedent), aliased
+# to avoid colliding with this file's own differently-shaped _seed_project/
+# _seed_talent/_cleanup.
+from tests.test_media_assignment import (  # noqa: E402
+    GUNWANTI_LID,
+    _seed_project as _seed_send_project,
+    _seed_submission as _seed_send_submission,
+    _seed_talent as _seed_send_talent,
+)
+from agents.modules import media_assignment as _ma
+
 agent_modules.register_all()
 
 AGENT_ID = "casting-agent"
@@ -6359,4 +6372,305 @@ async def test_share_hyphen_form_and_missing_recipient_asks():
         assert f"ShareHyphenTalent {tag}" in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Compound Actions (2026-08-27) — ADD, MOVE, SHARE, SEND combinable in one
+# instruction (Master Prompt: "make SHARE behave like the other pipeline
+# actions"). Focused regression coverage only (8 tests, per spec) — the
+# underlying SHARE/SEND mechanics themselves are already covered above and
+# in test_media_send.py; these tests are specifically about the COMBINING.
+# ---------------------------------------------------------------------------
+
+async def test_1_standalone_share_still_works_after_compound_actions():
+    """Test 1 — standalone SHARE, completely unaffected by the compound-
+    plan wiring added in this pass."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"StandaloneShareProj {tag}", shoot_dates="6 Jun 2028", budget="Rs 6,000/day",
+    )
+    talent_id = await _seed_talent(f"StandaloneShareTalent {tag}", phone="917000900001")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share casting call for StandaloneShareProj {tag} to StandaloneShareTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "SHARE PREVIEW" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_2_compound_add_move_share():
+    """Test 2 — ADD, MOVE, SHARE chained in one instruction, comma-
+    separated, with SHARE's recipient/project both left implicit
+    ("her"/nothing named) and correctly inherited from what ADD+MOVE just
+    touched."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"CompAMSProj {tag}", shoot_dates="1 Jul 2028", budget="Rs 7,000/day",
+    )
+    talent_id = await _seed_talent(f"CompAMSTalent {tag}", phone="917000900010")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add CompAMSTalent {tag} to CompAMSProj {tag}, "
+                "Move her to shortlisted, Share the casting call with her and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Completed" in r.reply, r.reply
+        assert "Share Casting Call" in r.reply, r.reply
+        assert "1 WhatsApp message queued." in r.reply, r.reply
+
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "shortlisted", (r.reply, doc)
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 1
+        assert "CompAMSProj" in jobs[0]["message_body"]
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_3_compound_add_move_share_send():
+    """Test 3 — the full ADD, MOVE, SHARE, SEND chain in one instruction.
+    Verifies ADD/MOVE/SHARE all completed AND that SEND's own form
+    preview is shown as part of the SAME reply — see Test 8 for the
+    dedicated approval-gate-integrity checks on this exact flow."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    email = f"amsend.{tag}@example.com"
+    project_id = await _seed_send_project(f"CompAMSSProj {tag}", whatsapp_casting_group_name="Talentgram Casting Test")
+    talent_id = await _seed_send_talent(
+        f"CompAMSSTalent {tag}", whatsapp_group_name=f"CompAMSSTalent {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_send_submission(project_id, talent_id, email, decision="approved")
+    await db[_ma.IDENTITY_COLLECTION].update_one(
+        {}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True,
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add CompAMSSTalent {tag} to CompAMSSProj {tag}, "
+                "Move her to shortlisted, Share the casting call with her, "
+                f"Send her for CompAMSSProj {tag} and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Completed" in r.reply, r.reply
+        assert "Share Casting Call" in r.reply, r.reply
+        assert "SEND FORM PREVIEW" in r.reply, r.reply
+        assert "1 → Approve" in r.reply, r.reply
+
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "shortlisted", (r.reply, doc)
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await db.submissions.delete_many({"id": submission_id})
+        await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await _restore_config(original)
+
+
+async def test_4_compound_share_multiple_talents():
+    """Test 4 — SHARE with multiple talents inside a compound command."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"CompMultiTalProj {tag}", shoot_dates="2 Aug 2028", budget="Rs 8,000/day",
+    )
+    t1 = await _seed_talent(f"CompMultiTalA {tag}", phone="917000900020")
+    t2 = await _seed_talent(f"CompMultiTalB {tag}", phone="917000900021")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add CompMultiTalA {tag}, CompMultiTalB {tag} to CompMultiTalProj {tag}, "
+                "Share the casting call with both and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Completed" in r.reply, r.reply
+        assert "2 WhatsApp messages queued." in r.reply, r.reply
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2]}}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_5_compound_share_multiple_projects_explicit_override():
+    """Test 5 — SHARE with an EXPLICIT project override that differs from
+    the ADD/MOVE project (Part 4: an explicit SHARE target always wins
+    over inheritance)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    added_project_id = await _seed_project_with_details(
+        f"CompAddedProj {tag}", shoot_dates="3 Sep 2028", budget="Rs 9,000/day",
+    )
+    other_project_id = await _seed_project_with_details(
+        f"CompOtherProj {tag}", shoot_dates="4 Oct 2028", budget="Rs 10,000/day",
+    )
+    talent_id = await _seed_talent(f"CompOverrideTalent {tag}", phone="917000900030")
+    await _seed_pipeline_row(other_project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add CompOverrideTalent {tag} to CompAddedProj {tag}, "
+                f"Share the casting call for CompOtherProj {tag} with CompOverrideTalent {tag} and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Completed" in r.reply, r.reply
+        assert f"CompOtherProj {tag}" in r.reply, r.reply
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 1
+        assert jobs[0]["source_id"] == other_project_id
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[added_project_id, other_project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_6_compound_share_ambiguous_project_asks_not_guesses():
+    """Test 6 — an ambiguous SHARE project inside a compound plan is
+    reported inline (✗ + the "which one?" question), exactly like an
+    ambiguous ADD/MOVE step already is — never silently guessed, never a
+    send to the wrong project."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    alpha_label = f"CompAmbig {tag} Alpha"
+    beta_label = f"CompAmbig {tag} Beta"
+    p1 = await _seed_project_with_details(alpha_label, shoot_dates="1 Nov 2028", budget="Rs 1/day")
+    p2 = await _seed_project_with_details(beta_label, shoot_dates="2 Nov 2028", budget="Rs 2/day")
+    talent_id = await _seed_talent(f"CompAmbigTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add CompAmbigTalent {tag} to {alpha_label}, "
+                f"Share the casting call for CompAmbig {tag} with CompAmbigTalent {tag} and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Completed" in r.reply, r.reply
+        assert "found multiple projects" in r.reply.lower(), r.reply
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert jobs == []
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_7_existing_add_move_send_template_blast_unchanged():
+    """Test 7 — the PRE-EXISTING "Add,Move,Send - Talent - Casting Call -
+    Project - Stage" structured compound (the WhatsApp-template-blast tail,
+    unrelated to casting.send) must remain completely unaffected by the
+    new ADD/MOVE/SHARE/SEND word-based chunking."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"AMSRegressProj {tag}", shoot_dates="5 Dec 2028", budget="Rs 5,000/day",
+    )
+    talent_id = await _seed_talent(f"AMSRegressTalent {tag}", phone="917000900040")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"add,move,send - AMSRegressTalent {tag} - Casting Call - AMSRegressProj {tag} - Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "✗" not in r.reply, r.reply
+        assert "1 WhatsApp message queued." in r.reply, r.reply
+
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "follow_up"
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_8_send_approval_gate_intact_inside_compound_command():
+    """Test 8 — SEND's approval gate is genuinely preserved when SEND is
+    part of a compound command: nothing is sent merely because the plan
+    was approved/auto-confirmed, the SEND form is a real, LIVE
+    confirmation (a subsequent "3" cancels it cleanly), and no WhatsApp
+    job/media-send record is ever created without a SEPARATE, explicit
+    approval of that form."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    email = f"gatecheck.{tag}@example.com"
+    project_id = await _seed_send_project(f"CompGateProj {tag}", whatsapp_casting_group_name="Talentgram Casting Test")
+    talent_id = await _seed_send_talent(
+        f"CompGateTalent {tag}", whatsapp_group_name=f"CompGateTalent {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_send_submission(project_id, talent_id, email, decision="approved")
+    await db[_ma.IDENTITY_COLLECTION].update_one(
+        {}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True,
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add CompGateTalent {tag} to CompGateProj {tag}, "
+                f"Send her for CompGateProj {tag} and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "SEND FORM PREVIEW" in r.reply, r.reply
+        # Nothing has actually been sent/scanned yet — approving the PLAN
+        # (via "and confirm") must never be mistaken for approving SEND.
+        assert await db[_ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id}) is None
+
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert cancel.handled, cancel.reply
+        assert "Cancelled" in cancel.reply, cancel.reply
+        assert await db[_ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id}) is None
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await db.submissions.delete_many({"id": submission_id})
+        await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
         await _restore_config(original)

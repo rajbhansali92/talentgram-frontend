@@ -79,6 +79,36 @@ async def _render_confirmation(intent, collected: dict, ctx: ExecContext) -> str
     return build_confirmation_message(intent, collected)
 
 
+async def _clear_or_handoff(
+    agent_id: str, phone: str, group_name: str, exec_result, *, previous_conv: Optional[dict] = None,
+) -> None:
+    """Compound Actions hand-off (2026-08-27) — called at every point that
+    otherwise unconditionally clears the conversation right after an
+    executor runs. When the executor set `next_conversation` (currently
+    only casting-agent's ADD/MOVE/SHARE plan executor, when the SAME
+    compound command also named a trailing SEND), REPLACE the
+    conversation with a fresh one for that intent/collected fields
+    instead of clearing it — step="confirming", so the user's very next
+    reply is handled by the ordinary "confirming" step below, exactly as
+    if they'd just typed that command themselves and its card were
+    already shown. `previous_conv` (if the caller has it) supplies the
+    group_name to carry over when the hand-off itself doesn't specify
+    one. None (every existing intent/executor) preserves the exact prior
+    behaviour: unconditional clear."""
+    next_conv = getattr(exec_result, "next_conversation", None)
+    if not next_conv:
+        await conversation.clear_conversation(agent_id, phone)
+        return
+    await conversation.start_conversation(
+        agent_id=agent_id,
+        phone=phone,
+        group_name=group_name or (previous_conv or {}).get("group_name") or "",
+        intent_id=next_conv["intent_id"],
+        collected=next_conv.get("collected") or {},
+    )
+    await conversation.update_conversation(agent_id, phone, step="confirming")
+
+
 async def _collect_or_advance(
     agent, intent, conv: dict, text: str, *, sender_name: Optional[str] = None
 ) -> DispatchResult:
@@ -152,13 +182,13 @@ async def _collect_or_advance(
             # mechanism casting.move gets via build_confirmation.
             await conversation.update_conversation(agent.agent_id, phone, step="editing")
         else:
-            await conversation.clear_conversation(agent.agent_id, phone)
+            await _clear_or_handoff(agent.agent_id, phone, conv.get("group_name") or "", exec_result)
         return DispatchResult(handled=True, reply=exec_result.message)
 
     if intent.try_auto_execute:
         auto_result = await intent.try_auto_execute(collected, ctx)
         if auto_result is not None:
-            await conversation.clear_conversation(agent.agent_id, phone)
+            await _clear_or_handoff(agent.agent_id, phone, conv.get("group_name") or "", auto_result)
             return DispatchResult(handled=True, reply=auto_result.message)
 
     await conversation.update_conversation(
@@ -780,7 +810,7 @@ async def handle_inbound_message(
                             last_message_text=exec_result.message,
                         )
                 else:
-                    await conversation.clear_conversation(agent.agent_id, phone)
+                    await _clear_or_handoff(agent.agent_id, phone, group_name, exec_result)
                     if new_task:
                         await tasks.clear_task(agent.agent_id, task_op_id)
                         task_op_id = None
@@ -802,7 +832,7 @@ async def handle_inbound_message(
             if intent.try_auto_execute:
                 auto_result = await intent.try_auto_execute(collected, ctx)
                 if auto_result is not None:
-                    await conversation.clear_conversation(agent.agent_id, phone)
+                    await _clear_or_handoff(agent.agent_id, phone, group_name, auto_result)
                     if new_task:
                         await tasks.clear_task(agent.agent_id, task_op_id)
                     await audit.log_turn(
@@ -899,7 +929,7 @@ async def handle_inbound_message(
                     conversation_id=str(conv.get("_id") or ""),
                 )
                 exec_result = await intent.executor(conv.get("collected") or {}, ctx)
-                await conversation.clear_conversation(agent.agent_id, phone)
+                await _clear_or_handoff(agent.agent_id, phone, group_name, exec_result)
                 await audit.log_turn(
                     agent_id=agent.agent_id,
                     group_name=group_name,

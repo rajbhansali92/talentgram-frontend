@@ -1581,3 +1581,74 @@ async def test_download_result_endpoint_persists_marker_result():
         assert doc["status"] == ma.DOWNLOAD_STATUS_DONE
     finally:
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+# ---------------------------------------------------------------------------
+# Casting Pipeline regression investigation (2026-08-27) — a real production
+# incident report ("commands that previously worked are now not
+# responding") triggered a full audit of whether SEND's own Phase 2 approval
+# gate (auto_confirm=False, a "confirming"-status Concurrent Task Engine
+# entry that can sit unresolved for its full TTL) could hijack an unrelated
+# fresh command from the SAME phone in the SAME group. Live production
+# testing (direct calls against the real deployed /inbound endpoint) found
+# every command still worked correctly even with real leftover "confirming"
+# casting.send tasks on file for that exact phone — this test makes that
+# same guarantee a permanent, automated regression check: a fresh QUERY
+# trigger must never be swallowed/misrouted into an unrelated pending SEND
+# confirmation, and the SEND task itself must be left completely untouched
+# (still "confirming", same operation_id) for the admin to resolve later.
+# ---------------------------------------------------------------------------
+async def test_send_confirming_state_does_not_swallow_unrelated_query_command():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    email = f"ahana.swallow.{tag}@example.com"
+    project_id = await _seed_project(f"Google Swallow {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(
+        f"Ahana Swallow {tag}", whatsapp_group_name=f"Ahana Swallow {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one(
+        {}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True,
+    )
+    phone = "917000600099"
+    try:
+        # Open a SEND confirmation and leave it hanging — never approve,
+        # edit, or cancel it, matching the exact real-world scenario found
+        # in production (two abandoned "confirming" casting.send tasks left
+        # on file for the same phone from an earlier debugging session).
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - Ahana Swallow {tag} - Google Swallow {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and "SEND FORM PREVIEW" in r.reply, r.reply
+        pending_op_id = r.operation_id
+        assert pending_op_id is not None
+
+        from agents import tasks as agent_tasks
+        pending_task = await agent_tasks.get_task("casting-agent", pending_op_id)
+        assert pending_task is not None and pending_task["status"] == "confirming"
+
+        # A completely unrelated FRESH command (not a reply-to-message, no
+        # quoted text) from the SAME phone in the SAME group must be parsed
+        # and executed as its own new command — never treated as a reply to
+        # the still-open SEND confirmation.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="show ongoing projects",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert "SEND FORM" not in r2.reply, r2.reply
+        assert "Approve" not in r2.reply, r2.reply
+        assert f"Google Swallow {tag}" in r2.reply, r2.reply
+
+        # The abandoned SEND task itself is completely untouched — still
+        # sitting exactly where the admin left it, ready to be resumed.
+        still_pending = await agent_tasks.get_task("casting-agent", pending_op_id)
+        assert still_pending is not None
+        assert still_pending["status"] == "confirming"
+        assert still_pending["updated_at"] == pending_task["updated_at"]
+    finally:
+        await _restore_config(original)
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])

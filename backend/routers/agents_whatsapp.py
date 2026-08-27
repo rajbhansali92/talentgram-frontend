@@ -234,6 +234,19 @@ async def claim_scan_request(x_internal_secret: Optional[str] = Header(default=N
     if not doc:
         return {}
     doc.pop("_id", None)
+    # Phase-timing instrumentation (2026-08-27, diagnostic only — never
+    # read by any orchestration logic, purely for measuring where SEND's
+    # real time goes): scan_claimed_at/send_claimed_at are each written
+    # EXACTLY ONCE (mode doesn't change between when a doc is claimed for
+    # scanning vs. claimed again later for the send/download phase), so
+    # unlike `claimed_at` (overwritten on every claim) these let created_at
+    # -> scan_claimed_at -> ... -> send_claimed_at -> completed_at be
+    # reconstructed after the fact.
+    timing_field = "scan_claimed_at" if doc.get("mode") == "scan" else "send_claimed_at"
+    await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+        {"id": doc["id"], timing_field: {"$exists": False}}, {"$set": {timing_field: now}},
+    )
+    doc.setdefault(timing_field, now)
     return doc
 
 
@@ -254,6 +267,7 @@ async def report_scan_result(
         {"$set": {
             "status": status, "candidates": payload.candidates, "scan_error": payload.error,
             "debug": payload.debug,
+            "scan_result_at": datetime.now(timezone.utc),  # phase-timing instrumentation, diagnostic only
             "updated_at": datetime.now(timezone.utc),
         }},
     )

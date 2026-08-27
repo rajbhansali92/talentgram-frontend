@@ -4116,7 +4116,7 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
         # worker-side failure) — reuse the FROZEN message verbatim rather
         # than regenerating it, so a retry never shows/sends different
         # wording than what was actually approved.
-        header = "SEND FORM — already approved (resuming)"
+        header = "SEND FORM — Already Approved (resuming — the form itself is not re-sent)"
         message = existing["message"]
     else:
         overrides = _send_approval_overrides(existing)
@@ -4129,13 +4129,20 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
             submission_id=target["submission"]["id"], overrides=overrides,
             message=built["message"], content_hash=built["content_hash"],
         )
-        header = "SEND FORM PREVIEW"
+        header = "SEND FORM PREVIEW — 🚫 Nothing Has Been Sent Yet"
         message = built["message"]
 
     return (
-        f"{header}\n\n{message}\n\n"
+        f"{header}\n\n"
+        f"This is the EXACT form that will be sent. Nothing has gone out, and nothing "
+        f"will, until you explicitly approve below.\n\n"
+        f"Destination: {destination_group}\n\n"
+        f"{message}\n\n"
         'Edit any field with e.g. "Age = 24" (one or more lines).\n\n'
-        "Reply:\n1 → Approve\n2 → Edit\n3 → Cancel"
+        "Reply:\n"
+        "1 → Approve (starts sending: Takes → Introduction → this form → Pictures → ☑️)\n"
+        "2 → Edit\n"
+        "3 → Cancel"
     )
 
 
@@ -4247,8 +4254,10 @@ async def _send_executor(
     )
     return ExecResult(
         ok=True,
-        message=f"Approved — sending {talent_label}'s marked {project['label']} media to "
-                f"{destination_group}…\n\nI'll report back here once it's done.",
+        message=f"✅ Approved by {ctx.sender_phone} — now sending {talent_label}'s marked "
+                f"{project['label']} media to {destination_group}\n\n"
+                f"Order: Takes → Introduction → Form → Pictures → ☑️ (skipping any stage with nothing marked).\n\n"
+                f"I'll report back here once it's done.",
     )
 
 

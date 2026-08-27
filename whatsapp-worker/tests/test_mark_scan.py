@@ -2301,6 +2301,38 @@ def main():
     assert page_80.escape_presses == 5, page_80.escape_presses  # all 5 bounded rounds attempted, never an infinite retry
     print("80. SEND dialog-close bounded and honest -> a genuinely stuck dialog is reported as NOT closed, never assumed fixed")
 
+    # 81 (2026-08-27, acceptance requirement): no unnecessary ~1-minute
+    # inter-item delays. With every sub-operation mocked to return
+    # instantly, _run_send's own orchestration must add no artificial
+    # sleep between items -- if a fixed/artificial wait were ever
+    # reintroduced between stages, this test's wall-clock budget would
+    # catch it immediately (real WhatsApp-required waits live INSIDE the
+    # mocked functions, not in _run_send's own loop, so mocking them
+    # away isolates exactly what _run_send itself adds).
+    import time as _time_mod
+    calls_81, open_81, forward_81, text_81 = _install_send_fakes()
+    orig_open_81, orig_forward_81, orig_text_81 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_81, forward_81, text_81
+    try:
+        req_81 = {
+            "group_name": "Source Group", "destination_group": "Dest Group",
+            "send_targets": [
+                _send_target("take1", "take", 1), _send_target("take2", "take", 2),
+                _send_target("intro1", "intro"), _send_target("pic1", "photos"),
+            ],
+            "form_insert_index": 3, "form_message": "SEND FORM TEXT", "send_marker_on_success": True,
+        }
+        t_start_81 = _time_mod.monotonic()
+        result_81 = asyncio.run(mark_scan._run_send(_FakePage73(), req_81))
+        elapsed_81 = _time_mod.monotonic() - t_start_81
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_81, orig_forward_81, orig_text_81
+
+    assert all(r["ok"] for r in result_81["results"]), result_81
+    assert result_81["marker_result"]["ok"] is True, result_81
+    assert elapsed_81 < 1.0, f"_run_send took {elapsed_81:.2f}s with everything mocked instant -- an artificial delay was reintroduced between items"
+    print(f"81. SEND no artificial inter-item delay -> 4 items + form + marker processed in {elapsed_81*1000:.0f}ms with instant mocks (budget: 1000ms)")
+
 
 if __name__ == "__main__":
     main()

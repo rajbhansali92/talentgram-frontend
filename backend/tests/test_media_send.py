@@ -1287,8 +1287,17 @@ async def test_approval_lifecycle_test_a_no_send_approval_means_nothing_sent():
         )
         assert r.handled, r.reply
         assert "SEND FORM PREVIEW" in r.reply, r.reply
-        # No reply to the preview yet -> nothing dispatched, nothing sent.
+        assert "Nothing Has Been Sent" in r.reply, r.reply
+        assert f"Destination: {DESTINATION_GROUP}" in r.reply, r.reply
+        # No reply to the preview yet -> ZERO outbound messages of any kind:
+        # no scan request ever dispatched (mode never reaches "send"), and
+        # none of SEND's own idempotency records exist either.
         assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+        assert await db[ms.MEDIA_SENDS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+        assert await db[ms.FORM_SENDS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+        assert await db[ms.COMPLETION_MARKERS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+        approval = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": talent_id})
+        assert approval is not None and approval["status"] == ms.SEND_APPROVAL_STATUS_PENDING
         sub = await db.submissions.find_one({"id": submission_id})
         assert sub["decision"] == "pending"
     finally:

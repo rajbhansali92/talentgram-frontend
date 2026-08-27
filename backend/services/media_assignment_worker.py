@@ -403,6 +403,7 @@ async def _process_scan_done() -> bool:
             {"$set": {
                 "mode": "send",
                 "status": media_assignment.DOWNLOAD_STATUS_PENDING,
+                "send_dispatched_at": _now(),  # phase-timing instrumentation, diagnostic only
                 "send_targets": send_targets,
                 "form_insert_index": form_insert_index,
                 "send_marker_on_success": send_marker_on_success,

@@ -2333,6 +2333,144 @@ def main():
     assert elapsed_81 < 1.0, f"_run_send took {elapsed_81:.2f}s with everything mocked instant -- an artificial delay was reintroduced between items"
     print(f"81. SEND no artificial inter-item delay -> 4 items + form + marker processed in {elapsed_81*1000:.0f}ms with instant mocks (budget: 1000ms)")
 
+    # 2026-08-27: a live SEND E2E against a real 2-tile photo album found
+    # BOTH _identify_tile_index AND a plain generic <img> search returning
+    # ZERO matches immediately after _find_message_index_by_data_id
+    # located the message -- proven live (photo_render_timing_diagnostic)
+    # to be a virtualized-DOM rendering-timing gap: the message's own
+    # container renders as a bare stub (outerHTML ~222 chars) until
+    # scrolled into view and given a moment to settle. These tests cover
+    # the fix: _ensure_message_content_rendered (bounded poll, never a
+    # blind fixed sleep) and _open_media_and_get_forward_button's photo
+    # branch now targeting the SPECIFIC album tile at tile_index (via the
+    # same video-content/image-content/image-thumb identity the original
+    # scan hashed) instead of always grabbing message.locator("img").first.
+
+    class _FakeStubThenReal82:
+        def __init__(self):
+            self.calls = 0
+            self.scrolled = False
+        async def scroll_into_view_if_needed(self, timeout=5000):
+            self.scrolled = True
+        async def evaluate(self, js):
+            self.calls += 1
+            return 222 if self.calls < 3 else 7411
+
+    class _FakePage82:
+        def __init__(self):
+            self.waits = []
+        async def wait_for_timeout(self, ms):
+            self.waits.append(ms)
+
+    msg_82 = _FakeStubThenReal82()
+    page_82 = _FakePage82()
+    asyncio.run(mark_scan._ensure_message_content_rendered(page_82, msg_82, max_rounds=8, interval_ms=500))
+    assert msg_82.scrolled is True, "must scroll the message container into view before polling"
+    assert msg_82.calls == 3, f"expected exactly 3 evaluate calls (stub, stub, rendered), got {msg_82.calls}"
+    assert page_82.waits == [500, 500], f"expected exactly 2 waits (between stub rounds, none after success), got {page_82.waits}"
+    print("82. photo render-timing wait       -> bounded poll waits only until the stub becomes real content, then stops immediately")
+
+    class _FakeStubForever82:
+        async def scroll_into_view_if_needed(self, timeout=5000):
+            pass
+        async def evaluate(self, js):
+            return 222
+
+    page_82b = _FakePage82()
+    asyncio.run(mark_scan._ensure_message_content_rendered(page_82b, _FakeStubForever82(), max_rounds=4, interval_ms=100))
+    assert page_82b.waits == [100, 100, 100, 100], page_82b.waits
+    print("82b. photo render-timing bounded   -> a message that never renders real content is polled exactly max_rounds times, never infinitely")
+
+    class _FakeImgLoc83:
+        def __init__(self, rec, label):
+            self.rec, self.label = rec, label
+        async def scroll_into_view_if_needed(self, timeout=5000):
+            self.rec.append((self.label, "scroll"))
+        async def click(self, timeout=10000):
+            self.rec.append((self.label, "click"))
+
+    class _FakeImgCollection83:
+        def __init__(self, rec, label):
+            self.first = _FakeImgLoc83(rec, label)
+
+    class _FakeTileLoc83:
+        def __init__(self, rec, index):
+            self.rec, self.index = rec, index
+        async def evaluate(self, js, timeout=10000):
+            return True
+        def locator(self, sel):
+            assert sel == "img"
+            return _FakeImgCollection83(self.rec, f"tile{self.index}_img")
+
+    class _FakeTilesCollection83:
+        def __init__(self, rec, count):
+            self.rec, self._count = rec, count
+        async def count(self):
+            return self._count
+        def nth(self, i):
+            self.rec.append(("tiles.nth", i))
+            return _FakeTileLoc83(self.rec, i)
+
+    class _FakeMessageLoc83:
+        def __init__(self, rec):
+            self.rec = rec
+        async def scroll_into_view_if_needed(self, timeout=5000):
+            self.rec.append(("message", "scroll"))
+        async def evaluate(self, js, timeout=10000):
+            return 7411  # already fully rendered -- isolates tile-selection from the render-timing test above
+        def locator(self, sel):
+            assert "image-thumb" in sel and "image-content" in sel and "video-content" in sel
+            return _FakeTilesCollection83(self.rec, 2)
+
+    class _FakeLocatorRoot83:
+        def __init__(self, rec):
+            self.rec = rec
+        def nth(self, idx):
+            return _FakeMessageLoc83(self.rec)
+
+    class _FakePage83:
+        def __init__(self, rec):
+            self.rec = rec
+        def locator(self, sel):
+            return _FakeLocatorRoot83(self.rec)
+        async def wait_for_timeout(self, ms):
+            pass
+
+    orig_find_idx_83 = mark_scan._find_message_index_by_data_id
+    orig_resolve_scope_83 = sender._resolve_scope
+    orig_evaluate_83 = mark_scan._evaluate
+
+    async def _fake_find_idx_83(page, group, data_id):
+        return 5
+
+    async def _fake_resolve_scope_83(page):
+        return "SCOPE"
+
+    async def _fake_evaluate_forward_btn_83(page, js, arg=None, timeout=10.0):
+        return {
+            "rootFound": True,
+            "buttons": [{"ariaLabel": "Forward", "dataIcon": None, "testid": None, "svgTitle": None, "rect": [100, 200, 24, 24]}],
+        }
+
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_83
+    sender._resolve_scope = _fake_resolve_scope_83
+    mark_scan._evaluate = _fake_evaluate_forward_btn_83
+    rec_83: list = []
+    try:
+        page_83 = _FakePage83(rec_83)
+        result_83 = asyncio.run(mark_scan._open_media_and_get_forward_button(page_83, "GROUP", "MSGID", 1, True))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_83
+        sender._resolve_scope = orig_resolve_scope_83
+        mark_scan._evaluate = orig_evaluate_83
+
+    assert result_83["ok"] is True, result_83
+    assert ("tiles.nth", 1) in rec_83, rec_83
+    assert ("tiles.nth", 0) not in rec_83, rec_83
+    assert ("tile1_img", "click") in rec_83, rec_83
+    assert ("tile0_img", "click") not in rec_83, rec_83
+    print("83. photo album correct tile targeted -> tile_index=1 of 2 clicks the SECOND tile's own <img>, never always the first")
+
 
 if __name__ == "__main__":
     main()

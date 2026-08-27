@@ -6961,6 +6961,37 @@ def _find_onscreen_forward_button(dump: Optional[Dict[str, Any]]) -> Optional[Di
     return exact_match or loose_match
 
 
+async def _ensure_message_content_rendered(page, message_locator, max_rounds: int = 8, interval_ms: int = 500) -> None:
+    """SEND-only fix (2026-08-27) — root-caused live via
+    photo_render_timing_diagnostic against a real album-photo SEND
+    failure: _find_message_index_by_data_id only guarantees the message's
+    own top-level container exists (WhatsApp's virtualized list renders a
+    lightweight stub there — proven live: outer_html_len=222, zero tiles
+    of ANY kind) — its actual media content (tiles/images) does not mount
+    until the container is itself scrolled into view and WhatsApp's own
+    virtualization settles (proven live: one round after
+    scroll_into_view_if_needed, outer_html_len jumped to 7411 with both
+    tiles present, stable every round after). Never a blind fixed sleep:
+    scrolls once, then polls (bounded) for the message's own outerHTML to
+    stop being a bare stub, since a truly-empty single (non-media) message
+    would never gain the same tile testids to poll for instead. Isolated
+    entirely to this SEND code path — never touches
+    _resolve_video_tile_locator/_find_message_index_by_data_id or any
+    other function UPLOAD's _run_download also calls."""
+    try:
+        await message_locator.scroll_into_view_if_needed(timeout=5000)
+    except Exception:
+        pass
+    for _ in range(max_rounds):
+        try:
+            html_len = await message_locator.evaluate("(el) => el.outerHTML.length")
+        except Exception:
+            break
+        if html_len > 300:
+            return
+        await page.wait_for_timeout(interval_ms)
+
+
 async def _open_media_and_get_forward_button(
     page, group_name: str, source_message_id: str, tile_index: int, is_photo: bool,
 ) -> Dict[str, Any]:
@@ -6983,17 +7014,41 @@ async def _open_media_and_get_forward_button(
             scope = await sender._resolve_scope(page)
             full_sel = f"{scope} [data-testid^='conv-msg-']"
             message = page.locator(full_sel).nth(idx)
+            await _ensure_message_content_rendered(page, message)
             try:
-                has_img = await message.evaluate("""
-                    (el) => {
-                      const imgs = Array.from(el.querySelectorAll('img'));
-                      const big = imgs.filter(im => im.offsetWidth > 20).sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight))[0];
-                      return !!big;
-                    }
-                """)
-                if not has_img:
-                    return {"ok": False, "reason": "no clickable <img> found on photo message"}
-                photo_loc = message.locator("img").first
+                # An album photo's tiles carry a video-content/image-content/
+                # image-thumb testid (same identity the original scan used to
+                # hash and assign tile_index — see _hash_album_tiles_live); a
+                # genuinely single (non-album) photo carries NONE of those
+                # (confirmed via prior diagnostic), so the whole-message
+                # generic <img> search remains its own correct, unchanged
+                # path. Only when tiles ARE present is the SPECIFIC tile at
+                # tile_index addressed — the previous code always grabbed
+                # message.locator("img").first regardless, which for a
+                # multi-tile album silently targeted the wrong photo.
+                tiles = message.locator(
+                    '[data-testid="video-content"], [data-testid="image-content"], [data-testid="image-thumb"]'
+                )
+                tile_count = await tiles.count()
+                if tile_count > 0:
+                    target_tile = tiles.nth(min(tile_index, tile_count - 1))
+                    has_img = await target_tile.evaluate(
+                        "(el) => Array.from(el.querySelectorAll('img')).some(im => im.offsetWidth > 20)"
+                    )
+                    if not has_img:
+                        return {"ok": False, "reason": f"no clickable <img> found on album tile {tile_index}"}
+                    photo_loc = target_tile.locator("img").first
+                else:
+                    has_img = await message.evaluate("""
+                        (el) => {
+                          const imgs = Array.from(el.querySelectorAll('img'));
+                          const big = imgs.filter(im => im.offsetWidth > 20).sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight))[0];
+                          return !!big;
+                        }
+                    """)
+                    if not has_img:
+                        return {"ok": False, "reason": "no clickable <img> found on photo message"}
+                    photo_loc = message.locator("img").first
                 await photo_loc.scroll_into_view_if_needed(timeout=5000)
                 await photo_loc.click(timeout=10000)
             except Exception as exc:
@@ -7002,6 +7057,14 @@ async def _open_media_and_get_forward_button(
         else:
             click_error: Optional[str] = None
             for attempt in range(MAX_TILE_CLICK_ATTEMPTS):
+                idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+                if idx is None:
+                    click_error = "source message no longer found in window"
+                    break
+                scope = await sender._resolve_scope(page)
+                full_sel = f"{scope} [data-testid^='conv-msg-']"
+                message = page.locator(full_sel).nth(idx)
+                await _ensure_message_content_rendered(page, message)
                 tile, _ = await _resolve_video_tile_locator(page, group_name, source_message_id, tile_index)
                 if tile is None:
                     click_error = "source message no longer found in window"

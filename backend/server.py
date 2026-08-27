@@ -480,80 +480,107 @@ async def on_startup():
         await ensure_notifications_indexes(db)
         logger.info("Notification indexes ready")
 
-        await db.client_states.create_index(
-            [("link_id", 1), ("viewer_email", 1)], unique=True
-        )
-
-        # OTP login indexes
-        try:
-            await db.otp_codes.create_index([("email", 1), ("used", 1)])
-            await db.otp_codes.create_index("expires_at", expireAfterSeconds=0)
-            await db.otp_audit_logs.create_index([("email", 1), ("timestamp", -1)])
-            await db.otp_audit_logs.create_index([("ip_address", 1), ("timestamp", -1)])
-            logger.info("OTP verification indexes ready")
-        except Exception as _e:
-            logger.warning("OTP indexes creation failed: %s", _e)
-
-        # Trusted-device auth indexes
-        try:
-            await db.trusted_devices.create_index("token_hash", unique=True)
-            await db.trusted_devices.create_index([("talent_id", 1), ("revoked", 1)])
-            await db.trusted_devices.create_index("expires_at", expireAfterSeconds=0)
-            logger.info("Trusted-device indexes ready")
-        except Exception as _e:
-            logger.warning("Trusted-device indexes creation failed: %s", _e)
-
-        await db.feedback.create_index([("submission_id", 1), ("status", 1)])
-        await db.feedback.create_index([("project_id", 1), ("status", 1)])
-        await db.feedback.create_index([("created_at", -1)])
-
-        # Submission diagnostics indexes
-        try:
-            await db.submission_diagnostics.create_index("created_at", expireAfterSeconds=30 * 24 * 3600)
-            await db.submission_diagnostics.create_index([("project_slug", 1)])
-            await db.submission_diagnostics.create_index([("failure_type", 1)])
-            await db.submission_diagnostics.create_index([("response_status", 1)])
-            await db.submission_diagnostics.create_index([("user_agent", 1)])
-            logger.info("Submission diagnostics indexes ready")
-        except Exception as _e:
-            logger.warning("Submission diagnostics indexes creation failed: %s", _e)
-
-        # Marketing Hub / CRM indexes
-        await db.clients.create_index([("last_contacted_date", -1)])
-        # WhatsApp CRM targeting (Slice 2): filter by contact_type / tags at scale.
-        await db.clients.create_index([("contact_type", 1)])
-        await db.clients.create_index([("tags", 1)])
-        try:
-            await db.clients.create_index([("name", "text"), ("company_name", "text"), ("tags", "text")])
-        except Exception as _e:
-            logger.warning("clients text index: %s", _e)
-
-        # Casting pipeline: enforce one card per (project, talent).
-        # Backs up the application-level duplicate guard in `add_to_pipeline` and
-        # the auto-create paths in `sync_pipeline_from_submission` /
-        # `ensure_pipeline_from_finalized_submission`. Idempotent on re-boot.
-        try:
-            await db.casting_pipeline.create_index(
-                [("project_id", 1), ("talent_id", 1)],
-                unique=True,
-                name="pipeline_project_talent_unique",
+        # Startup-latency fix (2026-08-27) — a live production incident
+        # ("Casting Pipeline commands not responding") traced to elevated
+        # Mongo round-trip time (measured live: ~150-700ms per op instead
+        # of the normal ~10-20ms) turning this block's ~20 SEQUENTIAL
+        # create_index calls into a startup that stretched past Railway's
+        # readiness window, causing real 502 "Application failed to
+        # respond" errors for every request (including real WhatsApp
+        # inbound messages) until startup finally finished. These index
+        # groups touch entirely different collections and have no
+        # ordering dependency on each other — running them concurrently
+        # turns "~20 round trips, back to back" into "~6 round trips'
+        # worth of wall-clock time, all in flight at once", proportionally
+        # shrinking that dead window regardless of the underlying per-op
+        # latency. Each group keeps its EXACT own try/except and log line
+        # from before — a failure in one group is still fully isolated
+        # and non-fatal, exactly as already designed; only the ordering
+        # (sequential -> concurrent) changed.
+        async def _client_states_index():
+            await db.client_states.create_index(
+                [("link_id", 1), ("viewer_email", 1)], unique=True
             )
-        except Exception as _e:
-            logger.warning("casting_pipeline unique index: %s", _e)
 
-        # Workflow indexes
-        try:
-            await db.workflow_tasks.create_index([("assignee_id", 1), ("status", 1)])
-            await db.workflow_tasks.create_index([("creator_id", 1)])
-            await db.workflow_scouts.create_index([("status", 1), ("created_at", -1)])
-            await db.workflow_notifications.create_index([("user_id", 1), ("read_at", 1)])
-            # AI Scout Capture — dedup lookups + audit trail
-            await db.workflow_scouts.create_index([("instagram_username", 1)])
-            await db.workflow_scouts.create_index([("phone", 1)])
-            await db.scout_capture_audit.create_index([("created_at", -1)])
-            await db.scout_capture_audit.create_index([("user_id", 1), ("created_at", -1)])
-        except Exception as _e:
-            logger.warning("workflow indexes: %s", _e)
+        async def _otp_indexes():
+            try:
+                await db.otp_codes.create_index([("email", 1), ("used", 1)])
+                await db.otp_codes.create_index("expires_at", expireAfterSeconds=0)
+                await db.otp_audit_logs.create_index([("email", 1), ("timestamp", -1)])
+                await db.otp_audit_logs.create_index([("ip_address", 1), ("timestamp", -1)])
+                logger.info("OTP verification indexes ready")
+            except Exception as _e:
+                logger.warning("OTP indexes creation failed: %s", _e)
+
+        async def _trusted_device_indexes():
+            try:
+                await db.trusted_devices.create_index("token_hash", unique=True)
+                await db.trusted_devices.create_index([("talent_id", 1), ("revoked", 1)])
+                await db.trusted_devices.create_index("expires_at", expireAfterSeconds=0)
+                logger.info("Trusted-device indexes ready")
+            except Exception as _e:
+                logger.warning("Trusted-device indexes creation failed: %s", _e)
+
+        async def _feedback_indexes():
+            await db.feedback.create_index([("submission_id", 1), ("status", 1)])
+            await db.feedback.create_index([("project_id", 1), ("status", 1)])
+            await db.feedback.create_index([("created_at", -1)])
+
+        async def _submission_diagnostics_indexes():
+            try:
+                await db.submission_diagnostics.create_index("created_at", expireAfterSeconds=30 * 24 * 3600)
+                await db.submission_diagnostics.create_index([("project_slug", 1)])
+                await db.submission_diagnostics.create_index([("failure_type", 1)])
+                await db.submission_diagnostics.create_index([("response_status", 1)])
+                await db.submission_diagnostics.create_index([("user_agent", 1)])
+                logger.info("Submission diagnostics indexes ready")
+            except Exception as _e:
+                logger.warning("Submission diagnostics indexes creation failed: %s", _e)
+
+        async def _clients_indexes():
+            # Marketing Hub / CRM indexes
+            await db.clients.create_index([("last_contacted_date", -1)])
+            # WhatsApp CRM targeting (Slice 2): filter by contact_type / tags at scale.
+            await db.clients.create_index([("contact_type", 1)])
+            await db.clients.create_index([("tags", 1)])
+            try:
+                await db.clients.create_index([("name", "text"), ("company_name", "text"), ("tags", "text")])
+            except Exception as _e:
+                logger.warning("clients text index: %s", _e)
+
+        async def _casting_pipeline_index():
+            # Casting pipeline: enforce one card per (project, talent).
+            # Backs up the application-level duplicate guard in `add_to_pipeline`
+            # and the auto-create paths in `sync_pipeline_from_submission` /
+            # `ensure_pipeline_from_finalized_submission`. Idempotent on re-boot.
+            try:
+                await db.casting_pipeline.create_index(
+                    [("project_id", 1), ("talent_id", 1)],
+                    unique=True,
+                    name="pipeline_project_talent_unique",
+                )
+            except Exception as _e:
+                logger.warning("casting_pipeline unique index: %s", _e)
+
+        async def _workflow_indexes():
+            try:
+                await db.workflow_tasks.create_index([("assignee_id", 1), ("status", 1)])
+                await db.workflow_tasks.create_index([("creator_id", 1)])
+                await db.workflow_scouts.create_index([("status", 1), ("created_at", -1)])
+                await db.workflow_notifications.create_index([("user_id", 1), ("read_at", 1)])
+                # AI Scout Capture — dedup lookups + audit trail
+                await db.workflow_scouts.create_index([("instagram_username", 1)])
+                await db.workflow_scouts.create_index([("phone", 1)])
+                await db.scout_capture_audit.create_index([("created_at", -1)])
+                await db.scout_capture_audit.create_index([("user_id", 1), ("created_at", -1)])
+            except Exception as _e:
+                logger.warning("workflow indexes: %s", _e)
+
+        await asyncio.gather(
+            _client_states_index(), _otp_indexes(), _trusted_device_indexes(),
+            _feedback_indexes(), _submission_diagnostics_indexes(), _clients_indexes(),
+            _casting_pipeline_index(), _workflow_indexes(),
+        )
 
         logger.info("Mongo indexes ready")
 

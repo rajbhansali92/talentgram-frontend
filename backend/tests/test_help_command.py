@@ -148,7 +148,7 @@ async def test_each_agent_has_distinct_help_text():
     assert CRM_HELP_TEXT != CAMPAIGN_HELP_TEXT
     assert CASTING_HELP_TEXT != CAMPAIGN_HELP_TEXT
 
-    assert "Talentgram CRM" in CRM_HELP_TEXT
+    assert "TALENTGRAM CRM" in CRM_HELP_TEXT
     assert "Save a Contact" in CRM_HELP_TEXT
     assert "Talent Search" not in CRM_HELP_TEXT
     assert "Send a Campaign" not in CRM_HELP_TEXT
@@ -159,7 +159,11 @@ async def test_each_agent_has_distinct_help_text():
     # it's still distinctly casting-flavored and still mentions the
     # older natural-language features (talent search, selection, undo)
     # remain available, without requiring the old verbose phrasing.
-    assert "Talentgram Casting Pipeline" in CASTING_HELP_TEXT
+    # Command Simplification (2026-08-27) — HELP now leads with an
+    # ALL-CAPS group-name header (Part 28: "every HELP response must
+    # clearly start with which group it belongs to"), so a new intern
+    # never confuses one agent's capabilities with another's.
+    assert "TALENTGRAM CASTING PIPELINE" in CASTING_HELP_TEXT
     assert "Action - Talent - Project - Pipeline" in CASTING_HELP_TEXT
     assert "pending test" in CASTING_HELP_TEXT
     assert "testing?" in CASTING_HELP_TEXT
@@ -168,7 +172,7 @@ async def test_each_agent_has_distinct_help_text():
     assert "Save a Contact" not in CASTING_HELP_TEXT
     assert "Send a Campaign" not in CASTING_HELP_TEXT
 
-    assert "Talentgram WhatsApp Agent" in CAMPAIGN_HELP_TEXT
+    assert "TALENTGRAM WHATSAPP AGENT" in CAMPAIGN_HELP_TEXT
     assert "Send a Campaign" in CAMPAIGN_HELP_TEXT
     assert "Action - Who - What - Where" in CAMPAIGN_HELP_TEXT
     assert "and confirm" in CAMPAIGN_HELP_TEXT

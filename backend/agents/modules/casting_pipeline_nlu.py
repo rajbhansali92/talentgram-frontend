@@ -1954,6 +1954,12 @@ QUERY_TRIGGERS = [
     # trigger. "who" (for "Who have I selected") and "current" (for
     # "Current selection") are ALREADY triggers — no new word needed there.
     "selected", "selection", "my selection",
+    # Command Simplification (2026-08-27) — "tested" as its own leading
+    # word, canonical form "TESTED <talent(s)> FOR <project(s)>". No
+    # collision with MOVE_TRIGGERS/ADD_TRIGGERS/UNDO/UPLOAD/SEND/SHARE's
+    # triggers. See _TESTED_LEAD_RE below for the natural-language match
+    # and _TESTING_CHECK_ACTION_RE for the structured "tested - X - Y" form.
+    "tested",
 ]
 
 # Matches "Project 5", "project #5", and the "P5" / "P 5" shorthand alike.
@@ -2111,6 +2117,22 @@ _STAGE_PENDING_FOR_TALENT_RE = re.compile(
 _TALENT_STAGE_LEAD_RE = re.compile(
     r"^\s*(?:is|are|was|were|has|have|did|does)\s+(.+?)\s*[.?!]*\s*$", re.IGNORECASE
 )
+
+# Command Simplification (2026-08-27) — canonical "TESTED <talent(s)> FOR
+# <project(s)>". Unlike _TALENT_STAGE_LEAD_RE's has/is/was/were/did/does
+# lead-ins (which need extract_stage_phrase_for_query to find the stage
+# word SEPARATELY inside the remainder), the leading word here already IS
+# the stage itself (already_tested) — so this sets stage_key directly
+# rather than re-scanning for it. Comma-tolerant on both spans
+# (_MULTI_NAME_SPAN) so "Tested Sharvari, Siddhi for TVS Jupiter,
+# Lovechild" is captured as one match — the existing bulk reroute in
+# casting_pipeline.py's _handle_talent_stage_query (triggered by a comma
+# in either the talent or project reference) picks it up unchanged, same
+# as the existing "has X,Y tested for A,B" bulk path.
+_TESTED_LEAD_RE = re.compile(
+    r"^\s*tested\s+" + _MULTI_NAME_SPAN + r"\s+for\s+" + _MULTI_NAME_SPAN + r"\s*[.?!]*\s*$",
+    re.IGNORECASE,
+)
 _TRAILING_FOR_PROJECT_RE = re.compile(r"\bfor\s+(.+?)\s*$", re.IGNORECASE)
 # Connector words a talent-stage question can leave behind once the stage
 # phrase and project reference are removed ("Ahana been", "Ahana get",
@@ -2160,6 +2182,16 @@ def _extract_talent_stage_query(stripped: str, stage_order: List[str]) -> Option
                 stage_key=stage_key, stage_ambiguous=ambiguous,
             )
         return QueryIntent(kind="talent_projects", talent_query=name)
+
+    m = _TESTED_LEAD_RE.match(stripped)
+    if m:
+        name = _clean_talent_leftover(m.group(1))
+        project = m.group(2).strip(" ?.!")
+        if name:
+            return QueryIntent(
+                kind="talent_stage_query", talent_query=name,
+                stage_key="already_tested", project_name_query=project or None,
+            )
 
     m = _TALENT_STAGE_LEAD_RE.match(stripped)
     if m:
@@ -2263,7 +2295,7 @@ def extract_bare_pipeline_candidate(
 # straight through to natural-language classification, unaffected.
 # ---------------------------------------------------------------------------
 _PENDING_TEST_ACTION_RE = re.compile(r"^\s*pending\s*test\s*$", re.IGNORECASE)
-_TESTING_CHECK_ACTION_RE = re.compile(r"^\s*testing\s*\??\s*$", re.IGNORECASE)
+_TESTING_CHECK_ACTION_RE = re.compile(r"^\s*(?:testing\s*\??|tested)\s*$", re.IGNORECASE)
 _SHOW_ACTION_RE = re.compile(r"^\s*show\s*$", re.IGNORECASE)
 
 

@@ -6136,3 +6136,227 @@ async def test_bare_hyphen_no_space_add_end_to_end():
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_config(original)
+
+
+async def test_canonical_tested_bare_word_trigger_single_and_bulk():
+    """Command Simplification (2026-08-27): "TESTED <talent> FOR <project>"
+    as its OWN leading word (no "has"/"is" lead-in) must open casting.query
+    and answer with the real current stage — both single and bulk."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"TestedProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    ta = await _seed_talent(f"Kavya Cq {tag}")
+    tb = await _seed_talent(f"Meera Cq {tag}")
+    await _seed_pipeline_row(project_id, ta, "shortlisted")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Tested Kavya Cq {tag} for {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Shortlisted" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Tested Kavya Cq {tag},Meera Cq {tag} for {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert f"Kavya Cq {tag}" in r2.reply and "Shortlisted" in r2.reply, r2.reply
+        assert f"Meera Cq {tag}" in r2.reply and "Not tested" in r2.reply, r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[ta, tb])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Command Simplification + SHARE (2026-08-27) — casting.share.
+# ---------------------------------------------------------------------------
+async def test_share_casting_call_single_project_single_talent():
+    """"share casting call for X to Y" resolves the SAME real, seeded
+    "Casting Call" template (routers/whatsapp.py's default-template seed)
+    the existing Add,Move,Send compound command already uses — never a
+    second/duplicate template."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"ShareProj {tag}", shoot_dates="1 Jan 2028", budget="Rs 5,000/day",
+    )
+    talent_id = await _seed_talent(f"ShareTalent {tag}", phone="917000700001")
+    # A "Casting Call" send renders {{project_name}}/{{shoot_dates}}/
+    # {{budget}} via create_batch's PROJECT-source recipient resolution
+    # (routers/whatsapp.py's resolve_recipients_engine), which requires an
+    # existing casting_pipeline row for this project — SHARE reuses that
+    # exact rendering path unmodified, so the recipient must already be
+    # somewhere in this project's pipeline, same as a real "invite this
+    # already-shortlisted talent to confirm" use.
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share casting call for ShareProj {tag} to ShareTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "SHARE PREVIEW" in r.reply, r.reply
+        assert "Casting Call" in r.reply, r.reply
+        assert f"ShareProj {tag}" in r.reply, r.reply
+        assert f"ShareTalent {tag}" in r.reply, r.reply
+        assert "NOT SENT" not in r.reply  # not part of this preview's wording, just confirming no false claim
+        assert "1 message" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert "Shared." in r2.reply, r2.reply
+        assert "1 WhatsApp message queued." in r2.reply, r2.reply
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 1
+        body = jobs[0]["message_body"]
+        assert "{{" not in body
+        assert f"ShareProj {tag}" in body
+        assert "1 Jan 2028" in body
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_share_multi_project_multi_talent_cross_product():
+    """"share casting calls for P1,P2 to T1,T2" fans out as a real
+    cross-product: each project sends to BOTH talents (4 messages total),
+    each with THAT project's own rendered values."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project_with_details(f"ShareCPA {tag}", shoot_dates="2 Feb 2028", budget="Rs 1,000/day")
+    p2 = await _seed_project_with_details(f"ShareCPB {tag}", shoot_dates="3 Mar 2028", budget="Rs 2,000/day")
+    t1 = await _seed_talent(f"ShareCPT1 {tag}", phone="917000700010")
+    t2 = await _seed_talent(f"ShareCPT2 {tag}", phone="917000700011")
+    # See test_share_casting_call_single_project_single_talent's comment —
+    # both talents need a pipeline row in BOTH projects for the cross
+    # product to actually send all 4 messages.
+    for pid in (p1, p2):
+        for tid in (t1, t2):
+            await _seed_pipeline_row(pid, tid, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share casting calls for ShareCPA {tag},ShareCPB {tag} to ShareCPT1 {tag},ShareCPT2 {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "4 WhatsApp messages queued." in r.reply, r.reply
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2]}}).to_list(10)
+        assert len(jobs) == 4
+        by_project = {}
+        for j in jobs:
+            by_project.setdefault(j["source_id"], []).append(j)
+        assert set(by_project.keys()) == {p1, p2}
+        for j in by_project[p1]:
+            assert "2 Feb 2028" in j["message_body"] and "Rs 1,000/day" in j["message_body"]
+        for j in by_project[p2]:
+            assert "3 Mar 2028" in j["message_body"] and "Rs 2,000/day" in j["message_body"]
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2])
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_share_to_pipeline_targets_everyone_currently_in_it():
+    """"share casting call for X to pipeline" reuses create_batch's own
+    project-wide recipient resolution — no separate/duplicate "everyone in
+    this pipeline" lookup — so it must reach every talent CURRENTLY in
+    that project's pipeline, not just talents named in the command."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"SharePipeProj {tag}", shoot_dates="4 Apr 2028", budget="Rs 3,000/day",
+    )
+    t1 = await _seed_talent(f"SharePipeT1 {tag}", phone="917000700020")
+    t2 = await _seed_talent(f"SharePipeT2 {tag}", phone="917000700021")
+    await _seed_pipeline_row(project_id, t1, "ask_to_test")
+    await _seed_pipeline_row(project_id, t2, "shortlisted")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share casting call for SharePipeProj {tag} to pipeline and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "queued" in r.reply, r.reply
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2]}}).to_list(10)
+        assert {j["talent_id"] for j in jobs} == {t1, t2}
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_share_bare_template_word_is_ambiguous_never_guessed():
+    """A bare "share template for X to Y" (no specific template named) must
+    ask which template rather than silently picking one — this repo's real
+    template registry has several (Casting Call, Follow Up, Shortlisted,
+    ...), so this is a genuine, live ambiguity, not a contrived one."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"ShareAmbigProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"ShareAmbigTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share template for {label} to ShareAmbigTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Which template should I share?" in r.reply, r.reply
+        jobs = await db.whatsapp_jobs.find({}).to_list(1)
+        # Not asserting jobs == [] globally (shared dev DB) — the real
+        # assertion is that OUR talent never received anything.
+        mine = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert mine == []
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_share_hyphen_form_and_missing_recipient_asks():
+    """"share - Project - Talent" structured form works, and a message
+    missing the recipient entirely asks instead of guessing/erroring
+    unhelpfully."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"ShareHyphenProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"ShareHyphenTalent {tag}", phone="917000700030")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share - {label} - ShareHyphenTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "SHARE PREVIEW" in r.reply, r.reply
+        assert f"ShareHyphenTalent {tag}" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)

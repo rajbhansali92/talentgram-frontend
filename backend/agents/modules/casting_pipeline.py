@@ -3846,6 +3846,351 @@ UPLOAD_INTENT = IntentDefinition(
 
 
 # ---------------------------------------------------------------------------
+# casting.share — Command Simplification + SHARE (2026-08-27). Shares a
+# project's requirement/casting-call TEMPLATE with talent(s) or the whole
+# pipeline — distinct from casting.send above, which forwards ONE talent's
+# own marked audition media. Reuses, unmodified:
+#   - the WhatsApp Campaign Agent's own template resolver
+#     (agents.modules.whatsapp_campaign_agent._resolve_source /
+#     _fetch_templates) — the exact same real, seeded "Casting Call"
+#     template (routers/whatsapp.py's default-template seed) that
+#     "Add,Move,Send - ... - Casting Call - ..." already sends via
+#     _flush_group_send below;
+#   - _resolve_add_project (project-name resolution, ambiguity/suggestion
+#     handling) and _fetch_all_talent_candidates +
+#     nlu.parse_talent_selector/resolve_against_candidates (global talent
+#     resolution, independent of pipeline membership — a SHARE recipient
+#     need not already be in the project) — both are ADD's own resolvers,
+#     called here verbatim, not duplicated;
+#   - create_batch (routers/whatsapp.py, unmodified) for the actual send,
+#     the same call _flush_group_send already makes for a compound
+#     Add,Move,Send tail step.
+# Multiple projects fan out as independent send calls to the SAME resolved
+# recipient set (the cross-product Part 19 describes); "to pipeline"
+# recipients skip talent_ids entirely so create_batch's own recipient
+# engine targets everyone currently in that project's pipeline, exactly
+# like a WhatsApp Campaign Agent project-wide send already does — no new
+# recipient-resolution logic for that case either.
+# ---------------------------------------------------------------------------
+SHARE_TRIGGERS = ["share"]
+
+_SHARE_CASTING_CALL_RE = re.compile(r"\bcasting\s*calls?\b", re.IGNORECASE)
+_SHARE_TEMPLATE_WORD_RE = re.compile(r"\btemplates?\b", re.IGNORECASE)
+_SHARE_TO_RECIPIENT_RE = re.compile(r"\b(?:to|with)\b\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_SHARE_LEADING_CONNECTOR_RE = re.compile(r"^\s*(?:for|of)\s+", re.IGNORECASE)
+_SHARE_PIPELINE_RECIPIENT_RE = re.compile(r"^\s*(?:the\s+)?pipelines?\s*$", re.IGNORECASE)
+
+
+def _extract_share_fields(text: str) -> Dict[str, str]:
+    """"share - Project(s) - Talent(s)|pipeline" (hyphen) OR natural
+    language: "casting call for X to Y" / "X casting call to Y" /
+    "template for X to Y" / "casting calls for X,Y to pipeline". Content
+    wording ("casting call" vs bare "template" vs nothing) only ever sets
+    template_query as a hint for _resolve_share — never guesses a specific
+    NAMED template beyond "Casting Call" itself, matching the narrower
+    scope this command was built for (see _resolve_share's docstring)."""
+    # "and confirm" — stripped FIRST, exactly like every other intent's
+    # extraction (see nlu.strip_and_confirm's docstring), so it never ends
+    # up glued onto the recipient clause below.
+    raw_text, auto_confirm = nlu.strip_and_confirm(text or "")
+    _, remainder = nlu._strip_leading_trigger(raw_text, SHARE_TRIGGERS)
+    remainder = (remainder or "").strip()
+    if not remainder:
+        return {}
+
+    out: Dict[str, str] = {}
+    parts = nlu._split_hyphen_fields(remainder, 2)
+    if parts:
+        project_part, recipient_part = parts
+        out = {
+            "project_query": project_part.strip(),
+            "recipient_query": recipient_part.strip(),
+            "template_query": "Casting Call",
+        }
+    else:
+        m = _SHARE_TO_RECIPIENT_RE.search(remainder)
+        if not m:
+            return {}
+        recipient_part = m.group(1).strip(" .!?")
+        head = remainder[:m.start()].strip()
+
+        is_casting_call = bool(_SHARE_CASTING_CALL_RE.search(head))
+        project_part = _SHARE_CASTING_CALL_RE.sub("", head)
+        if not is_casting_call:
+            # Bare "template" word with no other distinguishing content ->
+            # the ambiguous-check path in _resolve_share (empty
+            # template_query is the signal, never guessed here).
+            project_part = _SHARE_TEMPLATE_WORD_RE.sub("", project_part)
+        project_part = _SHARE_LEADING_CONNECTOR_RE.sub("", project_part.strip()).strip(" ,")
+
+        out = {"recipient_query": recipient_part, "project_query": project_part}
+        if is_casting_call:
+            out["template_query"] = "Casting Call"
+
+    if auto_confirm:
+        out[AUTO_CONFIRM_FIELD.key] = "1"
+    return out
+
+
+def _validate_share_text(raw: str) -> ValidationResult:
+    # Syntax-only, like every other field's validate — no DB access here.
+    # recipient_query in particular can legitimately be the literal word
+    # "pipeline" (not a talent selector shape at all), so this deliberately
+    # does NOT reuse _validate_selector, which would reject it outright.
+    return ValidationResult(ok=True, value=(raw or "").strip())
+
+
+SHARE_PROJECT_FIELD = FieldSpec(
+    key="project_query", label="Project(s)",
+    question='Which project? e.g. "Share casting call for Toyota Glanza to Sharvari".',
+    validate=_validate_share_text, aliases=["project", "projects", "for"],
+)
+SHARE_RECIPIENT_FIELD = FieldSpec(
+    key="recipient_query", label="Recipient(s)",
+    question='Who should this go to? Name talent(s), or say "to pipeline".',
+    validate=_validate_share_text, aliases=["to", "recipient", "recipients", "talent"],
+)
+SHARE_TEMPLATE_FIELD = FieldSpec(
+    key="template_query", label="Content", question="",
+    validate=_validate_share_text, required=False, aliases=["template", "content"],
+)
+
+
+@dataclass
+class _ShareResolution:
+    ok: bool
+    error: Optional[str] = None
+    disambiguation: Optional[Dict[str, Any]] = None
+    template: Optional[Dict[str, str]] = None
+    template_label: str = ""
+    project_ids: List[str] = dataclass_field(default_factory=list)
+    project_labels: List[str] = dataclass_field(default_factory=list)
+    is_pipeline_target: bool = False
+    talent_ids: List[str] = dataclass_field(default_factory=list)
+    talent_labels: List[str] = dataclass_field(default_factory=list)
+
+
+async def _resolve_share(collected: dict) -> _ShareResolution:
+    # Local import — see the module-level comment on the routers.whatsapp
+    # import above: whatsapp_campaign_agent.py already imports FROM this
+    # module, so a top-level import here would be circular (identical
+    # reasoning/pattern to _flush_group_send's own local import below).
+    from agents.modules import whatsapp_campaign_agent as wa
+
+    project_query = (collected.get("project_query") or "").strip()
+    recipient_query = (collected.get("recipient_query") or "").strip()
+    template_query = (collected.get("template_query") or "").strip()
+
+    if not project_query:
+        return _ShareResolution(
+            ok=False,
+            error='Which project? e.g. "Share casting call for Toyota Glanza to Sharvari".',
+        )
+    if not recipient_query:
+        return _ShareResolution(
+            ok=False, error='Who should this go to? Name talent(s), or say "to pipeline".',
+        )
+
+    if template_query:
+        tmpl_match = await wa._resolve_source(template_query)
+    else:
+        # Bare "template" with no specific name — auto-pick only when
+        # exactly one real template exists; otherwise ask (Part 17: never
+        # guess which template).
+        templates = await wa._fetch_templates()
+        if not templates:
+            return _ShareResolution(ok=False, error="No WhatsApp templates are configured yet.")
+        if len(templates) == 1:
+            tmpl_match = wa.TemplateMatch(template=templates[0])
+        else:
+            numbered = "\n".join(
+                f"{i + 1}. {t.get('name') or t.get('slug') or ''}" for i, t in enumerate(templates)
+            )
+            return _ShareResolution(
+                ok=False,
+                error=f"Which template should I share?\n\n{numbered}\n\nReply with the template name.",
+                disambiguation={
+                    "kind": "free_text_retry", "field_key": "template_query", "options": [],
+                },
+            )
+    if tmpl_match.error:
+        return _ShareResolution(ok=False, error=tmpl_match.error)
+    if tmpl_match.ambiguous:
+        options = [{"label": o["label"], "value": o["label"]} for o in tmpl_match.ambiguous]
+        msg = nlu.format_numbered_options("I found multiple templates.", [[o["label"]] for o in tmpl_match.ambiguous])
+        return _ShareResolution(
+            ok=False, error=msg,
+            disambiguation={"kind": "free_text_retry", "field_key": "template_query", "options": options},
+        )
+    template = tmpl_match.template
+    template_label = template.get("name") or template.get("slug") or ""
+
+    project_names = nlu.split_multi_names(project_query) or [project_query]
+    project_ids: List[str] = []
+    project_labels: List[str] = []
+    for pname in project_names:
+        pid, plabel, err, dis = await _resolve_add_project(pname)
+        if err:
+            return _ShareResolution(ok=False, error=err, disambiguation=dis)
+        project_ids.append(pid)
+        project_labels.append(plabel)
+
+    if _SHARE_PIPELINE_RECIPIENT_RE.match(recipient_query):
+        return _ShareResolution(
+            ok=True, template=template, template_label=template_label,
+            project_ids=project_ids, project_labels=project_labels,
+            is_pipeline_target=True,
+        )
+
+    selector = nlu.parse_talent_selector(recipient_query)
+    if not selector.ok:
+        return _ShareResolution(ok=False, error=selector.error)
+    candidates = await _fetch_all_talent_candidates()
+    with request_scope.stage("fuzzy"):
+        resolved = nlu.resolve_against_candidates(selector, candidates)
+    if not resolved.ok:
+        if resolved.ambiguous_candidates:
+            options = [
+                {"id": c.id, "label": c.label, "value": f"{nlu.RESOLVED_TALENT_MARKER}{c.id}|{c.label}"}
+                for c in resolved.ambiguous_candidates
+            ]
+            return _ShareResolution(
+                ok=False, error=resolved.error,
+                disambiguation={"kind": "talent", "field_key": "recipient_query", "options": options},
+            )
+        return _ShareResolution(
+            ok=False,
+            error=resolved.error or "No matching talent found.",
+            disambiguation={"kind": "free_text_retry", "field_key": "recipient_query", "options": []},
+        )
+
+    return _ShareResolution(
+        ok=True, template=template, template_label=template_label,
+        project_ids=project_ids, project_labels=project_labels,
+        talent_ids=resolved.talent_ids, talent_labels=resolved.talent_labels,
+    )
+
+
+async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
+    resolved = await _resolve_share(collected)
+    if not resolved.ok:
+        if resolved.disambiguation:
+            await session_context.update_session(
+                AGENT_ID, ctx.sender_phone, pending_disambiguation=resolved.disambiguation
+            )
+            await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="editing")
+        else:
+            await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+        return resolved.error
+
+    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+
+    lines = ["SHARE PREVIEW", "", "Content:", resolved.template_label, "", "Projects:"]
+    lines.extend(resolved.project_labels)
+    lines.append("")
+    if resolved.is_pipeline_target:
+        lines.append("Recipients: everyone currently in each project's pipeline")
+        n = len(resolved.project_ids)
+        lines.append("")
+        lines.append(f"{n} project pipeline{'' if n == 1 else 's'} will be messaged.")
+    else:
+        lines.append("Recipients:")
+        lines.extend(resolved.talent_labels)
+        lines.append("")
+        total = len(resolved.project_ids) * len(resolved.talent_ids)
+        lines.append(f"{total} message{'' if total == 1 else 's'} will be sent.")
+    lines += ["", "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel"]
+    return "\n".join(lines)
+
+
+async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    resolved = await _resolve_share(collected)
+    if not resolved.ok:
+        return ExecResult(ok=False, error="share_resolution_failed", message=resolved.error)
+
+    from agents.modules import whatsapp_campaign_agent as wa
+    admin = await wa._service_admin()
+
+    body_lines: List[str] = []
+    total_queued = 0
+    for pid, plabel in zip(resolved.project_ids, resolved.project_labels):
+        body_lines.append("")
+        body_lines.append(plabel)
+        if resolved.is_pipeline_target:
+            source_params = SourceParams(project_id=pid, pipeline_stages=list(PIPELINE_STAGE_ORDER))
+        else:
+            source_params = SourceParams(
+                project_id=pid, pipeline_stages=list(PIPELINE_STAGE_ORDER),
+                talent_ids=resolved.talent_ids,
+            )
+        try:
+            result = await create_batch(
+                BatchIn(
+                    source_type="PROJECT", source_params=source_params,
+                    template_id=resolved.template["id"], is_dry_run=False,
+                ),
+                admin=admin,
+            )
+        except HTTPException as exc:
+            body_lines.append(f"✗ WhatsApp send failed ({exc.detail})")
+            continue
+        jobs = result["jobs"]
+        if resolved.is_pipeline_target:
+            body_lines.append(f"• {len(jobs)} message{'' if len(jobs) == 1 else 's'} queued to this project's pipeline")
+        else:
+            sent_ids = {j.get("talent_id") for j in jobs}
+            for tid, label in zip(resolved.talent_ids, resolved.talent_labels):
+                if tid in sent_ids:
+                    body_lines.append(f"• {label} — sent")
+                else:
+                    # Real reason is one of: not currently in THIS
+                    # project's pipeline (a "Casting Call" send needs a
+                    # pipeline row to render {{project_name}}/{{shoot_
+                    # dates}}/{{budget}} from — see resolve_recipients_
+                    # engine's PROJECT branch, routers/whatsapp.py), or no
+                    # phone/WhatsApp group on file. create_batch's result
+                    # doesn't distinguish the two, so both are named
+                    # rather than guessing which one applies.
+                    body_lines.append(
+                        f"• {label} — not currently in {plabel}'s pipeline, "
+                        "or no phone/WhatsApp group on file — not sent"
+                    )
+        total_queued += len(jobs)
+
+    header = ["Shared.", "", f"Content: {resolved.template_label}"]
+    footer = ["", f"{total_queued} WhatsApp message{'' if total_queued == 1 else 's'} queued."]
+    return ExecResult(
+        ok=True, message="\n".join(header + body_lines + footer),
+        data={"queued": total_queued},
+    )
+
+
+async def _share_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    if not collected.get(AUTO_CONFIRM_FIELD.key):
+        return None
+    resolved = await _resolve_share(collected)
+    if not resolved.ok:
+        # Still ambiguous/erroring — fall through to the normal
+        # confirmation flow; _auto_confirm persists in `collected` across
+        # the "editing"-step continuation, so this check re-fires and
+        # auto-executes once the ambiguity resolves, same as ADD/MOVE.
+        return None
+    return await _share_executor(collected, ctx)
+
+
+SHARE_INTENT = IntentDefinition(
+    intent_id="casting.share",
+    triggers=SHARE_TRIGGERS,
+    fields=[SHARE_PROJECT_FIELD, SHARE_RECIPIENT_FIELD, SHARE_TEMPLATE_FIELD, AUTO_CONFIRM_FIELD],
+    executor=_share_executor,
+    extract_fields=_extract_share_fields,
+    build_confirmation=_build_share_confirmation,
+    try_auto_execute=_share_try_auto_execute,
+    summary_title="You are about to share:",
+)
+
+
+# ---------------------------------------------------------------------------
 # casting.send — "send - Talent - Project" (2026-08-24). An INDEPENDENT
 # consumer of the same @Gunwanti + mark WhatsApp source media UPLOAD
 # resolves — never requires submission.media[], media_assignments, or a
@@ -4634,48 +4979,34 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
 # and tests/test_casting_agent.py). Update this string by hand alongside any
 # future intent/command change.
 HELP_TEXT = (
-    "Talentgram Casting Pipeline — Commands\n\n"
+    "TALENTGRAM CASTING PIPELINE\n"
+    "QUICK MANUAL\n\n"
+    "This group manages talents, projects, and the casting pipeline.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "CASTING PIPELINE\n"
+    "QUICK COMMANDS\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Action - Talent - Project - Pipeline\n\n"
-    "Add - Ayushi - Toyota Glanza - Follow Up\n\n"
-    "Multiple talents/projects (comma-separated):\n\n"
+    "1. ADD — add talent(s) to a project's pipeline.\n\n"
+    "Add Ayushi to Toyota Glanza\n"
     "Add - Ayushi,Priya - Toyota,Nykaa - Follow Up\n\n"
-    "Move a stage:\n\n"
-    "Move - Ayushi - Toyota Glanza - Follow Up to Approved\n\n"
-    "Add and move in one step:\n\n"
-    "Add,Move - Ayushi - Toyota Glanza - Follow Up\n\n"
-    "Natural language works too, in any order of verbs:\n\n"
-    "Add and move Ayushi, Priya to Toyota, Nykaa to Follow Up and confirm\n\n"
-    "Add, move and send in one step (queues a WhatsApp send using a named "
-    "template, or the project's own casting call):\n\n"
-    "Add,Move,Send - Ayushi - Casting Call - Toyota Glanza - Follow Up\n\n"
-    "MOVE also understands: shortlist, select, reject, hold, restore, "
-    "not available, not interested, and every existing stage word — "
-    "unchanged.\n\n"
-    "Show projects a talent is in:\n\n"
-    "show projects of Ayushi\n"
-    "which projects is Ayushi in / what projects does Ayushi have\n\n"
-    "Check a talent's current stage for a project:\n\n"
-    "has Ayushi tested for Toyota Glanza\n"
-    "did Ayushi test for Toyota Glanza / was Ayushi tested for Toyota Glanza\n"
-    "(answers with the ACTUAL current pipeline stage, e.g. Shortlisted — "
-    "not just yes/no)\n\n"
-    "Pending tests\n\n"
-    "pending test - Ayushi,Priya\n\n"
-    "Testing?\n\n"
-    "testing? - Ayushi,Priya - Toyota,Nykaa\n\n"
-    "Show pipeline\n\n"
-    "show - Toyota,Nykaa - Follow Up,Approved\n\n"
-    "Move everyone in a stage at once (no talent named):\n\n"
+    "2. MOVE — move talent(s) to a pipeline stage, or a whole stage at "
+    "once (no talent named).\n\n"
+    "Move - Ayushi - Toyota Glanza - Follow Up to Approved\n"
     "move - Toyota Glanza - Ask To Test to Follow Up\n\n"
-    "UPLOAD — pulls a talent's @Gunwanti-marked WhatsApp media (takes/intro/"
-    "photos) into their Talentgram submission (Cloudinary), for the app's "
-    "own review pages — different from SEND below, which forwards on "
-    "WhatsApp and never touches Cloudinary:\n\n"
-    "upload - Ayushi - Toyota Glanza\n\n"
-    "SEND — forwards a talent's marked WhatsApp media (Takes → "
+    "MOVE also understands: shortlist, select, reject, hold, restore, "
+    "not available, not interested, and every existing stage word.\n\n"
+    "3. TESTED — check a talent's current pipeline stage for a project.\n\n"
+    "Tested Ayushi for Toyota Glanza\n"
+    "Tested Ayushi,Priya for Toyota,Nykaa\n"
+    "has Ayushi tested for Toyota Glanza / did Ayushi test for Toyota Glanza\n"
+    "(answers with the ACTUAL current stage, e.g. Shortlisted — not just "
+    "yes/no)\n\n"
+    "4. SHOW — look up projects, pipelines, or a talent's own projects.\n\n"
+    "show ongoing projects\n"
+    "show projects of Ayushi (also: which projects is Ayushi in / what "
+    "projects does Ayushi have — works for multiple talents too)\n"
+    "show - Toyota,Nykaa - Follow Up,Approved\n"
+    "pending test - Ayushi,Priya\n\n"
+    "5. SEND — forward a talent's marked WhatsApp audition media (Takes → "
     "Introduction → Form → Pictures → ☑️) to a casting WhatsApp group. "
     "ALWAYS shows a preview first and needs an explicit approval — "
     "nothing is ever sent automatically:\n\n"
@@ -4683,38 +5014,61 @@ HELP_TEXT = (
     "1 → Approve   2 → Edit a field   3 → Cancel\n\n"
     "Multiple talents/projects also work here (send - Ayushi,Priya - "
     "Toyota,Nykaa) — each pairing sends independently.\n\n"
-    "Undo the last move (within 5 minutes):\n\n"
+    "6. UPLOAD — pulls a talent's @Gunwanti-marked WhatsApp media (takes/"
+    "intro/photos) into their Talentgram submission (Cloudinary), for the "
+    "app's own review pages — different from SEND above, which forwards "
+    "on WhatsApp and never touches Cloudinary:\n\n"
+    "upload - Ayushi - Toyota Glanza\n\n"
+    "7. SHARE — share a project's casting call/template with talent(s), "
+    "or with everyone currently in that project's pipeline. Also always "
+    "shows a preview first:\n\n"
+    "share casting call for Toyota Glanza to Ayushi\n"
+    "share casting calls for Toyota,Nykaa to Ayushi,Priya\n"
+    "share casting call for Toyota Glanza to pipeline\n\n"
+    "8. UNDO — reverse the last pipeline move (within 5 minutes) — "
+    "including the move half of an Add+Move.\n\n"
     "undo\n\n"
+    "9. HELP — show this manual.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "COMBINING ADD + MOVE + SEND\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Multiple commands: put each on its own line (a blank line between "
+    "Add,Move - Ayushi - Toyota Glanza - Follow Up\n\n"
+    "Add,Move,Send - Ayushi - Casting Call - Toyota Glanza - Follow Up\n\n"
+    "Natural language works too, in any order of verbs:\n\n"
+    "Add and move Ayushi, Priya to Toyota, Nykaa to Follow Up and confirm\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "BULK COMMANDS\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "• Multiple talents: comma-separated (Ayushi,Priya)\n"
+    "• Multiple projects: comma-separated (Toyota,Nykaa)\n"
+    "• Multiple commands: put each on its own line (a blank line between "
     "them is fine but not required — \"/\" also works as a separator), or "
-    "comma-separate the action words themselves (Add,Move,Send).\n\n"
+    "comma-separate the action words themselves (Add,Move,Send)\n\n"
     "Finish with:\n\n"
     "and confirm\n\n"
     "to run every command immediately, no approval step (SEND always "
     "still requires its own explicit approval regardless).\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
     "Talent search (e.g. \"Find actors in Mumbai\") and picking from a "
     "list (Select 1,3,5 / Select first 5 / Select all, then \"Add "
-    "selected to Toyota Glanza\") still work exactly as before.\n\n"
+    "selected to Toyota Glanza\") still work too.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "GENERAL\n"
+    "IMPORTANT RULES\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "• Multiple talents: comma-separated (Ayushi,Priya)\n"
-    "• Multiple projects: comma-separated (Toyota,Nykaa)\n"
-    "• Multiple commands: comma- or line-separated (Add,Move,Send)\n"
     "• Spaces around commas/dashes are ignored\n"
     "• Minor spelling mistakes are tolerated\n"
     "• If a name is ambiguous, I'll ask which one you meant — just reply "
     "with your answer (e.g. \"2\" or the full name); you don't need to "
-    "repeat the whole command"
+    "repeat the whole command\n\n"
+    "Legacy syntax reference: Action - Talent - Project - Pipeline (still "
+    "works exactly as above); testing? - Ayushi,Priya - Toyota,Nykaa is "
+    "the same check as TESTED above."
 )
 
 CASTING_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="Talentgram Casting Pipeline",
     module="casting_pipeline",
-    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, SEND_INTENT, UNDO_INTENT],
+    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, SEND_INTENT, SHARE_INTENT, UNDO_INTENT],
     resolve_bare_reply=_resolve_bare_reply,
     # Concurrent Task Engine (2026-08-05) — casting-agent is the first (and
     # so far only) agent to opt into independently-addressable, concurrent

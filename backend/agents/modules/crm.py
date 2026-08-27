@@ -317,8 +317,8 @@ CREATE_CONTACT_INTENT = IntentDefinition(
 # would be pure overhead for one bullet. Update this string by hand if a
 # second CRM intent is ever added.
 HELP_TEXT = (
-    "Hi!\n\n"
-    "I'm your Talentgram CRM assistant.\n\n"
+    "TALENTGRAM CRM\n"
+    "QUICK MANUAL\n\n"
     "Here are the things I can currently help you with:\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "📇 Save a Contact\n\n"

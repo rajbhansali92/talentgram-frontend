@@ -330,7 +330,13 @@ HELP_TEXT = (
     "• Add Raj Mehta, 9876543210, Brand Manager\n\n"
     "You can also add Company, Email, City, Country, or Instagram on extra lines — "
     "everything except Name, Phone, and Role is optional.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "GENERAL\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
+    "• Spaces around commas are ignored\n"
+    "• Minor spelling mistakes in field labels are tolerated\n"
+    "• If something's ambiguous, I'll ask which one you meant — just "
+    "reply with your answer; you don't need to repeat the whole command\n\n"
     "That's everything I can currently help you with."
 )
 

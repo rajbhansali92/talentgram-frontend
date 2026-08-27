@@ -5768,3 +5768,205 @@ async def test_agent_config_health_check_flags_empty_group_names():
         await _restore_config(original)
         broken_after = await registry.find_agents_with_empty_group_names()
         assert AGENT_ID not in broken_after, broken_after
+
+
+# ---------------------------------------------------------------------------
+# Command Enhancement (2026-08-27) — light regression coverage for the
+# specific new behaviors added this pass. Deliberately NOT re-testing
+# everything the 150+ tests above already cover (bulk ADD/MOVE via the
+# hyphen grammar, undo, ambiguity itself, SEND approval-gating) — those are
+# unchanged and still exercised by the existing suites (this file, plus
+# tests/test_media_send.py for SEND).
+# ---------------------------------------------------------------------------
+async def test_comma_whitespace_normalization_matches_no_whitespace():
+    """"Talent A, Talent B ,Talent C" must resolve identically to
+    "Talent A,Talent B,Talent C" — both end up adding the exact same two
+    talents, regardless of stray spaces around the commas."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    pid = await _seed_project(brand_name=f"WhitespaceProj {tag}")
+    label = (await db.projects.find_one({"id": pid}))["brand_name"]
+    ta = await _seed_talent(f"WsTalentA {tag}")
+    tb = await _seed_talent(f"WsTalentB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=_phone(),
+            text=f"Add WsTalentA {tag} ,  WsTalentB {tag} to {label} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        rows = await db.casting_pipeline.find({"project_id": pid}).to_list(10)
+        assert {row["talent_id"] for row in rows} == {ta, tb}, r.reply
+    finally:
+        await _restore_config(original)
+        await db.projects.delete_one({"id": pid})
+        await db.talents.delete_many({"id": {"$in": [ta, tb]}})
+        await db.casting_pipeline.delete_many({"project_id": pid})
+
+
+async def test_which_projects_is_talent_in_natural_variant():
+    """New natural-language variant for casting.query's talent_projects
+    kind: "Which projects is X in?" (bare trailing "in", no "part of"/
+    "working on" phrasing) — must resolve, not fall through to "I didn't
+    understand that"."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    pid = await _seed_project(brand_name=f"WhichProj {tag}")
+    label = (await db.projects.find_one({"id": pid}))["brand_name"]
+    tid = await _seed_talent(f"WhichTalent {tag}")
+    await _seed_pipeline_row(pid, tid, "shortlisted")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=_phone(),
+            text=f"Which projects is WhichTalent {tag} in",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "didn't understand" not in r.reply.lower(), r.reply
+        assert label in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=_phone(),
+            text=f"What projects does WhichTalent {tag} have",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "didn't understand" not in r2.reply.lower(), r2.reply
+        assert label in r2.reply, r2.reply
+    finally:
+        await _restore_config(original)
+        await db.projects.delete_one({"id": pid})
+        await db.talents.delete_one({"id": tid})
+        await db.casting_pipeline.delete_many({"project_id": pid})
+
+
+async def test_natural_language_add_and_move_verb_first_bulk():
+    """"Add and move Talent A, Talent B to Project A, Project B to Stage
+    and confirm" — the compound-VERB-LEADING natural phrasing (distinct
+    from the already-working "Add X to Y and move to Z") — must add AND
+    move every talent x project combination."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    pa = await _seed_project(brand_name=f"NLProjA {tag}")
+    pb = await _seed_project(brand_name=f"NLProjB {tag}")
+    la = (await db.projects.find_one({"id": pa}))["brand_name"]
+    lb = (await db.projects.find_one({"id": pb}))["brand_name"]
+    ta = await _seed_talent(f"NLTalentA {tag}")
+    tb = await _seed_talent(f"NLTalentB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=_phone(),
+            text=f"Add and move NLTalentA {tag}, NLTalentB {tag} to {la}, {lb} to Follow Up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        rows = await db.casting_pipeline.find({"project_id": {"$in": [pa, pb]}}).to_list(20)
+        assert len(rows) == 4, rows
+        assert all(row["stage"] == "follow_up" for row in rows), rows
+    finally:
+        await _restore_config(original)
+        await db.projects.delete_many({"id": {"$in": [pa, pb]}})
+        await db.talents.delete_many({"id": {"$in": [ta, tb]}})
+        await db.casting_pipeline.delete_many({"project_id": {"$in": [pa, pb]}})
+
+
+async def test_typo_tolerant_but_genuine_ambiguity_still_asks():
+    """A minor typo against a UNIQUE name still resolves; two genuinely
+    similar names still stop and ask — existing ambiguity safeguards are
+    not weakened by anything added this pass."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    pid = await _seed_project(brand_name=f"TypoProj {tag}")
+    label = (await db.projects.find_one({"id": pid}))["brand_name"]
+    unique = await _seed_talent(f"Zolara Kapoor {tag}")
+    dup_a = await _seed_talent(f"Rahul Sharma {tag}")
+    dup_b = await _seed_talent(f"Rahul Sharm {tag}")
+    try:
+        # Minor one-letter typo still surfaces the intended talent as a
+        # candidate (fuzzy matching isn't disabled) — whether it resolves
+        # outright or appears in a "did you mean" list alongside unrelated
+        # names is this system's own pre-existing, unmodified matching
+        # behavior; this only guards that the typo is TOLERATED, not
+        # rejected outright as "no match at all".
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=_phone(),
+            text=f"show projects of Zolara Kapor {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Zolara Kapoor {tag}" in r.reply, r.reply
+
+        # Genuinely similar names still stop and ask, never guess.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=_phone(),
+            text=f"show projects of Rahul Sha {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r2.reply.lower(), r2.reply
+    finally:
+        await _restore_config(original)
+        await db.projects.delete_one({"id": pid})
+        await db.talents.delete_many({"id": {"$in": [unique, dup_a, dup_b]}})
+
+
+async def test_clarification_reply_resumes_original_move_command():
+    """A bare clarification reply ("1") resumes and completes the
+    ORIGINAL pending move — the admin never repeats the command."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    pid = await _seed_project(brand_name=f"ResumeProj {tag}")
+    label = (await db.projects.find_one({"id": pid}))["brand_name"]
+    dup_a = await _seed_talent(f"Rahul Sharma {tag}")
+    dup_b = await _seed_talent(f"Rahul Sharm {tag}")
+    await _seed_pipeline_row(pid, dup_a, "ask_to_test")
+    await _seed_pipeline_row(pid, dup_b, "ask_to_test")
+    phone = _phone()
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move Rahul Sha to Approved in {label} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Moved 1 talent" in r2.reply, r2.reply
+        row_a = await db.casting_pipeline.find_one({"project_id": pid, "talent_id": dup_a})
+        assert row_a["stage"] == "approved", row_a
+    finally:
+        await _restore_config(original)
+        await db.projects.delete_one({"id": pid})
+        await db.talents.delete_many({"id": {"$in": [dup_a, dup_b]}})
+        await db.casting_pipeline.delete_many({"project_id": pid})
+
+
+def test_help_text_mentions_send_and_new_query_forms():
+    """HELP must mention SEND (previously entirely absent) and the new
+    show-projects/has-tested natural-language forms, without dropping any
+    existing entry (Add/Move/Add,Move/Undo/testing?/pending test)."""
+    from agents.modules.casting_pipeline import HELP_TEXT
+    for existing in ("Add - ", "Move - ", "Add,Move - ", "testing?", "pending test", "and confirm"):
+        assert existing in HELP_TEXT, f"missing pre-existing HELP entry: {existing!r}"
+    for new in ("send - ", "show projects of", "has Ayushi tested", "which projects is"):
+        assert new in HELP_TEXT, f"missing new HELP entry: {new!r}"
+
+
+def test_whatsapp_campaign_agent_uses_group_members_security_mode():
+    """Command Enhancement requirement #1: every number currently in (or
+    later added to) the WhatsApp Agent group may issue commands — the
+    seed default must no longer be a single-number allowlist."""
+    import inspect
+    import agents
+    src = inspect.getsource(agents.ensure_agents_ready)
+    # The whatsapp-campaign-agent seed call must now pass group_members —
+    # a crude but effective regression guard against silently reverting
+    # to the old single-number allowlist default.
+    idx = src.index('"whatsapp-campaign-agent"')
+    call_src = src[idx:idx + 800]
+    assert 'security_mode="group_members"' in call_src, call_src

@@ -3743,7 +3743,21 @@ HELP_TEXT = (
     "• Change template to Reminder   • Preview\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "Plain natural-language sentences (e.g. \"Send Reminder template to Follow Up pipeline "
-    "of Myntra Campaign\") still work too."
+    "of Myntra Campaign\") still work too.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "GENERAL\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "• Multiple talents: comma-separated (Talent A,Talent B)\n"
+    "• Multiple projects: comma-separated (Project A,Project B)\n"
+    "• Multiple commands: comma- or line-separated\n"
+    "• Spaces around commas/dashes are ignored\n"
+    "• Minor spelling mistakes are tolerated (talent names, project "
+    "names, and recipients)\n"
+    "• Recipients (for Instagram/WhatsApp sends) are checked against "
+    "saved contacts and groups first, then searched on WhatsApp directly\n"
+    "• If a name or recipient is ambiguous, I'll ask which one you meant "
+    "— just reply with your answer (e.g. \"2\" or \"the second one\"); "
+    "you don't need to repeat the whole command"
 )
 
 CAMPAIGN_AGENT = AgentDefinition(

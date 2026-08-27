@@ -1714,6 +1714,66 @@ def translate_simple_command_to_natural_language(parsed: Dict[str, str]) -> str:
     return sentence
 
 
+# Command Enhancement (2026-08-27) — the compound-VERB-LEADING natural
+# phrasing from the spec ("Add and move Talent A, Talent B to Project A,
+# Project B to Follow Up", "Add move and send Talent A using casting call
+# of Project A to Follow Up"). Genuinely different shape from the ALREADY
+# working "Add Talent to Project and move to Stage" sentence
+# (extract_add_fields's own "and move to X" tail) — here the verb combo
+# comes FIRST, so extract_add_fields never gets a chance to see the
+# talent/project/stage structure at all. Rather than teach
+# extract_add_fields a second grammar, this recognizes the shape and
+# produces the SAME {"action", "talent_part", "project_part",
+# "pipeline_part", "template_part"} dict parse_simple_add_move_command
+# already produces, so translate_simple_command_to_natural_language (one
+# unchanged function) turns it into the exact sentence that already
+# works — no new execution logic anywhere downstream.
+# Non-greedy captures find the FIRST occurrence of each connector word,
+# which is correct for realistic talent/project/stage names (none of
+# which are themselves phrased as "... in ..."/"... to ..." mid-name) —
+# same assumption the spec's own "in/to" grammar already relies on.
+_NATURAL_COMBO_RE = re.compile(
+    r"^\s*add\s*(?:,|\band\b)?\s*move\s*(?:,|\band\b)?\s*(send)?\s*"
+    r"(.+?)"
+    r"\s+(?:using\s+(?:the\s+)?(?:casting\s+call|template)\s+(?:of|for)|in|to)\s+"
+    r"(.+?)"
+    r"\s+(?:in|to)\s+"
+    r"(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_natural_combo_command(line: str) -> Optional[Dict[str, str]]:
+    """Fallback tried only when parse_simple_add_move_command finds no
+    hyphen-grammar match on this line — a genuine natural-language
+    sentence (including one with no verb-combo at all, e.g. plain "Move
+    Ahana to Approved") harmlessly returns None here and falls through to
+    the existing extract_add_fields/extract_move_fields exactly as
+    before."""
+    m = _NATURAL_COMBO_RE.match(line or "")
+    if not m:
+        return None
+    has_send = bool(m.group(1))
+    talent_part, project_part, pipeline_part = (m.group(2) or "").strip(), (m.group(3) or "").strip(), (m.group(4) or "").strip()
+    if not (talent_part and project_part and pipeline_part):
+        return None
+    result = {
+        "action": "add_move", "talent_part": talent_part,
+        "project_part": project_part, "pipeline_part": pipeline_part,
+    }
+    if has_send:
+        # No separately-named template in this natural phrasing (the
+        # spec's own example says "using casting call OF Project" — the
+        # project's own casting-call/submission details ARE the
+        # template) — an empty template_part still marks has_send=True
+        # downstream (see translate_simple_command_to_natural_language:
+        # only truthy template_part appends SEND_TEMPLATE_MARKER, so
+        # this needs the project's label itself as the template query,
+        # exactly mirroring the hyphen grammar's own 4-field send shape).
+        result["template_part"] = project_part
+    return result
+
+
 def translate_simple_commands_in_text(text: str, stage_order: Optional[List[str]] = None) -> str:
     """Applied to a whole (possibly multi-line, possibly multi-command)
     inbound message BEFORE any existing extraction runs — translates
@@ -1745,7 +1805,7 @@ def translate_simple_commands_in_text(text: str, stage_order: Optional[List[str]
         # translation, it lands back at the end of the translated line.
         m = _AND_CONFIRM_RE.search(line)
         core, suffix = (line[:m.start()], line[m.start():]) if m else (line, "")
-        parsed = parse_simple_add_move_command(core, stage_order)
+        parsed = parse_simple_add_move_command(core, stage_order) or parse_natural_combo_command(core)
         if parsed:
             out.append(translate_simple_command_to_natural_language(parsed) + suffix)
         else:
@@ -1981,9 +2041,34 @@ _TALENT_PROJECTS_PATTERNS = [
         + r"\s+(?:part\s+of|working\s+on|involved\s+in|testing\s+for)\s*[.?!]*\s*$",
         re.IGNORECASE,
     ),
+    # Command Enhancement (2026-08-27) — "Which projects is Ahana in?" — a
+    # bare trailing "in" (no "part of"/"working on" phrasing). Same
+    # MULTI_NAME_SPAN, same is/are agreement; kept as its own alternative
+    # rather than folded into the pattern above so "in" alone never
+    # widens what that pattern already matches.
+    re.compile(
+        r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+(?:is|are)\s+" + _MULTI_NAME_SPAN
+        + r"\s+in\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    ),
+    # Command Enhancement (2026-08-27) — "What projects does Ahana have?" /
+    # "Which projects do Ahana, Priya have?" — the does/do...have shape,
+    # distinct from the is/are shape above (different auxiliary verb).
+    re.compile(
+        r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+(?:does|do)\s+" + _MULTI_NAME_SPAN
+        + r"\s+have\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    ),
     # "Which casting projects involve Ahana?"
     re.compile(
         r"^\s*(?:what|which)\s+(?:casting\s+)?projects?\s+involve\s+" + _MULTI_NAME_SPAN + r"\s*[.?!]*\s*$",
+        re.IGNORECASE,
+    ),
+    # Command Enhancement (2026-08-27) — bare "projects of Ahana" / "Ahana's
+    # projects" with no leading "show"/"what"/"which" verb at all — the
+    # plainest possible phrasing from the spec's own examples.
+    re.compile(
+        r"^\s*(?:all\s+)?projects?\s+(?:of|for)\s+" + _MULTI_NAME_SPAN + r"\s*[.?!]*\s*$",
         re.IGNORECASE,
     ),
 ]

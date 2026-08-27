@@ -42,12 +42,15 @@ async def ensure_agents_ready() -> None:
         "whatsapp-campaign-agent",
         group_names=["Talentgram WhatsApp Agent"],
         allowed_senders=[],
-        # allowlist, not group_members — a launched campaign sends real
-        # messages to real recipients, so this stays fail-closed until an
-        # admin explicitly authorizes specific phone numbers (same generic
-        # PUT /api/agents/whatsapp/config/{agent_id} endpoint every agent
-        # already uses; no new endpoint needed).
-        security_mode="allowlist",
+        # group_members (2026-08-27, Command Enhancement P0/P1 — explicit
+        # product decision) — was "allowlist" restricted to one phone
+        # number; every number currently in (or later added to) this group
+        # may now command the agent, matching casting-agent/crm-agent's
+        # existing boundary. The agent's own WhatsApp number
+        # (+91 93212 90688) remains the agent identity elsewhere in the
+        # architecture (Gunwanti mark-based UPLOAD/SEND) — unrelated to who
+        # may issue commands here.
+        security_mode="group_members",
     )
 
     try:

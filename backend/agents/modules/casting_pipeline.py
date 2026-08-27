@@ -4094,6 +4094,62 @@ def _send_approval_overrides(existing: Optional[Dict[str, Any]]) -> Dict[str, st
     return dict(existing.get("overrides") or {})
 
 
+async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected: dict) -> str:
+    """Resolves every (talent, project) pair independently — a single
+    ambiguous/unresolvable pair reports that exact problem and stops the
+    ENTIRE bulk request (never dispatches the pairs that DID resolve while
+    silently dropping the ones that didn't; never guesses). Only once
+    every pair resolves cleanly does this show the combined preview."""
+    resolved: List[Dict[str, Any]] = []
+    for talent_sel, project_q in pairs:
+        target, err = await _resolve_send_target({"talent_selector": talent_sel, "project_query": project_q})
+        if err is not None:
+            return (
+                f'For "{talent_sel} / {project_q}":\n\n{err.message}\n\n'
+                f"Nothing in this bulk send request has been previewed or sent yet — "
+                f"fix this pair and re-run the full command."
+            )
+        resolved.append(target)
+
+    lines = [
+        "SEND FORM PREVIEW (BULK) — 🚫 Nothing Has Been Sent Yet", "",
+        f"{len(resolved)} independent sends will be prepared, each using that talent's own "
+        f"submission form. Nothing has gone out, and nothing will, until you explicitly "
+        f"approve below.", "",
+    ]
+    for t in resolved:
+        lines.append(f"• {t['authoritative_talent_label']} → {t['project']['label']} → {t['destination_group']}")
+    lines += [
+        "",
+        "Editing an individual form isn't supported for a bulk send — cancel and re-run a "
+        "single \"send - Talent - Project\" first if you need to edit one before sending.",
+        "",
+        "Reply:",
+        "1 → Approve all (starts sending every pair above: Takes → Introduction → Form → Pictures → ☑️, one after another)",
+        "3 → Cancel",
+    ]
+    return "\n".join(lines)
+
+
+def _send_selector_pairs(collected: dict) -> List[Tuple[str, str]]:
+    """Command Enhancement (2026-08-27) — bulk SEND: "send - Talent A,
+    Talent B - Project A,Project B" (or the natural-language equivalent)
+    fans out to one independent (talent, project) pair per cross-product
+    combination, exactly the same comma-splitting nlu.split_multi_names
+    already gives ADD/MOVE. Returns the SINGLE (talent_selector,
+    project_query) pair UNCHANGED (no split at all) whenever neither field
+    contains a comma — the space-separated freeform shape (talent_selector
+    == project_query, resolved later by _resolve_freeform_talent_project)
+    never contains one either, so it is also completely unaffected."""
+    talent_selector = (collected.get("talent_selector") or "").strip()
+    project_query = (collected.get("project_query") or "").strip()
+    if "," not in talent_selector and "," not in project_query:
+        return [(talent_selector, project_query)]
+    talents = nlu.split_multi_names(talent_selector) or [talent_selector]
+    projects = nlu.split_multi_names(project_query) or [project_query]
+    return [(t, p) for t in talents for p in projects]
+
+
 async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
     """Phase 2 (2026-08-26) — the required explicit approval step: renders
     the EXACT outgoing SEND form (Project Name/Name/Age/.../Budget, nothing
@@ -4101,7 +4157,17 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
     card itself, so "show the form to the admin" and "ask the admin to
     approve/edit/cancel" are the same generic confirm/edit/cancel gate
     every other intent already uses. Never sends anything — approval only
-    happens in _send_executor, once the admin replies 1."""
+    happens in _send_executor, once the admin replies 1.
+
+    Bulk (2026-08-27): 2+ (talent, project) pairs show one combined
+    preview listing every pair that resolved cleanly — any single pair
+    that's ambiguous or unresolvable STOPS the whole request and asks for
+    clarification (never dispatches the pairs that DID resolve while
+    silently dropping the ones that didn't)."""
+    pairs = _send_selector_pairs(collected)
+    if len(pairs) > 1:
+        return await _build_bulk_send_confirmation(pairs, collected)
+
     target, err = await _resolve_send_target(collected)
     if err is not None:
         return err.message
@@ -4158,7 +4224,16 @@ async def _send_parse_edits_async(
     media_send.SEND_APPROVALS_COLLECTION directly; it never touches the
     underlying submission (Phase 4's explicit requirement). Falls back to
     the generic "Key = value" parser (e.g. "Talent = ...") for the
-    intent's own declared fields when no form-field edit is recognized."""
+    intent's own declared fields when no form-field edit is recognized.
+
+    Bulk (2026-08-27): per-field editing isn't supported across multiple
+    pairs (which of N forms would "Age = 24" apply to?) — the bulk
+    confirmation already tells the admin this and offers 1/3 only; this
+    just falls through to the generic edit-instruction parser rather than
+    silently editing the wrong (or every) pair's submission."""
+    if len(_send_selector_pairs(collected)) > 1:
+        return parse_edit_instructions(text, fields) or {}
+
     target, err = await _resolve_send_target(collected)
     if err is None:
         talent_id = target["authoritative_talent_id"]
@@ -4212,7 +4287,41 @@ async def _send_executor(
     approved. Re-resolves talent/project/destination/submission fresh
     (same reasoning as _move_executor not trusting the confirmation
     card's own snapshot), then freezes whatever draft/overrides exist as
-    the approved snapshot (Phase 4) before dispatching."""
+    the approved snapshot (Phase 4) before dispatching.
+
+    Bulk (2026-08-27): 2+ (talent, project) pairs re-resolves (same
+    "never trust the confirmation card's own snapshot" reasoning) and
+    dispatches each pair as its OWN completely independent send operation
+    — its own approval snapshot, its own scan_request, its own idempotency
+    key (talent_id, project_id, destination_group) — via the exact same
+    single-pair code every non-bulk send already uses, just called once
+    per pair. One pair failing (e.g. no submission) never blocks or rolls
+    back any other pair already dispatched."""
+    pairs = _send_selector_pairs(collected)
+    if len(pairs) > 1:
+        summaries = []
+        any_ok = False
+        for talent_sel, project_q in pairs:
+            result = await _send_one_pair(
+                {"talent_selector": talent_sel, "project_query": project_q}, ctx,
+                destination_group_override=destination_group_override,
+            )
+            any_ok = any_ok or result.ok
+            mark = "✓" if result.ok else "✗"
+            summaries.append(f"{mark} {talent_sel} → {project_q}\n{result.message}")
+        header = f"✅ Approved by {ctx.sender_phone} — {len(pairs)} independent sends dispatched:\n\n"
+        return ExecResult(ok=any_ok, message=header + "\n\n".join(summaries))
+
+    return await _send_one_pair(collected, ctx, destination_group_override=destination_group_override)
+
+
+async def _send_one_pair(
+    collected: dict, ctx: ExecContext, *, destination_group_override: Optional[str] = None,
+) -> ExecResult:
+    """The exact, unchanged single-(talent, project) SEND dispatch —
+    extracted verbatim from the original single-item _send_executor body
+    so bulk and non-bulk sends run identical code, never two copies that
+    could drift apart."""
     target, err = await _resolve_send_target(collected, destination_group_override=destination_group_override)
     if err is not None:
         return err
@@ -4471,32 +4580,69 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
 # and tests/test_casting_agent.py). Update this string by hand alongside any
 # future intent/command change.
 HELP_TEXT = (
-    "Talentgram Casting Commands\n\n"
+    "Talentgram Casting Pipeline — Commands\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "CASTING PIPELINE\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
     "Action - Talent - Project - Pipeline\n\n"
     "Add - Ayushi - Toyota Glanza - Follow Up\n\n"
-    "Multiple talents/projects:\n\n"
+    "Multiple talents/projects (comma-separated):\n\n"
     "Add - Ayushi,Priya - Toyota,Nykaa - Follow Up\n\n"
     "Move a stage:\n\n"
     "Move - Ayushi - Toyota Glanza - Follow Up to Approved\n\n"
     "Add and move in one step:\n\n"
     "Add,Move - Ayushi - Toyota Glanza - Follow Up\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
+    "Natural language works too, in any order of verbs:\n\n"
+    "Add and move Ayushi, Priya to Toyota, Nykaa to Follow Up and confirm\n\n"
+    "Add, move and send in one step (queues a WhatsApp send using a named "
+    "template, or the project's own casting call):\n\n"
+    "Add,Move,Send - Ayushi - Casting Call - Toyota Glanza - Follow Up\n\n"
+    "MOVE also understands: shortlist, select, reject, hold, restore, "
+    "not available, not interested, and every existing stage word — "
+    "unchanged.\n\n"
+    "Show projects a talent is in:\n\n"
+    "show projects of Ayushi\n"
+    "which projects is Ayushi in / what projects does Ayushi have\n\n"
+    "Check a talent's current stage for a project:\n\n"
+    "has Ayushi tested for Toyota Glanza\n"
+    "did Ayushi test for Toyota Glanza / was Ayushi tested for Toyota Glanza\n"
+    "(answers with the ACTUAL current pipeline stage, e.g. Shortlisted — "
+    "not just yes/no)\n\n"
     "Pending tests\n\n"
     "pending test - Ayushi,Priya\n\n"
     "Testing?\n\n"
     "testing? - Ayushi,Priya - Toyota,Nykaa\n\n"
     "Show pipeline\n\n"
     "show - Toyota,Nykaa - Follow Up,Approved\n\n"
+    "SEND — forwards a talent's marked WhatsApp media (Takes → "
+    "Introduction → Form → Pictures → ☑️) to a casting WhatsApp group. "
+    "ALWAYS shows a preview first and needs an explicit approval — "
+    "nothing is ever sent automatically:\n\n"
+    "send - Ayushi - Toyota Glanza\n\n"
+    "1 → Approve   2 → Edit a field   3 → Cancel\n\n"
+    "Undo the last move (within 5 minutes):\n\n"
+    "undo\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "Multiple commands: put each on its own line (a blank line between "
-    "them is fine but not required).\n\n"
+    "them is fine but not required), or comma-separate the action words "
+    "themselves (Add,Move,Send).\n\n"
     "Finish with:\n\n"
     "and confirm\n\n"
-    "to run every command immediately, no approval step.\n\n"
+    "to run every command immediately, no approval step (SEND always "
+    "still requires its own explicit approval regardless).\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "GENERAL\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Natural language, talent search, selection (Select 1,3,5), and Undo "
-    "still work exactly as before — the commands above are just the "
-    "fast way in."
+    "• Multiple talents: comma-separated (Ayushi,Priya)\n"
+    "• Multiple projects: comma-separated (Toyota,Nykaa)\n"
+    "• Multiple commands: comma- or line-separated (Add,Move,Send)\n"
+    "• Spaces around commas/dashes are ignored\n"
+    "• Minor spelling mistakes are tolerated\n"
+    "• If a name is ambiguous, I'll ask which one you meant — just reply "
+    "with your answer (e.g. \"2\" or the full name); you don't need to "
+    "repeat the whole command\n\n"
+    "Talent search, selection (Select 1,3,5), and Undo still work exactly "
+    "as before — the commands above are just the fast way in."
 )
 
 CASTING_AGENT = AgentDefinition(

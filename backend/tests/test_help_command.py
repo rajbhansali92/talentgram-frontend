@@ -159,7 +159,7 @@ async def test_each_agent_has_distinct_help_text():
     # it's still distinctly casting-flavored and still mentions the
     # older natural-language features (talent search, selection, undo)
     # remain available, without requiring the old verbose phrasing.
-    assert "Talentgram Casting Commands" in CASTING_HELP_TEXT
+    assert "Talentgram Casting Pipeline" in CASTING_HELP_TEXT
     assert "Action - Talent - Project - Pipeline" in CASTING_HELP_TEXT
     assert "pending test" in CASTING_HELP_TEXT
     assert "testing?" in CASTING_HELP_TEXT

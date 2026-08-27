@@ -2471,6 +2471,69 @@ def main():
     assert ("tile0_img", "click") not in rec_83, rec_83
     print("83. photo album correct tile targeted -> tile_index=1 of 2 clicks the SECOND tile's own <img>, never always the first")
 
+    # 2026-08-27: a real live SEND proved via a captured whatsapp_dom_snapshot
+    # that the "Forward message to" dialog was STILL fully open (Send button
+    # visible, caption/destination intact) immediately after a successful
+    # send -- the very next operation (_send_text_message opening the
+    # destination group for the marker) then failed with CHAT_NOT_OPENED
+    # because an unknown blocking dialog was still covering the view.
+    # _send_one_target_native_forward's SUCCESS path never verified the
+    # dialog had actually closed (only the two FAILURE paths did) -- this
+    # test proves the fix: success now also calls _ensure_forward_dialog_closed
+    # before returning, without turning the already-real success into a
+    # failure even if closing takes a moment.
+
+    class _FakePage84:
+        async def wait_for_timeout(self, ms):
+            pass
+        class mouse:
+            @staticmethod
+            async def click(x, y, button="left"):
+                pass
+
+    orig_open_84 = sender._open_group_chat
+    orig_ready_84 = mark_scan._open_media_and_get_forward_button
+    orig_select_84 = mark_scan._select_forward_destination
+    orig_caption_84 = mark_scan._enter_forward_caption_and_send
+    orig_closed_84 = mark_scan._ensure_forward_dialog_closed
+
+    close_calls_84 = []
+
+    async def _fake_open_group_84(page, group):
+        return "OPENED"
+
+    async def _fake_ready_84(page, group, msg_id, tile_index, is_photo):
+        return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+    async def _fake_select_84(page, dest):
+        return {"ok": True}
+
+    async def _fake_caption_send_84(page, caption):
+        return {"ok": True, "selector_used": "[aria-label^=\"Send\"]"}
+
+    async def _fake_ensure_closed_84(page):
+        close_calls_84.append(True)
+        return True
+
+    sender._open_group_chat = _fake_open_group_84
+    mark_scan._open_media_and_get_forward_button = _fake_ready_84
+    mark_scan._select_forward_destination = _fake_select_84
+    mark_scan._enter_forward_caption_and_send = _fake_caption_send_84
+    mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_84
+    try:
+        target_84 = _send_target("photo1", "photos")
+        result_84 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage84(), "Source Group", target_84))
+    finally:
+        sender._open_group_chat = orig_open_84
+        mark_scan._open_media_and_get_forward_button = orig_ready_84
+        mark_scan._select_forward_destination = orig_select_84
+        mark_scan._enter_forward_caption_and_send = orig_caption_84
+        mark_scan._ensure_forward_dialog_closed = orig_closed_84
+
+    assert result_84["ok"] is True, result_84
+    assert len(close_calls_84) == 1, "dialog-close verification must run exactly once after a successful send"
+    print("84. SEND verifies dialog closed on success -> a still-open Forward dialog after Send is now caught before the NEXT operation runs")
+
 
 if __name__ == "__main__":
     main()

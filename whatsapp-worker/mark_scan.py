@@ -7362,6 +7362,21 @@ async def _send_one_target_native_forward(page, group_name: str, target: Dict[st
             reason = f"{reason} (also: Forward dialog would not close afterward)"
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send failed: {reason}"}
 
+    # Verified close on SUCCESS too (2026-08-27 fix) — a real live SEND
+    # found the ☑️ marker (the very next operation, a plain group-open+type
+    # via _send_text_message) fail with CHAT_NOT_OPENED immediately after
+    # BOTH media items forwarded successfully. The success path here never
+    # verified the Forward dialog had actually finished closing before
+    # returning — unlike the two failure paths above, which already learned
+    # this exact lesson (see _ensure_forward_dialog_closed's own docstring).
+    # A still-settling/closing dialog is exactly the kind of residual UI
+    # state proven elsewhere in this file to poison the next operation.
+    # The send itself already succeeded (a real Send control was matched
+    # and clicked) regardless of this outcome, so this never turns a real
+    # success into a failure — it only clears the way for whatever comes
+    # next (the next forward, the form, or the marker).
+    await _ensure_forward_dialog_closed(page)
+
     return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT", "selector_used": send_result.get("selector_used")}
 
 

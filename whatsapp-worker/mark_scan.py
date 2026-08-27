@@ -5592,6 +5592,59 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             return {"results": [{"ok": False, "error": f"inspection evaluate failed: {exc}"}]}
         return {"results": [{"ok": True, "data_id": data_id, "tile_index": tile_index, **inspection}], "session_identity": session_identity}
 
+    if probe_type == "photo_render_timing_diagnostic":
+        # Diagnostic-only (2026-08-27) — a live SEND E2E against a photo
+        # album tile found BOTH _identify_tile_index (combined video-
+        # content/image-content/image-thumb selector) and a plain generic
+        # <img> search returning ZERO matches immediately after
+        # _find_message_index_by_data_id located the message's own
+        # top-level container — even though this exact message's tiles
+        # were successfully hashed moments earlier during the real scan.
+        # Never assumes why: scrolls the located message container into
+        # view and re-checks tile counts across several rounds, recording
+        # each round's counts for image-thumb / the combined 3-testid
+        # selector / generic <img>, to determine whether this is a
+        # virtualized-DOM rendering-timing gap (counts start at 0 and
+        # climb) or something structural (counts stay 0 throughout).
+        idx = await _find_message_index_by_data_id(page, group_name, data_id)
+        if idx is None:
+            return {"results": [{"ok": False, "error": f"message {data_id!r} not found in scanned window"}]}
+        scope = await sender._resolve_scope(page)
+        full_sel = f"{scope} [data-testid^='conv-msg-']"
+        message = page.locator(full_sel).nth(idx)
+        rounds = []
+        for round_i in range(6):
+            entry: Dict[str, Any] = {"round": round_i}
+            try:
+                entry["image_thumb_count"] = await message.locator('[data-testid="image-thumb"]').count()
+            except Exception as exc:
+                entry["image_thumb_count_error"] = str(exc)
+            try:
+                entry["combined_tile_count"] = await message.locator(
+                    '[data-testid="video-content"], [data-testid="image-content"], [data-testid="image-thumb"]'
+                ).count()
+            except Exception as exc:
+                entry["combined_tile_count_error"] = str(exc)
+            try:
+                entry["big_img_count"] = await message.evaluate(
+                    "(el) => Array.from(el.querySelectorAll('img')).filter(im => im.offsetWidth > 20).length"
+                )
+            except Exception as exc:
+                entry["big_img_count_error"] = str(exc)
+            try:
+                entry["outer_html_len"] = len(await message.evaluate("(el) => el.outerHTML"))
+            except Exception as exc:
+                entry["outer_html_len_error"] = str(exc)
+            rounds.append(entry)
+            if round_i == 0:
+                try:
+                    await message.scroll_into_view_if_needed(timeout=5000)
+                    entry["scrolled"] = True
+                except Exception as exc:
+                    entry["scroll_error"] = str(exc)
+            await page.wait_for_timeout(800)
+        return {"results": [{"ok": True, "message_idx": idx, "rounds": rounds, "session_identity": session_identity}]}
+
     if probe_type == "album_viewer_diagnostic":
         # Diagnostic-only (2026-08-23): the collapsed 2x2 preview only
         # shows 4 image-thumb slots (one an overflow placeholder) for an

@@ -1816,7 +1816,12 @@ TALENT_SELECTOR_FIELD = FieldSpec(
 TARGET_STAGE_FIELD = FieldSpec(
     key="target_stage",
     label="To",
-    question="Which pipeline should they move to?",
+    question=(
+        "MOVE needs a pipeline stage.\n\n"
+        "Example:\n"
+        "Move Ayra Krishna to Shortlisted\n\n"
+        "Nothing has been moved yet."
+    ),
     validate=_validate_target_stage,
     aliases=["stage", "pipeline", "to"],
 )
@@ -2616,7 +2621,16 @@ async def _flush_group_send(
     summary_lines.append(f"{total_queued} WhatsApp message{'' if total_queued == 1 else 's'} queued.")
 
 
-async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
+async def _resolve_plan_steps_for_display(
+    collected: dict, ctx: ExecContext,
+) -> "Tuple[List[Dict[str, Any]], List[str]]":
+    """The read-only resolution half of _build_plan_confirmation, factored
+    out (2026-08-28) so the Guided Edit Prompt for a compound plan
+    (_build_plan_edit_prompt) can describe the SAME pending plan without
+    a second resolution implementation. Returns (resolved_steps,
+    preview_send_lines) — see _describe_plan_step_lines for turning
+    resolved_steps into the numbered "1. Add X to Y" lines both callers
+    render identically."""
     steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
     resolved_steps: List[Dict[str, Any]] = []
     touched_pairs: List[Dict[str, str]] = []
@@ -2674,8 +2688,16 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
                             bucket.talent_ids.append(tid)
                             bucket.talent_labels.append(tl)
     await _flush_group_send(preview_send_lines, group_send_template, group_send_data, is_dry_run=True)
+    return resolved_steps, preview_send_lines
 
-    lines = ["You are about to run this plan:", ""]
+
+def _describe_plan_step_lines(resolved_steps: "List[Dict[str, Any]]") -> List[str]:
+    """Renders resolved_steps (from _resolve_plan_steps_for_display) into
+    the numbered "1. Add X to Y" description lines — shared verbatim by
+    the plan's confirmation card and its Guided Edit Prompt, so editing
+    a plan always describes the exact same pending operation the
+    confirmation card just showed."""
+    lines: List[str] = []
     for i, rs in enumerate(resolved_steps, start=1):
         if rs["intent_id"] == "casting.share":
             sr = rs.get("share_resolution")
@@ -2705,6 +2727,13 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
                 lines.append(f"{i}. Move {names} to {nlu.stage_label(r.target_stage)} in {r.project_label}")
         else:
             lines.append(f"{i}. {rs['raw_text']} — {rs['error']}")
+    return lines
+
+
+async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
+    resolved_steps, preview_send_lines = await _resolve_plan_steps_for_display(collected, ctx)
+    lines = ["You are about to run this plan:", ""]
+    lines.extend(_describe_plan_step_lines(resolved_steps))
     if preview_send_lines:
         lines.append("")
         lines.extend(preview_send_lines)
@@ -2713,6 +2742,28 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
     lines.append("1 → Approve")
     lines.append("2 → Edit")
     lines.append("3 → Cancel")
+    return "\n".join(lines)
+
+
+async def _build_plan_edit_prompt(collected: dict, ctx: ExecContext) -> str:
+    """Guided Edit Prompts (2026-08-28) — describes the SAME pending
+    compound plan the confirmation card just showed (reusing
+    _resolve_plan_steps_for_display/_describe_plan_step_lines verbatim,
+    not a second resolution), so "2" on an Add+Move(+Share/Send) plan is
+    connected to THAT specific plan instead of a generic "tell me what to
+    change"."""
+    resolved_steps, _preview_send_lines = await _resolve_plan_steps_for_display(collected, ctx)
+    lines = ["EDITING YOUR PLAN", "", "Current plan:"]
+    lines.extend(_describe_plan_step_lines(resolved_steps))
+    lines += [
+        "", "Tell me which part you want to change.", "",
+        "Examples:",
+        "• Change the stage to Shortlisted",
+        "• Remove one of the talents",
+        "• Change the project",
+        "• Share only with one of them",
+        "", "Nothing will execute until you confirm.",
+    ]
     return "\n".join(lines)
 
 
@@ -3283,6 +3334,37 @@ async def _stage_move_handle_confirming_reply(
     return card
 
 
+async def _build_move_edit_prompt(collected: dict, ctx: ExecContext) -> str:
+    """Guided Edit Prompts (2026-08-28) — connects "2" to the SPECIFIC
+    pending move instead of a generic "tell me what to change". Reads the
+    same collected talent_selector/project_query/target_stage text
+    _build_move_confirmation already resolved; no new resolution."""
+    if collected.get(PLAN_FIELD.key):
+        return await _build_plan_edit_prompt(collected, ctx)
+
+    talent = (collected.get("talent_selector") or "").strip()
+    project = (collected.get("project_query") or "").strip()
+    stage_raw = (collected.get("target_stage") or "").strip()
+    stage = nlu.stage_label(stage_raw) if stage_raw in PIPELINE_STAGES else stage_raw
+
+    lines = ["EDITING MOVE", "", "Current:"]
+    if talent:
+        lines.append(f"Talent: {talent}")
+    if project:
+        lines.append(f"Project: {project}")
+    if stage:
+        lines.append(f"Stage: {stage}")
+    lines += [
+        "", "Tell me what you want to change.", "",
+        "Examples:",
+        "• Move both to Shortlisted",
+        "• Remove one of the talents",
+        "• Change project to XYZ",
+        "", "Nothing will be executed until you confirm.",
+    ]
+    return "\n".join(lines)
+
+
 MOVE_INTENT = IntentDefinition(
     intent_id="casting.move",
     triggers=nlu.MOVE_TRIGGERS,
@@ -3290,6 +3372,7 @@ MOVE_INTENT = IntentDefinition(
     executor=_move_executor,
     extract_fields=_extract_move_fields,
     build_confirmation=_build_move_confirmation,
+    build_edit_prompt=_build_move_edit_prompt,
     parse_edits_async=_move_parse_edits_async,
     try_auto_execute=_move_try_auto_execute,
     handle_confirming_reply=_stage_move_handle_confirming_reply,
@@ -3317,7 +3400,12 @@ ADD_TALENT_SELECTOR_FIELD = FieldSpec(
 ADD_PROJECT_QUERY_FIELD = FieldSpec(
     key="project_query",
     label="Project",
-    question="Which project should I add them to?",
+    question=(
+        "ADD needs a project.\n\n"
+        "Example:\n"
+        "ADD Ayra Krishna to Score Condoms\n\n"
+        "Nothing has been added yet."
+    ),
     validate=_validate_project_query,
     aliases=["project", "for", "in", "to"],
     required=True,  # unlike MOVE's optional project_query — every Add spec
@@ -3723,6 +3811,31 @@ async def _add_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[E
     return await _add_executor(collected, ctx)
 
 
+async def _build_add_edit_prompt(collected: dict, ctx: ExecContext) -> str:
+    """Guided Edit Prompts (2026-08-28) — connects "2" to the SPECIFIC
+    pending add instead of a generic "tell me what to change"."""
+    if collected.get(PLAN_FIELD.key):
+        return await _build_plan_edit_prompt(collected, ctx)
+
+    talent = (collected.get("talent_selector") or "").strip()
+    project = (collected.get("project_query") or "").strip()
+
+    lines = ["EDITING ADD", "", "Current:"]
+    if talent:
+        lines.append(f"Talent: {talent}")
+    if project:
+        lines.append(f"Project: {project}")
+    lines += [
+        "", "Tell me what you want to change.", "",
+        "Examples:",
+        "• Add another talent",
+        "• Remove one of the talents",
+        "• Change project to XYZ",
+        "", "Nothing will be executed until you confirm.",
+    ]
+    return "\n".join(lines)
+
+
 ADD_INTENT = IntentDefinition(
     intent_id="casting.add",
     triggers=nlu.ADD_TRIGGERS,
@@ -3730,6 +3843,7 @@ ADD_INTENT = IntentDefinition(
     executor=_add_executor,
     extract_fields=_extract_add_fields,
     build_confirmation=_build_add_confirmation,
+    build_edit_prompt=_build_add_edit_prompt,
     try_auto_execute=_add_try_auto_execute,
     # Reused verbatim from MOVE — it only ever reads session's
     # pending_disambiguation (agent+phone scoped, not intent-specific) and
@@ -4063,12 +4177,21 @@ def _validate_share_text(raw: str) -> ValidationResult:
 
 SHARE_PROJECT_FIELD = FieldSpec(
     key="project_query", label="Project(s)",
-    question='Which project? e.g. "Share casting call for Toyota Glanza to Sharvari".',
+    question=(
+        "SHARE needs a project/template and recipient.\n\n"
+        "Examples:\n"
+        "SHARE casting call for Score Condoms with Ayra Krishna\n"
+        "SHARE casting call for Score Condoms to pipeline\n\n"
+        "Nothing has been sent."
+    ),
     validate=_validate_share_text, aliases=["project", "projects", "for"],
 )
 SHARE_RECIPIENT_FIELD = FieldSpec(
     key="recipient_query", label="Recipient(s)",
-    question='Who should this go to? Name talent(s), or say "to pipeline".',
+    question=(
+        "Who should this go to? Name talent(s), or say \"to pipeline\".\n\n"
+        "Nothing has been sent."
+    ),
     validate=_validate_share_text, aliases=["to", "recipient", "recipients", "talent"],
 )
 SHARE_TEMPLATE_FIELD = FieldSpec(
@@ -4364,6 +4487,41 @@ async def _share_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional
     return await _share_executor(collected, ctx)
 
 
+async def _build_share_edit_prompt(collected: dict, ctx: ExecContext) -> str:
+    """Guided Edit Prompts (2026-08-28) — connects "2" to the SPECIFIC
+    pending share, including the RESOLVED template name (reusing
+    _resolve_share, exactly what _build_share_confirmation already
+    called) rather than just echoing back the raw "casting call" hint
+    text. Falls back to the raw collected text if resolution itself is
+    what's currently failing (e.g. an ambiguous project) — still better
+    than a blank/generic prompt."""
+    resolved = await _resolve_share(collected)
+    if resolved.ok:
+        project_desc = ", ".join(resolved.project_labels)
+        recipient_desc = "pipeline" if resolved.is_pipeline_target else ", ".join(resolved.talent_labels)
+        template_desc = resolved.template_label
+    else:
+        project_desc = (collected.get("project_query") or "").strip()
+        recipient_desc = (collected.get("recipient_query") or "").strip()
+        template_desc = (collected.get("template_query") or "").strip() or "Casting Call"
+
+    lines = ["EDITING SHARE", "", "Current:"]
+    if project_desc:
+        lines.append(f"Project: {project_desc}")
+    if recipient_desc:
+        lines.append(f"Recipient: {recipient_desc}")
+    lines.append(f"Template: {template_desc}")
+    lines += [
+        "", "Tell me what you want to change.", "",
+        "Examples:",
+        "• Share it with someone else instead",
+        "• Share it with everyone named",
+        "• Change the project",
+        "", "Nothing will be sent until you confirm.",
+    ]
+    return "\n".join(lines)
+
+
 SHARE_INTENT = IntentDefinition(
     intent_id="casting.share",
     triggers=SHARE_TRIGGERS,
@@ -4371,6 +4529,7 @@ SHARE_INTENT = IntentDefinition(
     executor=_share_executor,
     extract_fields=_extract_share_fields,
     build_confirmation=_build_share_confirmation,
+    build_edit_prompt=_build_share_edit_prompt,
     try_auto_execute=_share_try_auto_execute,
     summary_title="You are about to share:",
 )
@@ -4397,7 +4556,12 @@ SEND_TALENT_FIELD = FieldSpec(
 
 SEND_PROJECT_FIELD = FieldSpec(
     key="project_query", label="Project",
-    question="Which project?",
+    question=(
+        "SEND needs a talent and project.\n\n"
+        "Example:\n"
+        "SEND Ayra Krishna for Score Condoms\n\n"
+        "Nothing has been sent."
+    ),
     validate=_validate_project_query, aliases=["project", "for"],
 )
 
@@ -5024,6 +5188,58 @@ async def _send_one_pair(
     )
 
 
+# Guided Edit Prompts (2026-08-28) — the fixed, client-facing field set
+# the SEND form actually shows (see media_send.build_form_send_message,
+# the single source of truth this mirrors) — deliberately never the raw
+# database fields UPLOAD's Client View exposes (gender/ethnicity/
+# followers/skills/...), matching that function's own "never the internal/
+# raw fields" contract. Custom Questions are per-submission/dynamic (the
+# form above already shows their real text), so they're named generically
+# here rather than re-fetched and duplicated.
+_SEND_FORM_EDITABLE_FIELDS = [
+    "Project Name", "Name", "Age", "Height", "Current Location",
+    "Availability", "Competitive Brand", "Instagram Link",
+    "Custom Questions (if shown above)", "Budget",
+]
+
+
+async def _build_send_edit_prompt(collected: dict, ctx: ExecContext) -> str:
+    """Guided Edit Prompts (2026-08-28) — SEND keeps its own separate
+    form-approval flow untouched (media_send.py, _send_executor,
+    _send_parse_edits_async — none of that changes here); this only makes
+    the "2 → Edit" prompt name what's actually editable on the form
+    instead of the generic Role=value example."""
+    lines = [
+        "EDITING SEND FORM", "",
+        "You can change any field shown in the form above.", "",
+        "Current fields:",
+    ]
+    lines += [f"• {label}" for label in _SEND_FORM_EDITABLE_FIELDS]
+    lines += [
+        "", "Tell me the field and new value.", "",
+        "Examples:",
+        "• Age = 24",
+        "• Current Location = Mumbai",
+        "• Availability = Available",
+        "• Budget = ₹25,000",
+        "", "Nothing will be sent until you approve the updated form.",
+    ]
+    return "\n".join(lines)
+
+
+async def _build_send_cancel_message(collected: dict, ctx: ExecContext) -> str:
+    """Guided Cancel Messages (2026-08-28) — "nothing saved" undersells a
+    SEND cancel specifically: an approved form snapshot may have existed
+    (media_send.SEND_APPROVALS_COLLECTION) and is what's actually being
+    discarded here, never a real media send (that only ever happens from
+    _send_executor, after a genuine "1")."""
+    return (
+        "SEND CANCELLED\n\n"
+        "Nothing was sent.\n"
+        "The form approval was discarded."
+    )
+
+
 SEND_INTENT = IntentDefinition(
     intent_id="casting.send",
     triggers=["send"],
@@ -5031,6 +5247,8 @@ SEND_INTENT = IntentDefinition(
     executor=_send_executor,
     extract_fields=_extract_send_fields,
     build_confirmation=_build_send_confirmation,
+    build_edit_prompt=_build_send_edit_prompt,
+    build_cancel_message=_build_send_cancel_message,
     parse_edits_async=_send_parse_edits_async,
     auto_confirm=False,
 )

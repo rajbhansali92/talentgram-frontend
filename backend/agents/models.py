@@ -119,6 +119,24 @@ class IntentDefinition:
     # selector against the current session's DB-backed listing. None means
     # "use the generic renderer" (every existing intent's behaviour).
     build_confirmation: Optional[Callable[[Dict[str, str], "ExecContext"], Awaitable[str]]] = None
+    # Guided Edit Prompts (2026-08-28) — overrides the text shown when the
+    # user replies "2"/"edit" to a confirmation card. Same shape/reasoning
+    # as build_confirmation: a domain module resolves `collected` into the
+    # SPECIFIC pending operation ("EDITING ADD — Talent: X / Project: Y")
+    # instead of the one generic, domain-blind "Tell me what to change"
+    # every intent used to share. None (the default) falls back to
+    # confirmation.build_generic_edit_prompt, itself already reads intent.
+    # fields/collected — an improvement over the old flat string for every
+    # existing intent that doesn't opt into a bespoke version, not a
+    # behaviour change beyond wording.
+    build_edit_prompt: Optional[Callable[[Dict[str, str], "ExecContext"], Awaitable[str]]] = None
+    # Guided Cancel Messages (2026-08-28) — same shape/reasoning as
+    # build_edit_prompt, for the text shown when the user replies "3"/
+    # "cancel". None (the default, every intent except casting.send) uses
+    # confirmation.CANCELLED_MESSAGE unchanged; casting.send overrides it
+    # to say the FORM APPROVAL specifically was discarded, since "nothing
+    # saved" undersells what a SEND cancel actually means (Part 13).
+    build_cancel_message: Optional[Callable[[Dict[str, str], "ExecContext"], Awaitable[str]]] = None
     # Async counterpart to `parse_edits` — for an "editing"-step reply that
     # needs DB/session access to interpret (e.g. "2" picking option 2 from
     # a disambiguation list the domain module stored in session, rather

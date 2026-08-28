@@ -23,6 +23,7 @@ from agents.confirmation import (
     UNRECOGNIZED_CONFIRMATION_REPLY,
     UNRECOGNIZED_EDIT_REPLY,
     build_confirmation_message,
+    build_generic_edit_prompt,
 )
 from agents.models import DispatchResult, ExecContext
 from agents.parser import (
@@ -60,11 +61,22 @@ def _render_question(template: str, collected: dict) -> str:
     """A domain module's FieldSpec.question may reference already-collected
     values (e.g. "What's {name}'s phone number?") to sound like a real
     conversation instead of a form. Purely generic string substitution —
-    this engine still has no idea what "name" means."""
+    this engine still has no idea what "name" means.
+
+    Normalizes incidental whitespace WITHIN each line (so a template
+    wrapped across source-code lines still renders as one clean sentence,
+    the original reason this existed) while preserving intentional blank-
+    line paragraph breaks (Guided Context-Aware Responses, 2026-08-28) —
+    a multi-line question like "ADD needs a project.\n\nExample:\n..."
+    must reach WhatsApp exactly as readable as it looks in source, not
+    flattened onto one run-on line. Every existing single-line question
+    (the overwhelming majority) is completely unaffected — there's only
+    one line to normalize either way."""
     try:
-        return " ".join(template.format_map(_BlankOnMissing(collected)).split())
+        rendered = template.format_map(_BlankOnMissing(collected))
     except Exception:
-        return template
+        rendered = template
+    return "\n".join(" ".join(line.split()) for line in rendered.split("\n"))
 
 
 async def _render_confirmation(intent, collected: dict, ctx: ExecContext) -> str:
@@ -77,6 +89,18 @@ async def _render_confirmation(intent, collected: dict, ctx: ExecContext) -> str
     if intent.build_confirmation:
         return await intent.build_confirmation(collected, ctx)
     return build_confirmation_message(intent, collected)
+
+
+async def _render_edit_prompt(intent, collected: dict, ctx: ExecContext) -> str:
+    """Guided Edit Prompts (2026-08-28) — same delegation shape as
+    _render_confirmation: a domain module's build_edit_prompt hook (when
+    supplied) resolves `collected` into something specific to the ACTUAL
+    pending operation; otherwise the generic, still-collected-data-aware
+    renderer (an improvement over the old flat EDIT_PROMPT string for
+    every intent that doesn't opt in — currently just crm-agent)."""
+    if intent.build_edit_prompt:
+        return await intent.build_edit_prompt(collected, ctx)
+    return build_generic_edit_prompt(intent, collected)
 
 
 async def _clear_or_handoff(
@@ -249,10 +273,11 @@ async def _advance_task(
             await tasks.clear_task(agent.agent_id, op_id)
             return DispatchResult(handled=True, reply=exec_result.message)
         if action == "edit":
+            edit_reply = await _render_edit_prompt(intent, collected, ctx)
             await tasks.update_task(
-                agent.agent_id, op_id, status=tasks.STATUS_CLARIFYING, last_message_text=EDIT_PROMPT,
+                agent.agent_id, op_id, status=tasks.STATUS_CLARIFYING, last_message_text=edit_reply,
             )
-            return DispatchResult(handled=True, reply=EDIT_PROMPT, operation_id=op_id)
+            return DispatchResult(handled=True, reply=edit_reply, operation_id=op_id)
         if action == "cancel":
             await tasks.clear_task(agent.agent_id, op_id)
             return DispatchResult(handled=True, reply=CANCELLED_MESSAGE)
@@ -948,6 +973,14 @@ async def handle_inbound_message(
                 await conversation.update_conversation(
                     agent.agent_id, phone, step="editing"
                 )
+                edit_ctx = ExecContext(
+                    agent_id=agent.agent_id,
+                    group_name=group_name,
+                    sender_phone=phone,
+                    sender_name=sender_name,
+                    conversation_id=str(conv.get("_id") or ""),
+                )
+                edit_reply = await _render_edit_prompt(intent, conv.get("collected") or {}, edit_ctx)
                 await audit.log_turn(
                     agent_id=agent.agent_id,
                     group_name=group_name,
@@ -957,10 +990,20 @@ async def handle_inbound_message(
                     parsed_intent=intent.intent_id,
                     confirmation_action="edit",
                 )
-                return DispatchResult(handled=True, reply=EDIT_PROMPT)
+                return DispatchResult(handled=True, reply=edit_reply)
 
             if action == "cancel":
                 await conversation.clear_conversation(agent.agent_id, phone)
+                cancel_reply = CANCELLED_MESSAGE
+                if intent.build_cancel_message:
+                    cancel_ctx = ExecContext(
+                        agent_id=agent.agent_id,
+                        group_name=group_name,
+                        sender_phone=phone,
+                        sender_name=sender_name,
+                        conversation_id=str(conv.get("_id") or ""),
+                    )
+                    cancel_reply = await intent.build_cancel_message(conv.get("collected") or {}, cancel_ctx)
                 await audit.log_turn(
                     agent_id=agent.agent_id,
                     group_name=group_name,
@@ -970,7 +1013,7 @@ async def handle_inbound_message(
                     parsed_intent=intent.intent_id,
                     confirmation_action="cancel",
                 )
-                return DispatchResult(handled=True, reply=CANCELLED_MESSAGE)
+                return DispatchResult(handled=True, reply=cancel_reply)
 
             await audit.log_turn(
                 agent_id=agent.agent_id,

@@ -830,7 +830,7 @@ async def test_cancel_creates_no_live_batch():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r2.handled
-        assert "Cancelled" in r2.reply
+        assert "CANCELLED" in r2.reply
 
         live_count = await db.whatsapp_batches.count_documents({"project_id": project_id, "is_dry_run": False})
         assert live_count == 0
@@ -1181,7 +1181,7 @@ async def test_disambiguation_cancel():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Cancelled" in r.reply
+        assert "CANCELLED" in r.reply
 
         pending_after = await disambiguation.get_pending(AGENT_ID, phone)
         assert pending_after is None
@@ -2183,7 +2183,7 @@ async def test_editing_cancel_clears_pending_campaign():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Cancelled" in r.reply
+        assert "CANCELLED" in r.reply
         pending = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": ctx["phone"]})
         assert pending is None
         live_count = await db.whatsapp_batches.count_documents({
@@ -2924,7 +2924,7 @@ async def test_approve_and_cancel_unaffected_by_bare_edit_fix():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled
-        assert "Cancelled" in r.reply
+        assert "CANCELLED" in r.reply
     finally:
         await _teardown_big_editing_campaign(ctx)
 

@@ -453,7 +453,10 @@ async def test_confirmation_edit_and_cancel():
             group_name=group, sender_phone=phone, text="3",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Cancelled" in r.reply
+        # Guided Context-Aware Responses (2026-08-28) — CANCELLED is now
+        # all-caps with a short explanation (see agents/confirmation.py's
+        # CANCELLED_MESSAGE).
+        assert "CANCELLED" in r.reply
         doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1})
         assert doc["stage"] == "ask_to_test"  # untouched
 
@@ -1467,7 +1470,7 @@ async def test_conversational_confirmation_synonyms():
             group_name=group, sender_phone=phone, text="Stop",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Cancelled" in r.reply
+        assert "CANCELLED" in r.reply
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t2}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
@@ -2844,7 +2847,10 @@ async def test_add_requires_project_when_omitted():
             text=f"Add {(await db.talents.find_one({'id': t}))['name']}",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "which project" in r.reply.lower()
+        # Guided Context-Aware Responses (2026-08-28) — the missing-project
+        # question now says what's needed + an example + reassurance,
+        # rather than the old bare "Which project should I add them to?".
+        assert "add needs a project" in r.reply.lower()
 
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone, text=label,
@@ -6666,8 +6672,253 @@ async def test_8_send_approval_gate_intact_inside_compound_command():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert cancel.handled, cancel.reply
-        assert "Cancelled" in cancel.reply, cancel.reply
+        # Guided Context-Aware Responses (2026-08-28) — SEND gets its own
+        # cancel wording ("SEND CANCELLED... The form approval was
+        # discarded"), distinct from the generic CANCELLED_MESSAGE.
+        assert "SEND CANCELLED" in cancel.reply, cancel.reply
         assert await db[_ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id}) is None
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await db.submissions.delete_many({"id": submission_id})
+        await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Guided, Context-Aware Agent Responses (2026-08-28) — focused coverage for
+# the new contextual EDIT prompts (Parts 1-5 of the test list) plus a
+# dedicated CANCEL check. Missing-project/ambiguous-talent/ambiguous-project/
+# invalid-command/success/partial-failure (Parts 6-12) are exercised by the
+# existing regression suite above, unchanged in substance — only 3 field
+# questions and the shared CANCELLED_MESSAGE gained wording improvements,
+# both already covered by updated assertions in this same file.
+# ---------------------------------------------------------------------------
+
+async def test_guided_1_add_edit_response_is_contextual():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"GuidedAddProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"GuidedAddTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add GuidedAddTalent {tag} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to add" in r.reply, r.reply
+
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING ADD" in edit.reply, edit.reply
+        assert f"GuidedAddTalent {tag}" in edit.reply, edit.reply
+        assert label in edit.reply, edit.reply
+        assert "Nothing will be executed until you confirm" in edit.reply, edit.reply
+        # Must NOT be the old generic, domain-blind prompt.
+        assert "Role = Casting Director" not in edit.reply, edit.reply
+
+        # A fresh trigger re-opens a "confirming" card (a bare "3" only
+        # cancels FROM "confirming" — see test_confirmation_edit_and_cancel
+        # for that same, pre-existing state-machine behaviour, unchanged).
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add GuidedAddTalent {tag} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "CANCELLED" in cancel.reply, cancel.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_guided_2_move_edit_response_is_contextual():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"GuidedMoveProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"GuidedMoveTalent {tag}")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move GuidedMoveTalent {tag} to Follow Up in {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to move" in r.reply, r.reply
+
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING MOVE" in edit.reply, edit.reply
+        assert f"GuidedMoveTalent {tag}" in edit.reply, edit.reply
+        assert "Follow Up" in edit.reply, edit.reply
+        assert "Nothing will be executed until you confirm" in edit.reply, edit.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move GuidedMoveTalent {tag} to Follow Up in {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "CANCELLED" in cancel.reply, cancel.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_guided_3_share_edit_response_shows_resolved_template():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"GuidedShareProj {tag}", shoot_dates="1 Jan 2029", budget="Rs 1/day",
+    )
+    talent_id = await _seed_talent(f"GuidedShareTalent {tag}")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share casting call for GuidedShareProj {tag} to GuidedShareTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "SHARE PREVIEW" in r.reply, r.reply
+
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING SHARE" in edit.reply, edit.reply
+        assert f"GuidedShareTalent {tag}" in edit.reply, edit.reply
+        # The RESOLVED template name, not just the "casting call" hint text.
+        assert "Casting Call" in edit.reply, edit.reply
+        assert "Nothing will be sent until you confirm" in edit.reply, edit.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share casting call for GuidedShareProj {tag} to GuidedShareTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "CANCELLED" in cancel.reply, cancel.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_guided_4_compound_plan_edit_response_lists_all_steps():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"GuidedPlanProj {tag}", shoot_dates="2 Feb 2029", budget="Rs 2/day",
+    )
+    talent_id = await _seed_talent(f"GuidedPlanTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add GuidedPlanTalent {tag} to GuidedPlanProj {tag}, "
+                "Move her to Shortlisted, Share the casting call with her"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan" in r.reply, r.reply
+
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING YOUR PLAN" in edit.reply, edit.reply
+        assert "Current plan:" in edit.reply, edit.reply
+        # All three steps described, not just the first.
+        assert "Add" in edit.reply and f"GuidedPlanTalent {tag}" in edit.reply, edit.reply
+        assert "Move" in edit.reply and "Shortlisted" in edit.reply, edit.reply
+        assert "Share" in edit.reply, edit.reply
+        assert "Nothing will execute until you confirm" in edit.reply, edit.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add GuidedPlanTalent {tag} to GuidedPlanProj {tag}, "
+                "Move her to Shortlisted, Share the casting call with her"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "CANCELLED" in cancel.reply, cancel.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_guided_5_send_edit_response_lists_form_fields_not_db_fields():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    email = f"guidededit.{tag}@example.com"
+    project_id = await _seed_send_project(f"GuidedSendProj {tag}", whatsapp_casting_group_name="Talentgram Casting Test")
+    talent_id = await _seed_send_talent(
+        f"GuidedSendTalent {tag}", whatsapp_group_name=f"GuidedSendTalent {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_send_submission(project_id, talent_id, email, decision="approved")
+    await db[_ma.IDENTITY_COLLECTION].update_one(
+        {}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True,
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - GuidedSendTalent {tag} - GuidedSendProj {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "SEND FORM PREVIEW" in r.reply, r.reply
+
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING SEND FORM" in edit.reply, edit.reply
+        for field in ("Age", "Height", "Current Location", "Availability", "Budget"):
+            assert field in edit.reply, edit.reply
+        # Never the raw/internal DB fields Client View shows.
+        for forbidden in ("Gender", "Ethnicity", "Followers", "Skills"):
+            assert forbidden not in edit.reply, edit.reply
+        assert "Nothing will be sent until you approve the updated form" in edit.reply, edit.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - GuidedSendTalent {tag} - GuidedSendProj {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "SEND CANCELLED" in cancel.reply, cancel.reply
+        assert "form approval was discarded" in cancel.reply.lower(), cancel.reply
     finally:
         await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])

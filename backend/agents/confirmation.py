@@ -39,7 +39,43 @@ EDIT_PROMPT = (
     "Role = Casting Director"
 )
 
-CANCELLED_MESSAGE = "Cancelled.\nNothing saved."
+
+def build_generic_edit_prompt(intent: IntentDefinition, collected: Dict[str, str]) -> str:
+    """Guided Edit Prompts (2026-08-28) — the DEFAULT edit prompt for any
+    intent that doesn't supply its own build_edit_prompt hook (currently
+    just crm-agent's create_contact; casting-agent's ADD/MOVE/SHARE/SEND
+    all override this with something more specific to what they resolved —
+    see agents/modules/casting_pipeline.py). Reuses the exact same
+    intent.fields/collected data build_confirmation_message already reads
+    — no new resolution, just framed as "here's what you can edit" instead
+    of "here's what I'm about to do". A field whose FieldSpec.question is
+    empty is the established "hidden, never shown" convention (see
+    AUTO_CONFIRM_FIELD/PLAN_FIELD/SEND_FORM_EDIT_FIELD) and is skipped
+    here exactly as build_confirmation_message already skips it."""
+    visible = [f for f in intent.fields if f.question]
+    lines = ["EDITING", "", "Current:"]
+    any_shown = False
+    for f in visible:
+        value = (collected.get(f.key, "") or "").strip()
+        if not value:
+            continue
+        lines.append(f"{f.label}: {value}")
+        any_shown = True
+    if not any_shown:
+        lines.pop()  # drop the now-empty "Current:" header
+    lines += ["", "Tell me what you want to change."]
+    example_field = visible[0] if visible else None
+    if example_field:
+        lines += ["", "Example:", f"{example_field.label} = <new value>"]
+    lines += ["", "Nothing will be executed until you confirm."]
+    return "\n".join(lines)
+
+
+CANCELLED_MESSAGE = (
+    "CANCELLED\n\n"
+    "Nothing from the pending action was executed or sent.\n\n"
+    "You can start a new command whenever you're ready."
+)
 
 UNRECOGNIZED_CONFIRMATION_REPLY = (
     "Sorry, I didn't understand that.\n"

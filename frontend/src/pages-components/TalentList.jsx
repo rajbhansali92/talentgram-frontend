@@ -3,11 +3,12 @@ import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { instagramProfileUrl } from "@/lib/mediaUtils";
-import { Search, Plus, Check, User, LayoutGrid, List, Tag, Instagram, SlidersHorizontal } from "lucide-react";
+import { Search, Plus, Check, User, LayoutGrid, List, Tag, Instagram, SlidersHorizontal, FolderKanban } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import TagPopover from "@/components/TagPopover";
+import ProjectsPopover from "@/components/ProjectsPopover";
 import BulkTagDialog from "@/components/BulkTagDialog";
 import AddToProjectModal from "@/components/AddToProjectModal";
 import MergeTalentsModal from "@/components/MergeTalentsModal";
@@ -309,6 +310,7 @@ const TalentListRow = React.memo(function TalentListRow({
     canBulkDelete,
     onToggle,
     onTagClick,
+    onProjectsClick,
 }) {
     const handleToggle = useCallback(
         (e) => {
@@ -325,6 +327,15 @@ const TalentListRow = React.memo(function TalentListRow({
             onTagClick(t);
         },
         [t, onTagClick]
+    );
+
+    const handleProjectsClick = useCallback(
+        (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onProjectsClick(t);
+        },
+        [t, onProjectsClick]
     );
 
     // Filter media arrays safely
@@ -510,6 +521,17 @@ const TalentListRow = React.memo(function TalentListRow({
                                 <Tag className="w-4.5 h-4.5 md:w-3.5 md:h-3.5 md:mr-1" />
                                 <span className="hidden md:inline">Tags</span>
                             </button>
+                            <button
+                                type="button"
+                                onClick={handleProjectsClick}
+                                aria-label="View ongoing project status"
+                                data-testid={`talent-projects-btn-${t.id}`}
+                                className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 hover:bg-black/[0.02] bg-white text-black text-[11px] font-medium w-11 h-11 md:w-auto md:px-2.5 md:py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
+                                title="Ongoing Project Status"
+                            >
+                                <FolderKanban className="w-4.5 h-4.5 md:w-3.5 md:h-3.5 md:mr-1" />
+                                <span className="hidden md:inline">Projects</span>
+                            </button>
                             {igUrl && (
                                 <a
                                     href={igUrl}
@@ -624,6 +646,8 @@ export default function TalentList() {
 
     // Inline tagging state
     const [tagPopoverTalent, setTagPopoverTalent] = useState(null);
+    // Read-only "which ongoing projects + stage" popover (List view only)
+    const [projectsPopoverTalent, setProjectsPopoverTalent] = useState(null);
     const [bulkTagAction, setBulkTagAction] = useState(null); // 'assign' | 'remove' | null
     const [showAddToProject, setShowAddToProject] = useState(false);
     const [showMergeModal, setShowMergeModal] = useState(false);
@@ -949,6 +973,7 @@ export default function TalentList() {
                             canBulkDelete={canBulkDelete}
                             onToggle={toggle}
                             onTagClick={setTagPopoverTalent}
+                            onProjectsClick={setProjectsPopoverTalent}
                         />
                     ))}
                 </div>
@@ -1052,6 +1077,14 @@ export default function TalentList() {
                     talent={tagPopoverTalent}
                     onSave={handleSaveTagsOptimistic}
                     onClose={() => setTagPopoverTalent(null)}
+                />
+            )}
+
+            {/* Ongoing Projects Popover (read-only status check) */}
+            {projectsPopoverTalent && (
+                <ProjectsPopover
+                    talent={projectsPopoverTalent}
+                    onClose={() => setProjectsPopoverTalent(null)}
                 />
             )}
 

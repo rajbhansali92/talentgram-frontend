@@ -1880,6 +1880,12 @@ async def seed_admin() -> None:
         # backend request time dominated by sequential Mongo round-trips;
         # this is the single hottest unindexed query shape found.
         ("casting_pipeline", [("project_id", 1), ("stage", 1)], {"name": "pipeline_project_stage"}),
+        # Roster "Projects" popover (GET /talents/{tid}/ongoing-projects):
+        # the only query shape that looks up a talent's pipeline rows across
+        # ALL projects, keyed on talent_id alone — every other pipeline
+        # query above is scoped by project_id first, so this is the first
+        # index with talent_id leading.
+        ("casting_pipeline", [("talent_id", 1)], {"name": "pipeline_talent_id"}),
         ("projects", [("slug", 1)], {"unique": True, "name": "proj_slug_unique"}),
         # routers/whatsapp.py already indexes (status, created_at) — covers
         # the `status` filter but not a `brand_name` sort. casting-agent's

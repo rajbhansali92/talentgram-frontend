@@ -1304,6 +1304,46 @@ async def remove_tag_from_talent(
     return {"ok": True}
 
 
+@router.get("/talents/{tid}/ongoing-projects")
+async def get_talent_ongoing_projects(tid: str, admin: dict = Depends(current_team_or_admin)):
+    """Ongoing-project associations for one talent, each with their current
+    pipeline stage — powers the roster's "Projects" popover. Fetched lazily
+    (only when the popover opens), not embedded in the roster list payload.
+
+    Two queries, no N+1 — mirrors casting_pipeline.list_pipeline's hydration
+    pattern, just keyed the other direction (talent -> its projects instead
+    of project -> its talents). Stage values are returned raw/unnormalised:
+    the frontend already owns stage normalisation + display labels
+    (components/pipeline/constants.js) — no need to duplicate that map here.
+    """
+    if not tid or tid in ("null", "undefined"):
+        raise HTTPException(400, "Invalid talent ID")
+
+    rows = await db.casting_pipeline.find(
+        {"talent_id": tid}, {"_id": 0, "project_id": 1, "stage": 1}
+    ).to_list(500)
+    if not rows:
+        return {"success": True, "data": []}
+
+    project_ids = list({r["project_id"] for r in rows if r.get("project_id")})
+    projects = await db.projects.find(
+        {"id": {"$in": project_ids}, "status": "ongoing"},
+        {"_id": 0, "id": 1, "brand_name": 1},
+    ).to_list(len(project_ids))
+    by_id = {p["id"]: p for p in projects}
+
+    data = [
+        {
+            "project_id": r["project_id"],
+            "project_name": by_id[r["project_id"]].get("brand_name") or "Untitled Project",
+            "stage": r.get("stage"),
+        }
+        for r in rows
+        if r.get("project_id") in by_id  # filters out non-ongoing/deleted projects
+    ]
+    return {"success": True, "data": data}
+
+
 @router.post("/talents/{tid}/cover/{mid}")
 async def set_cover(tid: str, mid: str, admin: dict = Depends(current_team_or_admin)):
     """Set the cover image for a talent.

@@ -6925,3 +6925,299 @@ async def test_guided_5_send_edit_response_lists_form_fields_not_db_fields():
         await db.submissions.delete_many({"id": submission_id})
         await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-29 regression — "and" inside a PROJECT'S OWN NAME (not a chaining
+# word) was being blindly treated as a project-list separator by
+# nlu.split_multi_names wherever ADD/MOVE (_resolve_one_plan_segment) and
+# SHARE (_resolve_share) split a project reference into one-or-many names.
+# "Vaseline (Film 1 and Film 4)" — one real project — got cut into two
+# nonsense fragments that BOTH independently fuzzy-resolved back to the
+# SAME project, producing a duplicate ADD step (and, downstream, a
+# duplicated project label on the inherited SHARE step) from a command
+# that named the project exactly once. Fixed by
+# _resolve_project_query_names: prefer the real project catalog over
+# blind text-splitting — only split when the WHOLE, unsplit reference does
+# NOT already resolve to one real ongoing project.
+# ---------------------------------------------------------------------------
+async def test_and_in_project_name_does_not_duplicate_compound_plan_steps():
+    """The exact reported regression: "Add X to Project(Film 1 and Film 4),
+    Move her to Follow Up, Share the casting call with her" must produce
+    exactly 3 plan steps (not 4), and exactly ONE add/move/share side
+    effect — never two ADDs to the same project, never two SHARE
+    messages, from one instruction typed once."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    # Mirrors the real reported project name shape: one project whose OWN
+    # name contains "and".
+    brand_name = f"Vaseline (Film 1 and Film 4) {tag}"
+    project_id = await _seed_project_with_details(
+        brand_name, shoot_dates="5 Sep 2028", budget="Rs 50,000/day",
+    )
+    talent_id = await _seed_talent(f"Shivi Rajput {tag}", phone="917000900099")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add Shivi Rajput {tag} to {brand_name}, "
+                "Move her to follow up, Share the casting call with her"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to run this plan:" in r.reply, r.reply
+        # Exactly 3 numbered plan lines — never a duplicated 4th ADD.
+        numbered_lines = [ln for ln in r.reply.splitlines() if re.match(r"^\d+\. ", ln)]
+        assert len(numbered_lines) == 3, r.reply
+        assert r.reply.count("Add Shivi") == 1, r.reply
+        # The project's own "and" must survive intact, never split into two
+        # comma-joined copies of itself on the inherited SHARE line.
+        assert f"{brand_name}, {brand_name}" not in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+        assert r2.reply.count("✓") == 3, r2.reply  # add, move, share — never a doubled add
+        assert "Already in this pipeline" not in r2.reply, r2.reply
+        assert "1 WhatsApp message queued." in r2.reply, r2.reply
+
+        rows = await db.casting_pipeline.find({"project_id": project_id, "talent_id": talent_id}).to_list(10)
+        assert len(rows) == 1, rows
+        assert rows[0]["stage"] == "follow_up", rows[0]
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 1, jobs
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_and_in_project_name_two_clause_chain_is_two_steps():
+    """TEST B: "Add X to Project and move her to Follow Up" — exactly 2
+    steps, never 3, and the project's "and" survives the chain-detection
+    split unharmed even though it's immediately followed by the word
+    "move" (a real chaining trigger) elsewhere in the sentence."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent(f"TwoStepTalent {tag}")
+    project_id = await _seed_project(brand_name=f"TwoStepProj {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add TwoStepTalent {tag} to TwoStepProj {tag} and move her to Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+        numbered_lines = [ln for ln in r.reply.splitlines() if re.match(r"^\d+\. ", ln)]
+        assert len(numbered_lines) == 2, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+        assert r2.reply.count("✓") == 2, r2.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "follow_up", doc
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_project_name_containing_and_stays_one_project_for_standalone_move():
+    """TEST E: a project whose ACTUAL name contains "and" ("Project A and
+    B") must remain ONE project for a plain, non-compound MOVE naming it
+    directly — never silently fanned out across two guessed fragments."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"Project A and B {tag}")
+    talent_id = await _seed_talent(f"AndNameTalent {tag}")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move AndNameTalent {tag} to Approved in Project A and B {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+        assert r2.reply.count("✓") == 1, r2.reply
+        rows = await db.casting_pipeline.find({"project_id": project_id, "talent_id": talent_id}).to_list(10)
+        assert len(rows) == 1, rows
+        assert rows[0]["stage"] == "approved", rows[0]
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_and_in_project_name_standalone_share_stays_one_project():
+    """Standalone SHARE (no compound chain at all) naming a project whose
+    own name contains "and" must never duplicate that project on the
+    rendered SHARE preview/label, and must only ever queue ONE message."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    brand_name = f"Rock and Roll Campaign {tag}"
+    project_id = await _seed_project_with_details(
+        brand_name, shoot_dates="9 Sep 2028", budget="Rs 9,000/day",
+    )
+    talent_id = await _seed_talent(f"AndShareTalent {tag}", phone="917000900098")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"share casting call for {brand_name} to AndShareTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "SHARE PREVIEW" in r.reply, r.reply
+        assert f"{brand_name}, {brand_name}" not in r.reply, r.reply
+        assert "1 message" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "1 WhatsApp message queued." in r2.reply, r2.reply
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert len(jobs) == 1, jobs
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_multi_project_still_splits_when_and_joins_two_real_projects():
+    """Guardrail for the fix above: two GENUINELY separate projects joined
+    by "and" ("Add X to A and B") must still cross-product-expand exactly
+    as before — the fix must never collapse a real multi-project reference
+    into one just because splitting is now conditional."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_a = await _seed_project(brand_name=f"RealProjA {tag}")
+    project_b = await _seed_project(brand_name=f"RealProjB {tag}")
+    talent_id = await _seed_talent(f"RealMultiTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add RealMultiTalent {tag} to RealProjA {tag} and RealProjB {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+        assert r.reply.count("Add RealMultiTalent") == 2, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+        assert r2.reply.count("✓") == 2, r2.reply
+        assert (await db.casting_pipeline.find_one({"project_id": project_a, "talent_id": talent_id})) is not None
+        assert (await db.casting_pipeline.find_one({"project_id": project_b, "talent_id": talent_id})) is not None
+    finally:
+        await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
+async def test_cross_product_add_and_share_no_duplicate_pairs_with_and_chained_move():
+    """TEST D (scoped to what this fix touches): "Add A,B to X,Y, Move
+    both to Follow Up, Share the casting call with both" must still
+    cross-product ADD to exactly the 4 intended (talent, project) pairs
+    and SHARE to exactly the 4 intended pairs — never fewer (missing a
+    pair), never more (a duplicate). The MOVE clause's own "both" fan-out
+    has a separate, pre-existing partial-application gap (confirmed
+    present identically on main before this fix, unrelated to project-
+    name "and"-splitting) that is out of scope for this regression fix —
+    not asserted here."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"CPProjD1 {tag}")
+    p2 = await _seed_project(brand_name=f"CPProjD2 {tag}")
+    t1 = await _seed_talent(f"CPTalD1 {tag}", phone="917000900031")
+    t2 = await _seed_talent(f"CPTalD2 {tag}", phone="917000900032")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add CPTalD1 {tag},CPTalD2 {tag} to CPProjD1 {tag},CPProjD2 {tag}, "
+                "Move both to Follow Up, Share the casting call with both"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+        assert r.reply.count("Add CPTal") == 4, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+        assert "4 WhatsApp messages queued." in r2.reply, r2.reply
+
+        rows = await db.casting_pipeline.find({"project_id": {"$in": [p1, p2]}}).to_list(50)
+        pairs = {(r_["project_id"], r_["talent_id"]) for r_ in rows}
+        assert len(rows) == 4, rows  # 4 unique pairs, no duplicate ADD write
+        assert pairs == {(p1, t1), (p1, t2), (p2, t1), (p2, t2)}
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2]}}).to_list(50)
+        assert len(jobs) == 4, jobs
+        job_pairs = {(j["source_id"], j["talent_id"]) for j in jobs}
+        assert job_pairs == {(p1, t1), (p1, t2), (p2, t1), (p2, t2)}
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2])
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_compound_plan_confirmation_never_double_numbers_lines():
+    """Item 7 regression guard: the confirmation renderer owns numbering
+    exclusively — a rendered plan line must never look like "2. 2. Add
+    ...". Investigated exhaustively against the exact reported repro; the
+    raw backend-generated confirmation text was already correctly single-
+    numbered in every case tried (this guard closes the coverage gap so a
+    future regression here is caught immediately, since no existing
+    compound-plan test asserted this)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"NumberingProj {tag}")
+    talent_id = await _seed_talent(f"NumberingTalent {tag}", phone="917000900097")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add NumberingTalent {tag} to NumberingProj {tag}, "
+                "Move her to Follow Up, Share the casting call with her"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        _assert_no_duplicate_numbering(r.reply)
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        _assert_no_duplicate_numbering(edit.reply)
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)

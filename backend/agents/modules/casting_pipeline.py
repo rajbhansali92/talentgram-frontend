@@ -192,6 +192,48 @@ async def _fetch_ongoing_projects() -> List[Dict[str, str]]:
     return projects
 
 
+_AND_OR_COMMA_RE = re.compile(r",|\band\b", re.IGNORECASE)
+
+
+async def _resolve_project_query_names(project_query: Optional[str]) -> List[str]:
+    """Returns the project name fragment(s) `project_query` actually refers
+    to — the one place ADD/MOVE (compound-plan segments) and SHARE decide
+    whether a project reference names ONE project or SEVERAL.
+
+    nlu.split_multi_names blindly treats every bare "and"/comma in the text
+    as a list separator — correct for "Toyota Glanza and Nykaa" (two real,
+    distinct projects), but wrong whenever a SINGLE project's own name
+    happens to contain "and" ("Vaseline (Film 1 and Film 4)"): it cuts that
+    one name into two meaningless fragments which then each independently
+    fuzzy-resolve straight back to the SAME real project, producing a
+    duplicate ADD/MOVE/SHARE step referencing the identical project twice
+    (2026-08-29 compound-command regression — a talent added/shared twice
+    from one instruction typed once).
+
+    Resolved generically, with no project name ever hardcoded, by
+    preferring the real project catalog over blind text-splitting: if the
+    WHOLE, unsplit query already resolves unambiguously to exactly one
+    real ongoing project, that's authoritative — split fragments could
+    only ever produce a WORSE (ambiguous, duplicate, or wrong) answer than
+    the one the full text already gives, so it's returned untouched as a
+    single-item list. Splitting into several names is used only as the
+    fallback, when the whole string does NOT resolve to an existing
+    project — the actual "these are two different named things" case
+    ("Toyota Glanza and Nykaa" doesn't itself name any one real project,
+    so it falls through to being split into ["Toyota Glanza", "Nykaa"]
+    exactly as before). The DB round-trip only ever runs when the text
+    contains an "and"/comma at all — the overwhelmingly common single-
+    project, no-separator case never pays for it."""
+    text = (project_query or "").strip()
+    if not text or not _AND_OR_COMMA_RE.search(text):
+        return [text] if text else [None]
+    projects_list = await _fetch_ongoing_projects()
+    whole_match = nlu.resolve_project_by_name(text, projects_list)
+    if whole_match.project is not None:
+        return [text]
+    return nlu.split_multi_names(text) or [text]
+
+
 async def _project_exists(project_id: str) -> bool:
     cache_key = ("project_exists", project_id)
     found, cached = request_scope.cache_get(cache_key)
@@ -2461,7 +2503,7 @@ async def _resolve_one_plan_segment(
         return out
 
     talent_names = nlu.split_multi_names(talent_raw) or [talent_raw]
-    project_names = nlu.split_multi_names(project_raw) if project_raw else [None]
+    project_names = await _resolve_project_query_names(project_raw)
 
     if len(project_names) > 1:
         # Cross-product-expand ONLY on multi-project — a multi-name talent
@@ -4269,7 +4311,7 @@ async def _resolve_share(collected: dict) -> _ShareResolution:
     template = tmpl_match.template
     template_label = template.get("name") or template.get("slug") or ""
 
-    project_names = nlu.split_multi_names(project_query) or [project_query]
+    project_names = await _resolve_project_query_names(project_query)
     project_ids: List[str] = []
     project_labels: List[str] = []
     for pname in project_names:

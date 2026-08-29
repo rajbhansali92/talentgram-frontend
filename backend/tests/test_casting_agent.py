@@ -7221,3 +7221,296 @@ async def test_compound_plan_confirmation_never_double_numbers_lines():
         await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-29 regression #2 — a trailing implicit pronoun MOVE ("Move both to
+# Follow Up") only ever applied to ONE of several (talent, project) pairs a
+# preceding multi-talent x multi-project ADD had just touched.
+#
+# Root cause: _resolve_one_plan_segment's fan-out branch compared the raw
+# talent-selector TEXT directly against the PRONOUN_LAST_MARKER sentinel
+# (`talent_raw == nlu.PRONOUN_LAST_MARKER`). extract_move_fields only ever
+# produces that literal sentinel string when NO talent is named at all
+# ("...and move to Follow Up") — a typed pronoun word ("both"/"her"/"him"/
+# "them") stays raw text at this point; only nlu.parse_talent_selector
+# (called later, inside the SINGLE-referent _resolve_move_selection path)
+# recognizes it as a pronoun. So the branch was silently unreachable for
+# every explicit pronoun, and execution fell through to the single-referent
+# path, resolving against session.last_talent_id — ONE stale (talent,
+# project) pair (last-pair-wins from the preceding ADD's own bulk
+# resolution), not the full touched set.
+#
+# Fixed by parsing talent_raw with nlu.parse_talent_selector before the
+# branch check — the exact same helper/pronoun vocabulary
+# _share_recipient_is_implicit/_plan_selector_is_implicit already use for
+# SHARE/SEND's identical implicit-reference check.
+# ---------------------------------------------------------------------------
+async def test_both_fanout_two_talents_two_projects():
+    """2 talents x 2 projects: "Add A,B to X,Y, Move both to Follow Up"
+    must move all 4 touched pairs — never just one."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"BothProjX {tag}")
+    p2 = await _seed_project(brand_name=f"BothProjY {tag}")
+    t1 = await _seed_talent(f"BothTalA {tag}")
+    t2 = await _seed_talent(f"BothTalB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add BothTalA {tag},BothTalB {tag} to BothProjX {tag},BothProjY {tag}, Move both to Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+        # 4 ADD lines + 2 bulk-MOVE lines (one write per project, batching
+        # both talents — the existing "one Mongo call per project"
+        # convention) = the 8 logical operations, batched.
+        assert r.reply.count("Add BothTal") == 4, r.reply
+        assert r.reply.count("Move BothTalA") + r.reply.count("Move BothTalA, BothTalB") >= 1, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+
+        rows = await db.casting_pipeline.find({"project_id": {"$in": [p1, p2]}}).to_list(50)
+        pairs = {(row["project_id"], row["talent_id"], row["stage"]) for row in rows}
+        assert len(rows) == 4, rows  # no missing pair, no duplicate row
+        assert pairs == {
+            (p1, t1, "follow_up"), (p1, t2, "follow_up"),
+            (p2, t1, "follow_up"), (p2, t2, "follow_up"),
+        }, pairs
+
+        # Duplicate-plan protection: re-running the SAME command must not
+        # create a 5th/6th row or move anything twice.
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add BothTalA {tag},BothTalB {tag} to BothProjX {tag},BothProjY {tag}, Move both to Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r4 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Already in this pipeline" in r4.reply, r4.reply
+        assert "Already in that stage" in r4.reply, r4.reply
+        rows_after = await db.casting_pipeline.find({"project_id": {"$in": [p1, p2]}}).to_list(50)
+        assert len(rows_after) == 4, rows_after
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_both_fanout_two_talents_one_project():
+    """2 talents x 1 project: "Add A,B to X, Move both to Follow Up" must
+    move both A and B in X."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"OneProjBoth {tag}")
+    t1 = await _seed_talent(f"OnePTalA {tag}")
+    t2 = await _seed_talent(f"OnePTalB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add OnePTalA {tag},OnePTalB {tag} to OneProjBoth {tag}, Move both to Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+
+        rows = await db.casting_pipeline.find({"project_id": p1}).to_list(50)
+        by_talent = {row["talent_id"]: row["stage"] for row in rows}
+        assert by_talent == {t1: "follow_up", t2: "follow_up"}, by_talent
+    finally:
+        await _cleanup(phone, project_ids=[p1], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_her_fanout_one_talent_two_projects():
+    """1 talent x 2 projects: "Add A to X,Y, Move her to Follow Up" must
+    move A in BOTH X and Y."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"HerProjX {tag}")
+    p2 = await _seed_project(brand_name=f"HerProjY {tag}")
+    t1 = await _seed_talent(f"HerTal {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add HerTal {tag} to HerProjX {tag},HerProjY {tag}, Move her to Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+
+        rows = await db.casting_pipeline.find({"talent_id": t1}).to_list(50)
+        by_project = {row["project_id"]: row["stage"] for row in rows}
+        assert by_project == {p1: "follow_up", p2: "follow_up"}, by_project
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1])
+        await _restore_config(original)
+
+
+async def test_them_fanout_two_talents_one_project():
+    """"her"/"him"/"them" inheritance — "them" (not just "both") must also
+    fan out across every touched pair, using the same pronoun vocabulary."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"ThemProj {tag}")
+    t1 = await _seed_talent(f"ThemTalA {tag}")
+    t2 = await _seed_talent(f"ThemTalB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add ThemTalA {tag},ThemTalB {tag} to ThemProj {tag}, Move them to Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+
+        rows = await db.casting_pipeline.find({"project_id": p1}).to_list(50)
+        by_talent = {row["talent_id"]: row["stage"] for row in rows}
+        assert by_talent == {t1: "follow_up", t2: "follow_up"}, by_talent
+    finally:
+        await _cleanup(phone, project_ids=[p1], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_explicit_narrowing_overrides_both_inheritance():
+    """"Add A,B to X,Y, Move A to Follow Up" — naming A explicitly must
+    narrow to ONLY A's pairs; B must stay untouched at ask_to_test."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"NarrowProjX {tag}")
+    p2 = await _seed_project(brand_name=f"NarrowProjY {tag}")
+    t1 = await _seed_talent(f"NarrowTalA {tag}")
+    t2 = await _seed_talent(f"NarrowTalB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add NarrowTalA {tag},NarrowTalB {tag} to NarrowProjX {tag},NarrowProjY {tag}, "
+                f"Move NarrowTalA {tag} to Follow Up"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+
+        rows = await db.casting_pipeline.find({"project_id": {"$in": [p1, p2]}}).to_list(50)
+        by_pair = {(row["project_id"], row["talent_id"]): row["stage"] for row in rows}
+        assert by_pair == {
+            (p1, t1): "follow_up", (p2, t1): "follow_up",  # A explicitly narrowed — moved
+            (p1, t2): "ask_to_test", (p2, t2): "ask_to_test",  # B untouched
+        }, by_pair
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_both_fanout_add_move_share_no_duplicate_pairs():
+    """ADD + MOVE + SHARE, all with "both": all 4 pairs get MOVE'd and all
+    4 pairs get exactly one SHARE — never fewer, never duplicated."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project_with_details(f"AMSBothProjX {tag}", shoot_dates="1 Oct 2028", budget="Rs 1,000/day")
+    p2 = await _seed_project_with_details(f"AMSBothProjY {tag}", shoot_dates="2 Oct 2028", budget="Rs 2,000/day")
+    t1 = await _seed_talent(f"AMSBothTalA {tag}", phone="917000900041")
+    t2 = await _seed_talent(f"AMSBothTalB {tag}", phone="917000900042")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add AMSBothTalA {tag},AMSBothTalB {tag} to AMSBothProjX {tag},AMSBothProjY {tag}, "
+                "Move both to Follow Up, Share the casting call with both"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan:" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r2.reply, r2.reply
+        assert "4 WhatsApp messages queued." in r2.reply, r2.reply
+
+        rows = await db.casting_pipeline.find({"project_id": {"$in": [p1, p2]}}).to_list(50)
+        pairs = {(row["project_id"], row["talent_id"]) for row in rows}
+        assert len(rows) == 4, rows
+        assert all(row["stage"] == "follow_up" for row in rows), rows
+        assert pairs == {(p1, t1), (p1, t2), (p2, t1), (p2, t2)}
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2]}}).to_list(50)
+        assert len(jobs) == 4, jobs
+        job_pairs = {(j["source_id"], j["talent_id"]) for j in jobs}
+        assert job_pairs == {(p1, t1), (p1, t2), (p2, t1), (p2, t2)}
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2])
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_both_pronoun_normalized_plan_has_exactly_expected_step_count():
+    """Machine-checkable pre-execution assertion: for A,B x X,Y with a
+    trailing "Move both", the normalized plan resolves to exactly 4 unique
+    ADD operations + 2 bulk-MOVE operations (one per project, covering all
+    4 pairs) — never fewer (a missed pair) and never more (a duplicate)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"CountProjX {tag}")
+    p2 = await _seed_project(brand_name=f"CountProjY {tag}")
+    t1 = await _seed_talent(f"CountTalA {tag}")
+    t2 = await _seed_talent(f"CountTalB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add CountTalA {tag},CountTalB {tag} to CountProjX {tag},CountProjY {tag}, Move both to Follow Up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        numbered_lines = [ln for ln in r.reply.splitlines() if re.match(r"^\d+\. ", ln)]
+        assert len(numbered_lines) == 6, r.reply  # 4 ADD + 2 bulk-MOVE (batched per project)
+        add_lines = [ln for ln in numbered_lines if ln.split(". ", 1)[1].startswith("Add ")]
+        move_lines = [ln for ln in numbered_lines if ln.split(". ", 1)[1].startswith("Move ")]
+        assert len(add_lines) == 4, r.reply
+        assert len(move_lines) == 2, r.reply
+        # Each bulk-MOVE line must name BOTH talents (proving the fan-out
+        # covers the full touched set, not just one of them) exactly once.
+        for ln in move_lines:
+            assert f"CountTalA {tag}" in ln and f"CountTalB {tag}" in ln, ln
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
+        await _restore_config(original)

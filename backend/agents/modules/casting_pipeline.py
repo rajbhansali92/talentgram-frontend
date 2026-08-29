@@ -2419,6 +2419,33 @@ async def _resolve_one_plan_step(
     return out
 
 
+def _touched_pairs_matching_talent(
+    talent_raw: str, touched_pairs: List[Dict[str, str]]
+) -> List[Dict[str, str]]:
+    """Filters touched_pairs down to the pair(s) belonging to an
+    EXPLICITLY-named talent (or comma/and-separated several — same
+    multi-name grammar every other selector already accepts), for the
+    "Move A to Follow Up" explicit-narrowing shape right after a
+    multi-project bulk ADD. Matches against touched_pairs' own
+    talent_label (this plan's own record of who it just resolved a
+    moment ago), not a fresh fuzzy DB lookup — cheap, and correct: the
+    user is referring back to someone this SAME instruction already
+    named. Returns [] when nothing matches, so the caller falls through
+    to the ordinary single/cross-product resolution path unchanged (e.g.
+    a genuinely new name never touched by this plan)."""
+    names = [n.strip().lower() for n in (nlu.split_multi_names(talent_raw) or [talent_raw]) if n.strip()]
+    if not names:
+        return []
+    matched: List[Dict[str, str]] = []
+    for pair in touched_pairs:
+        label_lower = (pair.get("talent_label") or "").strip().lower()
+        if not label_lower:
+            continue
+        if any(label_lower == n or label_lower.startswith(n + " ") or n in label_lower for n in names):
+            matched.append(pair)
+    return matched
+
+
 async def _resolve_one_plan_segment(
     intent_id: str, raw_text: str, ctx: ExecContext, touched_pairs: List[Dict[str, str]]
 ) -> List[Dict[str, Any]]:
@@ -2431,7 +2458,11 @@ async def _resolve_one_plan_segment(
     project label once resolved, else the raw text), "resolved"
     (ResolvedMove/ResolvedAdd or None), "error" (str or None)}.
 
-    A fully-implicit MOVE segment — no talent named (PRONOUN_LAST_MARKER)
+    A fully-implicit MOVE segment — no talent named (bare "...and move to
+    Follow Up", where extract_move_fields itself defaults talent_selector
+    to PRONOUN_LAST_MARKER) OR an explicit plural/last-referent pronoun
+    ("her"/"him"/"them"/"both" — still just raw text at this point,
+    nlu.parse_talent_selector is what actually recognizes a pronoun word)
     AND no project named — is the "...and move to Follow Up" trailing-
     action shape. Rather than resolving against session.last_talent_id
     (a single referent), it fans out across every (talent, project) pair
@@ -2441,7 +2472,11 @@ async def _resolve_one_plan_segment(
     than one call per talent). An explicitly-scoped trailing action
     (naming its own talent and/or project) never reaches this branch —
     it resolves through the normal single/cross-product path below,
-    exactly as before."""
+    exactly as before. "all"/"everyone" is deliberately NOT treated as
+    this kind of pronoun — it already has its own, different, broader
+    meaning elsewhere (the whole current pipeline for a project, not just
+    what this one plan touched) and changing that is out of scope here.
+    """
     with request_scope.stage("nlu"):
         if intent_id == "casting.add":
             fields = nlu.extract_add_fields(raw_text)
@@ -2461,12 +2496,42 @@ async def _resolve_one_plan_segment(
         talent_raw = fields.get("talent_selector") or ""
         project_raw = fields.get("project_query")
 
-    if (
-        intent_id == "casting.move"
-        and talent_raw == nlu.PRONOUN_LAST_MARKER
-        and not project_raw
-        and touched_pairs
-    ):
+    # 2026-08-29 fix: this used to compare talent_raw directly against the
+    # PRONOUN_LAST_MARKER sentinel — which only ever matches the bare
+    # "nothing named at all" case (extract_move_fields' own fallback). A
+    # literally-typed pronoun word ("both"/"her"/"him"/"them") stays raw
+    # text here; only nlu.parse_talent_selector (called deeper inside
+    # _resolve_move_selection, on the single-referent path below) actually
+    # recognizes it — so this branch was silently unreachable for every
+    # explicit pronoun, and "Move both to Follow Up" fell through to
+    # resolving against session.last_talent_id (ONE stale referent) instead
+    # of fanning out across every pair this plan just touched. Parsing the
+    # selector here — same helper, same pronoun vocabulary
+    # _share_recipient_is_implicit/_plan_selector_is_implicit already use
+    # for SHARE/SEND's identical implicit-reference check — makes this
+    # branch reachable for both shapes without inventing a second pronoun
+    # concept.
+    #
+    # A NAMED (non-pronoun) talent with no project of their own — "Move A
+    # to Follow Up" right after "Add A,B to X,Y" — is the RULE's explicit-
+    # narrowing case: A's own touched pairs (both projects A was just
+    # added to) still need the SAME multi-project fan-out, just filtered
+    # down to A instead of everyone. Matched against touched_pairs' own
+    # labels (this plan's own record of who it just resolved a moment
+    # ago) rather than a fresh fuzzy DB lookup — cheaper, and exactly what
+    # "A" refers back to here.
+    _talent_selector = nlu.parse_talent_selector(talent_raw)
+    _talent_is_implicit_pronoun = bool(
+        _talent_selector.ok and _talent_selector.name_query == nlu.PRONOUN_LAST_MARKER
+    )
+    _fan_out_pairs: List[Dict[str, str]] = []
+    if intent_id == "casting.move" and not project_raw and touched_pairs:
+        if _talent_is_implicit_pronoun:
+            _fan_out_pairs = touched_pairs
+        elif talent_raw:
+            _fan_out_pairs = _touched_pairs_matching_talent(talent_raw, touched_pairs)
+
+    if _fan_out_pairs:
         target_stage = fields.get("target_stage") or ""
         if target_stage not in PIPELINE_STAGES:
             return [{
@@ -2474,7 +2539,7 @@ async def _resolve_one_plan_segment(
                 "label": raw_text, "resolved": None, "error": "Pipeline not found.",
             }]
         by_project: Dict[str, Dict[str, Any]] = {}
-        for pair in touched_pairs:
+        for pair in _fan_out_pairs:
             bucket = by_project.setdefault(
                 pair["project_id"],
                 {"project_label": pair["project_label"], "talent_ids": [], "talent_labels": []},

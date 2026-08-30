@@ -1164,6 +1164,14 @@ async def add_media(
     if needs_compat:
         media["original_url"] = result["url"]
         media["needs_compat_delivery"] = True
+    # P7 follow-up: set the P3 ownership sub-document at creation so new talent
+    # media never lands in the "unknown ownership" bucket. A talents.media[] item
+    # is talent-owned by definition.
+    try:
+        from migrations.media_ownership_rules import ownership_for_new_item
+        media["ownership"] = ownership_for_new_item("talents", talent, media, tid, "talents_doc")
+    except Exception as e:
+        logger.warning("add_media: ownership classification failed for %s: %s", media_id, e)
     await db.talents.update_one({"id": tid}, {"$push": {"media": media}})
     # Singleton video slot: only one active Introduction Video may exist
     # per talent, matching the Apply/Submission intro_video invariant. The

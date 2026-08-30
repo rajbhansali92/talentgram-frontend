@@ -3492,6 +3492,9 @@ MEDIA_COPY_EXCLUDE_FIELDS = frozenset({
     "origin", "label", "status", "failed_at", "failure_reason",
     "client_visible", "internal_only", "client_cover", "created_at",
     "profile_sync_status",
+    # P7 follow-up: the source item's ownership sub-document describes the
+    # SOURCE's ownership — a mirror INTO talents.media[] is re-classified below.
+    "ownership", "lifecycle",
 })
 
 
@@ -3603,6 +3606,17 @@ async def sync_media_to_global_talent(submission: dict, media: dict, skip_cover_
     else:
         mirror["source_submission_id"] = submission.get("id")
         mirror["source_submission_media_id"] = source_id
+
+    # P7 follow-up: classify the mirror's OWN ownership (talents.media[] item ->
+    # talent-owned, copy-by-value). Keeps new Library mirrors out of the
+    # "unknown ownership" accounting bucket.
+    try:
+        from migrations.media_ownership_rules import ownership_for_new_item
+        mirror["ownership"] = ownership_for_new_item(
+            "talents", talent, mirror, talent.get("id"), "talents_doc"
+        )
+    except Exception as e:
+        logger.warning("sync_media_to_global_talent: ownership classify failed: %s", e)
 
     prev_videos = []
     if mapped_cat == "video":

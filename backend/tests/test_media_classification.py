@@ -608,3 +608,53 @@ def test_conflict_item_still_reports_provenance_and_shape():
     assert o["media_category_normalized"] == "portfolio"
     assert o["cloudinary"]["asset_id"] == "cld-1"
     assert o["migration_version"] == VERSION
+
+
+# ---------------------------------------------------------------------------
+# ownership_for_new_item — the write-path wrapper (P7 follow-up)
+# ---------------------------------------------------------------------------
+from migrations.media_ownership_rules import ownership_for_new_item  # noqa: E402
+
+
+def test_new_item_wrapper_talent_media_is_talent_owned():
+    o = ownership_for_new_item(
+        "talents", {"id": "T1"},
+        {"id": "m", "category": "western", "public_id": "abc", "resource_type": "image", "size": 10},
+        "T1", "talents_doc",
+    )
+    assert o["owner_type"] == OWNER_TYPE_TALENT
+    assert o["owner_id"] == "T1"
+    assert o["conflict"] is None
+    assert o["is_shared_copy"] is False
+
+
+def test_new_item_wrapper_copy_by_value_flags_shared():
+    o = ownership_for_new_item(
+        "talents", {"id": "T1"},
+        {"id": "m", "category": "indian", "public_id": "abc", "resource_type": "image",
+         "size": 10, "source_talent_media_id": "src-1"},
+        "T1", "talents_doc",
+    )
+    assert o["owner_type"] == OWNER_TYPE_TALENT
+    assert o["is_shared_copy"] is True
+
+
+def test_new_item_wrapper_take_on_submission_is_project_owned():
+    o = ownership_for_new_item(
+        "submissions", {"id": "S1", "project_id": "P1"},
+        {"id": "m", "category": "take", "public_id": "abc", "resource_type": "video", "size": 10},
+        "T1", "item.talent_id",
+    )
+    assert o["owner_type"] == OWNER_TYPE_PROJECT_SUBMISSION
+    assert o["owner_id"] == "S1"
+    assert o["project_id"] == "P1"
+
+
+def test_new_item_wrapper_unresolvable_talent_is_conflict_not_guess():
+    o = ownership_for_new_item(
+        "submissions", {"id": "S1", "project_id": "P1"},
+        {"id": "m", "category": "western", "public_id": "abc", "resource_type": "image", "size": 10},
+        None, "unresolved",
+    )
+    assert o["owner_type"] is None
+    assert o["conflict"]

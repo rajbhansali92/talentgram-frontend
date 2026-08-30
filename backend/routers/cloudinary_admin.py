@@ -151,6 +151,37 @@ def list_cloudinary_physical_resources_sync() -> List[Dict[str, Any]]:
         logger.warning(f"Error in list_cloudinary_physical_resources_sync: {e}")
     return resources
 
+def list_cloudinary_inventory_for_manifest_sync() -> List[Dict[str, Any]]:
+    """Read-only richer listing for the P8 cleanup manifest — carries the
+    fields the analysis needs (bytes, asset_id, type, format, created_at, the
+    delivery URL). `cloudinary.api.resources` lists ORIGINALS only; derived
+    assets are handled in aggregate (usage API) by the manifest."""
+    out: List[Dict[str, Any]] = []
+    try:
+        for rtype in ("image", "video", "raw"):
+            cursor = None
+            while True:
+                res = cloudinary.api.resources(resource_type=rtype, max_results=500,
+                                               next_cursor=cursor)
+                for it in res.get("resources", []):
+                    out.append({
+                        "public_id": it["public_id"],
+                        "asset_id": it.get("asset_id"),
+                        "bytes": it.get("bytes") or 0,
+                        "resource_type": rtype,
+                        "type": it.get("type") or "upload",
+                        "format": it.get("format"),
+                        "url": it.get("secure_url") or it.get("url"),
+                        "created_at": it.get("created_at"),
+                    })
+                cursor = res.get("next_cursor")
+                if not cursor:
+                    break
+    except Exception as e:
+        logger.warning(f"list_cloudinary_inventory_for_manifest_sync failed: {e}")
+    return out
+
+
 def classify_media_item(m: Dict[str, Any]) -> str:
     """Bucket a submission/application media item into the same category
     keys the Storage Console displays. Admin-added media is always bucketed
@@ -972,7 +1003,7 @@ async def _get_object_inventory(force_rescan: bool = False) -> Dict[str, Any]:
     objects: List[Dict[str, Any]] = []
     err = None
     try:
-        objects = await run_in_threadpool(list_cloudinary_physical_resources_sync)
+        objects = await run_in_threadpool(list_cloudinary_inventory_for_manifest_sync)
     except Exception as e:  # pragma: no cover
         err = str(e)
         logger.warning(f"object inventory listing failed: {e}")

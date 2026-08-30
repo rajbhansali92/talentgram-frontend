@@ -37,115 +37,21 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import db, normalize_email, resolve_canonical_talent  # noqa: E402
+# Classification logic lives in a side-effect-free module (no `core` import, no
+# DB, no Cloudinary, no env) so it can be unit-tested in isolation.
+from migrations.media_ownership_rules import (  # noqa: E402
+    VERSION,
+    TAKE_CATEGORIES,
+    CATEGORY_NORMALIZE,
+    CATEGORY_TO_NORMALIZED,
+    classify_item,
+    folder_disagrees,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
 logger = logging.getLogger("p3_media_ownership")
 
-VERSION = "p3-v1"
 BACKUP_COLL = "p3_ownership_migration_backup"
-
-TAKE_CATEGORIES = {"take", "take_1", "take_2", "take_3"}
-CATEGORY_NORMALIZE = {"photos": "image", "intro": "intro_video"}  # non-standard (scope=whatsapp_media_assignment)
-
-CATEGORY_TO_NORMALIZED = {
-    "portfolio": "portfolio", "image": "portfolio", "photos": "portfolio",
-    "additional_portfolio": "portfolio", "profiles": "portfolio", "selfie": "portfolio",
-    "full_length": "portfolio", "side_profile": "portfolio", "ethnic": "portfolio",
-    "headshot": "portfolio", "headshots": "portfolio", "profile_image": "portfolio",
-    "indian": "indian", "western": "western",
-    "video": "intro_video", "intro_video": "intro_video", "intro": "intro_video",
-    "portfolio_video": "intro_video", "portfolio_videos": "intro_video",
-    "take": "take", "take_1": "take", "take_2": "take", "take_3": "take",
-}
-_MEDIUM_CONFIDENCE_RESOLUTIONS = {"source_submission", "source_submission_email", "talent_email"}
-
-
-def classify_item(coll: str, parent: dict, item: dict, talent_id, how_tid: str,
-                  pid_owner_count: Counter, pid_norm_cats: dict) -> dict:
-    """Pure. Returns the ``ownership`` sub-document for one media item.
-
-    ``owner_type`` is None and ``conflict`` is non-None for anything ambiguous —
-    the caller must NOT write an owner for those; it reports them instead.
-    """
-    cat = item.get("category")
-    norm_cat = CATEGORY_TO_NORMALIZED.get(cat)
-    pid = item.get("public_id")
-    rtype = item.get("resource_type") or (
-        "video" if (item.get("content_type") or "").startswith("video/") else "image"
-    )
-    is_take = cat in TAKE_CATEGORIES
-
-    conflict = None
-    owner_type = owner_id = owner_source = None
-    confidence = "high"
-
-    if is_take and coll != "submissions":
-        conflict = f"take-category item on {coll} (only submissions may own audition takes)"
-    elif norm_cat is None:
-        conflict = f"unrecognised category {cat!r}"
-    elif len(pid_norm_cats.get(pid, set())) > 1:
-        conflict = f"public_id {pid} carries conflicting normalized categories {sorted(pid_norm_cats[pid])}"
-
-    if conflict is None:
-        if is_take:
-            owner_type = "project_submission"
-            owner_id = parent.get("id")
-            owner_source = "category:take"
-            if not parent.get("project_id"):
-                conflict = "take item on a submission with no project_id"
-        else:
-            owner_type = "talent"
-            owner_id = talent_id
-            owner_source = "category:global(normalized)" if cat in CATEGORY_NORMALIZE else "category:global"
-            if not talent_id:
-                conflict = "talent-owned item with no resolvable talent_id"
-            elif how_tid in _MEDIUM_CONFIDENCE_RESOLUTIONS:
-                confidence = "medium"
-    if cat in CATEGORY_NORMALIZE and confidence == "high":
-        confidence = "medium"
-
-    if conflict is not None:
-        owner_type = owner_id = owner_source = None
-
-    is_shared = bool(item.get("source_talent_media_id")) or (bool(pid) and pid_owner_count.get(pid, 0) > 1)
-
-    return {
-        "owner_type": owner_type,
-        "owner_id": owner_id,
-        "talent_id": talent_id,
-        "project_id": parent.get("project_id") if owner_type == "project_submission" else None,
-        "submission_id": parent.get("id") if coll == "submissions" else item.get("submission_id"),
-        "application_id": parent.get("id") if coll == "applications" else None,
-        "media_type": "video" if rtype == "video" else "image",
-        "media_category_normalized": norm_cat,
-        "cloudinary": {
-            "public_id": pid,
-            "asset_id": item.get("asset_id"),   # null-safe; a later pass can enrich from Cloudinary
-            "resource_type": rtype,
-            "format": item.get("format"),
-            "bytes": item.get("size") or item.get("bytes"),
-        },
-        "is_shared_copy": is_shared,
-        "source_talent_media_id": item.get("source_talent_media_id"),
-        "owner_source": owner_source,
-        "confidence": confidence if conflict is None else None,
-        "conflict": conflict,
-        "migrated_at": datetime.now(timezone.utc).isoformat(),
-        "migration_version": VERSION,
-    }
-
-
-def folder_disagrees(ownership: dict) -> dict | None:
-    pid = (ownership.get("cloudinary") or {}).get("public_id") or ""
-    if not pid.startswith("talentgram/") or pid.count("/") < 1:
-        return None
-    folder_kind = pid.split("/")[1]
-    ot = ownership.get("owner_type")
-    if ot == "talent" and folder_kind in ("projects", "admin_media", "submissions", "applications") and "/talents/" not in pid:
-        return {"public_id": pid, "db_owner": "talent", "folder": folder_kind}
-    if ot == "project_submission" and folder_kind == "talents":
-        return {"public_id": pid, "db_owner": "project_submission", "folder": "talents"}
-    return None
 
 
 async def _resolve_talent_id(coll: str, parent: dict, item: dict, cache: dict):

@@ -1,0 +1,671 @@
+{
+  "generated_at": "2026-08-30T08:20:20.579618+00:00",
+  "prod_db": "talentgram",
+  "cloudinary_usage_now": {
+    "resources": 4324,
+    "derived_resources": 8457,
+    "storage_gb": 19.55,
+    "credits": {
+      "usage": 115.52,
+      "limit": 60.0,
+      "used_percent": 192.53
+    },
+    "transform_breakdown": {
+      "transformation": 10687,
+      "frame": 1,
+      "sd_video_second": 21472,
+      "hd_video_second": 591,
+      "extra_avif_mp_encoding": 10996,
+      "fourk_video_second": 1165
+    },
+    "bandwidth_gb": 37.4
+  },
+  "totals": {
+    "originals": 4324,
+    "derived": 8457,
+    "all": 12781
+  },
+  "prod_live_docs": {
+    "projects": 64,
+    "submissions": 274,
+    "applications": 82,
+    "talents": 1264
+  },
+  "prod_media_items": 4455,
+  "originals_by_classification": {
+    "GLOBAL_TALENT_MEDIA": {
+      "count": 2527,
+      "gb": 11.06
+    },
+    "PROJECT_AUDITION_MEDIA": {
+      "count": 124,
+      "gb": 2.098
+    },
+    "ORPHAN": {
+      "count": 1673,
+      "gb": 1.456
+    }
+  },
+  "derived_by_classification": {
+    "LEGACY_DERIVED_ASSET": {
+      "count": 3427,
+      "gb": 3.555
+    },
+    "ORPHAN": {
+      "count": 2634,
+      "gb": 0.609
+    },
+    "ACTIVE_DERIVED_ASSET": {
+      "count": 2396,
+      "gb": 0.768
+    }
+  },
+  "orphan_originals": {
+    "count": 1673,
+    "gb": 1.456,
+    "by_resource_type": {
+      "image": 1554,
+      "video": 117,
+      "raw": 2
+    },
+    "by_month": {
+      "2026-07": 508,
+      "2026-08": 1165
+    },
+    "by_folder_scheme": {
+      "applications": {
+        "count": 323,
+        "gb": 0.156
+      },
+      "submissions": {
+        "count": 270,
+        "gb": 0.318
+      },
+      "projects": {
+        "count": 627,
+        "gb": 0.504
+      },
+      "talents": {
+        "count": 410,
+        "gb": 0.381
+      },
+      "external": {
+        "count": 13,
+        "gb": 0.008
+      },
+      "admin_media": {
+        "count": 15,
+        "gb": 0.086
+      },
+      "scout_capture": {
+        "count": 15,
+        "gb": 0.004
+      }
+    },
+    "parent_deleted": 1449,
+    "parent_alive_EXAMINE": 196,
+    "asset_metadata_only": 527
+  },
+  "orphan_derived": {
+    "count": 2634,
+    "gb": 0.609
+  },
+  "legacy_derived": {
+    "count": 3427,
+    "gb": 3.555
+  },
+  "orphan_with_live_parent_examples": [
+    {
+      "public_id": "talentgram/projects/9ad5ca4a-f1f2-4cf7-a056-242a89266ad3/auditions/cac3f332-7625-4ae3-978f-8dd400b2813a_mahim-suhalka/submission_63d18154-ab16-4511-b5fa-d9f73c12d841/take_f8bc45cc",
+      "scheme": "projects",
+      "bytes": 101406687,
+      "created_at": "2026-08-18T18:53:39Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/admin_media/ac346fe5-4050-4360-bc11-e812ddfe6743/1590d2fb-d1c9-45fb-934c-aff7335b212c/adm_a3be95b2",
+      "scheme": "admin_media",
+      "bytes": 24414904,
+      "created_at": "2026-08-12T11:50:42Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/d2b4e65f-acc6-4ac7-a363-553c0beb2f03/3cf34857-d2db-4ef4-9110-cf8bbb2f612c",
+      "scheme": "submissions",
+      "bytes": 19248669,
+      "created_at": "2026-08-21T10:36:39Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/admin_media/ac346fe5-4050-4360-bc11-e812ddfe6743/1590d2fb-d1c9-45fb-934c-aff7335b212c/adm_2b4421a6",
+      "scheme": "admin_media",
+      "bytes": 12121098,
+      "created_at": "2026-08-12T11:47:52Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/e7f4c4a5-9b97-4a72-b8f4-ed02bdf48386/b5ef340a-3056-4230-8ea9-766aacf3ffeb",
+      "scheme": "submissions",
+      "bytes": 11868769,
+      "created_at": "2026-08-21T18:35:44Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/admin_media/07d25735-40b7-4c71-bb64-44374fa96aa3/b800f279-7cbf-467b-bc63-1eec632be956/adm_eab5de2d",
+      "scheme": "admin_media",
+      "bytes": 11277421,
+      "created_at": "2026-08-17T14:09:33Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/3847b515-d0d3-4ac2-8278-5b3d99789ded/38f204e3-954c-4adc-940a-5c6e0c834078",
+      "scheme": "submissions",
+      "bytes": 10884073,
+      "created_at": "2026-08-20T13:36:19Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/projects/73be6c24-bcd3-4218-a8ab-a68d35ebb79d/videos/b250143c-b5d9-4810-a6e8-546a96e3c509.mp4",
+      "scheme": "projects",
+      "bytes": 10744108,
+      "created_at": "2026-08-24T10:30:47Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/126c5579-5a71-4ccf-96dd-b47aa2d59fa7/524adbb7-1704-4170-b095-23610be3b12d",
+      "scheme": "submissions",
+      "bytes": 10075371,
+      "created_at": "2026-07-13T13:02:53Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/talents/3c0154f4-b363-4b1f-a40b-f96b061a6477_zarah-philip/profile_images/d9ff4d30-e52e-4ff8-ba3b-3bc9f2603677",
+      "scheme": "talents",
+      "bytes": 9886302,
+      "created_at": "2026-08-07T06:00:20Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/e0b9a411-8218-41fd-937d-56e58a265f39/f4acab5e-296d-463b-bd50-7f1e3eb465eb",
+      "scheme": "submissions",
+      "bytes": 9821605,
+      "created_at": "2026-08-19T09:10:47Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/talents/8025b311-e71d-4d1a-a0a5-4f2dbafef868_kanchan-khatana/portfolio_videos/b739a7ff-6516-4fcc-b11c-36f09e94dd98",
+      "scheme": "talents",
+      "bytes": 9715247,
+      "created_at": "2026-08-08T06:03:07Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/applications/0b53aaeb-69c4-475c-94e1-97e3b7bd4c98/c362fefc-33e2-4c93-acca-a17f74391657",
+      "scheme": "applications",
+      "bytes": 9536332,
+      "created_at": "2026-08-17T18:23:49Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/e0b9a411-8218-41fd-937d-56e58a265f39/bcef8dcd-5a07-4e0f-a90e-4ad827509a58",
+      "scheme": "submissions",
+      "bytes": 9104804,
+      "created_at": "2026-08-19T09:10:48Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/projects/0ce1376f-fed9-4765-8592-41f7433f15c3/videos/ab9f699a-91d0-418c-9878-9f3bb560c136.mp4",
+      "scheme": "projects",
+      "bytes": 8916065,
+      "created_at": "2026-08-29T06:37:37Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/856a598c-68b2-4a2b-97e2-8e1cb7b51533/bee69de0-7751-4511-898d-2e14d05537dd",
+      "scheme": "submissions",
+      "bytes": 8640376,
+      "created_at": "2026-08-17T12:29:40Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/33347988-96cd-47c6-8815-2569962bb00c/aeb5755d-4c7f-402d-a7ee-f64e3f980b6f",
+      "scheme": "submissions",
+      "bytes": 7834149,
+      "created_at": "2026-07-14T10:58:24Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/admin_media/f1f25731-5d71-4b53-8213-f40dc39bbd01/6fcf056a-a719-4308-9edd-82cf053f50ae/adm_acd98c7b",
+      "scheme": "admin_media",
+      "bytes": 7634356,
+      "created_at": "2026-08-19T17:46:16Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/admin_media/07d25735-40b7-4c71-bb64-44374fa96aa3/f4b741aa-9953-4b3e-94a2-7b1e2e1b1fac/adm_85d43b68",
+      "scheme": "admin_media",
+      "bytes": 7244696,
+      "created_at": "2026-08-17T14:13:01Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/admin_media/aafee923-5ba7-48f2-8a99-3da91bd54abb/4b9efb59-a2f3-4d20-a5d6-3f6b05967daa/adm_d501913d",
+      "scheme": "admin_media",
+      "bytes": 7090234,
+      "created_at": "2026-08-12T13:41:26Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/applications/1e2bb60a-470a-4307-8c5a-c7bdf01c070b/aa000dba-dccb-454f-ace2-2edbeff6fea0",
+      "scheme": "applications",
+      "bytes": 6603350,
+      "created_at": "2026-07-18T09:03:18Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/applications/8c150d20-b614-4c65-8608-86d82acda423/7e056d97-413a-4cde-8215-cc07644d8c76",
+      "scheme": "applications",
+      "bytes": 6087746,
+      "created_at": "2026-07-15T12:39:09Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/applications/1e2bb60a-470a-4307-8c5a-c7bdf01c070b/0130d89a-fe9a-46e2-8b86-11815224938e",
+      "scheme": "applications",
+      "bytes": 5943894,
+      "created_at": "2026-07-18T09:03:10Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/126c5579-5a71-4ccf-96dd-b47aa2d59fa7/77061a5f-a4a8-4dcf-8f3b-b63be1cb8048",
+      "scheme": "submissions",
+      "bytes": 5933206,
+      "created_at": "2026-07-13T12:48:49Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/57b9a75f-be4d-4793-a852-8fc65e15291c",
+      "scheme": "submissions",
+      "bytes": 5599019,
+      "created_at": "2026-08-20T22:58:01Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/5542ca9b-a7dc-481a-ad3d-3d5f5a870c8a",
+      "scheme": "submissions",
+      "bytes": 5299038,
+      "created_at": "2026-08-20T22:59:11Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/projects/fecd1329-1b24-4997-8f8f-b805e1a9bdfd/auditions/unknown_talent_isha-nandal/submission_aa65aeee-874d-457d-bbed-f4e3af08cc2f/intro_video",
+      "scheme": "projects",
+      "bytes": 5215110,
+      "created_at": "2026-08-10T08:10:05Z",
+      "leaf_is_real_id": false
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/e9388b00-f5cb-4fbd-b671-53bee8f11755",
+      "scheme": "submissions",
+      "bytes": 5049452,
+      "created_at": "2026-08-20T22:57:51Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/applications/36ebf8ce-5366-44f5-a896-3a0b4494b49a/56ac5d66-b95f-450f-b63b-a13c98a7622f",
+      "scheme": "applications",
+      "bytes": 5028079,
+      "created_at": "2026-08-24T11:49:47Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/admin_media/fecd1329-1b24-4997-8f8f-b805e1a9bdfd/85a9152a-20ca-4a4d-b284-38a26a576c95/adm_477f9831",
+      "scheme": "admin_media",
+      "bytes": 4897827,
+      "created_at": "2026-08-10T12:40:16Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/126c5579-5a71-4ccf-96dd-b47aa2d59fa7/c29d7578-c060-46c8-a6b1-87fe21bfb516",
+      "scheme": "submissions",
+      "bytes": 4860377,
+      "created_at": "2026-07-13T13:06:57Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/applications/8c150d20-b614-4c65-8608-86d82acda423/bc130fce-6735-464a-bf65-ebc943c15730",
+      "scheme": "applications",
+      "bytes": 4836039,
+      "created_at": "2026-07-15T12:33:38Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/9ae7ef7c-16e7-49cb-a2e3-f7a77383295a",
+      "scheme": "submissions",
+      "bytes": 4831218,
+      "created_at": "2026-08-20T22:58:06Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/856a598c-68b2-4a2b-97e2-8e1cb7b51533/3b764b65-9e99-482d-81a9-aab0ee18dd46",
+      "scheme": "submissions",
+      "bytes": 4810238,
+      "created_at": "2026-08-17T12:30:11Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/9f547f88-446a-4b80-a4b9-6789c549cafa",
+      "scheme": "submissions",
+      "bytes": 4728023,
+      "created_at": "2026-08-20T22:57:49Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/adb63d5e-cfe9-4422-ab88-38bde95f5afe/79c8b6a9-fc73-4de1-b0d4-8f5903ef15c5",
+      "scheme": "submissions",
+      "bytes": 4691976,
+      "created_at": "2026-07-13T12:36:25Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/applications/8c150d20-b614-4c65-8608-86d82acda423/a7420f5f-3982-434c-bc7e-c3d06ce4e56c",
+      "scheme": "applications",
+      "bytes": 4677202,
+      "created_at": "2026-07-15T12:33:11Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/126c5579-5a71-4ccf-96dd-b47aa2d59fa7/09e6c0b8-d488-4b5a-9517-a705d1a797d5",
+      "scheme": "submissions",
+      "bytes": 4630957,
+      "created_at": "2026-07-13T12:48:39Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/admin_media/f1f25731-5d71-4b53-8213-f40dc39bbd01/6fcf056a-a719-4308-9edd-82cf053f50ae/adm_edff124a",
+      "scheme": "admin_media",
+      "bytes": 4543272,
+      "created_at": "2026-08-19T17:45:56Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/0ac79754-2c32-4807-b4a8-502f88f2459f/a18162d5-4fc6-49d8-8147-a224a0a21bab",
+      "scheme": "submissions",
+      "bytes": 4423884,
+      "created_at": "2026-08-19T07:46:22Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/0ac79754-2c32-4807-b4a8-502f88f2459f/f4442dd9-ff97-4d23-be91-695e07931dd3",
+      "scheme": "submissions",
+      "bytes": 4388314,
+      "created_at": "2026-08-19T07:46:37Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/0ac79754-2c32-4807-b4a8-502f88f2459f/476e07fb-c896-4a79-9c92-6bdb89ade1ae",
+      "scheme": "submissions",
+      "bytes": 4302981,
+      "created_at": "2026-08-19T07:46:33Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/0ac79754-2c32-4807-b4a8-502f88f2459f/f3f8aab7-ad88-49da-a6ba-02d26f13be7c",
+      "scheme": "submissions",
+      "bytes": 4296933,
+      "created_at": "2026-08-19T07:46:27Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/fa234bb5-66ae-4f7c-b969-0f6ed530f352",
+      "scheme": "submissions",
+      "bytes": 4269611,
+      "created_at": "2026-08-20T22:58:51Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/d9f3758f-cda9-4720-a274-795e6ed60265",
+      "scheme": "submissions",
+      "bytes": 4241867,
+      "created_at": "2026-08-20T23:18:22Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/bb852e7c-7578-40c0-98d7-52d2eb334fe1",
+      "scheme": "submissions",
+      "bytes": 4241867,
+      "created_at": "2026-08-20T22:59:06Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/8eeaf722-d032-48c8-9320-71b3e325f35f/8044ab7d-d695-4364-853a-949dbaa7fd5a",
+      "scheme": "submissions",
+      "bytes": 3970148,
+      "created_at": "2026-08-17T11:44:50Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/aabb7c28-1abc-42d6-ba3b-83c736ac141d/7116ec41-e865-4efe-bc77-fd65a7149343",
+      "scheme": "submissions",
+      "bytes": 3923748,
+      "created_at": "2026-08-20T22:58:22Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/applications/f8f21fae-69a9-43e4-bb06-6b3686090218/decc6571-0318-430e-9a1e-822c351e726e",
+      "scheme": "applications",
+      "bytes": 3891646,
+      "created_at": "2026-08-25T11:26:34Z",
+      "leaf_is_real_id": true
+    },
+    {
+      "public_id": "talentgram/submissions/856a598c-68b2-4a2b-97e2-8e1cb7b51533/5feb70c4-8ba4-490d-ad1a-83ce2dd61084",
+      "scheme": "submissions",
+      "bytes": 3778666,
+      "created_at": "2026-08-17T12:30:09Z",
+      "leaf_is_real_id": true
+    }
+  ],
+  "largest_orphans": [
+    {
+      "public_id": "talentgram/projects/22e306a4-d7ce-4981-b646-93b4cc621dd4/auditions/unknown_talent_raj-sanghavi/submission_33476ea9-642c-402a-b21e-d9fdce80ee22/intro_video",
+      "gb": 0.157,
+      "rt": "video",
+      "scheme": "projects",
+      "parent_alive": false,
+      "created_at": "2026-08-16T20:27:42Z"
+    },
+    {
+      "public_id": "talentgram/projects/9ad5ca4a-f1f2-4cf7-a056-242a89266ad3/auditions/cac3f332-7625-4ae3-978f-8dd400b2813a_mahim-suhalka/submission_63d18154-ab16-4511-b5fa-d9f73c12d841/take_f8bc45cc",
+      "gb": 0.101,
+      "rt": "video",
+      "scheme": "projects",
+      "parent_alive": true,
+      "created_at": "2026-08-18T18:53:39Z"
+    },
+    {
+      "public_id": "talentgram/projects/1b029824-3a6e-48b1-8e3a-4b8da0c8e750/auditions/unknown_talent_mukesh-bhansali/submission_9eaa4ecb-6b10-4b2b-bd8d-6ad82ca510f2/take_76fd4470",
+      "gb": 0.07,
+      "rt": "video",
+      "scheme": "projects",
+      "parent_alive": false,
+      "created_at": "2026-08-11T05:12:17Z"
+    },
+    {
+      "public_id": "talentgram/talents/723c906b-864c-4725-80d8-bda4bebf3dbf_priya-singh/portfolio_videos/6ccb53c1-571e-4691-928f-33b8a0793fdf",
+      "gb": 0.041,
+      "rt": "video",
+      "scheme": "talents",
+      "parent_alive": false,
+      "created_at": "2026-08-08T04:48:16Z"
+    },
+    {
+      "public_id": "talentgram/talents/7a6afd59-1100-463b-b509-31e87971eed0_aarriya-salgaonkar/portfolio_videos/c8f21dba-fd86-41cb-ab48-cd99464278b4",
+      "gb": 0.024,
+      "rt": "video",
+      "scheme": "talents",
+      "parent_alive": false,
+      "created_at": "2026-08-01T07:35:16Z"
+    },
+    {
+      "public_id": "talentgram/admin_media/ac346fe5-4050-4360-bc11-e812ddfe6743/1590d2fb-d1c9-45fb-934c-aff7335b212c/adm_a3be95b2",
+      "gb": 0.024,
+      "rt": "video",
+      "scheme": "admin_media",
+      "parent_alive": true,
+      "created_at": "2026-08-12T11:50:42Z"
+    },
+    {
+      "public_id": "talentgram/projects/2af9dc91-0ead-4166-aade-1f79981c69b1/auditions/0f87bc97-24dc-4726-aa75-bf423751c0dc_testing-bhansali/submission_1e5a4b07-4e9e-45d4-bae9-ded40112643c/take_c7dd0e8c",
+      "gb": 0.02,
+      "rt": "video",
+      "scheme": "projects",
+      "parent_alive": false,
+      "created_at": "2026-08-10T05:35:13Z"
+    },
+    {
+      "public_id": "talentgram/submissions/d2b4e65f-acc6-4ac7-a363-553c0beb2f03/3cf34857-d2db-4ef4-9110-cf8bbb2f612c",
+      "gb": 0.019,
+      "rt": "image",
+      "scheme": "submissions",
+      "parent_alive": true,
+      "created_at": "2026-08-21T10:36:39Z"
+    },
+    {
+      "public_id": "talentgram/projects/22e306a4-d7ce-4981-b646-93b4cc621dd4/auditions/unknown_talent/submission_e2d29a69-0f2e-4556-96a6-96c522490fb4/take_ca58894a",
+      "gb": 0.017,
+      "rt": "video",
+      "scheme": "projects",
+      "parent_alive": false,
+      "created_at": "2026-08-16T16:07:29Z"
+    },
+    {
+      "public_id": "talentgram/projects/2af9dc91-0ead-4166-aade-1f79981c69b1/auditions/0f87bc97-24dc-4726-aa75-bf423751c0dc_testing-bhansali/submission_1e5a4b07-4e9e-45d4-bae9-ded40112643c/intro_video",
+      "gb": 0.016,
+      "rt": "video",
+      "scheme": "projects",
+      "parent_alive": false,
+      "created_at": "2026-08-10T05:34:07Z"
+    },
+    {
+      "public_id": "talentgram/talents/66510f02-daf5-474b-8771-c98309d8469e_ankita-sharma/portfolio_videos/85dd0609-b4c9-443b-a6af-7605ecb35ac7",
+      "gb": 0.015,
+      "rt": "video",
+      "scheme": "talents",
+      "parent_alive": false,
+      "created_at": "2026-08-08T08:24:14Z"
+    },
+    {
+      "public_id": "talentgram/projects/1e436ae0-23b7-4168-a8b0-bfa376e53f5d/auditions/70f50911-1362-43fa-9ab7-cfc36425b847_mukesh-bhansali/submission_f0e88d5d-bd97-4d75-8c67-5ae16061ec1c/intro_video",
+      "gb": 0.014,
+      "rt": "video",
+      "scheme": "projects",
+      "parent_alive": false,
+      "created_at": "2026-08-11T05:35:59Z"
+    },
+    {
+      "public_id": "talentgram/talents/6c522c1a-8bfb-410f-9059-30f0b70a134d_videocert-admin-test/portfolio_videos/e8f72c03-9c9c-435b-9a14-32ed88032a84",
+      "gb": 0.014,
+      "rt": "video",
+      "scheme": "talents",
+      "parent_alive": false,
+      "created_at": "2026-08-04T04:35:26Z"
+    },
+    {
+      "public_id": "talentgram/talents/4d4022aa-9e6a-4c97-80a7-56ede1335151_harshita-k-chundawat/portfolio_videos/87632a59-c583-426b-9560-3a3e0caced5f",
+      "gb": 0.012,
+      "rt": "video",
+      "scheme": "talents",
+      "parent_alive": false,
+      "created_at": "2026-07-16T08:11:47Z"
+    },
+    {
+      "public_id": "talentgram/talents/2bfa3c18-0a9e-4ae4-8545-fa3f37bcac4f_ishani-kouli/portfolio_videos/fd8c8141-97b5-4c0c-acf8-1640d03df5b3",
+      "gb": 0.012,
+      "rt": "video",
+      "scheme": "talents",
+      "parent_alive": false,
+      "created_at": "2026-07-16T07:31:29Z"
+    },
+    {
+      "public_id": "talentgram/admin_media/ac346fe5-4050-4360-bc11-e812ddfe6743/1590d2fb-d1c9-45fb-934c-aff7335b212c/adm_2b4421a6",
+      "gb": 0.012,
+      "rt": "video",
+      "scheme": "admin_media",
+      "parent_alive": true,
+      "created_at": "2026-08-12T11:47:52Z"
+    },
+    {
+      "public_id": "talentgram/submissions/e7f4c4a5-9b97-4a72-b8f4-ed02bdf48386/b5ef340a-3056-4230-8ea9-766aacf3ffeb",
+      "gb": 0.012,
+      "rt": "image",
+      "scheme": "submissions",
+      "parent_alive": true,
+      "created_at": "2026-08-21T18:35:44Z"
+    },
+    {
+      "public_id": "talentgram/admin_media/07d25735-40b7-4c71-bb64-44374fa96aa3/b800f279-7cbf-467b-bc63-1eec632be956/adm_eab5de2d",
+      "gb": 0.011,
+      "rt": "video",
+      "scheme": "admin_media",
+      "parent_alive": true,
+      "created_at": "2026-08-17T14:09:33Z"
+    },
+    {
+      "public_id": "talentgram/talents/d10630ba-4374-4bf3-8ec5-52e4e42af64f_bishakha-thapa/portfolio_videos/6636a344-9007-407b-a23d-e3f5d26d91dd",
+      "gb": 0.011,
+      "rt": "video",
+      "scheme": "talents",
+      "parent_alive": false,
+      "created_at": "2026-08-06T13:54:34Z"
+    },
+    {
+      "public_id": "talentgram/submissions/3847b515-d0d3-4ac2-8278-5b3d99789ded/38f204e3-954c-4adc-940a-5c6e0c834078",
+      "gb": 0.011,
+      "rt": "image",
+      "scheme": "submissions",
+      "parent_alive": true,
+      "created_at": "2026-08-20T13:36:19Z"
+    },
+    {
+      "public_id": "talentgram/projects/73be6c24-bcd3-4218-a8ab-a68d35ebb79d/videos/b250143c-b5d9-4810-a6e8-546a96e3c509.mp4",
+      "gb": 0.011,
+      "rt": "video",
+      "scheme": "projects",
+      "parent_alive": true,
+      "created_at": "2026-08-24T10:30:47Z"
+    },
+    {
+      "public_id": "talentgram/talents/fb97f9c9-c5a5-43b9-aa87-e58e1391dea5_kripa-trivedi/portfolio_videos/471cdef5-358f-41a5-ba81-db2b9ffd1f43",
+      "gb": 0.01,
+      "rt": "video",
+      "scheme": "talents",
+      "parent_alive": false,
+      "created_at": "2026-08-06T15:35:10Z"
+    },
+    {
+      "public_id": "talentgram/submissions/126c5579-5a71-4ccf-96dd-b47aa2d59fa7/524adbb7-1704-4170-b095-23610be3b12d",
+      "gb": 0.01,
+      "rt": "image",
+      "scheme": "submissions",
+      "parent_alive": true,
+      "created_at": "2026-07-13T13:02:53Z"
+    },
+    {
+      "public_id": "talentgram/talents/3c0154f4-b363-4b1f-a40b-f96b061a6477_zarah-philip/profile_images/d9ff4d30-e52e-4ff8-ba3b-3bc9f2603677",
+      "gb": 0.01,
+      "rt": "image",
+      "scheme": "talents",
+      "parent_alive": true,
+      "created_at": "2026-08-07T06:00:20Z"
+    },
+    {
+      "public_id": "talentgram/submissions/e0b9a411-8218-41fd-937d-56e58a265f39/f4acab5e-296d-463b-bd50-7f1e3eb465eb",
+      "gb": 0.01,
+      "rt": "image",
+      "scheme": "submissions",
+      "parent_alive": true,
+      "created_at": "2026-08-19T09:10:47Z"
+    }
+  ]
+}

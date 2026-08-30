@@ -373,12 +373,15 @@ export default function TalentEdit() {
     const deleteTalent = async () => {
         if (!isEdit) return;
         try {
+            // P6 (media lifecycle): the default action is ARCHIVE — a hard
+            // delete needs ?hard=true and is refused (409) while dependencies
+            // exist. Global talent media is never cascade-destroyed.
             const res = await adminApi.delete(`/talents/${id}`);
             talentPreviewCache.invalidateTalent(id);
             if (process.env.NODE_ENV === "development") {
                 console.info("[delete talent]", id, res?.data);
             }
-            toast.success("Talent deleted");
+            toast.success(res?.data?.archived ? "Talent archived" : "Talent deleted");
             setConfirmDeleteOpen(false);
             nav("/admin/talents");
         } catch (err) {

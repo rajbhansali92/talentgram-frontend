@@ -933,17 +933,73 @@ async def bulk_delete_talents(
 
 
 @router.delete("/talents/{tid}")
-async def delete_talent(tid: str, admin: dict = Depends(current_admin)):
-    logger.info(
-        "DELETE /talents/%s requested by admin=%s (role=%s)",
-        tid, admin.get("email"), admin.get("role"),
+async def delete_talent(
+    tid: str,
+    hard: bool = False,
+    admin: dict = Depends(current_admin),
+):
+    """Talent removal (Cloudinary rearchitecture, P6 — media lifecycle).
+
+    Normal operation is ARCHIVE (default). A hard delete (``?hard=true``) is
+    only allowed when ``media_lifecycle.talent_hard_delete_blockers`` reports
+    nothing — active/historical submissions, client-review links, applications,
+    casting-pipeline entries, or still-owned global media all block it, with an
+    explicit list returned to the admin (HTTP 409).
+
+    Even a permitted hard delete NEVER cascade-destroys Cloudinary assets: the
+    talent doc is removed and its (now unreferenced) global media is recorded in
+    the ``pending_media_deletions`` ledger for the P8/P9 controlled purge.
+    """
+    from media_lifecycle import (
+        talent_hard_delete_blockers, enqueue_pending_deletion, classify_owner,
+        get_retention_days, STATE_DELETED,
     )
-    res = await db.talents.delete_one({"id": tid})
-    if not res.deleted_count:
+    from datetime import datetime, timezone
+
+    talent = await db.talents.find_one({"id": tid}, {"_id": 0})
+    if not talent:
         logger.warning("DELETE /talents/%s failed — not found", tid)
         raise HTTPException(404, "Talent not found")
-    logger.info("DELETE /talents/%s succeeded (by %s)", tid, admin.get("email"))
-    return {"ok": True, "deleted_id": tid}
+
+    logger.info("DELETE /talents/%s requested by admin=%s hard=%s", tid, admin.get("email"), hard)
+
+    if not hard:
+        await db.talents.update_one({"id": tid}, {"$set": {
+            "status": "archived", "lifecycle_state": "archived",
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+            "archived_by": admin.get("email"),
+        }})
+        logger.info("DELETE /talents/%s -> ARCHIVED (by %s)", tid, admin.get("email"))
+        return {"ok": True, "archived": True, "deleted_id": None,
+                "message": "Talent archived. Use ?hard=true to attempt a hard delete."}
+
+    blockers = await talent_hard_delete_blockers(db, tid)
+    if blockers:
+        logger.info("DELETE /talents/%s hard delete BLOCKED: %s", tid, blockers)
+        raise HTTPException(409, {
+            "message": "Talent cannot be hard-deleted while dependencies exist. Archive instead.",
+            "blockers": blockers,
+        })
+
+    # No blockers — safe to remove the talent record. Global media it owned is
+    # now unreferenced; record it for the controlled purge (never destroyed here).
+    now = datetime.now(timezone.utc)
+    retention_days = await get_retention_days(db)
+    enqueued = 0
+    for m in (talent.get("media") or []):
+        if m.get("public_id") or m.get("stream_uid"):
+            await enqueue_pending_deletion(
+                db, m, owner=classify_owner(m),
+                reason=f"talent {tid} hard-deleted; global media unreferenced",
+                retention_days=retention_days, actor=admin.get("email"), now=now,
+            )
+            enqueued += 1
+
+    res = await db.talents.delete_one({"id": tid})
+    logger.info("DELETE /talents/%s HARD deleted (by %s); %d media enqueued for purge (0 destroyed)",
+                tid, admin.get("email"), enqueued)
+    return {"ok": True, "deleted_id": tid, "hard": True,
+            "media_pending_deletion": enqueued, "cloudinary_assets_deleted": 0}
 
 
 class BulkTagPayload(BaseModel):

@@ -327,11 +327,17 @@ async def build_purge_manifest(
     source_manifest_id: str,
     resource_fetcher: Callable[[str, str], Dict[str, Any]],
     actor: Optional[str] = None,
+    persist: bool = True,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Layer 2 — run Layer 1 across every candidate and freeze the result into an
-    immutable manifest. NO deletion. This IS a Mongo write (the manifest doc) —
-    it is a new analysis artifact, never a mutation of media."""
+    """Layer 2 — run Layer 1 across every candidate and freeze the result into a
+    manifest. NO deletion, ever.
+
+    `persist=True` (default) writes the immutable manifest doc to
+    ``db.purge_manifests`` — required before an approval can reference it.
+    `persist=False` returns the manifest IN-MEMORY ONLY and performs **zero**
+    MongoDB writes — used for a pure read-only dry-run report.
+    """
     now = now or _now()
     ridx = await _build_reference_index(db)
     rows: List[Dict[str, Any]] = []
@@ -368,8 +374,9 @@ async def build_purge_manifest(
         "rows": rows,
         "canary_preview": select_canary([r for r in rows], CANARY_BATCH_SIZE),
     }
-    await db[MANIFESTS_COLL].insert_one({**doc})
-    doc.pop("_id", None)
+    if persist:
+        await db[MANIFESTS_COLL].insert_one({**doc})
+        doc.pop("_id", None)
     return doc
 
 

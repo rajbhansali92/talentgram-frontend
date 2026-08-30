@@ -1176,15 +1176,23 @@ async def _p9_delete_candidate_rows() -> List[Dict[str, Any]]:
 
 
 @router.get("/purge/manifest")
-async def p9_build_purge_manifest(admin: dict = Depends(require_role("admin"))):
-    """P9 Layer 2 — build a DRY-RUN purge manifest. Runs Layer 1 revalidation
-    (fresh Cloudinary + MongoDB checks) over the DELETE_CANDIDATE derived assets.
-    NO deletion. Writes only the immutable manifest artifact."""
+async def p9_build_purge_manifest(
+    persist: bool = False,
+    admin: dict = Depends(require_role("admin")),
+):
+    """P9 Layer 2 — build a purge manifest. Runs Layer 1 revalidation (fresh
+    Cloudinary + MongoDB checks) over the DELETE_CANDIDATE derived assets.
+    NO deletion, ever.
+
+    `persist=false` (default) = a pure READ-ONLY dry-run: the manifest is
+    returned in memory and NOTHING is written to MongoDB. `persist=true` writes
+    the immutable manifest doc — required only when you intend to approve it.
+    """
     import cloudinary_controlled_purge as p9
     candidates = await _p9_delete_candidate_rows()
     return await p9.build_purge_manifest(
         db, candidates, source_manifest_id="p8.5-derived-inventory",
-        resource_fetcher=_p9_resource_fetcher, actor=admin.get("email"))
+        resource_fetcher=_p9_resource_fetcher, actor=admin.get("email"), persist=persist)
 
 
 class P9ApproveIn(BaseModel):

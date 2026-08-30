@@ -607,3 +607,14 @@ def test_dry_run_manifest_build_writes_only_the_manifest_artifact(db):
     assert db[p.APPROVALS_COLL].docs == []
     assert db[p.BATCHES_COLL].docs == []
     assert len(db[p.MANIFESTS_COLL].docs) == 1
+
+
+def test_dry_run_manifest_persist_false_writes_absolutely_nothing(db):
+    _seed_12_parents(db)
+    m = run(p.build_purge_manifest(db, _10_avif_rows(), source_manifest_id="s",
+                                   resource_fetcher=_fetch_all_present(), actor="a",
+                                   persist=False))
+    assert m["summary"]["passed_revalidation"] >= 10
+    assert db[p.MANIFESTS_COLL].docs == []   # NOT persisted
+    assert db[p.AUDIT_COLL].docs == []
+    assert db[p.APPROVALS_COLL].docs == []

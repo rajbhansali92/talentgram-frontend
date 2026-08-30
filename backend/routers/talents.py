@@ -50,6 +50,11 @@ async def create_talent(payload: TalentIn, admin: dict = Depends(current_team_or
     create email-less talents (e.g. legacy) — those bypass the dedup.
     """
     doc = payload.model_dump()
+    # Media is never set on create — the insert path below hard-codes `[]` and
+    # the email-match merge path uses APPEND semantics. Drop the (Pydantic-
+    # stripped, see update_talent) incoming `media` so it can never append a
+    # lossy copy into an existing talent's array.
+    doc.pop("media", None)
     # Sanitize and validate age / dob
     dob = doc.get("dob")
     if dob:
@@ -763,6 +768,20 @@ async def get_talent(tid: str, admin: dict = Depends(current_team_or_admin)):
 async def update_talent(tid: str, payload: TalentUpdateIn, admin: dict = Depends(current_team_or_admin)):
     expected_updated_at = payload.expected_updated_at
     update = payload.model_dump(exclude={"expected_updated_at"})
+
+    # The admin edit page submits the ENTIRE talent form on save, including
+    # `talent.media` as loaded from a prior GET. `TalentUpdateIn.media` is typed
+    # `List[MediaItem]`, whose 9-field shape silently drops every extended media
+    # field on parse (Pydantic v2 `extra="ignore"`) — `poster_url`,
+    # `thumbnail_url`, `duration`, `talent_id`, `source_submission_id`,
+    # `source_talent_media_id`, `scope`, and (Cloudinary rearchitecture P3) the
+    # `ownership` sub-document. `$set`-ing that stripped array back would erase
+    # all of it on every routine talent edit. The media array is owned
+    # exclusively by the dedicated endpoints (`POST/DELETE /talents/{tid}/media`,
+    # `/cover`, and `sync_media_to_global_talent`); this form-save has no
+    # legitimate reason to rewrite it. Drop it from the $set entirely.
+    update.pop("media", None)
+
     # Sanitize and validate age / dob
     dob = update.get("dob")
     if dob:

@@ -36,25 +36,48 @@ export function getSubdomainUrl(subdomain) {
 
 
 
+// Formats a browser <img> cannot decode without a Cloudinary format
+// negotiation. HEIC/HEIF is the default iPhone camera format and an accepted
+// upload; only Safari renders it natively.
+const _NON_WEB_IMAGE_RE = /\.(heic|heif)(\?|#|$)/i;
+
+const _isHeicSource = (media, url) => {
+    if (_NON_WEB_IMAGE_RE.test(url || "")) return true;
+    if (media && typeof media === "object") {
+        const ct = (media.content_type || "").toLowerCase();
+        if (ct === "image/heic" || ct === "image/heif") return true;
+        const fmt = (media.format || "").toLowerCase();
+        if (fmt === "heic" || fmt === "heif") return true;
+        if (_NON_WEB_IMAGE_RE.test(media.original_filename || "")) return true;
+    }
+    return false;
+};
+
 /**
- * Resolve the display URL for a media object.
- * Post-Cloudinary migration every record carries a canonical full URL
- * (https://res.cloudinary.com/talentgram/...) on the `url` field — we
- * just return that, with an f_auto,q_auto transform inserted for
- * Cloudinary URLs. Without this, a HEIC upload (the default camera format
- * on iPhone, and an explicitly accepted upload format) renders as a raw
- * image/heic response, which only Safari can decode — every other
- * browser shows a broken image. f_auto negotiates a format the requesting
- * browser can actually render; it's a no-op for formats already
- * web-safe (JPEG/PNG/WEBP).
+ * Resolve the display URL for an image media object.
+ *
+ * Cloudinary rearchitecture P5 (RULE #2): the canonical uploaded image is the
+ * primary asset and is delivered DIRECTLY. We used to inject `f_auto,q_auto`
+ * at full resolution into every Cloudinary image URL — that forced a full-res
+ * AVIF/WebP re-encode of every image on every rendering surface (the
+ * `extra_avif_mp_encoding` line, ~11K units). JPEG/PNG/WebP are already
+ * universally renderable, so we serve them untouched.
+ *
+ * The ONE exception is a HEIC/HEIF source (only Safari decodes it): those get a
+ * single canonical `f_auto` segment — format negotiation only, no `q_auto`, no
+ * width, no `dpr` — so a broken image never ships to a non-Safari browser.
  */
 export const IMAGE_URL = (media) => {
     if (!media) return "";
     const url = typeof media === "string" ? media : media.url || "";
     if (!url) return url;
+    // Only Cloudinary image-delivery URLs are rewritable; leave everything else.
+    if (!/res\.cloudinary\.com\/[^/]+\/image\/upload\//.test(url)) return url;
+    if (/(^|\/)f_[^/]*\//.test(url)) return url; // already carries a format transform
+    if (!_isHeicSource(media, url)) return url; // web-safe → canonical asset, zero transform
     return url.replace(
-        /(res\.cloudinary\.com\/[^/]+\/image\/upload\/)(?!.*f_auto)/,
-        "$1f_auto,q_auto/"
+        /(res\.cloudinary\.com\/[^/]+\/image\/upload\/)/,
+        "$1f_auto/"
     );
 };
 

@@ -1514,40 +1514,39 @@ async def get_share_preview(share_id: str):
 
 
 def _get_video_download_url(url: str) -> str:
+    """Canonical download URL for a legacy Cloudinary video.
+
+    Cloudinary rearchitecture P5 (RULE #6/#7): this used to append ``f_mp4`` and
+    force a ``.mp4`` extension — a FULL re-transcode (billed in video seconds)
+    on every download, purely to guarantee a filename. The download proxy
+    already streams the bytes through our origin and sets
+    ``Content-Disposition: attachment; filename=…``, so no transformation is
+    needed to name the file. A genuinely non-web codec/container is handled
+    upstream in ``_resolve_video_download_url`` via the P4 compat URL.
+
+    We now return the asset URL with any *existing* transformation segment
+    stripped (so a legacy stored URL that already carries a stale eager preset
+    downloads the canonical asset, not a derived one) — but we never ADD a
+    transformation and never change the extension.
+    """
     if not url:
         return url
-    # Only rewrite Cloudinary delivery URLs (legacy video assets). Non-Cloudinary
-    # URLs — Cloudflare Stream HLS manifests and R2 signed object URLs — must NOT
-    # be ".mp4"-mangled here; Stream MP4 URLs are resolved via _enable_and_get_stream_mp4.
+    # Non-Cloudinary (Cloudflare Stream manifests, R2 signed object URLs) pass through.
     if "res.cloudinary.com" not in url and "/upload/" not in url:
         return url
-    clean_url = url
-    if "/upload/" in clean_url:
-        parts = clean_url.split("/upload/")
-        before = parts[0]
-        after = parts[1]
-        segments = after.split("/")
-        transformations = segments[0]
-        import re
-        if transformations and not re.match(r"^v\d+$", transformations):
-            trans_list = transformations.split(",")
-            new_trans = [t for t in trans_list if not t.startswith("f_") and not t.startswith("sp_")]
-            new_trans.append("f_mp4")
-            segments[0] = ",".join(new_trans)
-            after = "/".join(segments)
-        else:
-            after = f"f_mp4/{after}"
-        clean_url = f"{before}/upload/{after}"
-    
-    main_path = clean_url.split("?")[0].split("#")[0]
-    query = clean_url[len(main_path):]
-    if "." in main_path.split("/")[-1]:
-        base_path, ext = main_path.rsplit(".", 1)
-        if ext.lower() != "mp4":
-            clean_url = f"{base_path}.mp4{query}"
-    else:
-        clean_url = f"{main_path}.mp4{query}"
-    return clean_url
+    if "/upload/" not in url:
+        return url
+    before, after = url.split("/upload/", 1)
+    segments = after.split("/")
+    first = segments[0]
+    import re
+    # Drop a leading transformation segment (anything that isn't a bare version
+    # marker). Keeps the version + public_id + original extension intact.
+    if first and not re.match(r"^v\d+$", first) and re.search(
+        r"(^|,)(w_|h_|c_|q_|f_|dpr_|e_|so_|vc_|b_|ac_|g_|fl_|sp_|br_)", first
+    ):
+        segments = segments[1:]
+    return f"{before}/upload/{'/'.join(segments)}"
 
 def _extract_stream_uid(url: Optional[str]) -> Optional[str]:
     """Pull the Cloudflare Stream video UID out of a delivery URL like
@@ -1601,7 +1600,11 @@ async def _enable_and_get_stream_mp4(client, uid: str) -> Optional[str]:
 async def _resolve_video_download_url(client, raw_media: Optional[dict], filtered_url: Optional[str]) -> Optional[str]:
     """Provider-aware download URL for a video asset.
     - Cloudflare Stream: enable + return MP4 download URL (from stream_uid/manifest).
-    - Cloudinary (legacy): existing f_mp4 rewrite.
+    - Cloudinary + non-web codec/container (P4 compat-flagged): the ONE sanctioned
+      f_mp4 delivery URL (already generated once, cached — no new transcode).
+    - Cloudinary (web-safe): the canonical asset URL, verbatim, NO transformation
+      (Cloudinary rearchitecture P5 — the download proxy names the file via
+      Content-Disposition, so we never transcode just to download).
     - R2 / direct: the signed object URL is already downloadable — return as-is.
     """
     raw_media = raw_media or {}
@@ -1619,6 +1622,12 @@ async def _resolve_video_download_url(client, raw_media: Optional[dict], filtere
         return await _enable_and_get_stream_mp4(client, uid) if uid else None
     src = raw_url or filtered_url or ""
     if "res.cloudinary.com" in src or "/upload/" in src:
+        # P4 compat exception: a genuinely non-web codec/container was flagged at
+        # upload and `media.url` was pointed at the ONE canonical f_mp4 delivery
+        # URL. Serve that verbatim — do NOT strip its f_mp4 (that is the whole
+        # point) and do NOT add another transform.
+        if raw_media.get("needs_compat_delivery"):
+            return src
         return _get_video_download_url(src)
     # R2 / direct object URL — already an MP4 and directly fetchable.
     return src or None
@@ -2221,8 +2230,13 @@ async def proxy_media(
     # Safe download filename + content type.
     import os as _os
     ext = _os.path.splitext((m.get("url") or "").split("?")[0])[1]
-    if is_video and not ext:
-        ext = ".mp4"
+    if is_video:
+        # P5: we no longer transcode-to-mp4 for downloads, so the extension
+        # tracks the real asset. The resolved upstream is authoritative when it
+        # carries one (the P4 compat URL is a real .mp4); otherwise keep the
+        # canonical asset's own extension, falling back to .mp4 only if it has none.
+        up_ext = _os.path.splitext((upstream or "").split("?")[0])[1]
+        ext = up_ext or ext or ".mp4"
     if (not is_video) and ext.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
         ext = ".jpg"
     safe_talent = privatize_name(filtered_talent.get("name")).replace(".", "").strip()

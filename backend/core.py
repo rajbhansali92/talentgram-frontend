@@ -1008,13 +1008,18 @@ def cloudinary_url_for(
 ) -> str:
     """Build a transformation URL on the fly.
 
-    Default transformations applied to images: f_auto, q_auto, dpr_auto. Pass
-    additional via kwargs (e.g. width=1600, crop="limit").
+    Default transformations applied to images: f_auto, q_auto. Pass additional
+    via kwargs (e.g. width=400, crop="fill").
+
+    Cloudinary rearchitecture P5: `dpr_auto` removed — it needs client-hints
+    (never configured here), added a token to every image URL for no delivery
+    benefit, and is a cost-regression guard target. Only the sized thumbnail
+    presets in `media_url()` use this helper now; full-size image delivery goes
+    straight to the canonical asset (see `IMAGE_URL` on the frontend).
     """
     if resource_type == "image":
         transformations.setdefault("fetch_format", "auto")
         transformations.setdefault("quality", "auto")
-        transformations.setdefault("dpr", "auto")
     url, _opts = cloudinary.utils.cloudinary_url(
         public_id, resource_type=resource_type, secure=True, **transformations
     )
@@ -1022,23 +1027,23 @@ def cloudinary_url_for(
 
 
 def stream_video_url(public_id: Optional[str]) -> Optional[str]:
-    """Build a optimized video URL for a video.
-    Matches the eager transformation pre-generated on upload:
-    c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4
+    """DEPRECATED (Cloudinary rearchitecture P5). Historically built a
+    `c_limit,h_720,w_1280 / q_auto,vc_auto / f_mp4` 3-segment delivery chain — a
+    universal 720p downscale + transcode on first client view. P5 removed the
+    only caller: legacy Cloudinary videos with no stored delivery URL now get
+    their canonical original URL (or the P4 compat URL when the codec/container
+    genuinely can't play). A universal delivery transcode is exactly what the
+    P4/P5 video policy forbids.
+
+    Retained (returning the *untransformed* canonical delivery URL) only so any
+    lingering import resolves. No transformation is applied.
     """
     if not public_id:
         return None
     if public_id.startswith(("http://", "https://")):
         return public_id
     url, _ = cloudinary.utils.cloudinary_url(
-        public_id,
-        resource_type="video",
-        secure=True,
-        transformation=[
-            {"width": 1280, "height": 720, "crop": "limit"},
-            {"quality": "auto", "video_codec": "auto"},
-            {"fetch_format": "mp4"}
-        ]
+        public_id, resource_type="video", secure=True,
     )
     return url
 
@@ -1196,34 +1201,32 @@ def compat_video_delivery_url(public_id: Optional[str]) -> Optional[str]:
 
 
 def media_url(
-    public_id: Optional[str], preset: str = "detail", resource_type: str = "image"
+    public_id: Optional[str], preset: str = "roster", resource_type: str = "image"
 ) -> Optional[str]:
-    """Build a transformation URL on the fly.
+    """Canonical small-thumbnail URL builder.
 
-    Presets:
-      roster     — w_400, c_fill, f_auto, q_auto   (roster card ~200px wide @2x)
-      thumb      — w_200, c_fill, f_auto, q_auto   (pipeline card / mini thumbnail)
-      detail     — w_1200, c_limit, f_auto, q_auto (detail page, mobile-friendly)
-      full       — w_1600, c_limit, f_auto, q_auto (lightbox / full-res view)
-      poster     — w_600, h_338, c_fill, f_auto, q_auto (video poster)
+    Cloudinary rearchitecture P5 — collapsed to the TWO presets that have real
+    callers. Both are deliberate, genuinely-required small derivatives (roster
+    and pipeline cards); full-size image delivery does NOT come through here any
+    more — it goes straight to the canonical asset.
+
+      roster  — c_fill,w_400,f_auto,q_auto   (talent roster / cover card)
+      thumb   — c_fill,w_200,f_auto,q_auto   (pipeline card / mini thumbnail)
+
+    Removed (were dead code, zero callers): ``detail`` (w_1200), ``full``
+    (w_1600), ``poster`` — the last routed to ``video_poster_url`` which every
+    caller now invokes directly. Any unrecognised preset falls back to
+    ``roster`` rather than an uncapped full-res transform.
     """
     if not public_id:
         return None
     if public_id.startswith(("http://", "https://")):
         return public_id
 
-    if preset == "roster":
-        return cloudinary_url_for(public_id, resource_type, width=400, crop="fill")
-    elif preset == "thumb":
+    if preset == "thumb":
         return cloudinary_url_for(public_id, resource_type, width=200, crop="fill")
-    elif preset == "detail":
-        return cloudinary_url_for(public_id, resource_type, width=1200, crop="limit")
-    elif preset == "full":
-        return cloudinary_url_for(public_id, resource_type, width=1600, crop="limit")
-    elif preset == "poster":
-        return video_poster_url(public_id)
-
-    return cloudinary_url_for(public_id, resource_type)
+    # roster (default) and anything unrecognised
+    return cloudinary_url_for(public_id, resource_type, width=400, crop="fill")
 
 
 
@@ -2815,10 +2818,18 @@ def _public_media(m: dict) -> dict:
     # fixes it" bug: a second upload doesn't fix anything architecturally, it
     # just buys enough wall-clock time for that once-off cold transform to
     # finish. Now: use the already-stored, already-verified-working `url`
-    # whenever one exists, and only fall back to computing stream_video_url()
-    # for the genuinely legacy case where no url was ever stored.
+    # whenever one exists.
+    #
+    # Cloudinary rearchitecture P5: for the genuinely legacy case where no url
+    # was ever stored, serve the CANONICAL delivery URL (no transform) — or the
+    # P4 compat URL when the record was flagged as a non-web codec/container.
+    # The old path here forced a universal 720p downscale-transcode on first
+    # client view, which the P4/P5 video policy forbids.
     if is_video and m.get("public_id") and _is_cloudinary_video and not _is_stream and not url:
-        url = stream_video_url(m["public_id"])
+        if m.get("needs_compat_delivery"):
+            url = compat_video_delivery_url(m["public_id"])
+        else:
+            url = stream_video_url(m["public_id"])  # now returns the untransformed canonical URL
 
     out = {
         "id": m.get("id"),

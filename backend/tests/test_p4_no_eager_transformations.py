@@ -52,23 +52,84 @@ FORBIDDEN_TRANSFORM_TOKENS = ("w_1280", "h_720", "w_1920", "h_1080", "vc_auto",
 # pure helpers
 # ---------------------------------------------------------------------------
 class TestCompatHelpers:
-    @pytest.mark.parametrize("fmt,codec,expected", [
-        ("mp4", "h264", False),
-        ("mp4", "hevc", False),
-        ("webm", "vp9", False),
-        ("mov", "h264", False),          # iOS recordings play natively
-        ("mov", None, False),            # unknown codec on a common container -> trust it
-        (None, None, False),             # nothing known -> serve original
-        ("MP4", "H264", False),          # case-insensitive
-        ("avi", None, True),
-        ("wmv", "wmv3", True),
-        ("mkv", "h264", True),           # Safari/Firefox can't
-        ("mp4", "prores", True),
-        ("mov", "prores", True),
-        ("mp4", "mjpeg", True),
-    ])
+    # ── The Talentgram video-compatibility matrix ────────────────────────
+    # Supported browser matrix = frontend/package.json browserslist
+    # "production" (>0.2%, not dead, not op_mini all): Chrome / Edge / Firefox
+    # (incl. ESR) / Safari, desktop + mobile, current AND older releases.
+    # `LazyVideoPlayer` assigns the URL to <video>.src with NO capability
+    # probe and NO fallback, so the served `url` must decode natively there.
+    #
+    #  format  · codec   → decision                              · why
+    #  --------------------------------------------------------------------
+    #  mp4     · h264     → SERVE ORIGINAL                        · universal
+    #  mp4     · hevc     → COMPAT DELIVERY (f_mp4)               · Firefox ESR / non-HW Chrome can't decode HEVC
+    #  mov     · h264     → SERVE ORIGINAL                        · MOV+H264 plays on Chrome/FF/Safari
+    #  mov     · hevc     → COMPAT DELIVERY (f_mp4)               · same HEVC problem (common iPhone "High Efficiency")
+    #  webm    · vp9      → SERVE ORIGINAL                        · Chrome/Edge/FF always; Safari 14.1+
+    #  webm    · vp8      → SERVE ORIGINAL                        · universal in WebM-capable browsers
+    #  webm    · h264     → SERVE ORIGINAL                        · unusual but decodable everywhere WebM is
+    #  mp4     · av1      → SERVE ORIGINAL                        · Chrome/FF/Edge; Safari 17+. rare as an upload; revisit on volume
+    #  avi     · (any)    → COMPAT DELIVERY (f_mp4)               · AVI container unsupported by <video>
+    #  wmv     · wmv3     → COMPAT DELIVERY (f_mp4)               · Windows Media — unsupported
+    #  mkv     · h264     → COMPAT DELIVERY (f_mp4)               · MKV container: Safari/Firefox won't
+    #  mpeg    · (any)    → COMPAT DELIVERY (f_mp4)               · MPEG-PS container unsupported
+    #  flv     · flv1     → COMPAT DELIVERY (f_mp4)               · Flash video — unsupported
+    #  mp4     · prores   → COMPAT DELIVERY (f_mp4)               · pro editing codec — no browser
+    #  mp4     · mjpeg    → COMPAT DELIVERY (f_mp4)               · webcam MJPEG — not in <video>
+    #  <unknown> · <unknown> → SERVE ORIGINAL                     · conservative cost policy: unknown != transform
+    #  mp4     · (unknown) → SERVE ORIGINAL                       · common container, trust it
+    #  (unknown) · h264   → SERVE ORIGINAL                        · known-good codec
+    COMPAT_MATRIX = [
+        ("mp4",  "h264",   False),
+        ("MP4",  "H264",   False),   # case-insensitive
+        ("mp4",  "avc1",   False),
+        ("mov",  "h264",   False),
+        ("mov",  None,     False),
+        ("webm", "vp9",    False),
+        ("webm", "vp8",    False),
+        ("webm", "h264",   False),
+        ("mp4",  "av1",    False),
+        ("mp4",  "hevc",   True),
+        ("mp4",  "h265",   True),
+        ("mov",  "hevc",   True),
+        ("mp4",  "hvc1",   True),
+        ("mp4",  "hev1",   True),
+        ("avi",  None,     True),
+        ("avi",  "mpeg4",  True),
+        ("wmv",  "wmv3",   True),
+        ("wmv",  None,     True),
+        ("mkv",  "h264",   True),
+        ("mpeg", None,     True),
+        ("flv",  "flv1",   True),
+        ("mp4",  "prores", True),
+        ("mp4",  "mjpeg",  True),
+        (None,   None,     False),
+        ("mp4",  None,     False),
+        (None,   "h264",   False),
+        ("",     "",       False),
+    ]
+
+    @pytest.mark.parametrize("fmt,codec,expected", COMPAT_MATRIX)
     def test_video_needs_compat_delivery(self, fmt, codec, expected):
         assert core.video_needs_compat_delivery(fmt, codec) is expected
+
+    def test_mpeg_container_is_compat_regardless_of_codec(self):
+        # `mpg`/`mpeg` container alone triggers compat even when we don't
+        # recognise the codec string.
+        assert core.video_needs_compat_delivery("mpg", "mpeg2video") is True
+        assert core.video_needs_compat_delivery("mpeg", "somethingelse") is True
+
+    def test_hevc_is_a_compat_exception_across_the_supported_matrix(self):
+        """Explicit regression guard for the P4 review decision: HEVC/H.265 is
+        NOT assumed browser-safe (Firefox ESR / non-hardware Chrome)."""
+        for codec in ("hevc", "h265", "HEVC", "hvc1", "hev1"):
+            assert core.video_needs_compat_delivery("mp4", codec) is True, codec
+            assert core.video_needs_compat_delivery("mov", codec) is True, codec
+
+    def test_unknown_never_transforms(self):
+        assert core.video_needs_compat_delivery(None, None) is False
+        assert core.video_needs_compat_delivery("weirdext", None) is False
+        assert core.video_needs_compat_delivery(None, "weirdcodec") is False
 
     def test_video_poster_url_is_one_canonical_string(self):
         bare = core.video_poster_url("talentgram/submissions/s1/abc")
@@ -316,6 +377,62 @@ def test_submission_complete_video_compat_exception_for_non_web_format(mock_sync
     assert pushed["url"].count("f_mp4") == 1
     assert pushed["original_url"] == orig
     assert pushed["needs_compat_delivery"] is True
+
+
+@patch("routers.submissions.decode_submitter")
+@patch("routers.submissions.sync_media_to_global_talent", new_callable=AsyncMock)
+def test_submission_complete_hevc_video_uses_compat_delivery(mock_sync, mock_decode):
+    """An iPhone 'High Efficiency' HEVC .mov must be served via one canonical
+    lazy f_mp4 (Firefox ESR / non-HW Chrome can't decode HEVC), NOT transcoded
+    at upload and NOT served as the raw HEVC original."""
+    mock_decode.return_value = {"sid": "s1", "role": "submitter"}
+    mock_db.submissions.find_one = AsyncMock(return_value={"id": "s1", "project_id": "p1", "media": []})
+    captured = {}
+    mock_db.submissions.update_one = AsyncMock(side_effect=lambda q, u, **k: captured.update(u))
+    mock_db.asset_metadata.update_one = AsyncMock()
+    mock_db.asset_metadata.insert_one = AsyncMock()
+    mock_db.talents.find_one = AsyncMock(return_value=None)
+
+    orig = "https://res.cloudinary.com/dummy/video/upload/v9/talentgram/submissions/s1/mid.mov"
+    r = client.post("/api/public/submissions/s1/upload/complete",
+                    json={"media_id": "mid", "category": "intro_video", "public_id": "mid",
+                          "url": orig, "bytes": 123, "duration": 10.0,
+                          "content_type": "video/quicktime", "original_filename": "a.mov",
+                          "format": "mov", "video_codec": "hevc"},
+                    headers={"Authorization": "Bearer x"})
+    assert r.status_code == 200
+    pushed = captured["$push"]["media"]
+    assert pushed["url"].count("f_mp4") == 1
+    assert pushed["original_url"] == orig
+    assert pushed["needs_compat_delivery"] is True
+    # still just a lazy delivery URL — no eager was requested anywhere
+
+
+@patch("routers.submissions.decode_submitter")
+@patch("routers.submissions.sync_media_to_global_talent", new_callable=AsyncMock)
+def test_submission_complete_h264_mov_serves_original(mock_sync, mock_decode):
+    """MOV + H.264 (the common iPhone 'Most Compatible' / WhatsApp case) is
+    served as the uploaded original — no compat delivery, no transform."""
+    mock_decode.return_value = {"sid": "s1", "role": "submitter"}
+    mock_db.submissions.find_one = AsyncMock(return_value={"id": "s1", "project_id": "p1", "media": []})
+    captured = {}
+    mock_db.submissions.update_one = AsyncMock(side_effect=lambda q, u, **k: captured.update(u))
+    mock_db.asset_metadata.update_one = AsyncMock()
+    mock_db.asset_metadata.insert_one = AsyncMock()
+    mock_db.talents.find_one = AsyncMock(return_value=None)
+
+    orig = "https://res.cloudinary.com/dummy/video/upload/v9/talentgram/submissions/s1/mid.mov"
+    r = client.post("/api/public/submissions/s1/upload/complete",
+                    json={"media_id": "mid", "category": "intro_video", "public_id": "mid",
+                          "url": orig, "bytes": 123, "duration": 10.0,
+                          "content_type": "video/quicktime", "original_filename": "a.mov",
+                          "format": "mov", "video_codec": "h264"},
+                    headers={"Authorization": "Bearer x"})
+    assert r.status_code == 200
+    pushed = captured["$push"]["media"]
+    assert pushed["url"] == orig
+    assert "f_mp4" not in pushed["url"]
+    assert "needs_compat_delivery" not in pushed
 
 
 @patch("routers.submissions.decode_submitter")

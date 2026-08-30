@@ -1074,11 +1074,39 @@ def audition_video_transformation() -> list:
 
 
 # Cloudinary rearchitecture P4 — the ONLY sanctioned video transform: an
-# explicit browser-compatibility exception. Formats/codecs that a mainstream
-# <video> element cannot reliably decode. Anything not on these lists is served
-# as the uploaded original (zero transform).
+# explicit browser-compatibility exception. Formats/codecs a plain <video>
+# element cannot reliably decode across Talentgram's supported browser matrix
+# (frontend/package.json browserslist "production": >0.2%, not dead, not
+# op_mini all — i.e. Chrome/Edge/Firefox/Safari incl. ESR + older releases +
+# Samsung Internet, on desktop and mobile). `LazyVideoPlayer` / `HlsVideo`
+# assign the URL straight to `<video>.src` with NO MediaCapabilities probe and
+# NO codec fallback, so whatever we serve as `url` must decode natively there.
+#
+# Anything NOT on these lists is served as the uploaded original (zero
+# transform). Unknown format AND unknown codec -> serve the original.
+#
+# CODEC NOTES:
+#   H.264 / AVC        — universal. serve original.
+#   VP8 / VP9 (WebM)   — Chrome/Edge/Firefox always; Safari 14.1+/iOS 14.5+.
+#                        Modern matrix covers it. serve original.
+#   AV1                — Chrome 70+/Firefox 67+/Edge; Safari 17+ (HW only).
+#                        Rare as an UPLOAD codec; modern matrix mostly covers
+#                        it. serve original (revisit if it ever shows volume).
+#   HEVC / H.265       — Safari 11+ only. Chrome 107+ AND requires a platform
+#                        hardware HEVC decoder (fails on many desktops, esp.
+#                        Linux). Firefox only 134+ (Jan 2025) with an OS
+#                        decoder — Firefox ESR / older = NO. NOT safe for our
+#                        matrix -> COMPAT EXCEPTION (one lazy f_mp4). Common as
+#                        an iPhone "High Efficiency" .mov intro-video upload;
+#                        admin audition takes come via WhatsApp already
+#                        re-encoded to H.264 and are unaffected.
 NON_WEB_VIDEO_FORMATS = {"avi", "wmv", "flv", "mkv", "mpeg", "mpg", "ogv", "rm", "rmvb", "asf", "vob", "divx"}
 NON_WEB_VIDEO_CODECS = {
+    # HEVC / H.265 — not decodable on Firefox ESR / older, or Chrome without a
+    # hardware HEVC decoder. Cloudinary reports it as "hevc"/"h265"; some
+    # probes report the MP4 sample-entry fourCC.
+    "hevc", "h265", "hvc1", "hev1",
+    # genuinely legacy / pro / niche
     "prores", "dnxhd", "mjpeg", "wmv1", "wmv2", "wmv3", "vc1",
     "mpeg4", "msmpeg4", "msmpeg4v1", "msmpeg4v2", "msmpeg4v3",
     "rv40", "rv30", "theora", "flv1", "cinepak", "svq3",
@@ -1086,11 +1114,16 @@ NON_WEB_VIDEO_CODECS = {
 
 
 def video_needs_compat_delivery(fmt: Optional[str], codec: Optional[str]) -> bool:
-    """True only when the uploaded video is in a container/codec a mainstream
-    browser can't play natively — the one case where P4 permits a transform.
-    Unknown format AND unknown codec -> False (serve the original; a genuinely
-    unplayable asset is recoverable later, but transcoding-by-default is the
-    cost problem we are removing)."""
+    """True only when the uploaded video is in a container/codec that a plain
+    <video> element cannot reliably play across Talentgram's supported browser
+    matrix — the one case where P4 permits a transform.
+
+    Precedence: codec (authoritative) before container. Unknown format AND
+    unknown codec -> False (serve the original; a genuinely unplayable asset is
+    recoverable later, but transcoding-by-default is the cost problem we are
+    removing). Never inferred from the file extension alone — `fmt`/`codec`
+    come from Cloudinary's upload / resource response.
+    """
     f = (fmt or "").strip().lower().lstrip(".")
     c = (codec or "").strip().lower()
     if c and c in NON_WEB_VIDEO_CODECS:

@@ -14,7 +14,6 @@ import {
   HardDrive,
   Activity,
   RotateCcw,
-  Sparkles,
   Info,
   ChevronDown,
   ChevronRight,
@@ -94,19 +93,11 @@ export default function StorageDashboard() {
     }
   };
 
-  const handleOneClickCleanup = async () => {
-    setHealthLoading(true);
-    try {
-      const res = await adminApi.post(`/admin/cloudinary/health/cleanup`);
-      alert(`Cleanup completed! Cleaned ${res.data.cleaned_orphaned} orphaned files, ${res.data.cleaned_broken} broken references, and ${res.data.cleaned_unused} unused files.`);
-      await runHealthScan();
-      await fetchCore();
-    } catch (err) {
-      alert("Failed to run storage cleanup");
-    } finally {
-      setHealthLoading(false);
-    }
-  };
+  // One-click cleanup was permanently removed 2026-08-30 (production safety —
+  // see docs/CLOUDINARY_PHASE0_VERIFICATION.md §E). It mass-deleted Cloudinary
+  // assets from an incomplete orphan heuristic with no dry-run or confirmation.
+  // The scan below stays (read-only). A safe manifest-driven cleanup is being
+  // built separately.
 
   const toggleProject = async (projectId) => {
     if (expandedProject === projectId) {
@@ -304,16 +295,6 @@ export default function StorageDashboard() {
               <RefreshCw className={`w-3.5 h-3.5 ${healthLoading ? "animate-spin" : ""}`} />
               {healthScanned ? "Re-Scan" : "Scan Now"}
             </button>
-            {healthScanned && (
-              <button
-                onClick={handleOneClickCleanup}
-                disabled={healthLoading || !health || (health.orphaned_count === 0 && health.broken_count === 0 && health.unused_count === 0)}
-                className="h-10 px-4 text-xs font-semibold bg-slate-950 text-white rounded-md inline-flex items-center gap-2 hover:bg-slate-800 disabled:opacity-40"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                One-Click Repair &amp; Cleanup
-              </button>
-            )}
           </div>
         </div>
 

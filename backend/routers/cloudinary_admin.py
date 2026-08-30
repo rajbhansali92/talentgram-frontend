@@ -1048,126 +1048,45 @@ async def get_storage_health(admin: dict = Depends(require_role("admin"))):
         "unused_files": unused_files[:100]
     }
 
-@router.post("/health/cleanup")
+# ---------------------------------------------------------------------------
+# DISABLED 2026-08-30 (Cloudinary rearchitecture, P0.5 — production safety).
+#
+# This endpoint was a one-click, no-confirmation, no-dry-run, un-batched
+# mass-delete: it ran `cloudinary.uploader.destroy()` on every Cloudinary
+# resource whose public_id was absent from a reference set built with an
+# incomplete heuristic (category-name leaves matched as ids; whichever
+# MongoDB the backend was pointed at treated as authoritative), plus
+# collection-wide `db.submissions/talents.update_many({}, {"$pull": ...})`
+# against historical media arrays. Forensic audit (docs/CLOUDINARY_PHASE0_
+# VERIFICATION.md) measured ~3,400 originals + ~7,500 derived that a scan
+# would flag as "orphaned" — a single click would have destroyed them.
+#
+# It is intentionally kept registered (not deleted) so a stale cached
+# frontend gets an explicit 410 instead of a confusing 404. The safe
+# replacement is a dry-run manifest → per-category human approval →
+# batched, reference-checked deletion with an audit log (see the doc,
+# section E / P8). Do NOT re-enable this without that design.
+# ---------------------------------------------------------------------------
+@router.post("/health/cleanup", deprecated=True)
 async def run_storage_cleanup(admin: dict = Depends(require_role("admin"))):
-    """One-click repair and cleanup action for storage health violations."""
-    await assert_providers_healthy()
-    
-    # 1. Fetch physical items
-    r2_physical = await run_in_threadpool(list_r2_physical_objects_sync)
-    cld_physical = await run_in_threadpool(list_cloudinary_physical_resources_sync)
-    
-    r2_phys_keys = {item["key"] for item in r2_physical}
-    cld_phys_ids = {item["public_id"] for item in cld_physical}
-    
-    # 2. Fetch DB entities
-    metadata_list = await db.asset_metadata.find({}).to_list(length=100000)
-    submissions = await db.submissions.find({}).to_list(length=10000)
-    talents = await db.talents.find({}).to_list(length=10000)
-    # Production Certification (Phase 4 item 4): applications.media was
-    # missing from this reference set. build_prefill_media()/the /apply
-    # hydrate-media logic both copy a talent's Library media BY VALUE (same
-    # public_id) into applications too, not just submissions — omitting
-    # `applications` here meant this health-cleanup tool could treat a
-    # still-in-use asset as "orphaned" and physically destroy it.
-    applications = await db.applications.find({}).to_list(length=10000)
-    feedbacks = await db.feedback.find({}).to_list(length=10000)
+    """DISABLED. Destructive one-click cleanup permanently removed for safety.
 
-    db_referenced_ids = set()
-    for doc in metadata_list:
-        pid = doc.get("public_id")
-        if pid:
-            db_referenced_ids.add(pid)
-    for sub in submissions:
-        for m in sub.get("media", []):
-            pid = m.get("public_id")
-            if pid:
-                db_referenced_ids.add(pid)
-    for tal in talents:
-        for m in tal.get("media", []):
-            pid = m.get("public_id")
-            if pid:
-                db_referenced_ids.add(pid)
-    for app in applications:
-        for m in app.get("media", []):
-            pid = m.get("public_id")
-            if pid:
-                db_referenced_ids.add(pid)
-    for fb in feedbacks:
-        if fb.get("content_url"):
-            leaf = fb.get("content_url").split("/")[-1].split(".")[0]
-            db_referenced_ids.add(leaf)
-
-    cleaned_orphaned = 0
-    cleaned_broken = 0
-    cleaned_unused = 0
-
-    # A. Delete Orphaned physical files
-    for item in r2_physical:
-        key = item["key"]
-        leaf = key.split("/")[-1].split(".")[0]
-        if key not in db_referenced_ids and leaf not in db_referenced_ids:
-            try:
-                get_r2_client().delete_object(Bucket=R2_BUCKET_NAME, Key=key)
-                cleaned_orphaned += 1
-            except Exception as e:
-                logger.warning(f"Health Cleanup: failed to delete R2 orphaned key {key}: {e}")
-                
-    for item in cld_physical:
-        pid = item["public_id"]
-        if pid not in db_referenced_ids:
-            try:
-                cloudinary.uploader.destroy(pid, resource_type=item["resource_type"], invalidate=True)
-                cleaned_orphaned += 1
-            except Exception as e:
-                logger.warning(f"Health Cleanup: failed to destroy Cloudinary resource {pid}: {e}")
-
-    # B. Remove Broken References from database
-    for doc in metadata_list:
-        pid = doc.get("public_id")
-        is_r2_key = pid.startswith("raw-uploads/")
-        is_broken = False
-        
-        if is_r2_key:
-            if pid not in r2_phys_keys:
-                is_broken = True
-        else:
-            if pid not in cld_phys_ids:
-                is_broken = True
-                
-        if is_broken:
-            await db.asset_metadata.delete_one({"id": doc.get("id")})
-            await db.submissions.update_many({}, {"$pull": {"media": {"public_id": pid}}})
-            await db.talents.update_many({}, {"$pull": {"media": {"public_id": pid}}})
-            cleaned_broken += 1
-
-    # C. Delete Unused / Failed files
-    for doc in metadata_list:
-        if doc.get("status") == "failed" or doc.get("upload_status") == "failed" or doc.get("project_status") == "purged":
-            pid = doc.get("public_id")
-            wrapper = {
-                "public_id": pid,
-                "resource_type": doc.get("resource_type") or "video",
-                "category": doc.get("category"),
-                "provider": "r2" if pid.startswith("raw-uploads/") else "cloudinary"
-            }
-            op_id = str(uuid.uuid4())
-            await cleanup_media_storage(wrapper, scope="submission", parent_id=doc.get("submission_id"), operation_id=op_id)
-            cleaned_unused += 1
-
-    await log_storage_action(
-        user_id=admin.get("id"),
-        action_type="HEALTH_CLEANUP",
-        details=f"Cleaned {cleaned_orphaned} orphaned files, {cleaned_broken} broken references, {cleaned_unused} unused files.",
-        operation_id=str(uuid.uuid4())
+    Always returns HTTP 410 Gone and performs no work — reads nothing,
+    deletes nothing, mutates nothing.
+    """
+    logger.warning(
+        "Blocked call to deprecated destructive endpoint POST /health/cleanup "
+        f"by admin={admin.get('email') or admin.get('id')}"
     )
-
-    return {
-        "status": "success",
-        "cleaned_orphaned": cleaned_orphaned,
-        "cleaned_broken": cleaned_broken,
-        "cleaned_unused": cleaned_unused
-    }
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "The one-click storage cleanup has been permanently disabled for "
+            "production safety. A safe replacement (dry-run manifest, ownership "
+            "and reference checks, explicit per-batch confirmation, audit log) "
+            "is being built. No assets or database references were touched."
+        ),
+    )
 
 @router.delete("/talents/{talent_id}")
 async def delete_talent_assets(talent_id: str, talent_name: str, admin: dict = Depends(require_role("admin"))):

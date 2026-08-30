@@ -171,6 +171,30 @@ def classify_item(coll, parent, item, talent_id, how_tid,
     }
 
 
+def ownership_for_new_item(coll, parent, item, talent_id, how_tid="item", *, now=None):
+    """Convenience wrapper around ``classify_item`` for a SINGLE freshly-created
+    media item (write path — P7 follow-up). Builds the trivial per-item versions
+    of the migration-scoped ``pid_owner_count`` / ``pid_norm_cats`` arguments:
+
+      * ``pid_owner_count`` — 1 for a fresh upload, or 2 when it is a
+        copy-by-value (``source_talent_media_id`` present) so ``is_shared_copy``
+        is set correctly;
+      * ``pid_norm_cats`` — the single normalized category of this item, so the
+        conflicting-category check never mis-fires on one item.
+
+    Returns the same ``ownership`` sub-document ``classify_item`` returns —
+    including ``owner_type: None`` + ``conflict`` for a genuinely unresolvable
+    item (the caller stores it verbatim; it reads as UNKNOWN/PROTECTED).
+    """
+    pid = item.get("public_id")
+    norm = CATEGORY_TO_NORMALIZED.get(item.get("category"))
+    owner_count = Counter()
+    if pid:
+        owner_count[pid] = 2 if item.get("source_talent_media_id") else 1
+    norm_cats = {pid: {norm}} if (pid and norm) else {}
+    return classify_item(coll, parent, item, talent_id, how_tid, owner_count, norm_cats, now=now)
+
+
 def folder_disagrees(ownership):
     """Report (do not enforce) a Cloudinary-folder vs authoritative-DB-owner
     mismatch. ``classify_item`` never reads the folder path; this exists only so

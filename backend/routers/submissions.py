@@ -1042,6 +1042,16 @@ async def submission_complete_upload(
         "status": "completed"
     })
     
+    # P7 follow-up: set the P3 ownership sub-document at creation.
+    try:
+        from migrations.media_ownership_rules import ownership_for_new_item
+        media["ownership"] = ownership_for_new_item(
+            "submissions", sub, {**media, "submission_id": sid}, tid,
+            "item.talent_id" if tid else "unresolved",
+        )
+    except Exception as e:
+        logger.warning("submission complete: ownership classify failed for %s: %s", payload.media_id, e)
+
     patch: Dict[str, Any] = {"$push": {"media": media}}
     was_finalized = has_been_submitted_once(sub)
     re_approval = True

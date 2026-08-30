@@ -118,8 +118,15 @@ async def resolve_authoritative_talent_for_upload(
     if not candidate_talent_ids:
         return AuthoritativeTalentResolution(ok=False, error="no_candidates")
 
+    # P7 (soft-delete audit): this is a WRITE-PATH assist — it locates the
+    # submission a WhatsApp-delivered audition asset should be attached to. A
+    # soft-deleted project/submission has no live workflow; attaching fresh
+    # media to it is never correct (it wouldn't render in client links and
+    # would be retention-purged), so a soft-deleted submission must read as
+    # "not found" here. MUST EXCLUDE — no historical-access case applies.
+    from core import active_only
     submissions = await db.submissions.find(
-        {"project_id": project_id, "talent_id": {"$in": candidate_talent_ids}},
+        active_only({"project_id": project_id, "talent_id": {"$in": candidate_talent_ids}}),
         {"_id": 0, "id": 1, "talent_id": 1, "talent_email": 1},
     ).to_list(20)
     if not submissions:
@@ -604,8 +611,9 @@ async def already_uploaded(talent_id: str, project_id: str) -> List[Dict[str, An
     ).to_list(200)
     if not rows:
         return []
+    from core import active_only  # P7: consistent with resolve_authoritative_talent_for_upload
     submission = await db.submissions.find_one(
-        {"talent_id": talent_id, "project_id": project_id}, {"_id": 0, "media": 1}
+        active_only({"talent_id": talent_id, "project_id": project_id}), {"_id": 0, "media": 1}
     )
     submitted_source_ids = {
         m.get("source_message_id") for m in ((submission or {}).get("media") or []) if m.get("source_message_id")

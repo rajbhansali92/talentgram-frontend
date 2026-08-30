@@ -705,15 +705,6 @@ def cloudinary_upload(
     is_pdf = ct == "application/pdf" or ct.startswith("application/pdf")
     if is_pdf and resource_type == "auto":
         resource_type = "raw"
-        
-    is_video = resource_type == "video" or (
-        resource_type == "auto"
-        and ct.startswith("video/")
-    )
-    is_image = resource_type == "image" or (
-        resource_type == "auto"
-        and ct.startswith("image/")
-    )
 
     upload_kwargs: Dict[str, Any] = dict(
         folder=folder,
@@ -723,60 +714,19 @@ def cloudinary_upload(
         unique_filename=False,
     )
 
-    if is_video:
-        is_audio = clean_ct.startswith("audio/") or (detected_mime and detected_mime.startswith("audio/"))
-        if is_audio:
-            # Skip eager video transformations (like resizing or poster frames) for audio files
-            pass
-        elif not keep_original and len(data) > 300_000_000:
-            upload_kwargs["transformation"] = [
-                {"width": 1280, "height": 720, "crop": "limit"},
-                {"quality": "auto", "video_codec": "auto"},
-            ]
-            upload_kwargs["format"] = "mp4"
-            # Eagerly generate only the video poster frame to control transformation generation costs.
-            upload_kwargs["eager"] = [
-                {
-                    "format": "jpg",
-                    "transformation": [
-                        {"width": 600, "height": 338, "crop": "fill", "dpr": "auto"},
-                        {"quality": "auto"},
-                    ],
-                }
-            ]
-            upload_kwargs["eager_async"] = False
-        else:
-            # Synchronous H.264 MP4 720p derivative and poster frame.
-            upload_kwargs["eager"] = [
-                {
-                    "format": "mp4",
-                    "transformation": [
-                        {"width": 1280, "height": 720, "crop": "limit"},
-                        {"quality": "auto", "video_codec": "auto"},
-                    ],
-                },
-                {
-                    "format": "jpg",
-                    "transformation": [
-                        {"width": 600, "height": 338, "crop": "fill", "dpr": "auto"},
-                        {"quality": "auto"},
-                    ],
-                }
-            ]
-            upload_kwargs["eager_async"] = False
-    elif is_image:
-        # Eagerly generate ONLY the roster thumbnail preset to prevent dynamic transform cost explosion.
-        # Larger detail/lightbox views are dynamically generated on-demand.
-        upload_kwargs["eager"] = [
-            {
-                "width": 400,
-                "crop": "fill",
-                "dpr": "auto",
-                "fetch_format": "auto",
-                "quality": "auto",
-            }
-        ]
-        upload_kwargs["eager_async"] = False
+    # Cloudinary rearchitecture P4 — NO automatic derivative generation at upload.
+    # We store exactly one canonical asset (the uploaded original) for every
+    # image and video. No eager 720p/1080p transcode, no eager poster, no eager
+    # thumbnail, no incoming (stored-asset-mutating) transformation, no
+    # size-gated or 4K-gated transcode. Thumbnails and posters are lazy,
+    # single-canonical delivery URLs computed by media_url()/video_poster_url()
+    # and persisted by the caller; a genuine browser-compat transcode is an
+    # explicit exception handled at the /complete step, never here.
+    # `keep_original` is retained in the signature for callers but no longer
+    # branches behaviour — the original is always kept.
+    #
+    # (Historical: this block used to build eager mp4+jpg for video and an
+    #  eager w_400 for images; see docs/CLOUDINARY_P4_AUDIT.md.)
 
     try:
         result = cloudinary.uploader.upload(data, **upload_kwargs)
@@ -784,18 +734,9 @@ def cloudinary_upload(
         logger.error(f"Cloudinary upload failed (folder={folder} pid={public_id}): {e}")
         raise HTTPException(502, "Storage upload failed")
 
-    # Prefer the eager (720p MP4) URL for videos so we serve compressed.
-    # Fall back to the original `secure_url` if eager generation failed.
+    # P4: serve the uploaded original. No eager derivative is requested, so
+    # there is nothing to prefer over secure_url.
     primary_url = result.get("secure_url")
-    eager_list = result.get("eager") or []
-    if is_video and eager_list:
-        # Filter for mp4 format secure_url
-        compressed = next((x.get("secure_url") for x in eager_list if x.get("format") == "mp4"), None)
-        if not compressed:
-            # Otherwise fall back to the first eager item
-            compressed = eager_list[0].get("secure_url")
-        if compressed:
-            primary_url = compressed
 
     return {
         "url": primary_url,
@@ -803,6 +744,9 @@ def cloudinary_upload(
         "public_id": result.get("public_id"),
         "resource_type": result.get("resource_type"),
         "format": result.get("format"),
+        # P4 — surfaced so callers can run the browser-compat exception check
+        # without a second Admin API round-trip.
+        "video_codec": (result.get("video") or {}).get("codec"),
         "bytes": result.get("bytes"),
         "width": result.get("width"),
         "height": result.get("height"),
@@ -905,7 +849,10 @@ async def upload_and_track_asset(
         tags.append(f"asset_type={asset_type}")
 
     media_id = str(uuid.uuid4())
-    public_id_to_store = f"{folder}/{media_id}" if keep_original else f"{folder}/audition_web"
+    # Cloudinary rearchitecture P4: always store one canonical original at
+    # {folder}/{media_id}. The old `keep_original=False` path stored a
+    # re-uploaded `{folder}/audition_web` derivative instead — see below.
+    public_id_to_store = f"{folder}/{media_id}"
 
     # Database First: Insert pending metadata record
     pending_metadata = {
@@ -914,7 +861,7 @@ async def upload_and_track_asset(
         "folder_path": folder,
         "asset_url": "",
         "secure_url": "",
-        "file_name": "audition_web" if not keep_original else media_id,
+        "file_name": media_id,
         "original_filename": f"{media_id}",
         "file_size": len(data),
         "asset_type": asset_type,
@@ -941,109 +888,48 @@ async def upload_and_track_asset(
     )
 
     try:
-        # 2. Synchronize to Cloudinary
-        if resource_type == "video" and not keep_original:
-            temp_public_id = f"original_{media_id}"
-            temp_result = cloudinary_upload(
-                data,
-                folder=folder,
-                public_id=temp_public_id,
-                resource_type="video",
-                content_type=content_type,
-                keep_original=True
-            )
+        # 2. Synchronize to Cloudinary — Cloudinary rearchitecture P4.
+        #
+        # ONE canonical upload, always keeping the original. No eager
+        # transcode, no eager poster, no eager thumbnail.
+        #
+        # Removed here (see docs/CLOUDINARY_P4_AUDIT.md §3): the
+        # `resource_type=="video" and not keep_original` re-upload chain,
+        # which uploaded the raw bytes, asked Cloudinary for an eager
+        # 1080p mp4 + jpg, then RE-UPLOADED those derivative URLs back into
+        # Cloudinary as two brand-new originals (`{folder}/audition_web`,
+        # `{folder}/thumbnail`) and destroyed the raw original — 3-4
+        # Cloudinary assets for one logical video. Confirmed dead:
+        #   * only reachable via the multipart POST /public/submissions/
+        #     {sid}/upload endpoint, which the frontend never posts to;
+        #   * ZERO live media items reference a `…/audition_web` or
+        #     `…/thumbnail` public_id.
+        # Collapsing it to a single keep-original upload therefore breaks
+        # no existing reference. `keep_original` stays in the signature for
+        # callers but no longer changes behaviour.
+        upload_res = cloudinary_upload(
+            data,
+            folder=folder,
+            public_id=media_id,
+            resource_type=resource_type,
+            content_type=content_type,
+            keep_original=True,
+        )
+        cloudinary.uploader.add_tag(",".join(tags), upload_res["public_id"])
 
-            eager_trans = [
-                {"width": 1920, "height": 1080, "crop": "limit", "video_codec": "h264", "bit_rate": "5m", "quality": "auto"},
-            ]
-            cloudinary_upload_args = {
-                "folder": folder,
-                "public_id": temp_public_id,
-                "resource_type": "video",
-                "overwrite": True,
-                "unique_filename": False,
-                "eager": [
-                    {
-                        "format": "mp4",
-                        "transformation": eager_trans
-                    },
-                    {
-                        "format": "jpg",
-                        "transformation": [{"width": 600, "height": 338, "crop": "fill", "quality": "auto"}]
-                    }
-                ],
-                "tags": tags
-            }
-            res = cloudinary.uploader.upload(data, **cloudinary_upload_args)
-
-            mp4_url = None
-            jpg_url = None
-            for eager_item in res.get("eager", []):
-                if eager_item.get("format") == "mp4":
-                    mp4_url = eager_item.get("secure_url")
-                elif eager_item.get("format") == "jpg":
-                    jpg_url = eager_item.get("secure_url")
-
-            if not mp4_url:
-                mp4_url = res.get("secure_url")
-
-            final_video_res = cloudinary.uploader.upload(
-                mp4_url,
-                folder=folder,
-                public_id="audition_web",
-                resource_type="video",
-                tags=tags
-            )
-
-            if jpg_url:
-                final_thumb_res = cloudinary.uploader.upload(
-                    jpg_url,
-                    folder=folder,
-                    public_id="thumbnail",
-                    resource_type="image",
-                    tags=tags
-                )
-            else:
-                final_thumb_res = {}
-
-            cloudinary_destroy(f"{folder}/{temp_public_id}", resource_type="video")
-
-            result = {
-                "url": final_video_res.get("secure_url"),
-                "secure_url": final_video_res.get("secure_url"),
-                "public_id": final_video_res.get("public_id"),
-                "resource_type": "video",
-                "format": final_video_res.get("format"),
-                "bytes": final_video_res.get("bytes"),
-                "width": final_video_res.get("width"),
-                "height": final_video_res.get("height"),
-                "duration": final_video_res.get("duration"),
-                "asset_id": final_video_res.get("asset_id"),
-                "thumbnail_url": final_thumb_res.get("secure_url")
-            }
-        else:
-            upload_res = cloudinary_upload(
-                data,
-                folder=folder,
-                public_id=media_id,
-                resource_type=resource_type,
-                content_type=content_type,
-                keep_original=True
-            )
-            cloudinary.uploader.add_tag(",".join(tags), upload_res["public_id"])
-
-            result = {
-                "url": upload_res["url"],
-                "secure_url": upload_res["original_url"],
-                "public_id": upload_res["public_id"],
-                "resource_type": upload_res["resource_type"],
-                "format": upload_res["format"],
-                "bytes": upload_res["bytes"],
-                "width": upload_res["width"],
-                "height": upload_res["height"],
-                "duration": upload_res["duration"],
-                "asset_id": upload_res.get("asset_id") or upload_res["public_id"]
-            }
+        result = {
+            "url": upload_res["url"],
+            "secure_url": upload_res["original_url"],
+            "public_id": upload_res["public_id"],
+            "resource_type": upload_res["resource_type"],
+            "format": upload_res["format"],
+            "video_codec": upload_res.get("video_codec"),
+            "bytes": upload_res["bytes"],
+            "width": upload_res["width"],
+            "height": upload_res["height"],
+            "duration": upload_res["duration"],
+            "asset_id": upload_res.get("asset_id") or upload_res["public_id"],
+        }
 
         final_metadata = {
             "asset_id": result.get("asset_id") or result["public_id"],
@@ -1175,40 +1061,105 @@ def audition_submission_folder(
 def audition_video_transformation() -> list:
     """Incoming transformation pinned for direct audition-video uploads: 720p
     H.264 q_auto. Cloudinary stores ONLY this derivative — the heavy 4K original
-    is discarded on ingest (mirrors the existing keep_original=False strategy)."""
+    is discarded on ingest (mirrors the existing keep_original=False strategy).
+
+    DEPRECATED (Cloudinary rearchitecture P4). No caller should apply an
+    incoming/eager video transformation any more — new video uploads store the
+    uploaded original verbatim. Retained only so any lingering import resolves.
+    """
     return [
         {"width": 1280, "height": 720, "crop": "limit"},
         {"quality": "auto", "video_codec": "auto"},
     ]
 
 
+# Cloudinary rearchitecture P4 — the ONLY sanctioned video transform: an
+# explicit browser-compatibility exception. Formats/codecs that a mainstream
+# <video> element cannot reliably decode. Anything not on these lists is served
+# as the uploaded original (zero transform).
+NON_WEB_VIDEO_FORMATS = {"avi", "wmv", "flv", "mkv", "mpeg", "mpg", "ogv", "rm", "rmvb", "asf", "vob", "divx"}
+NON_WEB_VIDEO_CODECS = {
+    "prores", "dnxhd", "mjpeg", "wmv1", "wmv2", "wmv3", "vc1",
+    "mpeg4", "msmpeg4", "msmpeg4v1", "msmpeg4v2", "msmpeg4v3",
+    "rv40", "rv30", "theora", "flv1", "cinepak", "svq3",
+}
+
+
+def video_needs_compat_delivery(fmt: Optional[str], codec: Optional[str]) -> bool:
+    """True only when the uploaded video is in a container/codec a mainstream
+    browser can't play natively — the one case where P4 permits a transform.
+    Unknown format AND unknown codec -> False (serve the original; a genuinely
+    unplayable asset is recoverable later, but transcoding-by-default is the
+    cost problem we are removing)."""
+    f = (fmt or "").strip().lower().lstrip(".")
+    c = (codec or "").strip().lower()
+    if c and c in NON_WEB_VIDEO_CODECS:
+        return True
+    if f and f in NON_WEB_VIDEO_FORMATS:
+        return True
+    return False
+
+
+# Cloudinary rearchitecture P4/P5 — the ONE canonical video-poster transform.
+# Single segment, no dpr (Cloudinary sorts params within a segment, so this is a
+# stable string): c_fill,h_338,q_auto,w_600 + a .jpg extension. Every poster URL
+# the app produces must use exactly this, so one video has at most one poster
+# derivative instead of the 7 near-identical variants the old eager/lazy mix
+# generated. Posters are lazy (generated on first grid render) and persisted by
+# the caller into media.poster_url so payload-build never has to recompute one.
+_CANONICAL_POSTER_TRANSFORM = {"width": 600, "height": 338, "crop": "fill", "quality": "auto"}
+
+
+def _bare_public_id(value: Optional[str]) -> Optional[str]:
+    """Recover a bare Cloudinary public_id from either a bare id or a full
+    delivery URL (dropping the host, /upload/, a leading version, any existing
+    transformation segment, and the extension). None for non-Cloudinary URLs."""
+    if not value:
+        return None
+    if not value.startswith(("http://", "https://")):
+        return value
+    if "res.cloudinary.com" not in value or "/upload/" not in value:
+        return None
+    tail = value.split("/upload/", 1)[1].split("?")[0].split("#")[0]
+    segs = tail.split("/")
+    while segs and (re.fullmatch(r"v\d+", segs[0]) or
+                    re.search(r"(^|,)(w_|h_|c_|q_|f_|dpr_|e_|so_|vc_|b_|ac_|g_|fl_)", segs[0])):
+        segs.pop(0)
+    pid = "/".join(segs).rsplit(".", 1)[0]
+    return pid or None
+
+
 def video_poster_url(public_id: Optional[str]) -> Optional[str]:
-    """Cloudinary video thumbnail: extract first frame as JPEG/AVIF."""
-    if not public_id:
+    """One canonical lazy JPEG first-frame URL for a video. Accepts a bare
+    public_id or a full Cloudinary delivery URL. Returns None for
+    non-Cloudinary inputs."""
+    pid = _bare_public_id(public_id)
+    if not pid:
         return None
-    if public_id.startswith(("http://", "https://")):
-        url = public_id
-        if "res.cloudinary.com" in url:
-            base, ext = os.path.splitext(url)
-            if "?" in ext:
-                ext = ext.split("?")[0]
-            jpg_url = base + ".jpg"
-            if "/video/upload/" in jpg_url:
-                # Add default width and quality transformations
-                jpg_url = jpg_url.replace("/video/upload/", "/video/upload/w_600,h_338,c_fill,q_auto/")
-            return jpg_url
-        return None
-    url, _ = cloudinary.utils.cloudinary_url(
-        public_id,
+    built, _ = cloudinary.utils.cloudinary_url(
+        pid,
         resource_type="video",
         format="jpg",
-        transformation=[
-            {"width": 600, "height": 338, "crop": "fill", "dpr": "auto"},
-            {"quality": "auto"}
-        ],
-        secure=True
+        transformation=_CANONICAL_POSTER_TRANSFORM,
+        secure=True,
     )
-    return url
+    return built
+
+
+def compat_video_delivery_url(public_id: Optional[str]) -> Optional[str]:
+    """One canonical lazy `f_mp4` delivery URL for a video that failed the
+    web-safe check (``video_needs_compat_delivery``). `fetch_format=mp4` (→
+    `f_mp4`) tells Cloudinary to re-container/transcode to a browser-playable
+    MP4 on first playback. Single transformation string, so a compat video has
+    at most one derivative. Accepts a bare public_id or a full delivery URL."""
+    pid = _bare_public_id(public_id)
+    if not pid:
+        return None
+    built, _ = cloudinary.utils.cloudinary_url(
+        pid, resource_type="video", format="mp4",
+        transformation={"fetch_format": "mp4"}, secure=True,
+    )
+    return built
 
 
 def media_url(

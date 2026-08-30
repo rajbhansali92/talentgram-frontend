@@ -55,6 +55,8 @@ from core import (
     media_url,
     normalize_instagram_handle,
     video_poster_url,
+    video_needs_compat_delivery,
+    compat_video_delivery_url,
     update_talent_cover_cache,
     normalize_email,
     verify_email_ownership,
@@ -829,23 +831,26 @@ async def sign_application_upload(
     folder = f"{APP_NAME}/applications/{aid}"
     public_id = media_id
     rt = "image"
-    eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
+    # Cloudinary rearchitecture P4 — NO eager transformation. Cloudinary stores
+    # one canonical asset (the uploaded original). The card thumbnail is a lazy,
+    # single-canonical delivery URL; HEIC→web is handled by the frontend's lazy
+    # IMAGE_URL delivery transform. `eager` stays in the response (null) so the
+    # frontend shape is unchanged.
+    eager = None
 
     import time
     import cloudinary.utils
     timestamp = int(time.time())
-    
+
     params = {
         "folder": folder,
         "public_id": public_id,
         "timestamp": timestamp,
     }
-    if eager:
-        params["eager"] = eager
-        
+
     api_secret = cloudinary.config().api_secret
     signature = cloudinary.utils.api_sign_request(params, api_secret)
-    
+
     return {
         "signature": signature,
         "timestamp": timestamp,
@@ -994,15 +999,15 @@ async def app_video_signature(
         # routers/submissions.py's attach_video_media single-slot pattern.
         public_id = "intro_video"
 
-    eager = "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg"
+    # Cloudinary rearchitecture P4 — NO eager transformation. One canonical
+    # asset (the original). Poster is lazy + persisted at /video-complete; a
+    # browser-compat transcode, if ever needed, is an explicit exception there.
     tags = f"application_id={aid},category=intro_video,asset_kind=application_video"
     timestamp = int(time.time())
     params_to_sign = {
         "timestamp": timestamp,
         "folder": folder,
         "public_id": public_id,
-        "eager": eager,
-        "eager_async": "true",
         "overwrite": "true",
         "tags": tags,
     }
@@ -1037,8 +1042,6 @@ async def app_video_signature(
         "params": {
             "folder": folder,
             "public_id": public_id,
-            "eager": eager,
-            "eager_async": "true",
             "overwrite": "true",
             "tags": tags,
         },
@@ -1053,6 +1056,7 @@ class AppVideoCompleteIn(BaseModel):
     bytes: int
     duration: Optional[float] = None
     format: Optional[str] = None
+    video_codec: Optional[str] = None  # P4 — for the browser-compat exception
 
 
 @router.post("/public/apply/{aid}/video-complete")
@@ -1139,7 +1143,10 @@ async def app_video_complete(
             r2_url=r2_read_url,
             folder=folder,
             public_id=leaf_pid,
-            eager_transformation="c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg",
+            # Cloudinary rearchitecture P4 — no eager transcode. (Retired
+            # R2→Cloudinary pipeline; reachable only by a pre-retirement
+            # session; kept inert.)
+            eager_transformation=None,
             scope="application",
             parent_id=aid,
             category="intro_video",
@@ -1164,10 +1171,23 @@ async def app_video_complete(
     except Exception as e:
         logger.warning(f"app-video-complete: resource fetch failed {public_id}: {e}")
 
+    # Cloudinary rearchitecture P4 — serve the uploaded original; the
+    # browser-compat exception (one canonical lazy f_mp4) fires only when the
+    # stored container/codec can't play natively.
+    _orig_url = asset.get("secure_url") or asset.get("url")
+    _delivery_url = _orig_url
+    _needs_compat = video_needs_compat_delivery(
+        asset.get("format"), (asset.get("video") or {}).get("codec"),
+    )
+    if _needs_compat:
+        _compat = compat_video_delivery_url(public_id)
+        if _compat:
+            _delivery_url = _compat
+    _poster = video_poster_url(public_id)
     media = {
         "id": str(uuid.uuid4()),
         "category": "intro_video",
-        "url": asset.get("secure_url") or asset.get("url"),
+        "url": _delivery_url,
         "public_id": public_id,
         "resource_type": "video",
         "content_type": "video/mp4",
@@ -1177,9 +1197,12 @@ async def app_video_complete(
         "scope": "application",
         "application_id": aid,
         "duration": duration,
-        "thumbnail_url": video_poster_url(public_id),
-        "poster_url": video_poster_url(public_id),
+        "thumbnail_url": _poster,
+        "poster_url": _poster,
     }
+    if _needs_compat:
+        media["original_url"] = _orig_url
+        media["needs_compat_delivery"] = True
 
     # Single-slot replacement for intro_video — pull the old entry only now
     # that the new asset is confirmed uploaded (matches the R2 branch above

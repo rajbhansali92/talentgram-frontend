@@ -631,7 +631,12 @@ export function UploadManagerProvider({ children }) {
                     }
                 });
 
-                // 4. Submit completed metadata to backend to save
+                // 4. Submit completed metadata to backend to save.
+                // P4 (Cloudinary rearchitecture): the backend no longer requests
+                // any eager derivative, so `eager` is normally absent. We now
+                // forward Cloudinary's detected `format` and video `codec` so the
+                // backend can decide the browser-compatibility exception without
+                // transcoding by default.
                 const completeRes = await api.post(`${dynamicEndpoint}/complete`, {
                     media_id: signData.media_id,
                     category,
@@ -642,7 +647,9 @@ export function UploadManagerProvider({ children }) {
                     duration: uploadRes.data.duration,
                     content_type: fileToUpload.type,
                     original_filename: fileToUpload.name,
-                    eager: uploadRes.data.eager
+                    eager: uploadRes.data.eager,
+                    format: uploadRes.data.format,
+                    video_codec: uploadRes.data.video?.codec,
                 }, { headers });
 
                 if (onSuccess) onSuccess(completeRes.data);

@@ -466,6 +466,11 @@ async def list_talents(
         height_min, height_max, followers_min,
         interested_in, interested_in_mode, skills, skills_mode, tags, tags_mode,
     )
+    # P7: the operational roster excludes archived / soft-deleted talents unless
+    # the caller explicitly asks for that status.
+    from core import active_only
+    if not status:
+        query = active_only(query, exclude_archived=True)
     has_structured_filters = bool(query.get("$and"))
 
     # List projection excludes internal/provenance fields (see _LIST_PROJECTION).

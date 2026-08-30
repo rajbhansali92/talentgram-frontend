@@ -500,7 +500,8 @@ async def list_variables(admin: dict = Depends(current_team_or_admin)):
 @router.get("/projects")
 async def list_projects_for_wa(admin: dict = Depends(current_team_or_admin)):
     """Thin wrapper — returns same project list as /api/projects."""
-    docs = await db.projects.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    from core import active_only  # P7: exclude soft-deleted projects from the WA picker
+    docs = await db.projects.find(active_only({}), {"_id": 0}).sort("created_at", -1).to_list(500)
     return docs
 
 
@@ -557,7 +558,8 @@ async def search_projects(
     full-list dropdown so the picker scales to hundreds of projects."""
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
-    query: Dict[str, Any] = {}
+    from core import active_only  # P7: exclude soft-deleted projects
+    query: Dict[str, Any] = {} if status else active_only({})
     if status:
         query["status"] = status
     if q:

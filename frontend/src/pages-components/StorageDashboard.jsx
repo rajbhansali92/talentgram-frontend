@@ -52,17 +52,22 @@ export default function StorageDashboard() {
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [actionLoading, setActionLoading] = useState(false);
 
+  const [accounting, setAccounting] = useState(null);
+
   const fetchCore = useCallback(async () => {
     setLoading(true);
     try {
-      const [resSummary, resAnalytics, resProjects] = await Promise.all([
+      const [resSummary, resAnalytics, resProjects, resAccounting] = await Promise.all([
         adminApi.get(`/admin/cloudinary/summary`),
         adminApi.get(`/admin/cloudinary/analytics`),
         adminApi.get(`/admin/cloudinary/projects`),
+        // P7: corrected accounting model — one cached Cloudinary usage call + Mongo aggregation.
+        adminApi.get(`/admin/cloudinary/accounting`).catch(() => ({ data: null })),
       ]);
       setSummary(resSummary.data);
       setAnalytics(resAnalytics.data);
       setProjects(resProjects.data);
+      setAccounting(resAccounting.data);
       setError(null);
     } catch (err) {
       console.error("Failed to load storage dashboard metrics:", err);
@@ -273,6 +278,9 @@ export default function StorageDashboard() {
         </div>
       </div>
 
+      {/* P7 — CORRECTED STORAGE ACCOUNTING (Cloudinary vs MongoDB, kept separate) */}
+      {accounting && <StorageAccountingPanel data={accounting} />}
+
       {/* STORAGE HEALTH & CLEANUP — lazy, explicit scan only */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-6">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -450,6 +458,108 @@ export default function StorageDashboard() {
           onDeleted={() => refreshAfterDelete(manageTarget.project_id)}
         />
       )}
+    </div>
+  );
+}
+
+function fmtAge(s) {
+  if (s == null) return "never";
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+
+// P7 — corrected storage accounting. Cloudinary (A/E) is authoritative for bytes
+// and object counts; MongoDB (B/C/D/G) is authoritative for ownership and
+// references and is always labelled "reference size", never "Cloudinary storage".
+function StorageAccountingPanel({ data }) {
+  const c = data.cloudinary || {};
+  const ar = data.application_references || {};
+  const own = data.ownership || {};
+  const lc = data.lifecycle || {};
+  const rec = data.reconciliation || {};
+  const fr = data.freshness || {};
+  const scan = data.orphan_scan || {};
+
+  const Cell = ({ label, value, sub }) => (
+    <div className="bg-slate-50 border border-slate-200/60 p-4 rounded-xl">
+      <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-400">{label}</div>
+      <div className="text-lg font-bold text-slate-900 font-display mt-1">{value}</div>
+      {sub && <div className="text-[11px] text-slate-500 mt-0.5">{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-5">
+      <div>
+        <h3 className="text-base font-bold text-slate-900 font-display flex items-center gap-2">
+          <Database className="w-5 h-5 text-slate-700" />
+          Storage Accounting
+        </h3>
+        <p className="text-xs text-slate-500 mt-1">
+          Cloudinary is authoritative for bytes / objects / derived / credits.
+          MongoDB figures are <strong>application reference size</strong> — not Cloudinary storage.
+          Ownership uses the P3 ownership metadata, never the folder path. Read-only.
+        </p>
+      </div>
+
+      <div>
+        <div className="text-xs font-semibold text-slate-600 mb-2">A · CLOUDINARY ACTUAL STORAGE
+          <span className="text-slate-400 font-normal"> — usage API, updated {fmtAge(fr.cloudinary_usage?.age_seconds)}{fr.cloudinary_usage?.stale ? " (stale)" : ""}</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Cell label="Storage" value={formatBytes(c.storage_bytes)} />
+          <Cell label="Objects" value={c.objects ?? "—"} sub={`${c.original_objects ?? "?"} orig + ${c.derived_objects ?? "?"} derived (E)`} />
+          <Cell label="Bandwidth (period)" value={formatBytes(c.bandwidth_bytes)} />
+          <Cell label="Credits" value={c.credits?.used != null ? `${c.credits.used.toFixed?.(1) ?? c.credits.used}` : "—"} sub={c.credits?.used_percent != null ? `${c.credits.used_percent}% of plan` : null} />
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs font-semibold text-slate-600 mb-2">B · APPLICATION MEDIA REFERENCES
+          <span className="text-slate-400 font-normal"> — MongoDB media[].size, NOT Cloudinary storage</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Cell label="Reference size (deduped)" value={formatBytes(ar.reference_bytes)} sub={`raw w/ shared copies: ${formatBytes(ar.reference_bytes_raw_with_shared_copies)}`} />
+          <Cell label="Distinct backing assets" value={ar.distinct_backing_assets ?? "—"} sub={`${ar.shared_backing_assets ?? 0} shared copy-by-value`} />
+          <Cell label="Talent refs" value={ar.per_collection?.talents?.items ?? "—"} sub={formatBytes(ar.per_collection?.talents?.reference_bytes)} />
+          <Cell label="Submission / App refs" value={`${ar.per_collection?.submissions?.items ?? 0} / ${ar.per_collection?.applications?.items ?? 0}`} />
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs font-semibold text-slate-600 mb-2">C / D / G · OWNERSHIP <span className="text-slate-400 font-normal">(P3)</span></div>
+        <div className="grid grid-cols-3 gap-3">
+          <Cell label="Global talent media (C)" value={own.global_talent_media?.distinct_assets ?? "—"} sub={formatBytes(own.global_talent_media?.reference_bytes)} />
+          <Cell label="Project audition media (D)" value={own.project_audition_media?.distinct_assets ?? "—"} sub={formatBytes(own.project_audition_media?.reference_bytes)} />
+          <Cell label="Unknown / conflicting (G)" value={own.unknown_or_conflicting?.distinct_assets ?? "—"} sub="protected — never auto-purged" />
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs font-semibold text-slate-600 mb-2">LIFECYCLE</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Cell label="Active" value={lc.active?.distinct_assets ?? "—"} />
+          <Cell label="Pending deletion" value={lc.pending_deletion?.distinct_assets ?? 0} sub={`ledger: ${lc.ledger?.total ?? 0}`} />
+          <Cell label="Eligible for cleanup" value={lc.ledger?.eligible_for_cleanup ?? 0} sub="P8/P9 only — not deleted here" />
+          <Cell label="Protected" value={lc.protected?.distinct_assets ?? 0} />
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs font-semibold text-slate-600 mb-2">F · ORPHANED ASSETS <span className="text-slate-400 font-normal">— from last full scan only</span></div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Cell label="Scan status" value={scan.status ?? "never_run"} sub={scan.last_scan_at ? fmtAge(scan.age_seconds) : "run a Health Scan"} />
+          <Cell label="Unreferenced objects" value={scan.cloudinary_unreferenced_objects ?? "—"} sub={scan.available ? formatBytes(scan.cloudinary_unreferenced_bytes) : "unknown until scanned"} />
+          <Cell label="Broken references" value={scan.broken_references ?? "—"} />
+          <Cell label="Reconciliation gap" value={formatBytes(rec.unaccounted_bytes)} sub="derived + orphans + null-size legacy" />
+        </div>
+      </div>
+
+      <p className="text-[11px] text-slate-400 leading-relaxed border-t border-slate-100 pt-3">
+        {(data.notes || []).join(" · ")}
+      </p>
     </div>
   );
 }

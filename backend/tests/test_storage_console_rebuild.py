@@ -173,81 +173,57 @@ class TestSharedAssetProtection:
 
 @pytest.mark.asyncio
 class TestDeleteOneMediaItem:
-    async def test_unshared_media_is_physically_destroyed(self):
-        mock_db.submissions.count_documents = AsyncMock(return_value=0)
-        mock_db.applications.count_documents = AsyncMock(return_value=0)
-        mock_db.talents.count_documents = AsyncMock(return_value=0)
+    """P6 (media lifecycle): `delete_one_media_item` no longer makes its own
+    destroy decision — it delegates to `media_lifecycle.delete_if_safe` and
+    always pulls the local reference. These tests pin that wiring contract."""
+
+    async def test_routes_decision_through_lifecycle_and_always_pulls_ref(self):
         mock_db.submissions.update_one = AsyncMock()
         mock_parent_coll = mock_db.submissions
-
-        media_item = {"id": "m1", "public_id": "pid_x", "category": "image", "resource_type": "image", "url": "https://res.cloudinary.com/x/image/upload/v1/talentgram/submissions/sub_1/pid_x.jpg"}
-        with patch("routers.cloudinary_admin.cleanup_media_storage", new=AsyncMock()) as mock_cleanup, \
-             patch("routers.cloudinary_admin.log_storage_action", new=AsyncMock()), \
-             patch("cloudinary.api.resource", side_effect=cloudinary.exceptions.NotFound("gone")):
-            result = await delete_one_media_item(mock_parent_coll, "sub_1", media_item, "admin_1")
-
-        mock_cleanup.assert_awaited_once()
-        assert result["physically_deleted"] is True
-        assert result["shared_refs_remaining"] == 0
-        mock_parent_coll.update_one.assert_awaited_once()
-        pull_arg = mock_parent_coll.update_one.call_args[0][1]
-        assert pull_arg == {"$pull": {"media": {"id": "m1"}}}
-
-    async def test_destroy_not_confirmed_reports_false(self):
-        """The exact bug found via live testing: cleanup_media_storage()
-        never raises even when Cloudinary's destroy() silently no-ops
-        (e.g. mismatched public_id). physically_deleted must reflect a real
-        post-delete Cloudinary lookup, not just "we attempted it"."""
-        mock_db.submissions.count_documents = AsyncMock(return_value=0)
-        mock_db.applications.count_documents = AsyncMock(return_value=0)
-        mock_db.talents.count_documents = AsyncMock(return_value=0)
-        mock_db.submissions.update_one = AsyncMock()
-        mock_parent_coll = mock_db.submissions
-
-        media_item = {"id": "m4", "public_id": "pid_y", "category": "image", "resource_type": "image", "url": "https://res.cloudinary.com/x/image/upload/v1/talentgram/submissions/sub_1/pid_y.jpg"}
-        with patch("routers.cloudinary_admin.cleanup_media_storage", new=AsyncMock()), \
-             patch("routers.cloudinary_admin.log_storage_action", new=AsyncMock()), \
-             patch("cloudinary.api.resource", return_value={"bytes": 123}):  # still exists!
-            result = await delete_one_media_item(mock_parent_coll, "sub_1", media_item, "admin_1")
-
-        assert result["physically_deleted"] is False
-
-    async def test_shared_media_only_pulls_local_reference(self):
-        """Shared/global-asset protection: when the public_id is referenced
-        by the talent's global profile, the Cloudinary asset must NOT be
-        destroyed — only the local submission reference is removed."""
-        mock_db.submissions.count_documents = AsyncMock(return_value=0)
-        mock_db.applications.count_documents = AsyncMock(return_value=0)
-        mock_db.talents.count_documents = AsyncMock(return_value=1)  # shared with global talent
-        mock_db.submissions.update_one = AsyncMock()
-        mock_parent_coll = mock_db.submissions
-
-        media_item = {"id": "m2", "public_id": "pid_shared", "category": "indian", "resource_type": "image"}
-        with patch("routers.cloudinary_admin.cleanup_media_storage", new=AsyncMock()) as mock_cleanup, \
+        mock_parent_coll.name = "submissions"
+        media_item = {"id": "m1", "public_id": "pid_x", "category": "image", "resource_type": "image",
+                      "url": "https://res.cloudinary.com/x/image/upload/v1/talentgram/submissions/sub_1/pid_x.jpg"}
+        with patch("media_lifecycle.delete_if_safe", new=AsyncMock(return_value={"outcome": "would_delete"})) as mock_gate, \
              patch("routers.cloudinary_admin.log_storage_action", new=AsyncMock()):
             result = await delete_one_media_item(mock_parent_coll, "sub_1", media_item, "admin_1")
-
-        mock_cleanup.assert_not_awaited()
+        mock_gate.assert_awaited_once()
+        assert result["lifecycle_outcome"] == "would_delete"
         assert result["physically_deleted"] is False
-        assert result["shared_refs_remaining"] == 1
         mock_parent_coll.update_one.assert_awaited_once()
+        assert mock_parent_coll.update_one.call_args[0][1] == {"$pull": {"media": {"id": "m1"}}}
 
-    async def test_audition_take_skips_reference_scan(self):
-        """Audition takes are architecturally never reusable/global, so the
-        reference-count scan is skipped entirely for them (perf + always-safe)."""
-        mock_db.submissions.count_documents = AsyncMock()
-        mock_db.applications.count_documents = AsyncMock()
-        mock_db.talents.count_documents = AsyncMock()
+    async def test_protected_media_reports_not_physically_deleted(self):
         mock_db.submissions.update_one = AsyncMock()
         mock_parent_coll = mock_db.submissions
-
-        media_item = {"id": "m3", "public_id": "pid_take", "category": "take", "resource_type": "video", "url": "https://res.cloudinary.com/x/video/upload/v1/talentgram/submissions/sub_1/pid_take.mp4"}
-        with patch("routers.cloudinary_admin.cleanup_media_storage", new=AsyncMock()) as mock_cleanup, \
-             patch("routers.cloudinary_admin.log_storage_action", new=AsyncMock()), \
-             patch("cloudinary.api.resource", side_effect=cloudinary.exceptions.NotFound("gone")):
+        mock_parent_coll.name = "submissions"
+        media_item = {"id": "m2", "public_id": "pid_shared", "category": "indian", "resource_type": "image"}
+        with patch("media_lifecycle.delete_if_safe", new=AsyncMock(return_value={"outcome": "protected"})), \
+             patch("routers.cloudinary_admin.log_storage_action", new=AsyncMock()):
             result = await delete_one_media_item(mock_parent_coll, "sub_1", media_item, "admin_1")
+        assert result["physically_deleted"] is False
+        assert result["lifecycle_outcome"] == "protected"
+        mock_parent_coll.update_one.assert_awaited_once()
 
-        mock_db.submissions.count_documents.assert_not_awaited()
-        mock_db.talents.count_documents.assert_not_awaited()
-        mock_cleanup.assert_awaited_once()
-        assert result["physically_deleted"] is True
+    async def test_audition_take_marked_pending(self):
+        mock_db.submissions.update_one = AsyncMock()
+        mock_parent_coll = mock_db.submissions
+        mock_parent_coll.name = "submissions"
+        media_item = {"id": "m3", "public_id": "pid_take", "category": "take", "resource_type": "video",
+                      "url": "https://res.cloudinary.com/x/video/upload/v1/talentgram/submissions/sub_1/pid_take.mp4"}
+        with patch("media_lifecycle.delete_if_safe", new=AsyncMock(return_value={"outcome": "marked_pending"})) as mock_gate, \
+             patch("routers.cloudinary_admin.log_storage_action", new=AsyncMock()):
+            result = await delete_one_media_item(mock_parent_coll, "sub_1", media_item, "admin_1")
+        mock_gate.assert_awaited_once()
+        assert result["lifecycle_outcome"] == "marked_pending"
+        assert result["physically_deleted"] is False
+
+    async def test_gate_failure_still_pulls_local_reference(self):
+        mock_db.submissions.update_one = AsyncMock()
+        mock_parent_coll = mock_db.submissions
+        mock_parent_coll.name = "submissions"
+        media_item = {"id": "m4", "public_id": "pid_y", "category": "image", "resource_type": "image"}
+        with patch("media_lifecycle.delete_if_safe", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch("routers.cloudinary_admin.log_storage_action", new=AsyncMock()):
+            result = await delete_one_media_item(mock_parent_coll, "sub_1", media_item, "admin_1")
+        assert result["physically_deleted"] is False
+        mock_parent_coll.update_one.assert_awaited_once()

@@ -1479,14 +1479,48 @@ async def safe_cleanup_media_storage(
     media delete/replace, webhook-driven replacement cleanup) must call
     this instead of `cleanup_media_storage()` directly. Do not duplicate
     the reference-check + cleanup pairing at the call site.
+
+    Cloudinary rearchitecture P6 — this now delegates the *decision* to the
+    authoritative, ownership-aware `media_lifecycle` service:
+      * ownership unknown/conflicting, or any protecting reference  -> no-op
+      * global talent media                                        -> no-op
+      * project audition media                                     -> recorded
+        in the `pending_media_deletions` ledger with the retention window
+      * physically destroyed ONLY when the gate says deletable AND the
+        `MEDIA_LIFECYCLE_PHYSICAL_DELETE` env flag is on (off during P6)
     """
     if not media:
         return
     pid = media.get("public_id")
     stream_uid = media.get("stream_uid")
-    if (pid or stream_uid) and await is_media_asset_referenced(pid, stream_uid):
+    if not pid and not stream_uid:
         return
-    await cleanup_media_storage(media, scope=scope, parent_id=parent_id, operation_id=operation_id)
+
+    import media_lifecycle as _ml
+
+    _coll = {"talent": "talents", "submission": "submissions",
+             "application": "applications"}.get(scope or media.get("scope"))
+    ctx = _ml.DeletionContext(
+        exclude_collection=_coll, exclude_parent_id=parent_id,
+    )
+    decision = await _ml.can_delete(db, media, ctx=ctx)
+
+    if decision.deletable and _ml._physical_delete_enabled():
+        await cleanup_media_storage(media, scope=scope, parent_id=parent_id, operation_id=operation_id)
+        return
+    # Not physically deleting: record intent for the P8/P9 purge when this is a
+    # genuinely deletable / audition-owned asset the caller has already
+    # unreferenced. Global / shared / unknown assets are left entirely alone.
+    if decision.owner.is_project_audition_media or decision.deletable:
+        try:
+            await _ml.enqueue_pending_deletion(
+                db, media, owner=decision.owner,
+                reason=f"safe_cleanup ({scope}): {decision.reason}",
+                retention_days=decision.retention_days
+                if decision.retention_days is not None else await _ml.get_retention_days(db),
+            )
+        except Exception as e:  # never fail the caller's delete action
+            logger.warning(f"[safe_cleanup] ledger enqueue failed pid={pid}: {e}")
 
 
 async def delete_talent_media_item(tid: str, mid: str) -> None:

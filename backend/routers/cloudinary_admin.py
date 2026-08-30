@@ -671,28 +671,42 @@ async def restore_project(project_id: str, admin: dict = Depends(require_role("a
 @router.delete("/projects/{project_id}/auditions")
 async def delete_project_audition_videos(project_id: str, admin: dict = Depends(require_role("admin"))):
     """Delete all audition videos for a project (remove objects from R2/Cloudinary and database references)."""
-    await assert_providers_healthy()
-    # 1. Fetch all submissions for the project
+    # P6 (media lifecycle): audition takes are project-owned ephemeral media —
+    # route each through the ownership-aware gate. The local reference is pulled;
+    # physical destruction happens only when the gate says deletable AND the P6
+    # physical-delete flag is on. Otherwise each take is recorded PENDING_DELETION
+    # with the configured retention window.
+    from media_lifecycle import delete_if_safe, DeletionContext, get_retention_days
+    retention_days = await get_retention_days(db)
     submissions = await db.submissions.find({"project_id": project_id}).to_list(length=10000)
-    deleted_count = 0
+    processed = 0
+    outcomes: Dict[str, int] = {}
     for sub in submissions:
-        # Find takes / audition videos
         audition_media = [m for m in sub.get("media", []) if m.get("category") in ("take", "take_1", "take_2", "take_3")]
         for am in audition_media:
-            await cleanup_media_storage(am, scope="submission", parent_id=sub["id"])
-            deleted_count += 1
-        # Pull from submission media array
+            res = await delete_if_safe(
+                db, am,
+                ctx=DeletionContext(actor=admin.get("id"),
+                                    project_deletion=project_id,
+                                    exclude_collection="submissions", exclude_parent_id=sub["id"]),
+                collection_name="submissions", parent_id=sub["id"],
+                destroyer=lambda m, _sid=sub["id"]: cleanup_media_storage(m, scope="submission", parent_id=_sid),
+                retention_days=retention_days,
+            )
+            outcomes[res.get("outcome")] = outcomes.get(res.get("outcome"), 0) + 1
+            processed += 1
         await db.submissions.update_one(
             {"id": sub["id"]},
             {"$pull": {"media": {"category": {"$in": ["take", "take_1", "take_2", "take_3"]}}}}
         )
-    # Remove from asset_metadata
     await db.asset_metadata.delete_many({
         "project_id": project_id,
         "asset_type": "audition_video"
     })
     await log_storage_action(user_id=admin.get("id"), action_type="DELETE_AUDITIONS", project_id=project_id)
-    return {"status": "success", "message": f"Successfully deleted {deleted_count} audition videos for project {project_id}."}
+    return {"status": "success", "processed": processed, "outcomes": outcomes,
+            "retention_days": retention_days,
+            "message": f"{processed} audition take(s) for project {project_id} processed through the media lifecycle gate."}
 
 @router.delete("/projects/{project_id}/voice-notes")
 async def delete_project_voice_notes(project_id: str, admin: dict = Depends(require_role("admin"))):
@@ -800,52 +814,46 @@ async def count_other_references(public_id: str, exclude_scope: str, exclude_par
 
 
 async def delete_one_media_item(parent_coll, parent_id: str, media_item: Dict[str, Any], admin_id: str) -> Dict[str, Any]:
-    """Safely delete a single media item: physically destroy the Cloudinary
-    asset ONLY if no other record references the same public_id, always
-    remove the local reference, and verify both sides afterward. Never
-    raises — mirrors cleanup_media_storage's best-effort contract."""
+    """Remove one media item from a submission (Cloudinary rearchitecture, P6).
+
+    P6 change: the decision to physically destroy the backing Cloudinary asset
+    is delegated to the ownership-aware ``media_lifecycle`` gate instead of the
+    local ``count_other_references`` heuristic. The local reference is always
+    pulled; the asset is only ever physically destroyed when the gate says
+    deletable AND the P6 physical-delete flag is on (off during rollout) —
+    otherwise audition media is recorded as PENDING_DELETION and everything
+    else is left untouched. Never raises.
+    """
+    from media_lifecycle import delete_if_safe, DeletionContext
+
     public_id = media_item.get("public_id")
-    category = media_item.get("category")
-    is_audition = category == "take" or category in LEGACY_TAKE_CATEGORIES
-    other_refs = 0
-    if public_id and not is_audition:
-        # Audition takes are architecturally never synced to a global
-        # profile or reused across submissions (REUSABLE_MEDIA_CATEGORIES
-        # excludes them) — skip the reference scan for the common case.
-        other_refs = await count_other_references(public_id, "submission", parent_id)
+    mid = media_item.get("id")
+    coll_name = getattr(parent_coll, "name", "submissions")
 
-    physically_deleted = False
-    if public_id and other_refs == 0:
-        full_public_id = resolve_full_public_id(media_item)
-        cleanup_item = dict(media_item)
-        cleanup_item["public_id"] = full_public_id
-        await cleanup_media_storage(cleanup_item, scope="submission", parent_id=parent_id)
-        # cleanup_media_storage() is best-effort and never raises, so a
-        # failed/no-op destroy() call (e.g. Cloudinary returning "not
-        # found" for a mismatched public_id) would otherwise report success
-        # with the asset still live. Verify directly against Cloudinary
-        # (Phase 9 requirement: "Confirm Cloudinary deletion succeeded").
-        rtype = media_item.get("resource_type") or ("video" if is_audition or category == "intro_video" else "image")
-        try:
-            await run_in_threadpool(cloudinary.api.resource, full_public_id, resource_type=rtype)
-            physically_deleted = False
-            logger.error(f"[delete_one_media_item] Cloudinary asset still present after destroy: {full_public_id}")
-        except cloudinary.exceptions.NotFound:
-            physically_deleted = True
-        except Exception as e:
-            # Couldn't confirm either way (e.g. transient network/API error)
-            # — report honestly as unconfirmed rather than claiming success.
-            physically_deleted = False
-            logger.warning(f"[delete_one_media_item] Could not verify deletion of {full_public_id}: {e}")
+    outcome = None
+    try:
+        res = await delete_if_safe(
+            db, media_item,
+            ctx=DeletionContext(actor=admin_id,
+                                exclude_collection=coll_name, exclude_parent_id=parent_id),
+            collection_name=coll_name, parent_id=parent_id,
+            destroyer=lambda m: cleanup_media_storage(
+                {**m, "public_id": resolve_full_public_id(m) or m.get("public_id")},
+                scope="submission", parent_id=parent_id),
+        )
+        outcome = res.get("outcome")
+    except Exception as e:
+        logger.warning(f"[delete_one_media_item] lifecycle gate failed pid={public_id}: {e}")
 
-    await parent_coll.update_one({"id": parent_id}, {"$pull": {"media": {"id": media_item.get("id")}}})
+    await parent_coll.update_one({"id": parent_id}, {"$pull": {"media": {"id": mid}}})
 
     await log_storage_action(
         user_id=admin_id,
         action_type="DELETE_MEDIA_ITEM",
-        details=f"public_id={public_id} physically_deleted={physically_deleted} other_refs={other_refs}",
+        details=f"public_id={public_id} lifecycle_outcome={outcome}",
     )
-    return {"media_id": media_item.get("id"), "public_id": public_id, "physically_deleted": physically_deleted, "shared_refs_remaining": other_refs}
+    return {"media_id": mid, "public_id": public_id, "lifecycle_outcome": outcome,
+            "physically_deleted": outcome == "deleted"}
 
 
 @router.delete("/projects/{project_id}/talents/{talent_id}/auditions")
@@ -1090,15 +1098,44 @@ async def run_storage_cleanup(admin: dict = Depends(require_role("admin"))):
 
 @router.delete("/talents/{talent_id}")
 async def delete_talent_assets(talent_id: str, talent_name: str, admin: dict = Depends(require_role("admin"))):
-    """Removes the entire permanent talent folder and all associated assets."""
-    await db.asset_metadata.delete_many({"talent_id": talent_id})
-    try:
-        talent_slug = re.sub(r'[^a-zA-Z0-9_]', '', talent_name.lower().replace(' ', '_'))
-        folder_prefix = f"talentgram/talents/{talent_id}_{talent_slug}/"
-        cloudinary.api.delete_resources_by_prefix(folder_prefix)
-        cloudinary.api.delete_folder(f"talentgram/talents/{talent_id}_{talent_slug}")
-    except Exception as e:
-        logger.warning(f"Failed to fully delete Cloudinary talent folder {talent_id}: {e}")
+    """Talent-asset removal (Cloudinary rearchitecture, P6 — media lifecycle).
 
+    P6 change: the old implementation recomputed a folder slug
+    (``{talent_id}_{slug}``) — which drifts from the upload-time slug — and ran
+    ``delete_resources_by_prefix`` on it, a blind folder-scoped mass-delete.
+    Folder location is NOT ownership. Deletion now flows per-item through the
+    ownership-aware ``media_lifecycle`` gate, keyed on the stored canonical
+    ``public_id`` (never a recomputed slug). Nothing is physically destroyed
+    while the P6 physical-delete flag is off.
+    """
+    from media_lifecycle import talent_hard_delete_blockers, enqueue_pending_deletion, classify_owner, get_retention_days
+    from datetime import datetime, timezone
+
+    talent = await db.talents.find_one({"id": talent_id}, {"_id": 0})
+    if not talent:
+        raise HTTPException(404, "Talent not found")
+
+    blockers = await talent_hard_delete_blockers(db, talent_id)
+    if blockers:
+        raise HTTPException(409, {
+            "message": "Talent assets cannot be purged while dependencies exist.",
+            "blockers": blockers,
+        })
+
+    now = datetime.now(timezone.utc)
+    retention_days = await get_retention_days(db)
+    enqueued = 0
+    for m in (talent.get("media") or []):
+        if m.get("public_id") or m.get("stream_uid"):
+            await enqueue_pending_deletion(
+                db, m, owner=classify_owner(m),
+                reason=f"delete_talent_assets: talent {talent_id}, no blocking dependencies",
+                retention_days=retention_days, actor=admin.get("id"), now=now,
+            )
+            enqueued += 1
+
+    await db.asset_metadata.delete_many({"talent_id": talent_id})
     await log_storage_action(user_id=admin.get("id"), action_type="DELETE", talent_id=talent_id)
-    return {"status": "success", "message": f"Talent {talent_id} assets deleted successfully"}
+    return {"status": "success", "talent_id": talent_id,
+            "media_pending_deletion": enqueued, "cloudinary_assets_deleted": 0,
+            "message": f"Talent {talent_id}: {enqueued} media items recorded for retention-gated purge; 0 assets destroyed."}

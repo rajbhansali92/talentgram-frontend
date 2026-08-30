@@ -1831,8 +1831,20 @@ async def video_complete(
         raise HTTPException(400, "Could not determine media category")
 
     if duration is not None and float(duration) > MAX_AUDITION_VIDEO_SECONDS:
+        # P6 (media lifecycle): route the reject-on-upload cleanup through the
+        # gate. `just_uploaded_reject` — the asset was created seconds ago in
+        # this same request and nothing can reference it — so the gate clears an
+        # immediate physical destroy for this brand-new orphan.
         try:
-            cloudinary.uploader.destroy(public_id, resource_type="video")
+            from media_lifecycle import delete_if_safe, DeletionContext
+            await delete_if_safe(
+                db,
+                {"public_id": public_id, "resource_type": "video", "category": category or "take",
+                 "ownership": {"owner_type": "project_submission", "owner_id": sub.get("id"),
+                               "submission_id": sub.get("id"), "project_id": sub.get("project_id")}},
+                ctx=DeletionContext(just_uploaded_reject=True),
+                destroyer=lambda m: cloudinary.uploader.destroy(m["public_id"], resource_type="video"),
+            )
         except Exception:
             pass
         raise HTTPException(400, f"Audition video must be {MAX_AUDITION_VIDEO_SECONDS // 60} minutes or less.")
@@ -3516,8 +3528,34 @@ async def admin_remove_media_item(
     if not sub:
         raise HTTPException(404, "Submission not found")
 
+    from media_lifecycle import delete_if_safe, DeletionContext
+
+    target = next((m for m in (sub.get("media") or []) if m.get("id") == media_id), None)
+
+    # 1. drop the application/submission reference (as before)
     await db.submissions.update_one({"id": sid}, {"$pull": {"media": {"id": media_id}}})
+    # keep the global profile in sync (mirror pull) — unchanged behaviour
+    try:
+        from core import remove_synced_media_from_global_talent
+        await remove_synced_media_from_global_talent(sub, media_id)
+    except Exception as e:
+        logger.warning("admin_remove_media_item: mirror pull failed for %s: %s", media_id, e)
+
+    # 2–4. evaluate ownership + all other references; mark PENDING only if safe;
+    #      never a blind Cloudinary destroy (P6 — media lifecycle).
+    outcome = None
+    if target:
+        res = await delete_if_safe(
+            db, {**target, "submission_id": sid, "project_id": pid},
+            ctx=DeletionContext(actor=admin.get("email"),
+                                exclude_collection="submissions", exclude_parent_id=sid),
+        )
+        outcome = res.get("outcome")
+        logger.info("admin_remove_media_item %s/%s: lifecycle outcome=%s", sid, media_id, outcome)
+
     fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    if fresh_sub is not None:
+        fresh_sub["_media_lifecycle_outcome"] = outcome
     return fresh_sub
 
 
@@ -3525,10 +3563,37 @@ async def admin_remove_media_item(
 async def delete_submission(
     pid: str, sid: str, admin: dict = Depends(current_admin)
 ):
-    res = await db.submissions.delete_one({"id": sid, "project_id": pid})
-    if not res.deleted_count:
+    """Soft-delete a submission (Cloudinary rearchitecture, P6 — media lifecycle).
+
+    The submission stays as a historical record (``lifecycle_state=deleted`` +
+    ``deleted_at``). Its PROJECT-owned audition media is recorded in the
+    ``pending_media_deletions`` ledger with the configured retention window;
+    GLOBAL talent media is left untouched; NO Cloudinary asset is deleted here.
+    """
+    from media_lifecycle import record_owner_teardown, get_retention_days, STATE_DELETED
+    from datetime import datetime, timezone
+
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
+    if not sub:
         raise HTTPException(404, "Submission not found")
-    return {"ok": True}
+
+    now = datetime.now(timezone.utc)
+    retention_days = await get_retention_days(db)
+    summ = await record_owner_teardown(
+        db, sub.get("media") or [], context_kind="submission", context_id=sid,
+        actor=admin.get("email"), retention_days=retention_days, now=now,
+    )
+    await db.submissions.update_one({"id": sid, "project_id": pid}, {"$set": {
+        "lifecycle_state": STATE_DELETED, "deleted_at": now.isoformat(),
+        "deleted_by": admin.get("email"),
+    }})
+    logger.info("DELETE submission %s soft-deleted by %s; audition media pending=%d "
+                "global untouched=%d (NO Cloudinary asset deleted)",
+                sid, admin.get("email"), summ["audition_enqueued"], summ["global_skipped"])
+    return {"ok": True, "soft_deleted": True, "retention_days": retention_days,
+            "audition_media_pending_deletion": summ["audition_enqueued"],
+            "global_talent_media_untouched": summ["global_skipped"],
+            "cloudinary_assets_deleted": 0}
 
 
 @router.post("/projects/{pid}/submissions/{sid}/snapshot")

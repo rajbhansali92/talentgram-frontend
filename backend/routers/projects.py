@@ -102,72 +102,117 @@ async def bulk_delete_projects(
         "BULK DELETE /projects by admin=%s count=%d ids=%s",
         admin.get("email"), len(ids), ids[:10],
     )
-    res = await db.projects.delete_many({"id": {"$in": ids}})
-    sub_res = await db.submissions.delete_many({"project_id": {"$in": ids}})
+    # P6 (media lifecycle): soft-delete + ledger, NO Cloudinary mass-delete.
+    from media_lifecycle import record_owner_teardown, get_retention_days, STATE_DELETED
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    retention_days = await get_retention_days(db)
+    subs = await db.submissions.find({"project_id": {"$in": ids}}, {"_id": 0}).to_list(50000)
+    enqueued = 0
+    for s in subs:
+        summ = await record_owner_teardown(
+            db, s.get("media") or [], context_kind="project", context_id=s.get("project_id"),
+            actor=admin.get("email"), retention_days=retention_days, now=now,
+        )
+        enqueued += summ.get("audition_enqueued", 0)
+
+    res = await db.projects.update_many({"id": {"$in": ids}}, {"$set": {
+        "status": STATE_DELETED, "lifecycle_state": STATE_DELETED,
+        "deleted_at": now.isoformat(), "deleted_by": admin.get("email"),
+    }})
+    sub_res = await db.submissions.update_many({"project_id": {"$in": ids}}, {"$set": {
+        "lifecycle_state": STATE_DELETED, "deleted_at": now.isoformat(),
+    }})
     pipeline_res = await db.casting_pipeline.delete_many({"project_id": {"$in": ids}})
     asset_res = await db.asset_metadata.delete_many({"project_id": {"$in": ids}})
-    
-    # Cascade Cloudinary bulk delete
-    import cloudinary.api
-    for pid in ids:
-        try:
-            folder_prefix = f"talentgram/projects/{pid}/"
-            cloudinary.api.delete_resources_by_prefix(folder_prefix)
-            cloudinary.api.delete_folder(f"talentgram/projects/{pid}")
-        except Exception as e:
-            logger.warning(f"Failed to fully delete Cloudinary project folder {pid}: {e}")
 
     logger.info(
-        "BULK DELETE /projects by admin=%s removed=%d submissions_cascade=%d pipeline_cascade=%d assets_cascade=%d",
-        admin.get("email"), res.deleted_count, sub_res.deleted_count, pipeline_res.deleted_count, asset_res.deleted_count,
+        "BULK DELETE /projects by admin=%s soft-deleted=%d submissions_cascade=%d "
+        "audition_media_pending=%d (NO Cloudinary asset deleted)",
+        admin.get("email"), res.modified_count, sub_res.modified_count, enqueued,
     )
     return {
         "ok": True,
         "requested": len(ids),
-        "deleted": res.deleted_count,
-        "missing": len(ids) - res.deleted_count,
-        "cascaded_submissions": sub_res.deleted_count,
+        "deleted": res.modified_count,
+        "missing": len(ids) - res.modified_count,
+        "soft_deleted": True,
+        "cascaded_submissions": sub_res.modified_count,
         "cascaded_pipeline": pipeline_res.deleted_count,
         "cascaded_assets": asset_res.deleted_count,
+        "audition_media_pending_deletion": enqueued,
+        "cloudinary_assets_deleted": 0,
     }
 
 
 @router.delete("/projects/{pid}")
 async def delete_project(pid: str, admin: dict = Depends(current_admin)):
-    logger.info(
-        "DELETE /projects/%s requested by admin=%s (role=%s)",
-        pid, admin.get("email"), admin.get("role"),
-    )
-    res = await db.projects.delete_one({"id": pid})
-    if not res.deleted_count:
+    """Soft-delete a project (Cloudinary rearchitecture, P6 — media lifecycle).
+
+    P6 change: this no longer runs a Cloudinary folder-prefix mass-delete — that
+    scheme missed ``admin_media/`` and ``submissions/`` assets AND could destroy
+    copy-by-value global talent media that merely happened to sit under the
+    project folder. Deletion now flows through ``media_lifecycle``.
+
+    Instead:
+      * the project + its submissions are marked deleted (soft),
+      * each submission's PROJECT-owned audition media is recorded in the
+        ``pending_media_deletions`` ledger with the configured retention window,
+      * GLOBAL talent media is left completely untouched,
+      * NO Cloudinary asset is physically deleted here — P8/P9 own the purge.
+    """
+    from media_lifecycle import record_owner_teardown, get_retention_days, STATE_DELETED
+    from datetime import datetime, timezone
+
+    proj = await db.projects.find_one({"id": pid}, {"_id": 0, "id": 1})
+    if not proj:
         logger.warning("DELETE /projects/%s failed — not found", pid)
         raise HTTPException(404, "Project not found")
-    # Cascade: drop the project's submissions
-    sub_res = await db.submissions.delete_many({"project_id": pid})
-    # Cascade: clean up casting pipeline entries
+
+    now = datetime.now(timezone.utc)
+    retention_days = await get_retention_days(db)
+    subs = await db.submissions.find({"project_id": pid}, {"_id": 0}).to_list(10000)
+
+    totals = {"audition_enqueued": 0, "global_skipped": 0, "unknown_enqueued": 0,
+              "still_referenced_skipped": 0, "no_asset": 0}
+    for s in subs:
+        summ = await record_owner_teardown(
+            db, s.get("media") or [], context_kind="project", context_id=pid,
+            actor=admin.get("email"), retention_days=retention_days, now=now,
+        )
+        for k in totals:
+            totals[k] += summ.get(k, 0)
+
+    # Soft-delete: project + its submissions stay as historical records.
+    await db.projects.update_one({"id": pid}, {"$set": {
+        "status": STATE_DELETED, "lifecycle_state": STATE_DELETED,
+        "deleted_at": now.isoformat(), "deleted_by": admin.get("email"),
+    }})
+    sub_res = await db.submissions.update_many({"project_id": pid}, {"$set": {
+        "lifecycle_state": STATE_DELETED, "deleted_at": now.isoformat(),
+    }})
     pipeline_res = await db.casting_pipeline.delete_many({"project_id": pid})
-    # Cascade: clean up temporary project-scoped assets metadata
     asset_res = await db.asset_metadata.delete_many({"project_id": pid})
-    
-    # Cascade Cloudinary delete
-    try:
-        import cloudinary.api
-        folder_prefix = f"talentgram/projects/{pid}/"
-        cloudinary.api.delete_resources_by_prefix(folder_prefix)
-        cloudinary.api.delete_folder(f"talentgram/projects/{pid}")
-    except Exception as e:
-        logger.warning(f"Failed to fully delete Cloudinary project folder {pid}: {e}")
 
     logger.info(
-        "DELETE /projects/%s succeeded (by %s); cascade removed %d submissions, %d pipeline entries, %d assets",
-        pid, admin.get("email"), sub_res.deleted_count, pipeline_res.deleted_count, asset_res.deleted_count,
+        "DELETE /projects/%s soft-deleted by %s; %d submissions marked deleted, "
+        "audition media enqueued=%d, global media untouched=%d, unknown=%d, still-referenced=%d "
+        "(NO Cloudinary asset deleted)",
+        pid, admin.get("email"), sub_res.modified_count,
+        totals["audition_enqueued"], totals["global_skipped"],
+        totals["unknown_enqueued"], totals["still_referenced_skipped"],
     )
     return {
-        "ok": True, 
-        "deleted_id": pid, 
-        "cascaded_submissions": sub_res.deleted_count,
+        "ok": True,
+        "deleted_id": pid,
+        "soft_deleted": True,
+        "cascaded_submissions": sub_res.modified_count,
         "cascaded_pipeline": pipeline_res.deleted_count,
-        "cascaded_assets": asset_res.deleted_count
+        "cascaded_assets": asset_res.deleted_count,
+        "audition_media_pending_deletion": totals["audition_enqueued"],
+        "global_talent_media_untouched": totals["global_skipped"],
+        "retention_days": retention_days,
+        "cloudinary_assets_deleted": 0,
     }
 
 

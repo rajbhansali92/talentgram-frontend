@@ -151,6 +151,37 @@ def list_cloudinary_physical_resources_sync() -> List[Dict[str, Any]]:
         logger.warning(f"Error in list_cloudinary_physical_resources_sync: {e}")
     return resources
 
+def list_cloudinary_inventory_for_manifest_sync() -> List[Dict[str, Any]]:
+    """Read-only richer listing for the P8 cleanup manifest — carries the
+    fields the analysis needs (bytes, asset_id, type, format, created_at, the
+    delivery URL). `cloudinary.api.resources` lists ORIGINALS only; derived
+    assets are handled in aggregate (usage API) by the manifest."""
+    out: List[Dict[str, Any]] = []
+    try:
+        for rtype in ("image", "video", "raw"):
+            cursor = None
+            while True:
+                res = cloudinary.api.resources(resource_type=rtype, max_results=500,
+                                               next_cursor=cursor)
+                for it in res.get("resources", []):
+                    out.append({
+                        "public_id": it["public_id"],
+                        "asset_id": it.get("asset_id"),
+                        "bytes": it.get("bytes") or 0,
+                        "resource_type": rtype,
+                        "type": it.get("type") or "upload",
+                        "format": it.get("format"),
+                        "url": it.get("secure_url") or it.get("url"),
+                        "created_at": it.get("created_at"),
+                    })
+                cursor = res.get("next_cursor")
+                if not cursor:
+                    break
+    except Exception as e:
+        logger.warning(f"list_cloudinary_inventory_for_manifest_sync failed: {e}")
+    return out
+
+
 def classify_media_item(m: Dict[str, Any]) -> str:
     """Bucket a submission/application media item into the same category
     keys the Storage Console displays. Admin-added media is always bucketed
@@ -940,6 +971,117 @@ async def get_storage_accounting(
         usage_fetcher=fetch_cloudinary_usage_sync,
         force_usage_refresh=refresh,
     )
+
+
+_OBJECT_INVENTORY_CACHE_KEY = "full_object_inventory"
+_OBJECT_INVENTORY_TTL = 24 * 3600
+
+
+async def _get_object_inventory(force_rescan: bool = False) -> Dict[str, Any]:
+    """Read-only Cloudinary physical inventory for the P8 manifest, cached in
+    db.storage_metrics_cache. One `cloudinary.api.resources` listing at most
+    (skipped on a cache hit). This function — NOT the P8 engine — owns the
+    cache write, so the engine stays structurally write-free."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    cached = None
+    try:
+        cached = await db.storage_metrics_cache.find_one({"key": _OBJECT_INVENTORY_CACHE_KEY}, {"_id": 0})
+    except Exception as e:
+        logger.warning(f"object inventory cache read failed: {e}")
+    age = None
+    if cached and cached.get("fetched_at"):
+        try:
+            dt = datetime.fromisoformat(cached["fetched_at"].replace("Z", "+00:00"))
+            age = (now - (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc))).total_seconds()
+        except Exception:
+            age = None
+    if cached and not force_rescan and age is not None and age < _OBJECT_INVENTORY_TTL:
+        return {"objects": cached.get("value") or [], "fetched_at": cached.get("fetched_at"),
+                "from_cache": True, "stale": False}
+
+    objects: List[Dict[str, Any]] = []
+    err = None
+    try:
+        objects = await run_in_threadpool(list_cloudinary_inventory_for_manifest_sync)
+    except Exception as e:  # pragma: no cover
+        err = str(e)
+        logger.warning(f"object inventory listing failed: {e}")
+    if not objects and cached:
+        return {"objects": cached.get("value") or [], "fetched_at": cached.get("fetched_at"),
+                "from_cache": True, "stale": True, "error": err}
+    fetched_at = now.isoformat()
+    try:
+        await db.storage_metrics_cache.update_one(
+            {"key": _OBJECT_INVENTORY_CACHE_KEY},
+            {"$set": {"key": _OBJECT_INVENTORY_CACHE_KEY, "value": objects, "fetched_at": fetched_at}},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"object inventory cache write failed: {e}")
+    return {"objects": objects, "fetched_at": fetched_at, "from_cache": False, "stale": bool(err)}
+
+
+@router.get("/cleanup-manifest")
+async def get_cleanup_manifest(
+    rescan: bool = False,
+    classification: Optional[str] = None,
+    proposed_action: Optional[str] = None,
+    include_rows: bool = True,
+    limit: int = 500,
+    offset: int = 0,
+    admin: dict = Depends(require_role("admin")),
+):
+    """P8 — READ-ONLY cleanup-analysis manifest (DRY-RUN).
+
+    Cross-references the Cloudinary inventory (cached), P3 ownership, all
+    MongoDB media references, client-review links, copy-by-value lineage,
+    derived-parent relationships, the pending_media_deletions ledger, lifecycle
+    state, retention policy, and legacy stored-URL persistence — and classifies
+    every physical object.
+
+    It CANNOT delete anything: the analysis engine imports nothing from
+    cloudinary, makes no Cloudinary call, and performs no MongoDB write. A
+    `DELETE_ELIGIBLE` row means "could be safely deleted IF an admin later
+    approves AND P9's fresh per-asset re-check passes" — never "delete now".
+
+    `?rescan=true` refreshes the object inventory (1 read-only listing). Filter
+    with `?classification=` / `?proposed_action=`; page with `?limit`/`?offset`;
+    `?include_rows=false` returns only the summary.
+    """
+    import cloudinary_cleanup_manifest as ccm
+
+    inv = await _get_object_inventory(force_rescan=rescan)
+    usage = await run_in_threadpool(fetch_cloudinary_usage_sync)
+    manifest = await ccm.build_manifest(
+        db,
+        objects=inv["objects"],
+        inventory_fetched_at=inv.get("fetched_at"),
+        inventory_from_cache=inv.get("from_cache", False),
+        inventory_stale=inv.get("stale", False),
+        cloudinary_usage=usage,
+    )
+
+    all_rows = manifest.pop("rows")
+    # top-100 largest candidates (DELETE_ELIGIBLE + REVIEW), from the FULL set
+    top_candidates = sorted(
+        [r for r in all_rows if r["proposed_action"] in (ccm.DELETE_ELIGIBLE, ccm.REVIEW)],
+        key=lambda r: r.get("bytes") or 0, reverse=True,
+    )[:100]
+    rows = all_rows
+    if classification:
+        rows = [r for r in rows if r["classification"] == classification]
+    if proposed_action:
+        rows = [r for r in rows if r["proposed_action"] == proposed_action]
+    total_matched = len(rows)
+
+    out = dict(manifest)
+    out["filter"] = {"classification": classification, "proposed_action": proposed_action}
+    out["row_page"] = {"total_matched": total_matched, "offset": offset, "limit": limit}
+    if include_rows:
+        out["rows"] = rows[offset:offset + limit]
+        out["top_100_largest_candidates"] = top_candidates
+    return out
 
 
 @router.get("/health")

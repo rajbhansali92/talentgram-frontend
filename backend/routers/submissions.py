@@ -110,9 +110,11 @@ async def update_talent_submission_metrics(email: str):
     norm_email = normalize_email(email)
     if not norm_email:
         return
+    from core import NOT_DELETED
     cursor = db.submissions.find({
         "talent_email": norm_email,
-        "status": {"$ne": "draft"}
+        "status": {"$ne": "draft"},
+        **NOT_DELETED,   # P7: soft-deleted submissions don't count toward talent metrics
     }).sort("submitted_at", 1)
     subs = await cursor.to_list(length=1000)
     if not subs:
@@ -2495,7 +2497,9 @@ async def list_approved_submissions(
     admin: dict = Depends(current_team_or_admin),
 ):
     """All approved submissions across every project (admin convenience for Link picker)."""
-    query = {"decision": "approved"}
+    # P7: exclude soft-deleted submissions from the Link-picker.
+    from core import active_only
+    query = active_only({"decision": "approved"})
     # P2-B: project only the fields the Link-picker UI renders. Excludes
     # form_data (large nested object) and raw media metadata.
     list_proj = {
@@ -2550,7 +2554,9 @@ async def list_submissions(
     limit: Optional[int] = None,
     admin: dict = Depends(current_team_or_admin),
 ):
-    query: Dict[str, Any] = {"project_id": pid}
+    # P7: operational list — exclude soft-deleted submissions.
+    from core import active_only
+    query: Dict[str, Any] = active_only({"project_id": pid})
     if decision:
         if decision not in SUBMISSION_DECISIONS:
             raise HTTPException(400, "Invalid decision filter")

@@ -913,10 +913,45 @@ async def delete_talent_images(project_id: str, talent_id: str, payload: ImageDe
     return {"status": "success", "deleted": results}
 
 
+@router.get("/accounting")
+async def get_storage_accounting(
+    refresh: bool = False,
+    admin: dict = Depends(require_role("admin")),
+):
+    """P7 — corrected storage accounting model.
+
+    Strictly separates:
+      A. CLOUDINARY ACTUAL STORAGE  (authoritative — cloudinary.api.usage(), cached 5 min)
+      B. APPLICATION MEDIA REFERENCES  (MongoDB media[].size sums — LABELLED as reference size)
+      C. GLOBAL TALENT MEDIA  /  D. PROJECT AUDITION MEDIA  /  G. UNKNOWN
+         (from the P3 media[i].ownership sub-document — never the folder path)
+      E. DERIVED ASSETS  (usage().derived_resources)
+      F. ORPHANED ASSETS  (only from the last cached GET /health scan; never inline)
+      LIFECYCLE  (media[].lifecycle states + the pending_media_deletions ledger)
+      COST  (storage / bandwidth / transformation credits)
+
+    READ-ONLY. One Cloudinary Admin API call at most (skipped on a cache hit).
+    Cannot trigger a full inventory scan or any deletion. `?refresh=true` forces
+    the usage cache to refresh.
+    """
+    import storage_accounting as sa
+    return await sa.build_accounting(
+        db,
+        usage_fetcher=fetch_cloudinary_usage_sync,
+        force_usage_refresh=refresh,
+    )
+
+
 @router.get("/health")
 async def get_storage_health(admin: dict = Depends(require_role("admin"))):
-    """Scan and identify orphaned assets, broken references, duplicate media, and unused files."""
-    
+    """Scan and identify orphaned assets, broken references, duplicate media, and unused files.
+
+    P7: this is the ONLY place the expensive full inventory listing runs (manual
+    "Re-Scan" only). It stays read-only — produces a report, deletes nothing —
+    and now caches a summary so GET /accounting can surface orphan counts and
+    scan freshness without re-listing 12k+ objects.
+    """
+
     # 1. Fetch physical items from providers
     r2_physical = await run_in_threadpool(list_r2_physical_objects_sync)
     cld_physical = await run_in_threadpool(list_cloudinary_physical_resources_sync)
@@ -929,30 +964,44 @@ async def get_storage_health(admin: dict = Depends(require_role("admin"))):
     metadata_list = await db.asset_metadata.find({}).to_list(length=100000)
     submissions = await db.submissions.find({}).to_list(length=10000)
     talents = await db.talents.find({}).to_list(length=10000)
+    applications = await db.applications.find({}).to_list(length=10000)  # P7: was missing
     feedbacks = await db.feedback.find({}).to_list(length=10000)
-    
-    # Gather database referenced keys/public_ids
+
+    # Gather database referenced keys/public_ids + a public_id -> ownership/lifecycle map
     db_referenced_ids = set()
     db_metadata_ids = set()
-    
+    pid_ownership: Dict[str, Dict[str, Any]] = {}
+
     for doc in metadata_list:
         pid = doc.get("public_id")
         if pid:
             db_metadata_ids.add(pid)
             db_referenced_ids.add(pid)
-            
-    for sub in submissions:
-        for m in sub.get("media", []):
-            pid = m.get("public_id")
-            if pid:
+
+    for coll_docs in (submissions, talents, applications):
+        for doc in coll_docs:
+            for m in doc.get("media", []):
+                pid = m.get("public_id")
+                if not pid:
+                    continue
                 db_referenced_ids.add(pid)
-                
-    for tal in talents:
-        for m in tal.get("media", []):
-            pid = m.get("public_id")
-            if pid:
-                db_referenced_ids.add(pid)
-                
+                own = m.get("ownership") or {}
+                lc = (m.get("lifecycle") or {}).get("state") or "active"
+                cur = pid_ownership.get(pid)
+                if cur is None:
+                    pid_ownership[pid] = {
+                        "owner_type": own.get("owner_type"),
+                        "conflict": own.get("conflict"),
+                        "lifecycle_state": lc,
+                    }
+                else:
+                    if own.get("conflict"):
+                        cur["conflict"] = own["conflict"]
+                    if not cur.get("owner_type") and own.get("owner_type"):
+                        cur["owner_type"] = own["owner_type"]
+                    if lc in ("pending_deletion", "deleted"):
+                        cur["lifecycle_state"] = lc
+
     for fb in feedbacks:
         if fb.get("content_url"):
             # try to extract public_id
@@ -978,15 +1027,34 @@ async def get_storage_health(admin: dict = Depends(require_role("admin"))):
                 "type": "video"
             })
             
+    # P7: classify every Cloudinary physical object, not just the orphans.
+    cld_class_counts = {"referenced": 0, "orphan": 0, "derived_variant": 0}
+    cld_class_bytes = {"referenced": 0, "orphan": 0, "derived_variant": 0}
+    orphan_bytes = 0
+    _DERIVED_SEG_RE = re.compile(r"/(?:w_|h_|c_|q_|f_|dpr_|e_|so_|vc_|b_|ac_|g_|fl_|sp_|br_)")
     for item in cld_physical:
         pid = item["public_id"]
-        if pid not in db_referenced_ids:
-            orphaned_assets.append({
-                "provider": "Cloudinary",
-                "key": pid,
-                "size": item["size"],
-                "type": item["resource_type"]
-            })
+        size = item.get("size") or 0
+        url = item.get("url") or ""
+        if pid in db_referenced_ids:
+            cld_class_counts["referenced"] += 1
+            cld_class_bytes["referenced"] += size
+            continue
+        # a delivery URL that still carries a transformation segment is a derived
+        # variant of some original, not a standalone orphan original
+        is_derived = bool(_DERIVED_SEG_RE.search(url))
+        bucket = "derived_variant" if is_derived else "orphan"
+        cld_class_counts[bucket] += 1
+        cld_class_bytes[bucket] += size
+        if bucket == "orphan":
+            orphan_bytes += size
+        orphaned_assets.append({
+            "provider": "Cloudinary",
+            "key": pid,
+            "size": size,
+            "type": item["resource_type"],
+            "classification": bucket,
+        })
             
     # B. Broken References: DB references whose physical files are missing
     for doc in metadata_list:
@@ -1044,17 +1112,64 @@ async def get_storage_health(admin: dict = Depends(require_role("admin"))):
                 "reason": "Purged Project Asset"
             })
 
-    return {
-        "status": "healthy" if not (orphaned_assets or broken_references or duplicate_media or unused_files) else "action_required",
+    # P7: ownership / lifecycle rollup of the REFERENCED assets (from P3 metadata)
+    ownership_rollup = {"global_talent_media": 0, "project_audition_media": 0, "unknown": 0}
+    lifecycle_rollup = {"active": 0, "pending_deletion": 0, "deleted": 0}
+    for pid, meta in pid_ownership.items():
+        if meta.get("conflict") or not meta.get("owner_type"):
+            ownership_rollup["unknown"] += 1
+        elif meta["owner_type"] == "talent":
+            ownership_rollup["global_talent_media"] += 1
+        elif meta["owner_type"] == "project_submission":
+            ownership_rollup["project_audition_media"] += 1
+        else:
+            ownership_rollup["unknown"] += 1
+        st = meta.get("lifecycle_state") or "active"
+        lifecycle_rollup[st] = lifecycle_rollup.get(st, 0) + 1
+
+    try:
+        ledger_total = await db.pending_media_deletions.count_documents({})
+    except Exception:
+        ledger_total = None
+
+    result = {
+        "status": "healthy" if not (orphaned_assets or broken_references) else "action_required",
+        "scanned_at": _now(),
+        # NOTE: "duplicate" here == legitimate copy-by-value sharing (P3), not a bug.
         "orphaned_count": len(orphaned_assets),
+        "orphaned_bytes": orphan_bytes,
         "broken_count": len(broken_references),
-        "duplicate_count": len(duplicate_media),
+        "shared_public_id_count": len(duplicate_media),
+        "duplicate_count": len(duplicate_media),   # back-compat alias
         "unused_count": len(unused_files),
+        "cloudinary_object_classification": {
+            "counts": cld_class_counts, "bytes": cld_class_bytes,
+        },
+        "referenced_asset_ownership": ownership_rollup,
+        "referenced_asset_lifecycle": lifecycle_rollup,
+        "pending_media_deletions_ledger_count": ledger_total,
         "orphaned_assets": orphaned_assets[:100],
         "broken_references": broken_references[:100],
-        "duplicate_media": [{"public_id": k, "references": v} for k, v in list(duplicate_media.items())[:100]],
-        "unused_files": unused_files[:100]
+        "shared_public_ids": [{"public_id": k, "references": v} for k, v in list(duplicate_media.items())[:100]],
+        "duplicate_media": [{"public_id": k, "references": v} for k, v in list(duplicate_media.items())[:100]],  # back-compat
+        "unused_files": unused_files[:100],
+        "read_only": True,
     }
+
+    # P7: cache a compact summary so GET /accounting can show orphan counts +
+    # scan freshness without re-listing every object.
+    try:
+        import storage_accounting as _sa
+        await _sa.save_scan_result(db, {
+            "orphaned_count": len(orphaned_assets),
+            "orphaned_bytes": orphan_bytes,
+            "broken_count": len(broken_references),
+            "cloudinary_object_classification": result["cloudinary_object_classification"],
+        })
+    except Exception as e:
+        logger.warning(f"health scan cache write failed: {e}")
+
+    return result
 
 # ---------------------------------------------------------------------------
 # DISABLED 2026-08-30 (Cloudinary rearchitecture, P0.5 — production safety).

@@ -2147,6 +2147,38 @@ PORTFOLIO_IMAGE_CATEGORIES = {"image", "indian", "western"} | ADMIN_EXTRA_PORTFO
 # Audition takes (take/take_1..3) are never in this set and never reach the
 # consent dialog — they are always project-only, no exceptions.
 REUSABLE_MEDIA_CATEGORIES = {"intro_video", "image", "indian", "western"} | ADMIN_EXTRA_PORTFOLIO_CATEGORIES
+
+
+# --------------------------------------------------------------------------
+# Soft-delete filters (Cloudinary rearchitecture, P6/P7)
+#
+# P6 changed project + submission deletion from a hard `delete_one` to a
+# soft-delete (`lifecycle_state = "deleted"` + `deleted_at`). Talent deletion
+# defaults to ARCHIVE (`lifecycle_state = "archived"`). Operational and
+# client-facing queries must exclude these; admin/historical/audit/accounting
+# queries opt back in explicitly. `{"$ne": "deleted"}` matches docs where the
+# field is absent (every pre-P6 row) as well as `"active"`.
+# --------------------------------------------------------------------------
+NOT_DELETED = {"lifecycle_state": {"$ne": "deleted"}}
+NOT_ARCHIVED_OR_DELETED = {"lifecycle_state": {"$nin": ["deleted", "archived"]}}
+
+
+def active_only(query: Optional[dict] = None, *, include_deleted: bool = False,
+                exclude_archived: bool = False) -> dict:
+    """Merge the soft-delete filter into a MongoDB query. `include_deleted=True`
+    (admin/historical/accounting) returns the query untouched."""
+    q = dict(query or {})
+    if include_deleted:
+        return q
+    field = "lifecycle_state"
+    forbidden = ["deleted", "archived"] if exclude_archived else ["deleted"]
+    if field in q:
+        # caller already constrains lifecycle_state — respect it
+        return q
+    q[field] = {"$nin": forbidden} if len(forbidden) > 1 else {"$ne": forbidden[0]}
+    return q
+
+
 MAX_SUBMISSION_TAKES = 5
 MAX_SUBMISSION_IMAGES = 8
 MIN_SUBMISSION_IMAGES = 5

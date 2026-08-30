@@ -455,8 +455,9 @@ async def list_pipeline(
         # One query covers all rows. `talent_id` is intentionally chosen as the
         # match key (not email) because pipeline rows and submissions are
         # already linked-by-talent_id once a talent reaches a project.
+        from core import active_only
         sub_cursor = db.submissions.find(
-            {"project_id": project_id, "talent_id": {"$in": talent_ids}},
+            active_only({"project_id": project_id, "talent_id": {"$in": talent_ids}}),
             {"_id": 0, "talent_id": 1},
         )
         talent_docs, submission_docs = await asyncio.gather(

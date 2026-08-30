@@ -30,6 +30,7 @@ class ShareLogIn(BaseModel):
     session_id: Optional[str] = None
 
 from core import (
+    NOT_DELETED as _NOT_DELETED,
     ActionIn,
     BulkDeleteIn,
     DEFAULT_VISIBILITY,
@@ -328,7 +329,7 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
     if link.get("auto_pull") and link.get("auto_project_id"):
         auto_pid = link["auto_project_id"]
         auto_subs = await db.submissions.find(
-            {"project_id": auto_pid, "decision": "approved"},
+            {"project_id": auto_pid, "decision": "approved", **_NOT_DELETED},
             {"id": 1}
         ).to_list(5000)
         s_ids = list(set(s_ids + [s["id"] for s in auto_subs]))
@@ -414,7 +415,7 @@ async def link_results(lid: str, admin: dict = Depends(current_team_or_admin)):
             }
     if s_ids:
         for s in await db.submissions.find(
-            {"id": {"$in": s_ids}},
+            {"id": {"$in": s_ids}, **_NOT_DELETED},
             {"_id": 0, "id": 1, "project_id": 1, "talent_name": 1,
              "talent_email": 1, "cover_media_id": 1, "media": {"$slice": 10}},
         ).to_list(len(s_ids)):
@@ -700,7 +701,7 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     if link.get("auto_pull") and link.get("auto_project_id"):
         auto_pid = link["auto_project_id"]
         auto_subs = await db.submissions.find(
-            {"project_id": auto_pid, "decision": "approved"},
+            {"project_id": auto_pid, "decision": "approved", **_NOT_DELETED},
             {"_id": 0},
         ).sort("created_at", -1).to_list(5000)
         # Effective list — order is "newest first" so the freshest approvals
@@ -720,7 +721,7 @@ async def get_public_link(slug: str, authorization: Optional[str] = Header(None)
     if not (link.get("auto_pull") and link.get("auto_project_id")):
         if submission_ids:
             raw_subs = await db.submissions.find(
-                {"id": {"$in": submission_ids}},
+                {"id": {"$in": submission_ids}, **_NOT_DELETED},
                 {"_id": 0},
             ).to_list(5000)
 
@@ -1274,7 +1275,7 @@ async def create_share_link(
     if link.get("auto_pull") and link.get("auto_project_id"):
         auto_pid = link["auto_project_id"]
         auto_subs = await db.submissions.find(
-            {"project_id": auto_pid, "decision": "approved"},
+            {"project_id": auto_pid, "decision": "approved", **_NOT_DELETED},
             {"_id": 0},
         ).to_list(5000)
         submission_ids = [s["id"] for s in auto_subs]
@@ -1284,7 +1285,7 @@ async def create_share_link(
         is_valid = True
     else:
         sub_docs = await db.submissions.find(
-            {"id": {"$in": submission_ids}},
+            {"id": {"$in": submission_ids}, **_NOT_DELETED},
             {"_id": 0}
         ).to_list(5000)
         if any(s["id"] == talent_id or s.get("talent_id") == talent_id for s in sub_docs):
@@ -1433,7 +1434,7 @@ async def get_share_preview(share_id: str):
     if link.get("auto_pull") and link.get("auto_project_id"):
         auto_pid = link["auto_project_id"]
         auto_subs = await db.submissions.find(
-            {"project_id": auto_pid, "decision": "approved"},
+            {"project_id": auto_pid, "decision": "approved", **_NOT_DELETED},
             {"_id": 0},
         ).to_list(5000)
         submission_ids = [s["id"] for s in auto_subs]
@@ -1454,7 +1455,7 @@ async def get_share_preview(share_id: str):
         talent_doc = direct_talent
     else:
         sub_docs = await db.submissions.find(
-            {"id": {"$in": submission_ids}},
+            {"id": {"$in": submission_ids}, **_NOT_DELETED},
             {"_id": 0}
         ).to_list(5000)
         matching_sub = next((s for s in sub_docs if s["id"] == talent_id or s.get("talent_id") == talent_id), None)
@@ -1852,7 +1853,7 @@ async def download_talent_zip(
     if link.get("auto_pull") and link.get("auto_project_id"):
         auto_pid = link["auto_project_id"]
         auto_subs = await db.submissions.find(
-            {"project_id": auto_pid, "decision": "approved"},
+            {"project_id": auto_pid, "decision": "approved", **_NOT_DELETED},
             {"_id": 0},
         ).to_list(5000)
         submission_ids = [s["id"] for s in auto_subs]
@@ -1875,7 +1876,7 @@ async def download_talent_zip(
         target_sub = sub
     else:
         sub_docs = await db.submissions.find(
-            {"id": {"$in": submission_ids}},
+            {"id": {"$in": submission_ids}, **_NOT_DELETED},
             {"_id": 0}
         ).to_list(5000)
         matching_sub = next((s for s in sub_docs if s["id"] == talent_id or s.get("talent_id") == talent_id), None)
@@ -2127,7 +2128,7 @@ async def proxy_media(
     submission_ids = link.get("submission_ids", []) or []
     if link.get("auto_pull") and link.get("auto_project_id"):
         auto_subs = await db.submissions.find(
-            {"project_id": link["auto_project_id"], "decision": "approved"}, {"_id": 0},
+            {"project_id": link["auto_project_id"], "decision": "approved", **_NOT_DELETED}, {"_id": 0},
         ).to_list(5000)
         submission_ids = [s["id"] for s in auto_subs]
 
@@ -2147,7 +2148,7 @@ async def proxy_media(
         is_sub = True
         target_sub = sub
     else:
-        sub_docs = await db.submissions.find({"id": {"$in": submission_ids}}, {"_id": 0}).to_list(5000)
+        sub_docs = await db.submissions.find({"id": {"$in": submission_ids}, **_NOT_DELETED}, {"_id": 0}).to_list(5000)
         matching_sub = next((s for s in sub_docs if s["id"] == talent_id or s.get("talent_id") == talent_id), None)
         if not matching_sub:
             raise HTTPException(404, "Talent not found in this link")
@@ -2300,7 +2301,7 @@ async def download_campaign_bundle_zip(
     if link.get("auto_pull") and link.get("auto_project_id"):
         auto_pid = link["auto_project_id"]
         auto_subs = await db.submissions.find(
-            {"project_id": auto_pid, "decision": "approved"},
+            {"project_id": auto_pid, "decision": "approved", **_NOT_DELETED},
             {"_id": 0},
         ).to_list(5000)
         submission_ids = [s["id"] for s in auto_subs]
@@ -2318,7 +2319,7 @@ async def download_campaign_bundle_zip(
     if not (link.get("auto_pull") and link.get("auto_project_id")):
         if submission_ids:
             raw_subs = await db.submissions.find(
-                {"id": {"$in": submission_ids}},
+                {"id": {"$in": submission_ids}, **_NOT_DELETED},
                 {"_id": 0},
             ).to_list(5000)
 

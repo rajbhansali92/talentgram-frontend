@@ -55,9 +55,13 @@ async def list_projects(
     page: Optional[int] = None,
     size: Optional[int] = None,
     status: Optional[str] = None,
+    include_deleted: bool = False,
     admin: dict = Depends(current_team_or_admin),
 ):
-    query = {"status": status} if status else {}
+    # P7: exclude soft-deleted projects from the operational list. `?include_deleted=true`
+    # is the explicit admin/historical opt-in.
+    from core import active_only
+    query = active_only({"status": status} if status else {}, include_deleted=include_deleted)
     cursor = db.projects.find(query, {"_id": 0}).sort("created_at", -1)
     if page is None:
         return await cursor.to_list(2000)

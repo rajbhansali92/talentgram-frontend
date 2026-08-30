@@ -559,3 +559,52 @@ def test_bytes_falls_back_from_size_to_bytes_key():
                    {"category": "portfolio", "public_id": "x", "resource_type": "image", "bytes": 20}, talent_id="t")
     assert o1["cloudinary"]["bytes"] == 10
     assert o2["cloudinary"]["bytes"] == 20
+
+
+# ---------------------------------------------------------------------------
+# residual branch coverage
+# ---------------------------------------------------------------------------
+def test_normalized_category_with_indirect_talent_resolution_stays_medium():
+    """normalization demotes to medium; an already-medium confidence (indirect
+    talent resolution) must not be 're-processed' or bumped."""
+    parent = {"id": "sub-1", "project_id": "proj-1", "talent_id": "t"}
+    item = {"id": "m", "category": "photos", "public_id": "talentgram/projects/proj-1/submissions/sub-1/m",
+            "resource_type": "image"}
+    o = _classify("submissions", parent, item, talent_id="t", how_tid="talent_email")
+    assert o["confidence"] == "medium"
+    assert o["conflict"] is None
+
+
+def test_is_shared_copy_false_when_public_id_missing():
+    o = _classify("talents", {"id": "t"},
+                  {"id": "m", "category": "portfolio", "resource_type": "image"},  # no public_id
+                  talent_id="t", how_tid="talents_doc",
+                  pid_owner_count=Counter({None: 5}))  # a None key must not count as "shared"
+    assert o["is_shared_copy"] is False
+    assert o["cloudinary"]["public_id"] is None
+
+
+def test_folder_disagrees_ignores_non_talentgram_public_ids():
+    assert folder_disagrees({"owner_type": OWNER_TYPE_TALENT,
+                             "cloudinary": {"public_id": "s3://bucket/whatever"}}) is None
+    assert folder_disagrees({"owner_type": OWNER_TYPE_TALENT, "cloudinary": {}}) is None
+    assert folder_disagrees({"owner_type": OWNER_TYPE_TALENT,
+                             "cloudinary": {"public_id": "talentgram"}}) is None  # no "/" segment
+
+
+def test_conflict_item_still_reports_provenance_and_shape():
+    """A conflict clears owner_* but the sub-doc is still fully shaped (so the
+    caller can write it and a human can see the media_type / cloudinary / etc.)."""
+    o = _classify("applications", {"id": "app-1"},
+                  {"id": "x", "category": "image", "public_id": "talentgram/applications/app-1/x",
+                   "resource_type": "image", "asset_id": "cld-1", "size": 9},
+                  talent_id=None, how_tid="unresolved")
+    assert o["owner_type"] is None and o["owner_id"] is None and o["owner_source"] is None
+    assert o["confidence"] is None
+    assert o["conflict"]
+    # still shaped:
+    assert o["application_id"] == "app-1"
+    assert o["media_type"] == "image"
+    assert o["media_category_normalized"] == "portfolio"
+    assert o["cloudinary"]["asset_id"] == "cld-1"
+    assert o["migration_version"] == VERSION

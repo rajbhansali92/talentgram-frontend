@@ -356,38 +356,29 @@ function getVideoDownloadUrl(url) {
     if (!url.includes("res.cloudinary.com") && !url.includes("/upload/")) {
         return url;
     }
-    let cleanUrl = url;
-    if (cleanUrl.includes("/upload/")) {
-        const parts = cleanUrl.split("/upload/");
-        const before = parts[0];
-        let after = parts[1];
+    // Cloudinary rearchitecture P5 (RULE #6): the canonical video asset is
+    // itself downloadable. We no longer append `f_mp4` (a full re-transcode,
+    // billed in video seconds, purely to guarantee a container). A genuinely
+    // non-web codec/container is handled at upload time by the P4 compat path,
+    // whose delivery URL is already an mp4. Here we only strip a stale leading
+    // transformation segment so a legacy stored URL downloads the canonical
+    // asset, never a derived one — and never change the extension.
+    if (url.includes("/upload/")) {
+        const idx = url.indexOf("/upload/");
+        const before = url.slice(0, idx);
+        const after = url.slice(idx + "/upload/".length);
         const segments = after.split("/");
-        const transformations = segments[0];
-        if (transformations && !transformations.match(/^v\d+$/)) {
-            let newTrans = transformations
-                .split(",")
-                .filter(t => !t.startsWith("f_") && !t.startsWith("sp_"))
-                .join(",");
-            newTrans = newTrans ? `${newTrans},f_mp4` : "f_mp4";
-            segments[0] = newTrans;
-            after = segments.join("/");
-        } else {
-            after = `f_mp4/${after}`;
+        const first = segments[0];
+        if (
+            first &&
+            !first.match(/^v\d+$/) &&
+            /(^|,)(w_|h_|c_|q_|f_|dpr_|e_|so_|vc_|b_|ac_|g_|fl_|sp_|br_)/.test(first)
+        ) {
+            segments.shift();
         }
-        cleanUrl = `${before}/upload/${after}`;
+        return `${before}/upload/${segments.join("/")}`;
     }
-    const mainPath = cleanUrl.split("?")[0].split("#")[0];
-    const query = cleanUrl.substring(mainPath.length);
-    const lastDotIdx = mainPath.lastIndexOf(".");
-    if (lastDotIdx !== -1 && lastDotIdx > mainPath.lastIndexOf("/")) {
-        const ext = mainPath.substring(lastDotIdx + 1);
-        if (ext.toLowerCase() !== "mp4") {
-            cleanUrl = mainPath.substring(0, lastDotIdx) + ".mp4" + query;
-        }
-    } else {
-        cleanUrl = mainPath + ".mp4" + query;
-    }
-    return cleanUrl;
+    return url;
 }
 
 function ClientView() {
@@ -2643,11 +2634,14 @@ function TalentDetail({
                 baseName = baseName.replace(/\.[^/.]+$/, "");
             }
 
-            // Build a directly-downloadable URL. For Cloudinary, use fl_attachment so
-            // the server returns Content-Disposition: attachment (sets the filename
-            // too). This is reliable and REPEATABLE on iOS Safari/Chrome because the
-            // anchor click stays inside the user gesture — no fetch()/blob() (which
-            // breaks the gesture and fails on the 2nd download in Safari).
+            // Build a directly-downloadable URL. `fl_attachment` makes Cloudinary
+            // send Content-Disposition: attachment (and sets the saved filename).
+            // Cloudinary rearchitecture P5 (RULE #7): `fl_attachment` is a
+            // DELIVERY FLAG, not a transformation — on a canonical asset (which,
+            // post-P5, `url` now is for every web-safe image and every video) it
+            // creates no derived asset and is not billed. It stays because the
+            // anchor click must remain inside the user gesture — no fetch()/blob()
+            // (which breaks the gesture and fails on the 2nd download in Safari).
             let downloadUrl = url;
             if (url.includes("/upload/")) {
                 const cleanName = baseName.replace(/[^a-zA-Z0-9_-]/g, "_");

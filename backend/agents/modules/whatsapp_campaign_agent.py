@@ -380,7 +380,6 @@ def _strip_leading_trigger_preserve_newlines(text: str, triggers: List[str]) -> 
 # solely to quote-detection succeeding.
 # ---------------------------------------------------------------------------
 _INSTAGRAM_KEYWORD_RE = re.compile(r"\binsta(?:gram)?\b", re.IGNORECASE)
-_INSTAGRAM_KEYWORD_RE = re.compile(r"\binsta(?:gram)?\b", re.IGNORECASE)
 # (2026-08-12, production incident) "send custom message" must win over
 # template detection OUTRIGHT, not just via quote-sniffing — a real
 # production message reached this trigger phrase and, for whatever
@@ -773,7 +772,23 @@ def _extract_one_send_command_fields(chunk_text: str) -> Dict[str, str]:
 
     simple = parse_simple_send_command(remainder)
     if simple is not None:
-        return simple
+        # Old Interface Deprecation (2026-08-30) — the structured hyphen
+        # grammar ("send - Talent - Template - Project", "instagram -
+        # Talent - Recipient", "custom message "..." - Talent") this
+        # recognizes still WORKS underneath (parse_simple_send_command
+        # itself is completely untouched — the spec explicitly says "do
+        # not delete underlying execution functionality"), but is no
+        # longer the advertised/accepted user-facing interface: redirect
+        # to the new natural-language format instead of silently
+        # executing it. SOURCE/RECIPIENT get a placeholder (never shown —
+        # see _send_requirement_try_auto_execute's redirect, which fires
+        # before either field is ever read) purely so the generic
+        # missing-field flow doesn't intercept this first.
+        return {
+            SOURCE_QUERY_FIELD.key: _PLAN_PLACEHOLDER,
+            RECIPIENT_QUERY_FIELD.key: _PLAN_PLACEHOLDER,
+            LEGACY_SYNTAX_FIELD.key: "1",
+        }
 
     send_mode = _detect_send_mode(remainder)
     if send_mode == "instagram":
@@ -956,6 +971,16 @@ PLAN_FIELD = FieldSpec(
     validate=_validate_query_text, required=False,
 )
 _PLAN_PLACEHOLDER = "__plan__"
+# Old Interface Deprecation (2026-08-30) — set by _extract_one_send_command_
+# fields when the message matched the OLD hyphen grammar ("send - Talent -
+# Template - Project", "instagram - Talent - Recipient", "custom message
+# "..." - Talent"). Same hidden-field convention as AUTO_CONFIRM_FIELD/
+# PLAN_FIELD above; never required/asked about, absent means "ordinary
+# natural-language command" (100% of existing behaviour unaffected).
+LEGACY_SYNTAX_FIELD = FieldSpec(
+    key="_legacy_syntax", label="LegacySyntax", question="",
+    validate=_validate_query_text, required=False,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -3239,6 +3264,21 @@ async def _send_requirement_try_auto_execute(collected: dict, ctx: ExecContext) 
     "fully clean" pre-check — the executed summary reports ✗ for whichever
     individual commands couldn't resolve, exactly like approving one
     manually would."""
+    if collected.get(LEGACY_SYNTAX_FIELD.key):
+        # Old Interface Deprecation (2026-08-30) — fires unconditionally
+        # (not gated on "and confirm"), before anything else: never shows
+        # a confirmation card for the old hyphen grammar, never executes
+        # it, just explains the new format. See
+        # _extract_one_send_command_fields for where this gets set.
+        return ExecResult(
+            ok=True,
+            message=(
+                "I use the new command format now.\n\n"
+                "Try:\n"
+                "Send Kripa the casting call for Parachute Jasmine Oil\n\n"
+                "Send HELP to see every way to write a command."
+            ),
+        )
     if not collected.get(AUTO_CONFIRM_FIELD.key):
         return None
     if collected.get(PLAN_FIELD.key):
@@ -3690,7 +3730,7 @@ SEND_REQUIREMENT_INTENT = IntentDefinition(
     triggers=SEND_TRIGGERS,
     fields=[
         SOURCE_QUERY_FIELD, RECIPIENT_QUERY_FIELD, STAGE_QUERY_FIELD, PROJECT_QUERY_FIELD,
-        SEND_MODE_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD,
+        SEND_MODE_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD, LEGACY_SYNTAX_FIELD,
     ],
     executor=_send_requirement_executor,
     extract_fields=extract_send_requirement_fields,
@@ -3716,68 +3756,80 @@ UNAUTHORIZED_SENDER_MESSAGE = (
 HELP_TEXT = (
     "TALENTGRAM WHATSAPP AGENT\n"
     "QUICK MANUAL\n\n"
-    "Purpose: send casting requirements and communication through "
-    "WhatsApp — to talents, WhatsApp groups, individual recipients, or a "
-    "whole project's pipeline.\n\n"
-    "Fastest format: Action - Who - What - Where, using \" - \" between "
-    "fields. \"Send\" and \"Share\" both work as the action word "
-    "everywhere below.\n\n"
+    "This group sends casting requirements and communication through "
+    "WhatsApp — to talents, WhatsApp groups, individual recipients, or "
+    "everyone in a project's pipeline.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "QUICK COMMANDS\n"
+    "COMMANDS\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "1. 📢 Send a Campaign — a saved template, to named talent(s) or to "
-    "everyone in a project's pipeline stage.\n\n"
-    "• send - Talent A,Talent B - Template Name - Project A\n\n"
-    "• send - Template Name - Project A,Project B - Follow Up\n"
-    "  (targets everyone in that pipeline stage; the template name is "
-    "required — if you leave it out, I'll ask which one before sending, "
-    "there's no automatic default)\n\n"
-    "2. 💬 Send a Custom Message — your own free-text message instead of "
-    "a saved template.\n\n"
-    "• send custom message \"Hi, your profile has been shortlisted.\" - Talent A,Talent B\n\n"
-    "• send custom message \"Reminder about tomorrow's call.\" - Project A - Follow Up\n\n"
-    "3. 📸 Share an Instagram Profile — a talent's Instagram link, to "
-    "someone else.\n\n"
-    "• send instagram - Talent A - Raj\n\n"
-    "• share insta link - Talent A - Casting WhatsApp group\n\n"
-    "4. HELP — show this manual.\n\n"
+    "1. SEND / SHARE A CAMPAIGN\n\n"
+    "WHAT IT DOES: sends a saved template to named talent(s), or to "
+    "everyone currently in a project's pipeline stage.\n\n"
+    "HOW TO WRITE IT: Send [template] to [talent(s)] / Send [template] "
+    "to [stage] pipeline of [project]\n\n"
+    "EXAMPLES:\n"
+    "Send the Casting Call template to Kripa Trivedi\n"
+    "Send Casting Call to Kripa Trivedi,Siddhi Bankhele\n"
+    "Send Reminder template to Follow Up pipeline of Parachute Jasmine Oil\n\n"
+    "IMPORTANT NOTES: the template name is required — if you leave it "
+    "out, I'll ask which one, there's no automatic default.\n\n"
+    "2. SEND A CUSTOM MESSAGE\n\n"
+    "WHAT IT DOES: sends your own free-text message instead of a saved "
+    "template.\n\n"
+    "HOW TO WRITE IT: send custom message \"[your message]\" to [talent(s) "
+    "or pipeline]\n\n"
+    "EXAMPLES:\n"
+    "send custom message \"Hi, your profile has been shortlisted.\" to Kripa Trivedi,Siddhi Bankhele\n"
+    "send custom message \"Reminder about tomorrow's call.\" to Follow Up pipeline of Parachute Jasmine Oil\n\n"
+    "3. SHARE AN INSTAGRAM PROFILE\n\n"
+    "WHAT IT DOES: shares a talent's Instagram profile with someone else.\n\n"
+    "HOW TO WRITE IT: Send [talent]'s instagram to [recipient]\n\n"
+    "EXAMPLES:\n"
+    "Send Kripa Trivedi's instagram to Raj\n"
+    "Send Kripa Trivedi's insta to the Casting WhatsApp group\n\n"
+    "4. HELP\n\n"
+    "WHAT IT DOES: shows this manual.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "MULTIPLE RECIPIENTS / PROJECTS\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "Comma-separate multiple talents (Kripa Trivedi,Siddhi Bankhele) or "
+    "multiple projects (Project A,Project B) — I understand them as "
+    "lists, not one combined name.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "MULTIPLE COMMANDS IN ONE MESSAGE\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Put each command on its own line (a blank line between them is fine but not required), "
-    "then add \"and confirm\" once at the very end to send everything immediately "
-    "without a preview for each one:\n\n"
-    "send - Talent A - Template A - Project A\n"
-    "send - Talent B - Template B - Project B\n"
+    "Put each command on its own line, then add \"and confirm\" once at "
+    "the very end to send everything immediately, no preview for each "
+    "one:\n\n"
+    "Send Template A to Talent A\n"
+    "Send Template B to Talent B\n"
     "and confirm\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "EDIT BEFORE SENDING\n"
+    "CONFIRMATION\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Once a preview is shown, you can adjust it before approving:\n\n"
-    "• Exclude Ahana   • Exclude 5   • Include 7\n\n"
-    "• Change template to Reminder   • Preview\n\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "Plain natural-language sentences (e.g. \"Send Reminder template to Follow Up pipeline "
-    "of Myntra Campaign\") still work too.\n\n"
+    "Before anything sends, I show a preview and wait for your reply:\n\n"
+    "Reply:\n"
+    "1 → Approve\n"
+    "2 → Edit\n"
+    "3 → Cancel\n\n"
+    "On Edit, you can adjust the preview before approving — Exclude "
+    "Ahana, Exclude 5, Include 7, Change template to Reminder, Preview.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "BULK COMMANDS\n"
+    "WHEN A RECIPIENT CAN'T BE FOUND\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "• Multiple talents: comma-separated (Talent A,Talent B)\n"
-    "• Multiple projects: comma-separated (Project A,Project B)\n"
-    "• Multiple commands: comma- or line-separated\n\n"
+    "Recipients are checked against saved CRM contacts, saved lists, "
+    "saved groups, and known talents. If someone isn't found there, "
+    "save them as a CRM contact or in a saved list/group first, then "
+    "resend the command. If a name is ambiguous, I'll ask which one you "
+    "meant — just reply with your answer (e.g. \"2\"); you don't need to "
+    "repeat the whole command.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "IMPORTANT RULES\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "• Spaces around commas/dashes are ignored\n"
+    "• Spaces around commas are ignored\n"
     "• Minor spelling mistakes are tolerated (talent names, project "
     "names, and recipients)\n"
-    "• Recipients (for Instagram/WhatsApp sends) are checked against "
-    "saved contacts, saved lists, saved groups, and known talents — if "
-    "someone isn't found there, save them as a CRM contact or in a saved "
-    "list/group first, then resend the command\n"
-    "• If a name or recipient is ambiguous, I'll ask which one you meant "
-    "— just reply with your answer (e.g. \"2\" or \"the second one\"); "
-    "you don't need to repeat the whole command"
+    "• Nothing is ever sent without your explicit approval"
 )
 
 CAMPAIGN_AGENT = AgentDefinition(

@@ -5990,14 +5990,17 @@ async def test_clarification_reply_resumes_original_move_command():
 
 
 def test_help_text_mentions_send_and_new_query_forms():
-    """HELP must mention SEND (previously entirely absent) and the new
-    show-projects/has-tested natural-language forms, without dropping any
-    existing entry (Add/Move/Add,Move/Undo/testing?/pending test)."""
+    """HELP must document every command (Command Resolution manual
+    rebuild, 2026-08-30) using natural-language examples only — the old
+    hyphen grammar is no longer advertised (still functional underneath,
+    see test_bare_hyphen_no_space_add_end_to_end etc., just not shown)."""
     from agents.modules.casting_pipeline import HELP_TEXT
-    for existing in ("Add - ", "Move - ", "Add,Move - ", "testing?", "pending test", "and confirm"):
-        assert existing in HELP_TEXT, f"missing pre-existing HELP entry: {existing!r}"
-    for new in ("send - ", "show projects of", "has Ayushi tested", "which projects is"):
+    for existing in ("Add ", "Move ", "SHARE", "SEND", "UPLOAD", "TESTED", "SHOW", "UNDO", "and confirm"):
+        assert existing in HELP_TEXT, f"missing HELP entry: {existing!r}"
+    for new in ("Show projects of", "Tested Kripa Trivedi for", "Send Kripa Trivedi for"):
         assert new in HELP_TEXT, f"missing new HELP entry: {new!r}"
+    for old in ("Add - ", "Move - ", "Add,Move - ", "send - ", "testing? -", "pending test -"):
+        assert old not in HELP_TEXT, f"old hyphen-grammar entry still advertised: {old!r}"
 
 
 def test_whatsapp_campaign_agent_uses_group_members_security_mode():
@@ -7513,4 +7516,161 @@ async def test_both_pronoun_normalized_plan_has_exactly_expected_step_count():
             assert f"CountTalA {tag}" in ln and f"CountTalB {tag}" in ln, ln
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
+# P0 Command Resolution (2026-08-30) — SEND must never resolve a stale/
+# unrelated recipient; typo tolerance for the canonical action verbs.
+# ---------------------------------------------------------------------------
+async def test_p0_send_her_the_casting_call_resolves_correct_compound_talent():
+    """The exact reported production bug: "Add X to Y, move her to
+    Follow Up, send her the casting call" must resolve SEND's recipient to
+    the SAME talent the plan just added/moved — never an unrelated talent
+    resolved from a garbled "her the casting call" fuzzy match."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    email = f"p0kripa.{tag}@example.com"
+    project_id = await _seed_send_project(f"P0KripaProj {tag}", whatsapp_casting_group_name="Talentgram Casting Test")
+    talent_id = await _seed_send_talent(
+        f"P0KripaTalent {tag}", whatsapp_group_name=f"P0KripaTalent {tag} x Talentgram", email=email,
+    )
+    # An UNRELATED talent that must never be pulled in.
+    decoy_id = await _seed_talent(f"P0DecoyTalent {tag}")
+    submission_id = await _seed_send_submission(project_id, talent_id, email, decision="approved")
+    await db[_ma.IDENTITY_COLLECTION].update_one(
+        {}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True,
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add P0KripaTalent {tag} to P0KripaProj {tag}, "
+                f"move her to follow up, send her the casting call and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "SEND FORM PREVIEW" in r.reply, r.reply
+        assert f"P0KripaTalent {tag}" in r.reply, r.reply
+        assert f"P0DecoyTalent {tag}" not in r.reply, r.reply
+        assert "no WhatsApp group configured" not in r.reply, r.reply
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id, decoy_id])
+        await db.submissions.delete_many({"id": submission_id})
+        await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await _restore_config(original)
+
+
+async def test_p0_send_both_the_casting_calls_multi_talent():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"P0BothProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t1 = await _seed_talent(f"P0BothA {tag}")
+    t2 = await _seed_talent(f"P0BothB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add P0BothA {tag},P0BothB {tag} to {label}, move both to follow up, send both the casting calls",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        # No live WhatsApp group configured for these disposable talents —
+        # the important assertion is WHO the send targets, not that it
+        # actually goes out (talent_not_found/no_whatsapp_group means the
+        # RIGHT people were named, just undeliverable in this test fixture).
+        assert f"P0BothA {tag}" in r.reply, r.reply
+        assert f"P0BothB {tag}" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_p0_send_explicit_single_narrowing_after_multi_talent_add():
+    """"Add A,B to Project, move A to Follow Up, send A the casting call"
+    — SEND names A explicitly; must resolve to A only, never both."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"P0NarrowProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t1 = await _seed_talent(f"P0NarrowA {tag}")
+    t2 = await _seed_talent(f"P0NarrowB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add P0NarrowA {tag},P0NarrowB {tag} to {label}, "
+                f"move P0NarrowA {tag} to follow up, send P0NarrowA {tag} the casting call"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        send_line = next(ln for ln in r.reply.splitlines() if ln.strip().startswith("3. Send"))
+        assert f"P0NarrowA {tag}" in send_line, r.reply
+        assert f"P0NarrowB {tag}" not in send_line, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_p0_send_singular_pronoun_ambiguous_after_multi_talent_asks():
+    """"Add A,B to Project, move both to Follow Up, send her the casting
+    call" — "her" is singular but TWO talents were just touched; must ask
+    for clarification, never silently guess/merge."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"P0AmbigPronounProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t1 = await _seed_talent(f"P0AmbigA {tag}")
+    t2 = await _seed_talent(f"P0AmbigB {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add P0AmbigA {tag},P0AmbigB {tag} to {label}, "
+                f"move both to follow up, send her the casting call"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "could mean more than one talent" in r.reply, r.reply
+        assert f"P0AmbigA {tag}" in r.reply and f"P0AmbigB {tag}" in r.reply, r.reply
+        assert "SEND FORM" not in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_config(original)
+
+
+async def test_p0_typo_mover_end_to_end():
+    """"mover to follow up" (typo for "move her to follow up") must still
+    resolve correctly, both as the standalone trigger and mid-compound."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"P0TypoProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"P0TypoTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add P0TypoTalent {tag} to {label}, mover to follow up and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "✗" not in r.reply, r.reply
+        doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert doc is not None and doc["stage"] == "follow_up", (r.reply, doc)
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_config(original)

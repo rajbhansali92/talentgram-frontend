@@ -4678,7 +4678,7 @@ async def test_simple_send_talent_template_project_and_confirm():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send - SimpleSendTalent {tag} - {template_name} - SimpleSendProj {tag} and confirm",
+            text=f"send {template_name} to SimpleSendTalent {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
@@ -4708,7 +4708,7 @@ async def test_simple_send_talent_project_no_template_asks_for_source():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send - NoTemplateTalent {tag} - NoTemplateProj {tag}",
+            text=f"send to NoTemplateTalent {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
@@ -4736,8 +4736,8 @@ async def test_simple_send_stage_targeting_multi_project_multi_stage_and_confirm
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=(
-                f"send - {template_name} - StageProjA {tag},StageProjB {tag} - "
-                "Follow Up,Approved and confirm"
+                f"send {template_name} to Follow Up,Approved pipeline of "
+                f"StageProjA {tag},StageProjB {tag} and confirm"
             ),
             sender_name="Raj", sender_is_group_member=True,
         )
@@ -4767,7 +4767,7 @@ async def test_simple_send_custom_message_talents_and_confirm_preserves_body():
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=(
-                f'send custom message "Hi, your profile has been shortlisted." - '
+                f'send custom message "Hi, your profile has been shortlisted." to '
                 f"CustomSimpleT1 {tag},CustomSimpleT2 {tag} and confirm"
             ),
             sender_name="Raj", sender_is_group_member=True,
@@ -4799,8 +4799,8 @@ async def test_simple_send_custom_message_project_stage_and_confirm():
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=(
-                f'send custom message "Reminder about tomorrow\'s call." - '
-                f"CustomStageProj {tag} - Follow Up and confirm"
+                f'send custom message "Reminder about tomorrow\'s call." to '
+                f"Follow Up pipeline of CustomStageProj {tag} and confirm"
             ),
             sender_name="Raj", sender_is_group_member=True,
         )
@@ -4828,7 +4828,7 @@ async def test_simple_send_instagram_with_recipient_end_to_end():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send instagram - InstaSimpleTalent {tag} - InstaSimpleRecipient {tag} and confirm",
+            text=f"send InstaSimpleTalent {tag} instagram to InstaSimpleRecipient {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
@@ -4858,9 +4858,9 @@ async def test_simple_multi_command_two_sends_single_trailing_confirm():
     batch_ids = []
     try:
         text = (
-            f"send - MultiSendTalentA {tag} - {template_a} - MultiSendProjA {tag}\n"
+            f"send {template_a} to MultiSendTalentA {tag}\n"
             "\n"
-            f"send - MultiSendTalentB {tag} - {template_b} - MultiSendProjB {tag}\n"
+            f"send {template_b} to MultiSendTalentB {tag}\n"
             "and confirm"
         )
         r = await handle_inbound_message(
@@ -4941,7 +4941,7 @@ async def test_simple_send_multi_pick_ambiguity_resume():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send - Zayna {tag} - {template_name} - SimpleMultiPickProj {tag}",
+            text=f"send {template_name} to Zayna {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
@@ -5041,7 +5041,7 @@ async def test_named_talent_single_project_renders_all_variables():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send - RenderTalent {tag} - RenderCheck {tag} - RenderProj {tag} and confirm",
+            text=f"send RenderCheck {tag} for RenderProj {tag} to RenderTalent {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled and "Sent." in r.reply, r.reply
@@ -5086,7 +5086,7 @@ async def test_named_talent_multi_project_each_gets_own_context():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send - Prachi Darbar {tag} - MultiProjTpl {tag} - Amazon {tag},Twamev {tag} and confirm",
+            text=f"send MultiProjTpl {tag} for Amazon {tag},Twamev {tag} to Prachi Darbar {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled and "Sent." in r.reply, r.reply
@@ -5130,7 +5130,7 @@ async def test_multi_talent_single_project_each_renders_correctly():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send - MultiTalentA {tag},MultiTalentB {tag} - MultiTalentTpl {tag} - MultiTalentProj {tag} and confirm",
+            text=f"send MultiTalentTpl {tag} for MultiTalentProj {tag} to MultiTalentA {tag},MultiTalentB {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled and "Sent." in r.reply, r.reply
@@ -5174,8 +5174,8 @@ async def test_multi_talent_multi_project_no_cross_contamination():
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=(
-                f"send - MatrixTalentA {tag},MatrixTalentB {tag} - FullMatrixTpl {tag} - "
-                f"MatrixProjA {tag},MatrixProjB {tag} and confirm"
+                f"send FullMatrixTpl {tag} for MatrixProjA {tag},MatrixProjB {tag} to "
+                f"MatrixTalentA {tag},MatrixTalentB {tag} and confirm"
             ),
             sender_name="Raj", sender_is_group_member=True,
         )
@@ -5256,7 +5256,7 @@ async def test_instagram_recipient_resolves_crm_contact_not_talent():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send talentgram - Angela {tag} - Akash Castingtree {tag} and confirm",
+            text=f"send Angela {tag}'s instagram to Akash Castingtree {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled and "Sent." in r.reply, r.reply
@@ -5274,18 +5274,25 @@ async def test_instagram_recipient_resolves_crm_contact_not_talent():
 
 
 async def test_instagram_talentgram_alias_equivalent_to_instagram():
+    """"talentgram" as an Instagram-mode alias word was specific to the
+    now-deprecated hyphen grammar's own _SIMPLE_INSTAGRAM_RE (it was never
+    part of the general natural-language _INSTAGRAM_KEYWORD_RE) — Old
+    Interface Deprecation deliberately does not extend it to natural
+    language (the word is a much riskier, broader trigger outside the
+    hyphen form's narrow "instagram|talentgram - Talent - Recipient"
+    shape). "instagram"/"insta" remain fully equivalent in both forms."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
     tag = uuid.uuid4().hex[:6]
-    for word in ("instagram", "insta", "instagram link", "insta link", "talentgram"):
+    for word in ("instagram", "insta"):
         t1 = await _seed_talent(f"AliasTalent {tag}", instagram_handle="alias_handle")
         t2 = await _seed_talent(f"AliasRecipient {tag}", phone="917000400070")
         batch_id = None
         try:
             r = await handle_inbound_message(
                 group_name=group, sender_phone=phone,
-                text=f"send {word} - AliasTalent {tag} - AliasRecipient {tag} and confirm",
+                text=f"send AliasTalent {tag}'s {word} to AliasRecipient {tag} and confirm",
                 sender_name="Raj", sender_is_group_member=True,
             )
             assert r.handled and "Sent." in r.reply, (word, r.reply)
@@ -5309,7 +5316,7 @@ async def test_instagram_recipient_ambiguous_crm_contact_shows_full_list_and_res
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send instagram - Bella {tag} - Rohan {tag}",
+            text=f"send Bella {tag}'s instagram to Rohan {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
@@ -5349,7 +5356,7 @@ async def test_instagram_recipient_phone_number():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send instagram - Carla {tag} - +917000400090 and confirm",
+            text=f"send Carla {tag}'s instagram to +917000400090 and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled and "Sent." in r.reply, r.reply
@@ -5379,7 +5386,7 @@ async def test_instagram_recipient_genuinely_not_found_reports_clearly():
         # talent-fallback tier via the shared random suffix alone.
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send instagram - Diya {tag} - Zzzargled Nonexistent Recipient Xyzzy Quux",
+            text=f"send Diya {tag}'s instagram to Zzzargled Nonexistent Recipient Xyzzy Quux",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
@@ -5406,7 +5413,7 @@ async def test_instagram_recipient_crm_contact_takes_priority_over_similarly_nam
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send instagram - Elena {tag} - Farhan Qureshi {tag} and confirm",
+            text=f"send Elena {tag}'s instagram to Farhan Qureshi {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled and "Sent." in r.reply, r.reply
@@ -5435,7 +5442,7 @@ async def test_instagram_recipient_falls_back_to_talent_when_no_crm_match():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send instagram - Gita {tag} - Harish {tag} and confirm",
+            text=f"send Gita {tag}'s instagram to Harish {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled and "Sent." in r.reply, r.reply
@@ -5469,6 +5476,17 @@ async def test_whitespace_tolerant_parse_simple_send_command_unit():
     assert parsed4 == {"send_mode": "instagram", "source_query": "Riya", "recipient_query": "Raj"}
 
 
+# Old Interface Deprecation (2026-08-30) — the 4 tests below used to prove
+# the deprecated hyphen grammar's OWN whitespace tolerance ("send-Talent-
+# Template-Project", no spaces, still parsed correctly). parse_simple_send_
+# command itself is completely untouched (it still parses these exact
+# shapes identically — see test_whitespace_tolerant_parse_simple_send_
+# command_unit below, a pure unit test of that function, unaffected), but
+# the END-TO-END path no longer executes what it recognizes — it redirects
+# instead (see LEGACY_SYNTAX_FIELD / _send_requirement_try_auto_execute).
+# Updated to confirm the redirect fires correctly for whitespace-tolerant
+# hyphen input too, not just the spaced form — genuine coverage that the
+# interception isn't bypassable by omitting spaces.
 async def test_whitespace_tolerant_template_send_end_to_end():
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
@@ -5479,20 +5497,16 @@ async def test_whitespace_tolerant_template_send_end_to_end():
     project_id = await _seed_project(f"NoSpaceProj {tag}")
     t1 = await _seed_talent(f"NoSpaceTalent {tag}", phone="917000900001")
     await _seed_pipeline_row(project_id, t1, "follow_up")
-    batch_id = None
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=f"send-NoSpaceTalent {tag}-{template_name}-NoSpaceProj {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert r.handled and "Sent." in r.reply, r.reply
-        batch_id = r.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        assert {j["talent_id"] for j in jobs} == {t1}
+        assert r.handled, r.reply
+        assert "new command format" in r.reply, r.reply
+        assert "Sent." not in r.reply
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)
 
@@ -5504,18 +5518,16 @@ async def test_whitespace_tolerant_instagram_send_end_to_end():
     tag = uuid.uuid4().hex[:6]
     t1 = await _seed_talent(f"NoSpaceInstaSubj {tag}", instagram_handle="nospace_h")
     t2 = await _seed_talent(f"NoSpaceInstaRecip {tag}", phone="917000900002")
-    batch_id = None
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=f"send instagram-NoSpaceInstaSubj {tag}-NoSpaceInstaRecip {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert r.handled and "Sent." in r.reply, r.reply
-        batch_id = r.reply.split("Batch ID:")[1].strip()
+        assert r.handled, r.reply
+        assert "new command format" in r.reply, r.reply
+        assert "Sent." not in r.reply
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
         await _cleanup(phone, talent_ids=[t1, t2])
         await _restore_config(original)
 
@@ -5530,20 +5542,16 @@ async def test_whitespace_tolerant_stage_targeting_send_end_to_end():
     project_id = await _seed_project(f"NoSpaceStageProj {tag}")
     t1 = await _seed_talent(f"NoSpaceStageTalent {tag}", phone="917000900003")
     await _seed_pipeline_row(project_id, t1, "follow_up")
-    batch_id = None
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=f"send-{template_name}-NoSpaceStageProj {tag}-Follow Up and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert r.handled and "Sent." in r.reply, r.reply
-        batch_id = r.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        assert {j["talent_id"] for j in jobs} == {t1}
+        assert r.handled, r.reply
+        assert "new command format" in r.reply, r.reply
+        assert "Sent." not in r.reply
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)
 
@@ -5552,7 +5560,10 @@ async def test_whitespace_tolerant_hyphenated_recipient_name_still_resolves():
     """A talent name with a no-space internal hyphen ("Co-Star Riya")
     stays correctly un-split when the command's own field separators use
     the documented " - " form (the strict, spaced split is always tried
-    first and already finds the right field count)."""
+    first and already finds the right field count) — parse_simple_send_
+    command's own field-splitting behaviour, unaffected by the hyphen
+    grammar's deprecation (still verified via the redirect firing cleanly,
+    not garbling the name into an error)."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
@@ -5562,20 +5573,16 @@ async def test_whitespace_tolerant_hyphenated_recipient_name_still_resolves():
     project_id = await _seed_project(f"HyphenRecipProj {tag}")
     t1 = await _seed_talent(f"Co-Star Riya {tag}", phone="917000900004")
     await _seed_pipeline_row(project_id, t1, "follow_up")
-    batch_id = None
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=f"send - Co-Star Riya {tag} - {template_name} - HyphenRecipProj {tag} and confirm",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert r.handled and "Sent." in r.reply, r.reply
-        batch_id = r.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        assert {j["talent_id"] for j in jobs} == {t1}
+        assert r.handled, r.reply
+        assert "new command format" in r.reply, r.reply
+        assert "Sent." not in r.reply
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1], template_ids=[template_id])
         await _restore_config(original)
 
@@ -5615,7 +5622,7 @@ async def test_instagram_recipient_unsafe_ambiguous_talent_tie_reports_not_found
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"send instagram - Isha {tag} - Mixxi App x Talentgram {tag} Agency",
+            text=f"send Isha {tag}'s instagram to Mixxi App x Talentgram {tag} Agency",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply

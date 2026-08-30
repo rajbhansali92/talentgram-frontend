@@ -2818,6 +2818,9 @@ def _describe_plan_step_lines(resolved_steps: "List[Dict[str, Any]]") -> List[st
             continue
         if rs["intent_id"] == "casting.send":
             sf = rs.get("send_fields") or {}
+            if sf.get("error"):
+                lines.append(f"{i}. {rs['raw_text']} — {sf['error']}")
+                continue
             talent_desc = sf.get("talent_selector") or "?"
             project_desc = sf.get("project_query") or "?"
             lines.append(
@@ -3050,6 +3053,15 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
     await _flush_group_send(summary_lines, group_send_template, group_send_data, is_dry_run=False)
 
     if pending_send_fields is None:
+        return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
+
+    if pending_send_fields.get("error"):
+        # P0 fix (2026-08-30) — a singular pronoun ("her"/"him") that
+        # can't be safely resolved to exactly one touched talent STOPS
+        # here and asks, rather than silently guessing/merging (see
+        # _resolve_plan_pronoun_talents). Every other step in the plan
+        # has still already run — only the SEND leg is withheld.
+        summary_lines += ["", f"✗ Send — {pending_send_fields['error']}"]
         return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
 
     # Compound Actions SEND hand-off (2026-08-27) — everything else in
@@ -4456,11 +4468,10 @@ async def _resolve_share_step_for_plan(
     template_query = fields.get("template_query") or ""
 
     if _share_recipient_is_implicit(recipient_raw) and touched_pairs:
-        seen: List[str] = []
-        for pair in touched_pairs:
-            if pair["talent_label"] not in seen:
-                seen.append(pair["talent_label"])
-        recipient_raw = ",".join(seen)
+        labels, err = _resolve_plan_pronoun_talents(recipient_raw, touched_pairs)
+        if err:
+            return _ShareResolution(ok=False, error=err)
+        recipient_raw = ",".join(labels)
 
     if not project_raw and touched_pairs:
         seen_p: List[str] = []
@@ -4695,12 +4706,41 @@ SEND_FORM_EDIT_FIELD = FieldSpec(
 )
 
 
+# P0 fix (2026-08-30) — "send her THE CASTING CALL" / "send both THE
+# CASTING CALLS" / "Send Kripa THE CASTING CALL for Project" is the
+# canonical natural phrasing for SEND (Command Resolution spec, Parts 2/4/
+# 5/9) — "the casting call"/"submission"/"media" here is a pure object
+# noun describing WHAT gets sent, never part of a talent name. Left
+# unstripped, it used to glue onto the pronoun/name ("her the casting
+# call", "Kripa the casting call") before either extractor ever saw it:
+# _plan_selector_is_implicit's exact "== pronoun word" check then failed
+# (the raw text was never literally "her"), so the compound-plan inherit-
+# from-touched_pairs branch never fired, and the whole garbled string got
+# fuzzy-matched against the ENTIRE talent database instead — the exact
+# root cause of a real production incident where "send her the casting
+# call" resolved to a completely unrelated talent. Stripped ONCE, in one
+# shared helper, before EITHER extractor (standalone or compound-plan)
+# does anything else — "her"/"both"/"Kripa" is what's left, exactly the
+# text _plan_selector_is_implicit/_resolve_talent_query_target already
+# know how to handle correctly.
+_SEND_OBJECT_FILLER_RE = re.compile(
+    r"\b(?:the\s+)?casting\s+calls?\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_send_object_filler(text: str) -> str:
+    cleaned = _SEND_OBJECT_FILLER_RE.sub(" ", text or "")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _extract_send_fields(text: str) -> Dict[str, str]:
-    """"send - Talent - Project" (hyphen), "SEND Talent for Project"
-    (canonical natural language, 2026-08-27 — the explicit "for" connector
-    checked first, same regex the compound-plan SEND step uses), or "send
-    Talent Project" (space-separated, boundary resolved later via the
-    DB-aware _resolve_freeform_talent_project) — own trigger ("send")."""
+    """"send - Talent - Project" (hyphen), "SEND Talent for Project" /
+    "SEND Talent the casting call for Project" (canonical natural
+    language — the explicit "for" connector checked first, same regex the
+    compound-plan SEND step uses), or "send Talent Project" (space-
+    separated, boundary resolved later via the DB-aware
+    _resolve_freeform_talent_project) — own trigger ("send")."""
     _, remainder = nlu._strip_leading_trigger(text or "", ["send"])
     remainder = (remainder or "").strip()
     if not remainder:
@@ -4709,6 +4749,9 @@ def _extract_send_fields(text: str) -> Dict[str, str]:
     if fields:
         talent_part, project_part = fields
         return {"talent_selector": talent_part, "project_query": project_part}
+    remainder = _strip_send_object_filler(remainder)
+    if not remainder:
+        return {}
     m = _SEND_STEP_FOR_PROJECT_RE.match(remainder)
     if m:
         return {"talent_selector": m.group(1).strip(), "project_query": m.group(2).strip()}
@@ -4727,7 +4770,7 @@ _SEND_STEP_FOR_PROJECT_RE = re.compile(r"^(.*?)\s+for\s+(.+)$", re.IGNORECASE | 
 
 def _extract_send_fields_for_plan(raw_text: str) -> Dict[str, str]:
     _, remainder = nlu._strip_leading_trigger(raw_text or "", ["send"])
-    remainder = (remainder or "").strip()
+    remainder = _strip_send_object_filler((remainder or "").strip())
     if not remainder:
         return {}
     m = _SEND_STEP_FOR_PROJECT_RE.match(remainder)
@@ -4749,6 +4792,44 @@ def _plan_selector_is_implicit(raw: str) -> bool:
     return bool(selector.ok and selector.name_query == nlu.PRONOUN_LAST_MARKER)
 
 
+# P0 fix (2026-08-30) — singular vs. plural pronoun inheritance. "both"/
+# "them" (or the clause naming no one at all) genuinely mean "everyone
+# this plan has touched so far" — but "her"/"him"/"this one" are SINGULAR:
+# if the plan has touched more than one distinct talent, "her" does NOT
+# unambiguously mean all of them, and silently joining every touched
+# talent under a singular pronoun is exactly the class of bug that sent a
+# casting call to a completely unrelated talent in production (a
+# differently-shaped bug — an unstripped filler phrase defeated the
+# pronoun check entirely — but the underlying principle is the same:
+# a singular reference must resolve to exactly one talent or ask, never
+# guess/merge). Scoped to singular pronouns ONLY; "both"/"them"/empty are
+# unaffected and keep inheriting the full touched set exactly as before.
+_SINGULAR_PRONOUN_WORDS = {"him", "her", "this one", "that one", "this", "that"}
+
+
+def _resolve_plan_pronoun_talents(
+    raw: str, touched_pairs: List[Dict[str, str]],
+) -> "Tuple[List[str], Optional[str]]":
+    """Resolves an implicit/pronoun talent reference against touched_pairs.
+    Returns (talent_labels, error) — error is None on success. "both"/
+    "them"/an unnamed reference inherit every distinct talent this plan
+    has touched; a singular pronoun ("her"/"him"/"this"/"that") only
+    resolves that way when touched_pairs names exactly ONE distinct
+    talent — with more than one, "her" is genuinely ambiguous, so this
+    returns a clarification message instead of picking or merging."""
+    seen: List[str] = []
+    for pair in touched_pairs:
+        if pair["talent_label"] not in seen:
+            seen.append(pair["talent_label"])
+    if raw.strip().lower() in _SINGULAR_PRONOUN_WORDS and len(seen) > 1:
+        options = "\n".join(f"{i + 1}. {name}" for i, name in enumerate(seen))
+        return [], (
+            f'"{raw.strip()}" could mean more than one talent from this plan:\n\n{options}\n\n'
+            "Please name the talent explicitly instead (e.g. the exact name)."
+        )
+    return seen, None
+
+
 def _resolve_send_step_for_plan(raw_text: str, touched_pairs: List[Dict[str, str]]) -> Dict[str, str]:
     """Resolves one 'casting.send' plan step's talent/project text —
     inheriting an implicit/pronoun reference from `touched_pairs` (the
@@ -4757,17 +4838,18 @@ def _resolve_send_step_for_plan(raw_text: str, touched_pairs: List[Dict[str, str
     resolver. Returns raw {"talent_selector", "project_query"} text —
     NOT yet resolved against the database; casting.send's own existing
     build_confirmation/executor do that unchanged, via the normal
-    conversation hand-off (see _execute_plan's casting.send branch)."""
+    conversation hand-off (see _execute_plan's casting.send branch). A
+    dict with an "error" key (and no "talent_selector") means the pronoun
+    could not be safely resolved — see _resolve_plan_pronoun_talents."""
     fields = _extract_send_fields_for_plan(raw_text)
     talent_raw = (fields.get("talent_selector") or "").strip()
     project_raw = (fields.get("project_query") or "").strip()
 
     if _plan_selector_is_implicit(talent_raw) and touched_pairs:
-        seen: List[str] = []
-        for pair in touched_pairs:
-            if pair["talent_label"] not in seen:
-                seen.append(pair["talent_label"])
-        talent_raw = ",".join(seen)
+        labels, err = _resolve_plan_pronoun_talents(talent_raw, touched_pairs)
+        if err:
+            return {"error": err}
+        talent_raw = ",".join(labels)
 
     if not project_raw and touched_pairs:
         seen_p: List[str] = []
@@ -5561,93 +5643,170 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
 HELP_TEXT = (
     "TALENTGRAM CASTING PIPELINE\n"
     "QUICK MANUAL\n\n"
-    "This group manages talents, projects, and the casting pipeline.\n\n"
+    "This group manages talents, projects, and the casting pipeline — "
+    "adding talents, moving them through stages, sharing casting calls, "
+    "sending submissions, and checking status. Talk to it in plain "
+    "English; the examples below are the reliable way to write each "
+    "command.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "QUICK COMMANDS\n"
+    "1. ADD\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "1. ADD — add talent(s) to a project's pipeline.\n\n"
-    "Add Ayushi to Toyota Glanza\n"
-    "Add - Ayushi,Priya - Toyota,Nykaa - Follow Up\n\n"
-    "2. MOVE — move talent(s) to a pipeline stage, or a whole stage at "
-    "once (no talent named).\n\n"
-    "Move - Ayushi - Toyota Glanza - Follow Up to Approved\n"
-    "move - Toyota Glanza - Ask To Test to Follow Up\n\n"
-    "MOVE also understands: shortlist, select, reject, hold, restore, "
-    "not available, not interested, and every existing stage word.\n\n"
-    "3. TESTED — check a talent's current pipeline stage for a project.\n\n"
-    "Tested Ayushi for Toyota Glanza\n"
-    "Tested Ayushi,Priya for Toyota,Nykaa\n"
-    "has Ayushi tested for Toyota Glanza / did Ayushi test for Toyota Glanza\n"
-    "(answers with the ACTUAL current stage, e.g. Shortlisted — not just "
-    "yes/no)\n\n"
-    "4. SHOW — look up projects, pipelines, or a talent's own projects.\n\n"
-    "show ongoing projects\n"
-    "show projects of Ayushi (also: which projects is Ayushi in / what "
-    "projects does Ayushi have — works for multiple talents too)\n"
-    "show - Toyota,Nykaa - Follow Up,Approved\n"
-    "pending test - Ayushi,Priya\n\n"
-    "5. SEND — forward a talent's marked WhatsApp audition media (Takes → "
-    "Introduction → Form → Pictures → ☑️) to a casting WhatsApp group. "
-    "ALWAYS shows a preview first and needs an explicit approval — "
-    "nothing is ever sent automatically:\n\n"
-    "send - Ayushi - Toyota Glanza\n\n"
-    "1 → Approve   2 → Edit a field   3 → Cancel\n\n"
-    "Multiple talents/projects also work here (send - Ayushi,Priya - "
-    "Toyota,Nykaa) — each pairing sends independently.\n\n"
-    "6. UPLOAD — pulls a talent's @Gunwanti-marked WhatsApp media (takes/"
-    "intro/photos) into their Talentgram submission (Cloudinary), for the "
-    "app's own review pages — different from SEND above, which forwards "
-    "on WhatsApp and never touches Cloudinary:\n\n"
-    "upload - Ayushi - Toyota Glanza\n\n"
-    "7. SHARE — share a project's casting call/template with talent(s), "
-    "or with everyone currently in that project's pipeline. Also always "
-    "shows a preview first:\n\n"
-    "share casting call for Toyota Glanza to Ayushi\n"
-    "share casting calls for Toyota,Nykaa to Ayushi,Priya\n"
-    "share casting call for Toyota Glanza to pipeline\n\n"
-    "8. UNDO — reverse the last pipeline move (within 5 minutes) — "
-    "including the move half of an Add+Move.\n\n"
-    "undo\n\n"
-    "9. HELP — show this manual.\n\n"
+    "WHAT IT DOES: adds talent(s) to a project's pipeline, at Ask To Test.\n\n"
+    "HOW TO WRITE IT: Add [talent] to [project]\n\n"
+    "EXAMPLES:\n"
+    "Add Kripa Trivedi to Parachute Jasmine Oil\n"
+    "Add Kripa Trivedi,Siddhi Bankhele to Parachute Jasmine Oil\n"
+    "Add Kripa Trivedi,Siddhi Bankhele to Project A,Project B\n\n"
+    "IMPORTANT NOTES: after sending, I show what will be added and wait "
+    "for your approval — nothing is added until you reply 1.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "COMMANDS CAN BE COMBINED\n"
+    "2. MOVE\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "ADD, MOVE, SHARE, and SEND can all be chained in one message — each "
-    "runs in the order you wrote it, and an unnamed talent/project (e.g. "
-    "\"her\", \"both\") is understood as whoever the earlier steps just "
-    "touched:\n\n"
-    "Add Ayushi to Toyota Glanza, Move her to Shortlisted, Share the "
-    "casting call with her\n\n"
-    "SEND inside a combined command still shows its own separate form and "
-    "still needs its own explicit approval — never bundled into the rest.\n\n"
-    "Add,Move - Ayushi - Toyota Glanza - Follow Up\n\n"
-    "Add,Move,Send - Ayushi - Casting Call - Toyota Glanza - Follow Up\n\n"
+    "WHAT IT DOES: moves talent(s) already in a pipeline to a different "
+    "stage.\n\n"
+    "HOW TO WRITE IT: Move [talent] to [stage] in [project]\n\n"
+    "EXAMPLES:\n"
+    "Move Kripa Trivedi to Follow Up in Parachute Jasmine Oil\n"
+    "Move Kripa Trivedi,Siddhi Bankhele to Shortlisted in Project A\n\n"
+    "IMPORTANT NOTES: also understands shortlist, select, reject, hold, "
+    "restore, not available, not interested, and every existing stage "
+    "name. Shows a preview and waits for approval, same as ADD.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "BULK COMMANDS\n"
+    "3. SHARE\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "• Multiple talents: comma-separated (Ayushi,Priya)\n"
-    "• Multiple projects: comma-separated (Toyota,Nykaa)\n"
-    "• Multiple commands: put each on its own line (a blank line between "
-    "them is fine but not required — \"/\" also works as a separator), or "
-    "comma-separate the action words themselves (Add,Move,Send)\n\n"
-    "Finish with:\n\n"
-    "and confirm\n\n"
-    "to run every command immediately, no approval step (SEND always "
-    "still requires its own explicit approval regardless).\n\n"
-    "Talent search (e.g. \"Find actors in Mumbai\") and picking from a "
-    "list (Select 1,3,5 / Select first 5 / Select all, then \"Add "
-    "selected to Toyota Glanza\") still work too.\n\n"
+    "WHAT IT DOES: shares a project's casting call/template with "
+    "talent(s), or with everyone currently in that project's pipeline. "
+    "This is for sharing INFORMATION — for sending a talent's own "
+    "submission, use SEND instead.\n\n"
+    "HOW TO WRITE IT: Share the casting call for [project] with [talent(s)]\n\n"
+    "EXAMPLES:\n"
+    "Share the casting call for Parachute Jasmine Oil with Kripa Trivedi\n"
+    "Share the casting call for Project A with Kripa Trivedi,Siddhi Bankhele\n"
+    "Share the casting call for Project A with everyone in its pipeline\n\n"
+    "IMPORTANT NOTES: shows a preview and waits for approval before "
+    "anything sends.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "IMPORTANT RULES\n"
+    "4. SEND\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "• Spaces around commas/dashes are ignored\n"
-    "• Minor spelling mistakes are tolerated\n"
-    "• If a name is ambiguous, I'll ask which one you meant — just reply "
-    "with your answer (e.g. \"2\" or the full name); you don't need to "
-    "repeat the whole command\n\n"
-    "Legacy syntax reference: Action - Talent - Project - Pipeline (still "
-    "works exactly as above); testing? - Ayushi,Priya - Toyota,Nykaa is "
-    "the same check as TESTED above."
+    "WHAT IT DOES: forwards a talent's own marked WhatsApp audition "
+    "media (Takes → Introduction → Form → Pictures → ☑️) to a casting "
+    "WhatsApp group.\n\n"
+    "HOW TO WRITE IT: Send [talent] for [project]\n\n"
+    "EXAMPLES:\n"
+    "Send Kripa Trivedi for Parachute Jasmine Oil\n"
+    "Send Kripa Trivedi,Siddhi Bankhele for Parachute Jasmine Oil\n\n"
+    "IMPORTANT NOTES: ALWAYS shows the exact form first and needs an "
+    "explicit approval — nothing is ever sent automatically. Reply:\n"
+    "1 → Approve\n"
+    "2 → Edit a field\n"
+    "3 → Cancel\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "5. UPLOAD\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "WHAT IT DOES: pulls a talent's @Gunwanti-marked WhatsApp media "
+    "(takes/intro/photos) into their Talentgram submission, for the "
+    "app's own review pages. Different from SEND — this never touches "
+    "WhatsApp, and SEND never touches this.\n\n"
+    "HOW TO WRITE IT: Upload [talent]'s marked media for [project]\n\n"
+    "EXAMPLES:\n"
+    "Upload Kripa Trivedi's marked media for Parachute Jasmine Oil\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "6. TESTED\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "WHAT IT DOES: checks a talent's current pipeline stage for a "
+    "project.\n\n"
+    "HOW TO WRITE IT: Tested [talent] for [project]\n\n"
+    "EXAMPLES:\n"
+    "Tested Kripa Trivedi for Parachute Jasmine Oil\n"
+    "Has Kripa Trivedi tested for Parachute Jasmine Oil\n"
+    "Tested Kripa Trivedi,Siddhi Bankhele for Project A,Project B\n\n"
+    "IMPORTANT NOTES: answers with the ACTUAL current stage (e.g. "
+    "Shortlisted) — not just yes/no. Runs immediately, no approval "
+    "needed (it doesn't change anything).\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "7. SHOW\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "WHAT IT DOES: looks up ongoing projects, a project's pipeline, or "
+    "which projects a talent is in.\n\n"
+    "HOW TO WRITE IT: Show [projects / a project's pipeline / talent's projects]\n\n"
+    "EXAMPLES:\n"
+    "Show ongoing projects\n"
+    "Show projects of Kripa Trivedi\n"
+    "Show projects of Kripa Trivedi,Siddhi Bankhele\n"
+    "Show the Follow Up pipeline of Parachute Jasmine Oil\n\n"
+    "IMPORTANT NOTES: runs immediately, no approval needed.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "8. UNDO\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "WHAT IT DOES: reverses the last pipeline move, within 5 minutes — "
+    "including the move half of a combined Add+Move.\n\n"
+    "HOW TO WRITE IT: Undo\n\n"
+    "IMPORTANT NOTES: never undoes a SEND or SHARE — those are outbound "
+    "WhatsApp messages, not pipeline changes.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "9. HELP\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "WHAT IT DOES: shows this manual.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "MULTIPLE TALENTS / MULTIPLE PROJECTS\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "Comma-separate multiple talents (Kripa Trivedi,Siddhi Bankhele) or "
+    "multiple projects (Project A,Project B) — I understand them as "
+    "lists. Naming both means every combination:\n\n"
+    "Add Kripa Trivedi,Siddhi Bankhele to Project A,Project B\n\n"
+    "means Kripa→A, Kripa→B, Siddhi→A, Siddhi→B — one talent is never "
+    "added twice to the same project.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "MULTIPLE COMMANDS IN ONE MESSAGE\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "ADD, MOVE, SHARE, and SEND can be chained in one message — each "
+    "runs in the order you wrote it:\n\n"
+    "Add Kripa Trivedi to Parachute Jasmine Oil, move her to Follow Up, "
+    "share the casting call with her\n\n"
+    "Add A,B to Project 1,Project 2, move both to Follow Up, send both "
+    "the casting calls\n\n"
+    "SEND inside a combined command still shows its own separate form "
+    "and needs its own explicit approval — never bundled into the rest. "
+    "Finish with \"and confirm\" to skip the approval step on everything "
+    "else (SEND's own approval is never skipped).\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "\"BOTH\" / \"HER\" / \"HIM\" / \"THEM\"\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "In a combined command, an unnamed talent (her/him/both/them) means "
+    "whoever the earlier steps in THAT SAME message just touched. \"Both\"/"
+    "\"them\" mean everyone touched so far; \"her\"/\"him\" mean exactly one "
+    "— if more than one talent could be meant, I'll ask rather than guess.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "CONFIRMATION\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "Before anything changes, I show exactly what will happen and wait:\n\n"
+    "Reply:\n"
+    "1 → Approve\n"
+    "2 → Edit\n"
+    "3 → Cancel\n\n"
+    "On Edit, I'll ask specifically what you want to change about THAT "
+    "pending action — no need to repeat the whole command.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "WHEN SOMETHING IS AMBIGUOUS\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "If a talent or project name matches more than one real record, "
+    "I'll show numbered options and ask you to pick — I never guess on "
+    "a close spelling match. Once you answer, I continue the original "
+    "command automatically.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "WHEN AN ERROR OCCURS\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "I'll tell you what I understood, what's missing or wrong, and "
+    "exactly what to send next — nothing is ever changed or sent when "
+    "something goes wrong.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "GENERAL\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "• Spaces around commas are ignored\n"
+    "• Minor spelling mistakes are tolerated, including in command words "
+    "(e.g. \"mover\" for \"move\")\n"
+    "• Talent search (e.g. \"Find actors in Mumbai\") and picking from a "
+    "list (Select 1,3,5) still work too"
 )
 
 CASTING_AGENT = AgentDefinition(

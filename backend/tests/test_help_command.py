@@ -164,17 +164,27 @@ async def test_each_agent_has_distinct_help_text():
     # clearly start with which group it belongs to"), so a new intern
     # never confuses one agent's capabilities with another's.
     assert "TALENTGRAM CASTING PIPELINE" in CASTING_HELP_TEXT
-    assert "Action - Talent - Project - Pipeline" in CASTING_HELP_TEXT
-    assert "pending test" in CASTING_HELP_TEXT
-    assert "testing?" in CASTING_HELP_TEXT
+    # Command Resolution + Old Interface Cleanup (2026-08-30) — the
+    # hyphenated "Action - Talent - Project - Pipeline" grammar (and its
+    # "pending test -"/"testing? -" structured siblings) is no longer
+    # advertised in HELP — natural language ("Add X to Y", "Tested X for
+    # Y") is now the one documented interface, even though the old
+    # grammar still quietly works underneath (Part 4/8: capabilities
+    # preserved, interface simplified).
+    assert "Action - Talent - Project - Pipeline" not in CASTING_HELP_TEXT
+    assert "pending test -" not in CASTING_HELP_TEXT
+    assert "testing? -" not in CASTING_HELP_TEXT
     assert "talent search" in CASTING_HELP_TEXT.lower()
     assert "Move" in CASTING_HELP_TEXT
     assert "Save a Contact" not in CASTING_HELP_TEXT
-    assert "Send a Campaign" not in CASTING_HELP_TEXT
+    assert "SEND / SHARE A CAMPAIGN" not in CASTING_HELP_TEXT
 
     assert "TALENTGRAM WHATSAPP AGENT" in CAMPAIGN_HELP_TEXT
-    assert "Send a Campaign" in CAMPAIGN_HELP_TEXT
-    assert "Action - Who - What - Where" in CAMPAIGN_HELP_TEXT
+    assert "SEND / SHARE A CAMPAIGN" in CAMPAIGN_HELP_TEXT
+    # Old Interface Deprecation (2026-08-30) — the hyphen grammar
+    # ("Action - Who - What - Where") is no longer advertised; HELP shows
+    # only natural-language examples now.
+    assert "Action - Who - What - Where" not in CAMPAIGN_HELP_TEXT
     assert "and confirm" in CAMPAIGN_HELP_TEXT
     assert "custom message" in CAMPAIGN_HELP_TEXT.lower()
     assert "instagram" in CAMPAIGN_HELP_TEXT.lower()

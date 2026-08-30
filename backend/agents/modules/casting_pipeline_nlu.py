@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from core import parse_height_to_inches
+from agents import parser
 
 
 # ---------------------------------------------------------------------------
@@ -1014,6 +1015,20 @@ def _starts_with_any_trigger(line: str, triggers: List[str]) -> bool:
 _SHARE_CHUNK_TRIGGERS = ["share"]
 _SEND_CHUNK_TRIGGERS = ["send"]
 
+# Typo Tolerance (Command Resolution, 2026-08-30) — the exact typo'd
+# spellings the spec names (mover/move, shre/share, snd/send, addd/add),
+# mapped to the intent they mean. A closed, hand-picked list, not a
+# generator: compound-sentence chunk SPLITTING is regex/string-based (see
+# split_actions_grouped's all_triggers, just above) and needs literal
+# strings to match against, not a general edit-distance check — the same
+# tight scoping principle agents/parser.py's detect_trigger fallback uses
+# (a small curated word set, never applied to talent/project text).
+_TYPO_CHUNK_TRIGGER_VARIANTS = ["mover", "shre", "snd", "addd"]
+_TYPO_CHUNK_TRIGGER_TO_INTENT = {
+    "mover": "casting.move", "shre": "casting.share",
+    "snd": "casting.send", "addd": "casting.add",
+}
+
 
 def classify_chunk_intent(chunk_text: str) -> Optional[str]:
     """Which intent a split_actions chunk belongs to, based on which
@@ -1031,6 +1046,10 @@ def classify_chunk_intent(chunk_text: str) -> Optional[str]:
         return "casting.share"
     if _starts_with_any_trigger(first_line, _SEND_CHUNK_TRIGGERS):
         return "casting.send"
+    if _starts_with_any_trigger(first_line, _TYPO_CHUNK_TRIGGER_VARIANTS):
+        for typo, intent_id in _TYPO_CHUNK_TRIGGER_TO_INTENT.items():
+            if _starts_with_any_trigger(first_line, [typo]):
+                return intent_id
     return None
 
 
@@ -1088,8 +1107,16 @@ def split_actions_grouped(text: str) -> "List[Tuple[int, str]]":
     # "add"/"move" as chunk-starting/chaining trigger words, so ADD, MOVE,
     # SHARE, and SEND can all be combined in one instruction (see
     # classify_chunk_intent and _split_and_chained's comma-chaining below).
+    # Typo Tolerance (2026-08-30) — _TYPO_CHUNK_TRIGGER_VARIANTS folded in
+    # here too, so a typo'd action word ("mover") starts its own chunk
+    # inside a compound sentence exactly like the correctly-spelled word
+    # would, not just when it's the very first word of the whole message
+    # (that case is handled separately by agents/parser.py's detect_trigger).
     all_triggers = sorted(
-        {t.lower() for t in (MOVE_TRIGGERS + ADD_TRIGGERS + _SHARE_CHUNK_TRIGGERS + _SEND_CHUNK_TRIGGERS)},
+        {t.lower() for t in (
+            MOVE_TRIGGERS + ADD_TRIGGERS + _SHARE_CHUNK_TRIGGERS + _SEND_CHUNK_TRIGGERS
+            + _TYPO_CHUNK_TRIGGER_VARIANTS
+        )},
         key=len, reverse=True,
     )
     lines = (text or "").split("\n")
@@ -1272,9 +1299,27 @@ def _strip_leading_trigger(text: str, triggers: List[str]) -> "tuple[Optional[st
             continue
         if best is None or cand[0] > best[0]:
             best = cand
-    if best is None:
-        return None, working
-    return best[1], best[2]
+    if best is not None:
+        return best[1], best[2]
+
+    # Typo Tolerance (2026-08-30) — mirrors agents/parser.py's
+    # detect_trigger fallback exactly (same curated word set, same one-
+    # edit-away check, same "ambiguous -> match nothing" safety rule):
+    # once detect_trigger has already decided a typo'd first word like
+    # "mover" opens casting.move, the ACTUAL field extraction below needs
+    # to strip that same first word too, or the whole (still-unstripped)
+    # "mover to follow up" would be read as talent/project text instead.
+    first_word_match = parser._FIRST_WORD_RE.match(lowered)
+    if first_word_match:
+        candidate = first_word_match.group(0)
+        typo_hits = [
+            trig for trig in triggers
+            if trig.lower().strip() in parser._TYPO_TOLERANT_TRIGGERS
+            and parser._one_edit_away(candidate, trig.lower().strip())
+        ]
+        if len(typo_hits) == 1:
+            return typo_hits[0], working[len(candidate):].lstrip(" :-")
+    return None, working
 
 
 def extract_move_fields(text: str, stage_order: List[str]) -> Dict[str, str]:

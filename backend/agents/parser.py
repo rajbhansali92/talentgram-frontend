@@ -53,11 +53,58 @@ def clean_voice_transcript(text: str) -> str:
     return working.strip()
 
 
+# Typo Tolerance (Command Resolution, 2026-08-30) — "obvious command typo
+# -> understand it" (mover/shre/snd/addd), scoped to a small, hand-curated
+# set of canonical action-verb triggers rather than every trigger word in
+# the system. Deliberately NOT applied to short/generic trigger words
+# ("p", "to", "is", "for", ...) or multi-word combos ("add,move",
+# "new contact") — fuzzy-matching those against ordinary group chatter
+# would risk exactly the "ambiguous meaning -> silently execute" failure
+# mode the spec explicitly forbids. Only reached when NO trigger matched
+# exactly (see detect_trigger below), and only ever inspects the
+# message's first WORD — never talent/project text.
+_TYPO_TOLERANT_TRIGGERS = {"add", "move", "share", "send", "upload", "undo", "tested", "show", "help"}
+_FIRST_WORD_RE = re.compile(r"^[A-Za-z]+")
+
+
+def _one_edit_away(a: str, b: str) -> bool:
+    """True iff a and b differ by exactly ONE single-character edit
+    (insertion, deletion, or substitution) — never zero (an exact match,
+    handled separately by detect_trigger) and never two or more (too
+    loose to trust for a command word): "mover"/"move" (1 insertion),
+    "shre"/"share" (1 deletion), "snd"/"send" (1 deletion), "addd"/"add"
+    (1 insertion) all qualify; "mve"/"move" (2 edits) does not."""
+    if a == b:
+        return False
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    shorter, longer = (a, b) if la < lb else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] == longer[j]:
+            i += 1
+            j += 1
+            continue
+        if skipped:
+            return False
+        skipped = True
+        j += 1
+    return True
+
+
 def detect_trigger(agent: AgentDefinition, text: str) -> Optional[IntentDefinition]:
     """Does this message open a new intent? Matches if the first line
     starts with (case-insensitively) one of the intent's trigger phrases,
     longest trigger first so "new contact" wins over a hypothetical
-    shorter "new"."""
+    shorter "new". Falls back to typo-tolerant matching (see above) only
+    when nothing matched exactly, and only if exactly one intent's
+    canonical trigger is one edit away — a first word equidistant from
+    two different triggers is genuinely ambiguous and matches neither,
+    rather than guessing."""
     lines = _clean_lines(text)
     if not lines:
         return None
@@ -93,7 +140,21 @@ def detect_trigger(agent: AgentDefinition, text: str) -> Optional[IntentDefiniti
             if matches:
                 if best is None or len(t) > best[0]:
                     best = (len(t), intent)
-    return best[1] if best else None
+    if best is not None:
+        return best[1]
+
+    word_match = _FIRST_WORD_RE.match(first)
+    if not word_match:
+        return None
+    candidate = word_match.group(0)
+    typo_matches = []
+    for intent in agent.intents:
+        for trig in intent.triggers:
+            t = trig.lower().strip()
+            if t in _TYPO_TOLERANT_TRIGGERS and _one_edit_away(candidate, t):
+                typo_matches.append(intent)
+                break
+    return typo_matches[0] if len(typo_matches) == 1 else None
 
 
 # Static Help Command — the fixed, literal trigger set from the spec.

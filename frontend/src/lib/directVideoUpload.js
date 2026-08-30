@@ -191,6 +191,9 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
     }
 
     // 3) Notify the backend to attach (finalize reconciliation is the safety net).
+    // P4 (Cloudinary rearchitecture): forward Cloudinary's detected `format` and
+    // video `codec` so the backend can decide the browser-compatibility
+    // exception without transcoding every upload by default.
     const completeRes = await api.post(
         completeEndpoint,
         {
@@ -200,6 +203,7 @@ export async function directVideoUpload({ sid, token, category, label, file, isA
             bytes: lastResponse.bytes || 0,
             duration: lastResponse.duration != null ? lastResponse.duration : duration,
             format: lastResponse.format || null,
+            video_codec: lastResponse.video?.codec || null,
             label: label || null,
         },
         { headers: authHeader, timeoutMs: 45_000 }

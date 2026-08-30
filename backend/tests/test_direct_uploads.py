@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import pytest
@@ -356,10 +357,16 @@ def test_public_id_length_worst_case():
 
 
 @patch("routers.submissions.decode_submitter")
-def test_video_signature_asynchronous_transformations(mock_decode):
-    """Verify that video-signature uses eager_async and does not return synchronous transformation or format."""
+def test_video_signature_requests_no_transformation(mock_decode):
+    """Cloudinary rearchitecture P4 — the video-signature must sign NO eager
+    transformation, NO incoming transformation, and NO eager_async. Cloudinary
+    stores one canonical asset (the uploaded original); the poster is a lazy
+    single-canonical URL persisted at /video-complete and a browser-compat
+    transcode is an explicit exception there. This is a cost-safety regression
+    guard — it fails loudly if an eager 720p/poster is ever reintroduced here.
+    """
     mock_decode.return_value = {"sid": "sid123", "role": "submitter"}
-    
+
     mock_db.submissions.find_one = AsyncMock(return_value={
         "id": "sid123",
         "project_id": "pid123",
@@ -373,9 +380,13 @@ def test_video_signature_asynchronous_transformations(mock_decode):
         "submission_requirements": {"audition_takes_visibility": "optional"}
     })
 
-    with patch("cloudinary.utils.api_sign_request") as mock_sign:
-        mock_sign.return_value = "mocked_sig"
+    captured = {}
 
+    def _capture_sign(params, secret):
+        captured["params"] = params
+        return "mocked_sig"
+
+    with patch("cloudinary.utils.api_sign_request", side_effect=_capture_sign):
         response = client.post(
             "/api/public/submissions/sid123/video-signature",
             json={"category": "take", "label": "Take 1", "content_type": "video/mp4"},
@@ -383,28 +394,26 @@ def test_video_signature_asynchronous_transformations(mock_decode):
         )
 
         assert response.status_code == 200
-        data = response.json()
-        params = data["params"]
+        params = response.json()["params"]
 
-        # Verify eager and eager_async parameters are present
-        assert "eager" in params
-        assert "eager_async" in params
-        assert params["eager_async"] == "true"
-        
-        # Verify the 720p scaling and poster transforms are in the eager chain
-        assert "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4" in params["eager"]
-        assert "c_fill,h_338,w_600,q_auto/f_jpg" in params["eager"]
-        
-        # Verify that synchronous transformation and format parameters are absent
-        assert "transformation" not in params
-        assert "format" not in params
+        # No derivative generation of any kind.
+        for forbidden in ("eager", "eager_async", "transformation", "format", "eager_transformation"):
+            assert forbidden not in params, f"{forbidden!r} must not be in the signed video-upload params"
+        # And it must not have been signed either.
+        for forbidden in ("eager", "eager_async", "transformation"):
+            assert forbidden not in captured["params"], f"{forbidden!r} must not be signed"
+        # No 720p / poster strings anywhere in the response.
+        blob = json.dumps(response.json())
+        for banned in ("w_1280", "h_720", "vc_auto", "f_mp4", "h_338", "w_600", "w_400"):
+            assert banned not in blob, f"transform token {banned!r} leaked into the sign response"
 
 
 @patch("routers.applications.decode_submitter")
-def test_app_video_signature_success(mock_decode):
-    """Verify that app-video-signature endpoint generates signature with eager async and matches schemas."""
+def test_app_video_signature_requests_no_transformation(mock_decode):
+    """Cloudinary rearchitecture P4 — the apply video-signature must sign NO
+    eager transformation and NO eager_async. Cost-safety regression guard."""
     mock_decode.return_value = {"sid": "aid123", "role": "submitter", "kind": "application"}
-    
+
     mock_db.applications.find_one = AsyncMock(return_value={
         "id": "aid123",
         "talent_email": "test@test.com",
@@ -412,27 +421,26 @@ def test_app_video_signature_success(mock_decode):
     })
     mock_db.applications.update_one = AsyncMock()
     mock_db.asset_metadata.update_one = AsyncMock()
-    
-    with patch("cloudinary.utils.api_sign_request") as mock_sign:
-        mock_sign.return_value = "mocked_sig"
-        
+
+    with patch("cloudinary.utils.api_sign_request", return_value="mocked_sig"):
         response = client.post(
             "/api/public/apply/aid123/video-signature",
             json={"category": "intro_video", "content_type": "video/mp4"},
             headers={"Authorization": "Bearer dummy_token"}
         )
-        
+
         assert response.status_code == 200
         data = response.json()
         params = data["params"]
-        
+
         assert data["signature"] == "mocked_sig"
         assert params["public_id"] == "intro_video"
         assert params["folder"] == "talentgram/applications/aid123"
-        assert params["eager_async"] == "true"
-        assert "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4" in params["eager"]
-        assert "transformation" not in params
-        assert "format" not in params
+        for forbidden in ("eager", "eager_async", "transformation", "format"):
+            assert forbidden not in params
+        blob = json.dumps(data)
+        for banned in ("w_1280", "h_720", "vc_auto", "f_mp4", "h_338", "w_600"):
+            assert banned not in blob
 
 
 @patch("routers.applications.decode_submitter")

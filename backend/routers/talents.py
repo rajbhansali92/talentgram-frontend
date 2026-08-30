@@ -29,6 +29,8 @@ from core import (
     enrich_talent,
     media_url,
     video_poster_url,
+    video_needs_compat_delivery,
+    compat_video_delivery_url,
     resolve_cover_media,
     update_talent_cover_cache,
     delete_talent_media_item,
@@ -1073,10 +1075,19 @@ async def add_media(
     )
     is_video = rt == "video"
     is_image = rt == "image"
+    # Cloudinary rearchitecture P4 — serve the uploaded original. The
+    # browser-compat exception (one canonical lazy f_mp4) fires only when the
+    # stored container/codec can't play natively.
+    delivery_url = result["url"]
+    needs_compat = is_video and video_needs_compat_delivery(result.get("format"), result.get("video_codec"))
+    if needs_compat:
+        _compat = compat_video_delivery_url(result["public_id"])
+        if _compat:
+            delivery_url = _compat
     media = {
         "id": media_id,
         "category": category,
-        "url": result["url"],
+        "url": delivery_url,
         "public_id": result["public_id"],
         "resource_type": result["resource_type"],
         "content_type": file.content_type or "application/octet-stream",
@@ -1089,6 +1100,9 @@ async def add_media(
         "thumbnail_url": media_url(result["public_id"], preset="roster", resource_type=result["resource_type"]) if is_image else None,
         "poster_url": video_poster_url(result["public_id"]) if is_video else None,
     }
+    if needs_compat:
+        media["original_url"] = result["url"]
+        media["needs_compat_delivery"] = True
     await db.talents.update_one({"id": tid}, {"$push": {"media": media}})
     # Singleton video slot: only one active Introduction Video may exist
     # per talent, matching the Apply/Submission intro_video invariant. The

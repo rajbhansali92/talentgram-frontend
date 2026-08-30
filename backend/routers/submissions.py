@@ -54,6 +54,8 @@ from core import (
     sync_media_to_global_talent,
     media_url,
     video_poster_url,
+    video_needs_compat_delivery,
+    compat_video_delivery_url,
     update_talent_cover_cache,
     normalize_email,
     verify_email_ownership,
@@ -683,10 +685,20 @@ async def submission_upload(
     )
     is_video = rt == "video"
     is_image = rt == "image"
+    # Cloudinary rearchitecture P4 — serve the uploaded original; the
+    # browser-compat exception (one canonical lazy f_mp4) fires only when the
+    # stored container/codec can't play natively.
+    _delivery_url = result["url"]
+    _needs_compat = is_video and video_needs_compat_delivery(result.get("format"), result.get("video_codec"))
+    if _needs_compat:
+        _c = compat_video_delivery_url(result["public_id"])
+        if _c:
+            _delivery_url = _c
+    _poster = video_poster_url(result["public_id"]) if is_video else None
     media = {
         "id": media_id,
         "category": category,
-        "url": result["url"],
+        "url": _delivery_url,
         "public_id": result["public_id"],
         "resource_type": result["resource_type"],
         "content_type": file.content_type or "application/octet-stream",
@@ -697,10 +709,13 @@ async def submission_upload(
         "submission_id": sid,
         "project_id": sub["project_id"],
         "duration": result.get("duration"),
-        "thumbnail_url": result.get("thumbnail_url") if (is_video and result.get("thumbnail_url")) else (media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"]) if is_image else None),
-        "poster_url": result.get("thumbnail_url") if (is_video and result.get("thumbnail_url")) else (video_poster_url(result["public_id"]) if is_video else None),
+        "thumbnail_url": _poster if is_video else (media_url(result["public_id"], preset="thumb", resource_type=result["resource_type"]) if is_image else None),
+        "poster_url": _poster,
         "origin": "project",  # Media Library Foundation (Phase 4 item 1) — freshly uploaded during this submission, not from the Global Profile.
     }
+    if _needs_compat:
+        media["original_url"] = result["url"]
+        media["needs_compat_delivery"] = True
     if category == "take":
         media["label"] = (label or "").strip() or f"Take {existing_takes + 1}"
     # Talent Profile Migration, Phase 4 — a reusable-category upload no
@@ -873,36 +888,30 @@ async def submission_sign_upload(
     folder = f"{APP_NAME}/submissions/{sid}"
     public_id = media_id
     rt = "video" if is_video_slot else "image"
-    
+
+    # Cloudinary rearchitecture P4 — NO eager transformation and NO incoming
+    # transformation. The browser uploads the file and Cloudinary stores exactly
+    # one canonical asset (the original). Thumbnails/posters are lazy,
+    # single-canonical delivery URLs computed at /complete; a browser-compat
+    # video transcode is an explicit exception decided at /complete, never
+    # requested here. `eager`/`transformation` stay in the response (always
+    # null) so the frontend's existing shape is unchanged.
     eager = None
     transformation = None
-    
-    if is_video_slot:
-        if category == "intro_video":
-            eager = "w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4|w_600,h_338,c_fill,q_auto,f_jpg"
-        else:
-            transformation = "w_1280,h_720,c_limit,q_auto,vc_auto"
-            eager = "w_600,h_338,c_fill,q_auto,f_jpg"
-    else:
-        eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
 
     import time
     import cloudinary.utils
-    
+
     timestamp = int(time.time())
     params = {
         "folder": folder,
         "public_id": public_id,
         "timestamp": timestamp,
     }
-    if eager:
-        params["eager"] = eager
-    if transformation:
-        params["transformation"] = transformation
-        
+
     api_secret = cloudinary.config().api_secret
     signature = cloudinary.utils.api_sign_request(params, api_secret)
-    
+
     return {
         "signature": signature,
         "timestamp": timestamp,
@@ -928,6 +937,10 @@ class CompleteUploadIn(BaseModel):
     content_type: Optional[str] = None
     original_filename: Optional[str] = None
     eager: Optional[List[dict]] = None
+    # P4 — from Cloudinary's upload response, so the backend can decide the
+    # browser-compatibility exception without transcoding by default.
+    format: Optional[str] = None
+    video_codec: Optional[str] = None
 
 
 @router.post("/public/submissions/{sid}/upload/complete")
@@ -948,22 +961,29 @@ async def submission_complete_upload(
     is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
     is_video = is_video_slot
     is_image = not is_video_slot
-    
+
+    # Cloudinary rearchitecture P4 — store the uploaded ORIGINAL. No eager
+    # derivative is requested any more, so `payload.eager` is (correctly)
+    # empty; `payload.url` is Cloudinary's `secure_url` for the canonical asset.
     thumbnail_url = None
     poster_url = None
-    eager_list = payload.eager or []
-    
+    needs_compat_delivery = False
+
     if is_video:
-        poster_url = next((x.get("secure_url") for x in eager_list if x.get("format") == "jpg"), None)
-        compressed_mp4 = next((x.get("secure_url") for x in eager_list if x.get("format") == "mp4"), None)
-        url = compressed_mp4 or payload.url
+        url = payload.url  # the original
+        # Browser-compatibility EXCEPTION (explicit, gated): only when the
+        # uploaded container/codec can't play natively do we point `url` at a
+        # single canonical lazy f_mp4 delivery. h264/webm/etc. serve as-is.
+        if video_needs_compat_delivery(payload.format, payload.video_codec):
+            compat = compat_video_delivery_url(payload.url)
+            if compat:
+                url = compat
+                needs_compat_delivery = True
+        poster_url = video_poster_url(payload.url)  # one canonical lazy string, persisted
     else:
         url = payload.url
         thumbnail_url = media_url(payload.public_id, preset="thumb", resource_type="image")
-        
-    if not poster_url and is_video:
-        poster_url = video_poster_url(payload.public_id)
-        
+
     media = {
         "id": payload.media_id,
         "category": category,
@@ -982,6 +1002,9 @@ async def submission_complete_upload(
         "poster_url": poster_url if is_video else None,
         "origin": "project",  # Media Library Foundation (Phase 4 item 1) — freshly uploaded during this submission, not from the Global Profile.
     }
+    if needs_compat_delivery:
+        media["original_url"] = payload.url
+        media["needs_compat_delivery"] = True
 
     existing_takes = 0
     if category == "take":
@@ -1432,10 +1455,22 @@ async def attach_video_media(sub: dict, asset: dict, category: str, label: Optio
             return m
 
     secure = asset.get("secure_url") or asset.get("url")
+    # Cloudinary rearchitecture P4 — serve the uploaded original. The
+    # browser-compat exception (one canonical lazy f_mp4) fires only when the
+    # stored container/codec can't play natively.
+    delivery_url = secure
+    needs_compat = video_needs_compat_delivery(
+        asset.get("format"), (asset.get("video") or {}).get("codec"),
+    )
+    if needs_compat:
+        compat = compat_video_delivery_url(public_id)
+        if compat:
+            delivery_url = compat
+    poster = video_poster_url(public_id)
     media = {
         "id": str(uuid.uuid4()),
         "category": category,
-        "url": secure,
+        "url": delivery_url,
         "public_id": public_id,
         "resource_type": "video",
         "content_type": "video/mp4",
@@ -1446,11 +1481,14 @@ async def attach_video_media(sub: dict, asset: dict, category: str, label: Optio
         "submission_id": sid,
         "project_id": sub.get("project_id"),
         "duration": asset.get("duration"),
-        "thumbnail_url": video_poster_url(public_id),
-        "poster_url": video_poster_url(public_id),
+        "thumbnail_url": poster,
+        "poster_url": poster,
         "source": "direct_upload",
         "origin": "project",  # Media Library Foundation (Phase 4 item 1) — freshly uploaded during this submission, not from the Global Profile.
     }
+    if needs_compat:
+        media["original_url"] = secure
+        media["needs_compat_delivery"] = True
     if category in ("take",) or category in LEGACY_TAKE_CATEGORIES:
         media["label"] = (label or "").strip() or "Take"
     # Talent Profile Migration, Phase 4 — this helper has never called
@@ -1596,8 +1634,12 @@ async def video_signature(
                 raise HTTPException(400, f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another")
         public_id = "intro_video" if category == "intro_video" else f"take_{uuid.uuid4().hex[:8]}"
 
-    # Pinned, string-encoded transformation + eager poster (signed verbatim).
-    eager = "c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg"
+    # Cloudinary rearchitecture P4 — NO eager transformation. The browser
+    # uploads the audition video and Cloudinary stores exactly one canonical
+    # asset (the original). No 720p transcode, no 4K processing, no poster
+    # generated at upload. The poster is a lazy single-canonical URL persisted
+    # at /video-complete; a browser-compat transcode, if ever needed, is an
+    # explicit exception decided there.
     tags = f"submission_id={sid},project_id={sub.get('project_id')},talent_id={tid},category={category},asset_kind=audition_video"
     import urllib.parse
     safe_label = urllib.parse.quote((payload.label or "").strip())
@@ -1607,8 +1649,6 @@ async def video_signature(
         "timestamp": timestamp,
         "folder": folder,
         "public_id": public_id,
-        "eager": eager,
-        "eager_async": "true",
         "overwrite": "true",
         "tags": tags,
         "context": context,
@@ -1639,8 +1679,8 @@ async def video_signature(
         "signature": signature,
         "upload_url": f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/video/upload",
         "params": {
-            "folder": folder, "public_id": public_id, "eager": eager, 
-            "eager_async": "true", "overwrite": "true", "tags": tags, 
+            "folder": folder, "public_id": public_id,
+            "overwrite": "true", "tags": tags,
             "context": context,
         },
         "max_duration_seconds": MAX_AUDITION_VIDEO_SECONDS,
@@ -1750,7 +1790,10 @@ async def video_complete(
             r2_url=r2_read_url,
             folder=folder,
             public_id=leaf_pid,
-            eager_transformation="c_limit,h_720,w_1280/q_auto,vc_auto/f_mp4|c_fill,h_338,w_600,q_auto/f_jpg",
+            # Cloudinary rearchitecture P4 — no eager transcode. (This branch is
+            # the retired R2→Cloudinary pipeline, reachable only by a pre-
+            # retirement upload session; kept inert.)
+            eager_transformation=None,
             scope="submission",
             parent_id=sid,
             category=category,
@@ -3341,37 +3384,21 @@ async def admin_add_media_sign(
     public_id = media_id
     rt = "video" if is_video_slot else "image"
 
+    # Cloudinary rearchitecture P4 — NO eager transformation. The admin uploads
+    # the audition file and Cloudinary stores exactly one canonical asset (the
+    # original). The old `w_1280,h_720,…,f_mp4` eager existed to guarantee a
+    # browser-playable derivative for admins sourcing non-native containers
+    # (QuickTime .mov, screen recordings); that concern is now handled as an
+    # explicit, format/codec-gated exception at /admin-media-v2/complete —
+    # NOT by transcoding every upload. Images get no eager thumbnail; the
+    # thumbnail is a lazy single-canonical URL.
     eager = None
     transformation = None
-    if is_video_slot:
-        # P1 fix: force an MP4/H.264 eager derivative, matching the
-        # talent-facing intro_video sign path (submission_sign_upload
-        # above) — the only pattern in this file proven to guarantee
-        # browser-playable output. This branch previously only requested a
-        # JPG poster and applied a codec-only transformation
-        # (`vc_auto`, no `f_mp4`) to the main upload, so the delivered
-        # `url` kept whatever container/codec the source file already had.
-        # A talent's upload is typically already a browser-native phone
-        # camera recording, so this went unnoticed there; an admin can
-        # source a video from anywhere (desktop export, downloaded file,
-        # screen recording), and a non-browser-safe container (e.g.
-        # QuickTime .mov) still lets Cloudinary generate a poster frame
-        # (works for any container) while the client's <video> element
-        # silently fails to decode playback — exactly the reported bug.
-        # admin_add_media_complete already parses a two-entry eager list
-        # (mp4 + jpg) correctly; this was the only missing piece.
-        eager = "w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4|w_600,h_338,c_fill,q_auto,f_jpg"
-    else:
-        eager = "w_400,c_fill,dpr_auto,f_auto,q_auto"
 
     import time as _time
     import cloudinary.utils as _cu
     timestamp = int(_time.time())
     params = {"folder": folder, "public_id": public_id, "timestamp": timestamp}
-    if eager:
-        params["eager"] = eager
-    if transformation:
-        params["transformation"] = transformation
     api_secret = cloudinary.config().api_secret
     signature = _cu.api_sign_request(params, api_secret)
 
@@ -3410,15 +3437,18 @@ async def admin_add_media_complete(
 
     category = payload.category
     is_video_slot = category in {"intro_video", "take", "take_1", "take_2", "take_3"}
-    eager_list = payload.eager or []
     thumbnail_url = None
     poster_url = None
+    needs_compat_delivery = False
     if is_video_slot:
-        poster_url = next((x.get("secure_url") for x in eager_list if x.get("format") == "jpg"), None)
-        compressed_mp4 = next((x.get("secure_url") for x in eager_list if x.get("format") == "mp4"), None)
-        url = compressed_mp4 or payload.url
-        if not poster_url:
-            poster_url = video_poster_url(payload.public_id)
+        # P4 — store the uploaded original. Browser-compat exception only.
+        url = payload.url
+        if video_needs_compat_delivery(payload.format, payload.video_codec):
+            compat = compat_video_delivery_url(payload.url)
+            if compat:
+                url = compat
+                needs_compat_delivery = True
+        poster_url = video_poster_url(payload.url)
     else:
         url = payload.url
         thumbnail_url = media_url(payload.public_id, preset="thumb", resource_type="image")
@@ -3445,6 +3475,9 @@ async def admin_add_media_complete(
         "thumbnail_url": thumbnail_url,
         "origin": "project",
     }
+    if needs_compat_delivery:
+        media_obj["original_url"] = payload.url
+        media_obj["needs_compat_delivery"] = True
     await db.submissions.update_one({"id": sid}, {"$push": {"media": media_obj}})
     try:
         await db.asset_metadata.insert_one({

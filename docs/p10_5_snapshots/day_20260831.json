@@ -1,0 +1,349 @@
+{
+  "captured_at": "2026-08-31T08:22:19.284589+00:00",
+  "cloudinary_last_updated": "2026-08-30",
+  "cloudinary_date_requested": "2026-08-31T00:00:00Z",
+  "plan": "Small PAYG",
+  "credits": {
+    "usage": 115.44,
+    "limit": 60.0,
+    "used_percent": 192.4
+  },
+  "storage_credits": 17.86,
+  "storage_bytes": 19175407932,
+  "bandwidth_credits": 26.33,
+  "bandwidth_bytes": 37579177350,
+  "transformation_credits": 71.25,
+  "transformations_usage_rolling": 71252,
+  "transformation_breakdown": {
+    "transformation": 10804,
+    "frame": 1,
+    "sd_video_second": 21555,
+    "hd_video_second": 591,
+    "extra_avif_mp_encoding": 11304,
+    "fourk_video_second": 1165
+  },
+  "original_resource_count": 4350,
+  "derived_resource_count": 8383,
+  "object_count": 12733,
+  "requests": 28561,
+  "fl_attachment_probe": {
+    "registry_total": 148,
+    "bare_fl_attachment_strings": 9,
+    "combined_with_a_transform": 139,
+    "sample_bare": [
+      "fl_attachment:fg_image_dl",
+      "fl_attachment:fg_take_dl",
+      "fl_attachment:WhatsApp_Image_2026-07-14_at_10_23_11__3_",
+      "fl_attachment:ebd4ecdb-97f3-4f3d-9170-e33ca3ce48a4",
+      "fl_attachment:WhatsApp_Image_2026-02-26_at_21_14_55__1_",
+      "fl_attachment:IMG_2901",
+      "fl_attachment:_MG_7152",
+      "fl_attachment:test_download_file/jpg",
+      "fl_attachment"
+    ],
+    "sample_combined": [
+      "fl_attachment:Rtwik_N_video/f_mp4",
+      "fl_attachment:Aashish_A_take/f_mp4",
+      "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09/f_auto,q_auto",
+      "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__8_/f_auto,q_auto",
+      "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__7_/f_auto,q_auto",
+      "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__5_/f_auto,q_auto",
+      "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__4_/f_auto,q_auto",
+      "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__2_/f_auto,q_auto",
+      "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__1_/f_auto,q_auto",
+      "fl_attachment:WhatsApp_Video_2026-08-17_at_22_29_13/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4"
+    ],
+    "detail_sample": [
+      {
+        "name": "fl_attachment:Rtwik_N_video/f_mp4",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:Rtwik_N_video"
+            ]
+          },
+          {
+            "format": "mp4"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:Aashish_A_take/f_mp4",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:Aashish_A_take"
+            ]
+          },
+          {
+            "format": "mp4"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09/f_auto,q_auto",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Image_2026-07-08_at_21_10_09"
+            ]
+          },
+          {
+            "quality": "auto"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__8_/f_auto,q_auto",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Image_2026-07-08_at_21_10_09__8_"
+            ]
+          },
+          {
+            "quality": "auto"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__7_/f_auto,q_auto",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Image_2026-07-08_at_21_10_09__7_"
+            ]
+          },
+          {
+            "quality": "auto"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__5_/f_auto,q_auto",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Image_2026-07-08_at_21_10_09__5_"
+            ]
+          },
+          {
+            "quality": "auto"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__4_/f_auto,q_auto",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Image_2026-07-08_at_21_10_09__4_"
+            ]
+          },
+          {
+            "quality": "auto"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__2_/f_auto,q_auto",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Image_2026-07-08_at_21_10_09__2_"
+            ]
+          },
+          {
+            "quality": "auto"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__1_/f_auto,q_auto",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Image_2026-07-08_at_21_10_09__1_"
+            ]
+          },
+          {
+            "quality": "auto"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Video_2026-08-17_at_22_29_13/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Video_2026-08-17_at_22_29_13"
+            ]
+          },
+          {
+            "width": 1280,
+            "height": 720,
+            "quality": "auto",
+            "video_codec": "auto",
+            "format": "mp4",
+            "crop": "limit"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Video_2026-08-19_at_19_30_11/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Video_2026-08-19_at_19_30_11"
+            ]
+          },
+          {
+            "width": 1280,
+            "height": 720,
+            "quality": "auto",
+            "video_codec": "auto",
+            "format": "mp4",
+            "crop": "limit"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      },
+      {
+        "name": "fl_attachment:WhatsApp_Video_2026-08-19_at_19_26_38/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+        "used": true,
+        "named": false,
+        "info": [
+          {
+            "flags": [
+              "attachment:WhatsApp_Video_2026-08-19_at_19_26_38"
+            ]
+          },
+          {
+            "width": 1280,
+            "height": 720,
+            "quality": "auto",
+            "video_codec": "auto",
+            "format": "mp4",
+            "crop": "limit"
+          }
+        ],
+        "derived_count": 1,
+        "allowed_for_strict": false
+      }
+    ],
+    "note": "A bare fl_attachment:<name> string in the registry means Cloudinary has RECORDED the string (someone requested that URL). Whether it consumed a transformation CREDIT depends on whether Cloudinary treats a pure delivery flag on an untransformed asset as billable \u2014 see report \u00a7D."
+  },
+  "transformation_registry_families": {
+    "q_auto,vc_auto": 1,
+    "fl_attachment:*": 148,
+    "f_webp,fl_awebp,q_auto/png": 1,
+    "c_limit,w_N/jpg": 2,
+    "w_N,h_N,c_limit,q_auto,vc_auto,f_mpN": 1,
+    "f_mpN": 1,
+    "/mpN": 1,
+    "f_avif,q_auto/png": 1,
+    "f_avif,q_auto/webp": 1,
+    "f_avif,q_auto/heic": 1,
+    "f_avif,q_auto/jpg": 1,
+    "f_auto,q_auto": 1,
+    "c_fill,dpr_N.N,f_auto,q_auto,w_N/": 1,
+    "c_limit,h_N,w_N/q_auto,vc_auto/f_mpN/": 1,
+    "c_limit,h_N,w_N,f_mpN/q_auto,vc_auto": 1,
+    "c_limit,h_N,w_N,f_mpN/q_auto,vc_auto/f_mpN": 1,
+    "fl_sprite/jpg": 1,
+    "fl_sprite/vtt": 1,
+    "f_webm,vc_vpN/": 1,
+    "c_fill,h_N,w_N,q_auto/f_jpg": 1,
+    "c_limit,h_N,w_N/q_auto,vc_auto/f_mpN": 1,
+    "w_N,c_fill,dpr_auto,f_auto,q_auto": 1,
+    "w_N,h_N,c_fill,q_auto,f_jpg": 1,
+    "br_Nm,c_limit,h_N,q_auto,vc_hN,w_N/mpN": 1,
+    "/png": 1,
+    "c_fill,h_N,q_auto,w_N/jpg": 1,
+    "br_Nm,c_limit,h_N,q_auto,vc_hN,w_N": 1,
+    "q_auto:good,vc_auto,f_mpN": 1,
+    "f_mpN,vc_hN,q_auto:good/": 2,
+    "f_webm,vc_vpN,q_auto:good/": 1,
+    "c_fill,w_N/": 1,
+    "c_fill,dpr_N.N,f_avif,q_auto,w_N/": 2,
+    "c_fill,dpr_auto,f_auto,q_auto,w_N": 1,
+    "/jpg": 1,
+    "c_limit,h_N,w_N/q_auto,vc_auto/mpN": 1,
+    "c_fill,dpr_auto,h_N,w_N/q_auto/jpg": 1,
+    "c_fill,dpr_N.N,h_N,w_N/q_auto/jpg": 1,
+    "c_fill,f_avif,q_auto,w_N/": 1,
+    "f_mpN,br_Nk": 1,
+    "f_avif,q_auto,w_N,c_limit/png": 2,
+    "f_webm,vc_vpN,q_auto,w_N,c_limit/mpN": 1,
+    "f_webm,vc_vpN,q_auto,w_N,c_limit/mov": 1,
+    "so_N,w_N,h_N,c_fill,q_auto,f_jpg": 1,
+    "f_avif,q_auto,w_N,c_limit/jpg": 3,
+    "f_webp,q_auto,w_N,c_limit/jpg": 2,
+    "f_mpN,vc_hN,q_auto,w_N,c_limit": 1,
+    "c_limit,h_N,w_N/q_auto,vc_auto": 1,
+    "t_media_lib_thumb/jpg": 1,
+    "t_media_lib_thumb": 1
+  },
+  "transformation_registry_total": 203,
+  "derived_since_p5": {
+    "parents_checked": 240,
+    "new_derived": []
+  },
+  "api_calls": {
+    "usage": 1,
+    "transformations": 1,
+    "transformation_detail": 12,
+    "resources": 2,
+    "resource": 240
+  },
+  "read_only": {
+    "cloudinary_writes": 0,
+    "cloudinary_deletes": 0,
+    "uploads": 0,
+    "transform_generating_requests": 0,
+    "mongodb_writes": 0
+  }
+}

@@ -1,0 +1,534 @@
+{
+  "generated_at": "2026-08-31T07:55:30.064255+00:00",
+  "p5_deploy_utc": "2026-08-30T14:09:00+00:00",
+  "hours_since_p5_deploy": 17.8,
+  "cloudinary_writes": 0,
+  "cloudinary_deletes": 0,
+  "uploads": 0,
+  "transformations_generated": 0,
+  "mongodb_writes": 0,
+  "api_calls": {
+    "usage": 1,
+    "transformations": 1,
+    "resource": 86
+  },
+  "usage": {
+    "plan": "Small PAYG",
+    "last_updated": "2026-08-30",
+    "date_requested": "2026-08-31T00:00:00Z",
+    "transformations": {
+      "usage": 71252,
+      "credits_usage": 71.25,
+      "breakdown": {
+        "transformation": 10804,
+        "frame": 1,
+        "sd_video_second": 21555,
+        "hd_video_second": 591,
+        "extra_avif_mp_encoding": 11304,
+        "fourk_video_second": 1165
+      }
+    },
+    "objects": {
+      "usage": 12766
+    },
+    "bandwidth": {
+      "usage": 37579177350,
+      "credits_usage": 26.33
+    },
+    "storage": {
+      "usage": 19604077694,
+      "credits_usage": 18.26
+    },
+    "impressions": {
+      "usage": 17744,
+      "credits_usage": 0.0
+    },
+    "seconds_delivered": {
+      "usage": 0,
+      "credits_usage": 0.0
+    },
+    "credits": {
+      "usage": 115.84,
+      "limit": 60.0,
+      "used_percent": 193.07
+    },
+    "resources": 4350,
+    "derived_resources": 8416,
+    "requests": 28561,
+    "media_limits": {
+      "image_max_size_bytes": 20971520,
+      "video_max_size_bytes": 2147483648,
+      "raw_max_size_bytes": 20971520,
+      "image_max_px": 25000000,
+      "asset_max_total_px": 100000000
+    }
+  },
+  "transformation_registry_count": 203,
+  "transformation_registry_top": [
+    {
+      "name": "q_auto,vc_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Rtwik_N_video/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "f_webp,fl_awebp,q_auto/png",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Aashish_A_take/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__8_/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__7_/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__5_/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__4_/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__2_/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Image_2026-07-08_at_21_10_09__1_/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Video_2026-08-17_at_22_29_13/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Video_2026-08-19_at_19_30_11/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Video_2026-08-19_at_19_26_38/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Video_2026-08-19_at_19_23_25/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:640f182c-4f5b-4812-b319-7c81322b4524/f_avif,q_auto/jpg",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_9056/f_avif,q_auto/jpg",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:f4801335-e69f-403f-a2b1-434d8c497d72/f_avif,q_auto/jpg",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:23f228b9-fa4d-4107-be6f-a129c3b3958c/f_avif,q_auto/jpg",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Video_2026-08-07_at_14_11_03/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:0O0A8953/f_avif,q_auto/jpg",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:0O0A8924_2/f_avif,q_auto/jpg",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:0O0A9206/f_avif,q_auto/jpg",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:DSCF4422/f_avif,q_auto/jpg",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Rachel_P_video/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Harshita_C_video/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:SAML9263/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:SAML9287/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:SAML9262/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:SAML8960/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Paakhi_B_video/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Video_2026-08-18_at_11_19_05/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Shrutika_G_video/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Manjary_M_video/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:WhatsApp_Video_2026-08-06_at_19_18_42/w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Adrian-32/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:DSC_7164/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:DSC01851/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_5876/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_1936/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Ritika_O_video/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Ritika_O_take/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_8205/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_0039/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_7106/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_7104/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:_DSC3363a_2/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Ayushi_S_take/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:DSCF5458/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:DSC02757/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:F654693E-C4D6-4820-B0E3-057DD176E7D4/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Sara_S_video/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:Sara_S_take/f_mp4",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_5587/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_5555/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:IMG_5548/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:c1102123-6bbd-421e-af8a-22dea8d4ce78/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:b14a1b82-90aa-4d0e-95ba-9487b602b49c/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:e3050f64-6d91-4831-ab92-d182ba59de2d/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    },
+    {
+      "name": "fl_attachment:2fc2687e-77a1-4d54-914b-640403ae175f/f_auto,q_auto",
+      "count": null,
+      "used": true,
+      "named": false,
+      "allowed_for_strict": false
+    }
+  ],
+  "sample": {
+    "distinct_live_parents": 2649,
+    "parents_checked": 86,
+    "parents_uploaded_since_p5": 0,
+    "derived_assets_seen": 240,
+    "derived_created_since_p5": [],
+    "derived_family_counter": {
+      "c_limit,h_N,w_N/q_auto,vc_auto/f_mpN/": 10,
+      "c_fill,dpr_N.N,h_N,w_N/q_auto/jpg": 34,
+      "c_fill,h_N,w_N,q_auto/f_jpg": 31,
+      "c_limit,h_N,w_N/q_auto,vc_auto/f_mpN": 31,
+      "f_avif,q_auto/jpg": 40,
+      "c_fill,dpr_auto,f_auto,q_auto,w_N": 51,
+      "c_fill,dpr_N.N,f_avif,q_auto,w_N/": 9,
+      "c_limit,h_N,w_N,f_mpN/q_auto,vc_auto": 3,
+      "c_fill,dpr_auto,h_N,w_N/q_auto/jpg": 4,
+      "c_limit,h_N,w_N/q_auto,vc_auto": 4,
+      "f_mpN": 11,
+      "/mpN": 1,
+      "fl_attachment:*": 9,
+      "c_fill,w_N/": 1,
+      "q_auto,vc_auto": 1
+    },
+    "broader_scan": {
+      "newest_originals_per_type": 300,
+      "originals_checked": 600,
+      "derived_assets_inspected": 1571,
+      "originals_uploaded_since_p5": 1,
+      "derived_created_since_p5": 0,
+      "note": "combined with sample A (86 parents / 240 derived) -> ~686 parents / ~1811 derived inspected, 0 created since P5 deploy 2026-08-30T14:09Z"
+    }
+  },
+  "plan": {
+    "name": "Small PAYG",
+    "credit_limit_per_month": 60.0,
+    "note": "user target ~/mo needs reconciling with this 60-credit limit"
+  },
+  "credit_split": {
+    "transformations": 71.25,
+    "storage": 18.26,
+    "bandwidth": 26.33,
+    "total": 115.84,
+    "limit": 60.0,
+    "used_percent": 193.07
+  }
+}

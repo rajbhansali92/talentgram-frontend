@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { ArrowLeft, ArrowUpRight, Calendar, Building2, User, DollarSign, Film, MapPin, Wallet, MessageCircleQuestion, Link2, ImageIcon, Video as VideoIcon, Clapperboard } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Calendar, Building2, User, DollarSign, Film, MapPin, Wallet, MessageCircleQuestion, Link2, ImageIcon, Video as VideoIcon, Clapperboard, FolderOpen } from "lucide-react";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
 import { api as axios, portalApi, PORTAL_TOKEN_KEY } from "@/lib/api";
@@ -8,6 +8,7 @@ import { getEngagementStatusDetails } from "@/lib/engagementStatus";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { parseStoredLink } from "@/lib/workLinks";
 import MediaGrid from "@/components/shared/MediaGrid";
+import MaterialModal from "@/components/MaterialModal";
 import FeedbackRow from "@/components/shared/FeedbackRow";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
 import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceModel";
@@ -75,6 +76,14 @@ export default function ProjectDetail() {
     // default; reuses the exact same already-computed checklist items below,
     // just a client-side display split — no new calculation, no engine change.
     const [showOptionalFields, setShowOptionalFields] = useState(false);
+    // Audition Brief fix (2026-08-29) — this page fetches the same project
+    // doc (GET /public/projects/{slug}) SubmissionPage.jsx does, including
+    // `materials`/`video_links`, but never rendered them: a talent revisiting
+    // a project from their dashboard after submitting had no way back to
+    // the brief. Reuses MaterialModal verbatim (same component
+    // SubmissionPage.jsx already opens for this) — no new viewer, no new
+    // data source.
+    const [showMaterial, setShowMaterial] = useState(false);
 
     // The same Requirement/Readiness/Operational engines SubmissionPage.jsx
     // uses, called unconditionally per Rules of Hooks — safe with null
@@ -239,6 +248,22 @@ export default function ProjectDetail() {
             ? "Update Submission"
             : "Open Submission";
 
+    // Same derivation SubmissionPage.jsx uses for its own "View Audition
+    // Material" CTA — identical logic, not reimplemented differently here.
+    const hasAuditionMaterial = !!project && (
+        (Array.isArray(project.materials) && project.materials.length > 0) ||
+        (Array.isArray(project.video_links) && project.video_links.length > 0)
+    );
+    const auditionMaterialSummary = (() => {
+        const materials = Array.isArray(project.materials) ? project.materials : [];
+        const hasVideoLinks = Array.isArray(project.video_links) && project.video_links.length > 0;
+        const labels = [];
+        if (materials.some((m) => m.category === "script")) labels.push("Script");
+        if (materials.some((m) => m.category === "video_file") || hasVideoLinks) labels.push("Reference Video");
+        if (materials.some((m) => m.category === "audio")) labels.push("Audio Brief");
+        return labels.join(" / ");
+    })();
+
     const hasSummaryContent =
         !!availability.status ||
         !!budget.status ||
@@ -351,6 +376,23 @@ export default function ProjectDetail() {
                     </div>
                     {!project.shoot_dates && !project.production_house && !project.director && !project.medium_usage && (
                         <p className="text-xs text-black/40">No additional project details provided.</p>
+                    )}
+                    {hasAuditionMaterial && (
+                        <div className="pt-2">
+                            <button
+                                type="button"
+                                onClick={() => setShowMaterial(true)}
+                                data-testid="view-audition-material-btn"
+                                className="inline-flex items-center gap-2 px-5 py-2.5 border border-[#0c2340] hover:border-[#0c2340] hover:bg-[#0c2340]/[0.08] active:scale-[0.98] rounded-full text-[13px] text-[#0c2340] font-semibold transition-all hover:shadow-md hover:-translate-y-[1px] bg-[#0c2340]/[0.04]"
+                            >
+                                <FolderOpen className="w-4 h-4 text-[#0c2340]" /> View Audition Material
+                            </button>
+                            {auditionMaterialSummary && (
+                                <p className="mt-2 ml-1 text-[11px] text-black/45 tracking-wide">
+                                    {auditionMaterialSummary}
+                                </p>
+                            )}
+                        </div>
                     )}
                 </div>
 
@@ -531,6 +573,13 @@ export default function ProjectDetail() {
                     </a>
                 </div>
             </main>
+
+            {showMaterial && (
+                <MaterialModal
+                    project={project}
+                    onClose={() => setShowMaterial(false)}
+                />
+            )}
         </div>
     );
 }

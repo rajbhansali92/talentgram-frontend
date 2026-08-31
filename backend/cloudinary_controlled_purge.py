@@ -67,10 +67,46 @@ _NEVER = {"PROTECTED_HISTORICAL_DERIVED", "ACTIVE_DERIVED", "UNKNOWN_DERIVED",
           "PROTECTED_SHARED", "ACTIVE_GLOBAL_TALENT_MEDIA",
           "ACTIVE_PROJECT_AUDITION_MEDIA", "PENDING_RETENTION", "STALE_METADATA_ONLY"}
 
-# canary must come from this transformation family only (retired, regenerable,
-# render-time-only, never persisted): full-res / sized AVIF
+# canary must come from ONE retired, regenerable, render-time-only, never-persisted
+# transformation family. The default family is full-res / sized AVIF. A second,
+# explicitly-requested family is the bare `f_mp4` retired video-download transcode
+# (P5 removed `_get_video_download_url`'s f_mp4; the current app never produces a
+# bare f_mp4 for a web-safe H.264 parent). Each family has its own membership test
+# and its own forbid list; a canary batch is always ONE family only.
 _CANARY_FAMILIES = ("f_avif,q_auto", "c_fill,dpr_", "f_avif")
 _CANARY_FORBID_TOKENS = ("f_mp4", "fl_attachment", "vc_auto", "fl_sprite")
+
+# f_mp4 canary: the transformation must be EXACTLY bare `f_mp4` — anything with a
+# size/crop/codec/attachment token is a different (720p / download-with-filename)
+# family and is not eligible here.
+_CANARY_FMP4_FORBID_TOKENS = ("fl_attachment", "vc_auto", "fl_sprite", "w_", "h_",
+                              "c_limit", "c_fill", "c_scale", "dpr_", "b_", "br_",
+                              "q_auto:", "so_", "eo_", "du_")
+
+_CANARY_FAMILY_KEYS = ("avif", "f_mp4")
+
+
+def _canary_row_ok(r: Dict[str, Any], family: str) -> bool:
+    """Membership test for one canary family. Shared by select_canary and the
+    batch selector so they cannot diverge."""
+    if r.get("classification") != "DELETE_CANDIDATE":
+        return False
+    rv = (r.get("revalidation") or {}).get("status")
+    if rv is not None and rv != PASS:
+        return False
+    if not r.get("parent_referenced", True):
+        return False
+    xf = (r.get("transformation") or "").strip().lower()
+    if family == "avif":
+        if any(tok in xf for tok in _CANARY_FORBID_TOKENS):
+            return False
+        return "avif" in xf
+    if family == "f_mp4":
+        if any(tok in xf for tok in _CANARY_FMP4_FORBID_TOKENS):
+            return False
+        # exactly bare f_mp4 (Cloudinary may list it as "f_mp4")
+        return xf in ("f_mp4", "fetch_format_mp4")
+    raise ValueError(f"unknown canary family {family!r}")
 
 
 class PurgeAnomaly(RuntimeError):
@@ -328,10 +364,12 @@ async def build_purge_manifest(
     resource_fetcher: Callable[[str, str], Dict[str, Any]],
     actor: Optional[str] = None,
     persist: bool = True,
+    canary_family: str = "avif",
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Layer 2 — run Layer 1 across every candidate and freeze the result into a
-    manifest. NO deletion, ever.
+    manifest. NO deletion, ever. `canary_family` only affects the advisory
+    `canary_preview` field ("avif" default, or "f_mp4").
 
     `persist=True` (default) writes the immutable manifest doc to
     ``db.purge_manifests`` — required before an approval can reference it.
@@ -372,7 +410,7 @@ async def build_purge_manifest(
         "passed_candidate_ids": sorted(str(r.get("derived_id")) for r in passed),
         "passed_candidate_hash": candidate_hash([r.get("derived_id") for r in passed]),
         "rows": rows,
-        "canary_preview": select_canary([r for r in rows], CANARY_BATCH_SIZE),
+        "canary_preview": select_canary([r for r in rows], CANARY_BATCH_SIZE, family=canary_family),
     }
     if persist:
         await db[MANIFESTS_COLL].insert_one({**doc})
@@ -428,11 +466,15 @@ async def create_batch(
     *,
     size: int = CANARY_BATCH_SIZE,
     canary: bool = True,
+    canary_family: str = "avif",
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Carve a size-capped batch of not-yet-processed candidates from an
     approval. Canary batch is exactly CANARY_BATCH_SIZE; later batches are
-    capped at MAX_BATCH_SIZE."""
+    capped at MAX_BATCH_SIZE. `canary_family` picks which retired transformation
+    family a canary is drawn from ("avif" default, or "f_mp4")."""
+    if canary_family not in _CANARY_FAMILY_KEYS:
+        raise ValueError(f"unknown canary_family {canary_family!r}")
     now = now or _now()
     approval = await db[APPROVALS_COLL].find_one({"approval_id": approval_id}, {"_id": 0})
     if not approval:
@@ -455,7 +497,7 @@ async def create_batch(
         raise ValueError("approval fully consumed — no candidates remain")
 
     rows_by_id = {str(r.get("derived_id")): r for r in manifest["rows"]}
-    chosen = _select_batch_ids(remaining, rows_by_id, size, canary)
+    chosen = _select_batch_ids(remaining, rows_by_id, size, canary, canary_family)
     batch_id = "b_" + hashlib.sha256(f"{approval_id}|{_iso(now)}|{','.join(chosen)}".encode()).hexdigest()[:20]
     doc = {
         "batch_id": batch_id,
@@ -463,6 +505,7 @@ async def create_batch(
         "manifest_id": approval["manifest_id"],
         "created_at": _iso(now),
         "canary": canary,
+        "canary_family": canary_family if canary else None,
         "size": len(chosen),
         "candidate_ids": chosen,
         "candidates": [rows_by_id[c] for c in chosen],
@@ -474,27 +517,20 @@ async def create_batch(
     return doc
 
 
-def select_canary(rows: List[Dict[str, Any]], n: int = CANARY_BATCH_SIZE) -> List[Dict[str, Any]]:
-    """The safest possible n candidates: retired sized/full-res AVIF derivatives,
-    revalidation PASS, active+referenced parent, no persisted URL, ownership
-    known. Explicitly excludes f_mp4 / fl_attachment / vc_auto / sprite / any
-    non-DELETE_CANDIDATE / any orphan-parent."""
+def select_canary(rows: List[Dict[str, Any]], n: int = CANARY_BATCH_SIZE,
+                  *, family: str = "avif") -> List[Dict[str, Any]]:
+    """The safest possible n candidates from ONE retired transformation family:
+    revalidation PASS, DELETE_CANDIDATE, active+referenced parent. `family`
+    selects the membership test — "avif" (default: retired sized/full-res AVIF)
+    or "f_mp4" (retired bare-`f_mp4` video-download transcode). Neither family
+    admits fl_attachment / vc_auto / sprite / any non-DELETE_CANDIDATE / any
+    orphan-parent; the f_mp4 family additionally rejects anything that is not
+    EXACTLY bare `f_mp4`."""
     out = []
     for r in rows:
         if len(out) >= n:
             break
-        rv = (r.get("revalidation") or {}).get("status")
-        if rv is not None and rv != PASS:
-            continue
-        if r.get("classification") != "DELETE_CANDIDATE":
-            continue
-        fam = (r.get("transformation_family") or "")
-        xf = (r.get("transformation") or "").lower()
-        if any(tok in xf for tok in _CANARY_FORBID_TOKENS):
-            continue
-        if "avif" not in xf:
-            continue
-        if not r.get("parent_referenced", True):
+        if not _canary_row_ok(r, family):
             continue
         out.append({k: r.get(k) for k in (
             "candidate_id", "derived_id", "public_id", "parent_public_id", "transformation",
@@ -502,14 +538,14 @@ def select_canary(rows: List[Dict[str, Any]], n: int = CANARY_BATCH_SIZE) -> Lis
     return out
 
 
-def _select_batch_ids(remaining_ids, rows_by_id, size, canary):
+def _select_batch_ids(remaining_ids, rows_by_id, size, canary, family: str = "avif"):
     if canary:
         canary_rows = select_canary([rows_by_id[c] for c in remaining_ids if c in rows_by_id],
-                                    CANARY_BATCH_SIZE)
+                                    CANARY_BATCH_SIZE, family=family)
         ids = [str(r["derived_id"]) for r in canary_rows]
         if len(ids) < CANARY_BATCH_SIZE:
             raise ValueError(f"cannot form a full {CANARY_BATCH_SIZE}-asset canary from the "
-                             f"safest AVIF family — only {len(ids)} qualify")
+                             f"safest {family!r} family — only {len(ids)} qualify")
         return ids[:CANARY_BATCH_SIZE]
     return remaining_ids[:size]
 

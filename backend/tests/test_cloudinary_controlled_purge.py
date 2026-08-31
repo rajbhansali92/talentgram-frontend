@@ -561,6 +561,56 @@ def test_canary_selection_excludes_forbidden_families(db):
     assert {"ok1", "ok2"}.issubset(ids)
 
 
+def test_canary_family_fmp4_admits_only_bare_f_mp4(db):
+    rows = [
+        # bare f_mp4 retired download transcode — the ONLY thing this family admits
+        _candidate(did="v1", xf="f_mp4", fam="f_mpN", fmt="mp4",
+                   url=f"{C}/video/upload/f_mp4/v1/{PARENT}1.mp4"),
+        _candidate(did="v2", xf="f_mp4", fam="f_mpN", fmt="mp4",
+                   url=f"{C}/video/upload/f_mp4/v1/{PARENT}2.mp4"),
+        # 720p transcode chain — different family, excluded
+        _candidate(did="p720", xf="w_1280,h_720,c_limit,q_auto,vc_auto,f_mp4",
+                   fam="w_N,h_N,c_limit,q_auto,vc_auto,f_mpN", fmt="mp4"),
+        # download-with-filename — excluded
+        _candidate(did="dl", xf="fl_attachment:x/f_mp4", fam="fl_attachment:* (download)", fmt="mp4"),
+        # AVIF — the other family, excluded from an f_mp4 canary
+        _candidate(did="avif", xf="f_avif,q_auto/jpg"),
+    ]
+    picked = p.select_canary(rows, 10, family="f_mp4")
+    ids = {r["derived_id"] for r in picked}
+    assert ids == {"v1", "v2"}
+    # and the AVIF family still refuses the bare f_mp4 rows
+    picked_avif = p.select_canary(rows, 10, family="avif")
+    assert {r["derived_id"] for r in picked_avif} == {"avif"}
+
+
+def test_canary_family_fmp4_batch_needs_exactly_10(db):
+    _seed_12_parents(db)
+    rows = [_candidate(did=f"f{i}", pid=f"{PARENT}{i}", xf="f_mp4", fam="f_mpN", fmt="mp4",
+                       url=f"{C}/video/upload/f_mp4/v1/{PARENT}{i}.mp4") for i in range(12)]
+
+    def fetch(pid, rt):
+        return {"public_id": pid, "resource_type": rt,
+                "derived": [{"id": f"f{pid[-1]}" if pid[-1].isdigit() else "f0",
+                             "transformation": "f_mp4", "format": "mp4", "bytes": 40000,
+                             "url": f"{C}/video/upload/f_mp4/v1/{pid}.mp4"}]}
+
+    # seed talent owners for each parent so revalidation can PASS
+    for i in range(12):
+        db.talents.docs.append({"id": f"Tv{i}", "media": [{
+            "id": f"mv{i}", "public_id": f"{PARENT}{i}", "category": "portfolio",
+            "resource_type": "video", "url": f"{C}/video/upload/v1/{PARENT}{i}.mp4",
+            "ownership": {"owner_type": "talent", "talent_id": f"Tv{i}", "conflict": None,
+                          "is_shared_copy": False}}]})
+    m = run(p.build_purge_manifest(db, rows, source_manifest_id="fmp4", resource_fetcher=fetch,
+                                   actor="a", canary_family="f_mp4"))
+    ap = run(p.approve_manifest(db, m["manifest_id"], approved_by="a",
+                                candidate_ids=m["passed_candidate_ids"]))
+    b = run(p.create_batch(db, ap["approval_id"], size=10, canary=True, canary_family="f_mp4"))
+    assert b["canary"] is True and b["canary_family"] == "f_mp4" and b["size"] == 10
+    assert all(p._norm_xf(c["transformation"]) == "f_mp4" for c in b["candidates"])
+
+
 def test_14b_deleter_receives_exactly_one_id(db, monkeypatch):
     monkeypatch.setenv("MEDIA_LIFECYCLE_PHYSICAL_DELETE", "true")
     _seed_12_parents(db)

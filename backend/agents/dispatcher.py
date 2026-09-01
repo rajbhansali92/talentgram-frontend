@@ -705,8 +705,40 @@ async def handle_inbound_message(
         # any agent whose trigger vocabulary happens to overlap an approve/
         # cancel word gets the same, correct priority.
         pending_confirmation = conv is not None and conv.get("step") in ("confirming", "disambiguating")
+        # Guided Step-Specific Editing (2026-09-02) — the SAME collision,
+        # one step later: a domain module's own step-edit examples can
+        # naturally start with that module's own trigger word (e.g.
+        # casting-agent suggesting "Share it with X instead" while editing
+        # a SHARE step of a compound plan). Unlike pending_confirmation's
+        # generic parse_confirmation_reply check above, deciding whether
+        # THIS specific reply plausibly targets the pending edit needs
+        # domain knowledge only the module itself has — so this asks the
+        # intent's own claims_editing_reply hook (see agents/models.py),
+        # a pure, side-effect-free check, rather than a blanket "any
+        # editing turn is immune" grant. None (every existing intent, and
+        # every OTHER message for casting-agent's ADD/MOVE too) preserves
+        # the exact prior behaviour: a fresh trigger still restarts it.
+        editing_intent = (
+            registry.get_intent(agent, conv["intent_id"])
+            if conv is not None and conv.get("step") == "editing" and conv.get("intent_id")
+            else None
+        )
+        editing_immune_to_fresh_trigger = False
+        if editing_intent is not None and editing_intent.claims_editing_reply:
+            editing_ctx = ExecContext(
+                agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
+                sender_name=sender_name, conversation_id=str(conv.get("_id") or ""),
+            )
+            editing_immune_to_fresh_trigger = bool(
+                await editing_intent.claims_editing_reply(
+                    working_message, conv.get("collected") or {}, editing_ctx
+                )
+            )
         fresh_intent = (
-            None if pending_confirmation and parse_confirmation_reply(working_message) is not None
+            None if (
+                (pending_confirmation and parse_confirmation_reply(working_message) is not None)
+                or editing_immune_to_fresh_trigger
+            )
             else detect_trigger(agent, working_message)
         )
 

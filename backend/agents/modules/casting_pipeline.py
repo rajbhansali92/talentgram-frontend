@@ -2392,7 +2392,8 @@ def _deserialize_plan(raw: Optional[str]) -> List[Dict[str, str]]:
 
 
 async def _resolve_one_plan_step(
-    step: Dict[str, str], ctx: ExecContext, touched_pairs: List[Dict[str, str]]
+    step: Dict[str, str], ctx: ExecContext, touched_pairs: List[Dict[str, str]],
+    plan_resolved_flag: Optional[List[bool]] = None,
 ) -> List[Dict[str, Any]]:
     """Resolves ONE plan step (one raw-text chunk) into one or more
     resolved sub-steps. A chunk naming several independent talent-group ->
@@ -2415,7 +2416,7 @@ async def _resolve_one_plan_step(
 
     out: List[Dict[str, Any]] = []
     for segment_text in segments:
-        out.extend(await _resolve_one_plan_segment(intent_id, segment_text, ctx, touched_pairs))
+        out.extend(await _resolve_one_plan_segment(intent_id, segment_text, ctx, touched_pairs, plan_resolved_flag))
     return out
 
 
@@ -2447,7 +2448,8 @@ def _touched_pairs_matching_talent(
 
 
 async def _resolve_one_plan_segment(
-    intent_id: str, raw_text: str, ctx: ExecContext, touched_pairs: List[Dict[str, str]]
+    intent_id: str, raw_text: str, ctx: ExecContext, touched_pairs: List[Dict[str, str]],
+    plan_resolved_flag: Optional[List[bool]] = None,
 ) -> List[Dict[str, Any]]:
     """Resolves ONE segment — a single "<talent(s)> to <project(s)>"
     mapping — into one or more resolved sub-steps, more than one only when
@@ -2531,6 +2533,53 @@ async def _resolve_one_plan_segment(
         elif talent_raw:
             _fan_out_pairs = _touched_pairs_matching_talent(talent_raw, touched_pairs)
 
+    # Current-Command Context Only (2026-09-02) — a genuine production
+    # regression: "Add Anusha Sharma, move her to Follow Up, share the
+    # casting call with her" with no project on the ADD clause. ADD fails
+    # to resolve (missing project), so touched_pairs stays EMPTY for this
+    # plan/group. Before this fix, MOVE's implicit pronoun ("her") then
+    # fell through to the single-pair path below, which calls
+    # _resolve_move_selection — and THAT function's own pronoun handling
+    # (line ~2168) resolves an implicit pronoun against
+    # session.last_talent_id/last_talent_project_id, i.e. whoever was
+    # last discussed in a COMPLETELY UNRELATED EARLIER COMMAND. In the
+    # reported incident this fabricated "Move Vikram Sharma to Follow Up
+    # in Hinge" — a talent never even mentioned in the current message.
+    #
+    # The fix: within a compound PLAN, an implicit last-referent pronoun
+    # on a MOVE step may ONLY ever resolve against something THIS PLAN
+    # has already successfully resolved (current-command context only,
+    # per the "no stale context may ever create a new action" rule) —
+    # never a stale session value left over from a genuinely separate,
+    # earlier command. touched_pairs alone isn't quite the right signal
+    # here, though: it's deliberately reset at every GROUP boundary
+    # (Simplified Command Language, e.g. "Add ...\n\nMove\nApproved" —
+    # two independent-looking groups within ONE message that are still
+    # meant to chain, via _remember_last_talent/session.last_talent_id,
+    # exactly as they always have). `plan_resolved_flag` is the broader,
+    # never-reset-per-group signal: True once ANYTHING earlier in this
+    # SAME plan-resolution pass (any group) has successfully resolved —
+    # at that point session.last_talent_id is guaranteed to hold what
+    # THIS plan itself just wrote, not stale cross-command data, so the
+    # existing session fallback below is safe to use. Only when NEITHER
+    # touched_pairs NOR any earlier part of this whole plan has resolved
+    # anything does this step stay unresolved with a clear "depends on an
+    # earlier step" message instead of guessing — atomic resolution: an
+    # unresolved earlier step can never let a later step fabricate its
+    # own referent from memory.
+    _plan_has_resolved_anything = bool(plan_resolved_flag and plan_resolved_flag[0])
+    if (
+        intent_id == "casting.move" and not project_raw and _talent_is_implicit_pronoun
+        and not touched_pairs and not _plan_has_resolved_anything
+    ):
+        return [{
+            "intent_id": intent_id, "raw_text": raw_text, "label": raw_text, "resolved": None,
+            "error": (
+                "This step depends on an earlier step in this command that "
+                "hasn't been resolved yet — nothing has been moved."
+            ),
+        }]
+
     if _fan_out_pairs:
         target_stage = fields.get("target_stage") or ""
         if target_stage not in PIPELINE_STAGES:
@@ -2565,6 +2614,8 @@ async def _resolve_one_plan_segment(
             })
         if out:
             await _remember_last_talent(ctx, out[-1]["resolved"])
+            if plan_resolved_flag is not None:
+                plan_resolved_flag[0] = True
         return out
 
     talent_names = nlu.split_multi_names(talent_raw) or [talent_raw]
@@ -2620,6 +2671,8 @@ async def _resolve_one_plan_segment(
         if resolved is not None:
             if len(resolved.talent_ids) == 1:
                 last_resolved_single = resolved
+            if plan_resolved_flag is not None:
+                plan_resolved_flag[0] = True
             for tid, tl in zip(resolved.talent_ids, resolved.talent_labels):
                 touched_pairs.append({
                     "talent_id": tid, "talent_label": tl,
@@ -2741,11 +2794,17 @@ async def _resolve_plan_steps_for_display(
     steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
     resolved_steps: List[Dict[str, Any]] = []
     touched_pairs: List[Dict[str, str]] = []
+    # Never reset at a group boundary (unlike touched_pairs) — see
+    # _resolve_one_plan_segment's "Current-Command Context Only" docstring
+    # for why this broader, whole-plan signal is needed alongside
+    # touched_pairs for the Simplified Command Language's legitimate
+    # cross-group chaining ("Add ...\n\nMove\nApproved").
+    plan_resolved_flag: List[bool] = [False]
     last_group: Optional[Any] = None
     group_send_template: Optional[str] = None
     group_send_data: Dict[str, _GroupSendBucket] = {}
     preview_send_lines: List[str] = []
-    for step in steps:
+    for raw_step_index, step in enumerate(steps):
         group = step.get("group", 0)
         if last_group is not None and group != last_group:
             # A new independent, blank-line-separated command begins here
@@ -2767,11 +2826,20 @@ async def _resolve_plan_steps_for_display(
         # to — the SAME touched_pairs accumulator, so an implicit/pronoun
         # reference ("with her", "for TVS Jupiter" left unnamed) inherits
         # from whatever this SAME group's earlier ADD/MOVE steps touched.
+        #
+        # "_raw_step_index" (Guided Step-Specific Editing, 2026-09-02) —
+        # which entry of the RAW `steps` list (the PLAN_FIELD JSON) this
+        # displayed/resolved line came from, so a later "edit step N" reply
+        # can locate and rewrite exactly that one raw step. Purely
+        # additive bookkeeping — every existing reader of resolved_steps
+        # dicts (_describe_plan_step_lines, _execute_plan, etc.) ignores
+        # unknown extra keys, so this changes no existing behaviour.
         if step.get("intent_id") == "casting.share":
             share_res = await _resolve_share_step_for_plan(step.get("raw_text") or "", touched_pairs)
             resolved_steps.append({
                 "intent_id": "casting.share", "raw_text": step.get("raw_text") or "",
                 "label": None, "resolved": None, "error": None, "share_resolution": share_res,
+                "_raw_step_index": raw_step_index,
             })
             continue
         if step.get("intent_id") == "casting.send":
@@ -2779,9 +2847,12 @@ async def _resolve_plan_steps_for_display(
             resolved_steps.append({
                 "intent_id": "casting.send", "raw_text": step.get("raw_text") or "",
                 "label": None, "resolved": None, "error": None, "send_fields": send_fields,
+                "_raw_step_index": raw_step_index,
             })
             continue
-        resolved = await _resolve_one_plan_step(step, ctx, touched_pairs)
+        resolved = await _resolve_one_plan_step(step, ctx, touched_pairs, plan_resolved_flag)
+        for rs in resolved:
+            rs["_raw_step_index"] = raw_step_index
         resolved_steps.extend(resolved)
         if step.get("send_template"):
             for rs in resolved:
@@ -2840,8 +2911,67 @@ def _describe_plan_step_lines(resolved_steps: "List[Dict[str, Any]]") -> List[st
     return lines
 
 
+_ADD_MISSING_PROJECT_ERROR = 'Which project? e.g. "Add Prajal Tushir to Toyota Glanza".'
+
+
+async def _build_plan_missing_project_clarification(
+    resolved_steps: List[Dict[str, Any]], ctx: ExecContext, collected: dict,
+) -> Optional[str]:
+    """Guided ADD-Missing-Project Resume (2026-09-02) — the exact reported
+    regression's OTHER half: "Add Anusha Sharma, move her to Follow Up,
+    share the casting call with her" (no project on ADD) must ask ONLY
+    for the missing project, with a clean numbered way to answer that
+    resumes THIS SAME command — never a bare "Which project?" line buried
+    inside a full plan card with no way to continue except retyping
+    everything. Scoped narrowly to the FIRST step being casting.add with
+    genuinely no project named at all (never ambiguous — that already has
+    its own numbered-disambiguation flow via _resolve_add_project); every
+    other kind of step failure still renders through the normal plan
+    confirmation card unchanged. Returns None when this doesn't apply."""
+    if not resolved_steps:
+        return None
+    rs = resolved_steps[0]
+    if rs["intent_id"] != "casting.add" or rs.get("resolved") is not None:
+        return None
+    if (rs.get("error") or "").strip() != _ADD_MISSING_PROJECT_ERROR:
+        return None
+
+    projects = await _fetch_ongoing_projects()
+    suggestions = projects[:6]
+    # raw_text still carries this step's own "Add" trigger word (plan
+    # chunks are the un-stripped chunk text — see nlu.preprocess_command_
+    # grouped) — strip it so the resend example doesn't double up on "Add".
+    _, talent_hint = nlu._strip_leading_trigger((rs.get("raw_text") or "").strip(), nlu.ADD_TRIGGERS)
+    talent_hint = talent_hint.strip()
+
+    lines = ["ADD needs a project before I can continue.", ""]
+    options = []
+    for i, p in enumerate(suggestions, start=1):
+        lines.append(f"{i} → {p['label']}")
+        options.append({"label": p["label"], "value": p["label"]})
+    if suggestions:
+        lines.append("")
+    lines.append("Reply with the number, or send:")
+    lines.append(f"Add {talent_hint or '[Talent]'} to [Project Name]")
+    lines += ["", "Nothing has been added, moved, or shared yet."]
+
+    await session_context.update_session(
+        AGENT_ID, ctx.sender_phone,
+        pending_disambiguation={"kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY, "options": options},
+    )
+    new_collected = dict(collected)
+    new_collected[_PLAN_EDIT_STEP_KEY] = "1"
+    await conversation.update_conversation(
+        ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing"
+    )
+    return "\n".join(lines)
+
+
 async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
     resolved_steps, preview_send_lines = await _resolve_plan_steps_for_display(collected, ctx)
+    missing_project_clarification = await _build_plan_missing_project_clarification(resolved_steps, ctx, collected)
+    if missing_project_clarification is not None:
+        return missing_project_clarification
     lines = ["You are about to run this plan:", ""]
     lines.extend(_describe_plan_step_lines(resolved_steps))
     if preview_send_lines:
@@ -2850,7 +2980,11 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
     lines.append("")
     lines.append("Reply:")
     lines.append("1 → Approve")
-    lines.append("2 → Edit")
+    # "Edit a step" (2026-09-02) — was plain "Edit"; now a bare step
+    # number (2, 3, ...) opens that SPECIFIC step directly (see
+    # _plan_step_handle_confirming_reply below), not a generic "which
+    # part do you mean" prompt, so the wording says so up front.
+    lines.append("2 → Edit a step")
     lines.append("3 → Cancel")
     return "\n".join(lines)
 
@@ -2859,22 +2993,497 @@ async def _build_plan_edit_prompt(collected: dict, ctx: ExecContext) -> str:
     """Guided Edit Prompts (2026-08-28) — describes the SAME pending
     compound plan the confirmation card just showed (reusing
     _resolve_plan_steps_for_display/_describe_plan_step_lines verbatim,
-    not a second resolution), so "2" on an Add+Move(+Share/Send) plan is
-    connected to THAT specific plan instead of a generic "tell me what to
-    change"."""
+    not a second resolution). Reachable when the literal word "edit" (or
+    "change") was typed instead of a step number — every numbered reply
+    is now caught earlier by _plan_step_handle_confirming_reply and goes
+    straight to a step-specific prompt (Guided Step-Specific Editing,
+    2026-09-02), so this generic fallback only fires for that one case."""
     resolved_steps, _preview_send_lines = await _resolve_plan_steps_for_display(collected, ctx)
     lines = ["EDITING YOUR PLAN", "", "Current plan:"]
     lines.extend(_describe_plan_step_lines(resolved_steps))
     lines += [
-        "", "Tell me which part you want to change.", "",
+        "", "Reply with the step number to edit just that step (e.g. \"2\"), "
+        "or tell me which part you want to change.", "",
         "Examples:",
+        "• 2",
         "• Change the stage to Shortlisted",
         "• Remove one of the talents",
         "• Change the project",
-        "• Share only with one of them",
         "", "Nothing will execute until you confirm.",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Guided Step-Specific Editing (2026-09-02) — replying "2" to a multi-step
+# plan's confirmation card now opens "EDITING STEP 2 — MOVE" directly
+# (naming the CURRENT talent/project/stage for that one step and offering
+# concrete next instructions), instead of a generic "tell me which part
+# you want to change" that made the user say which step a second time.
+# "N <instruction>" in one message ("2 change the stage to Shortlisted")
+# applies the change immediately. Every edit rewrites ONLY the one raw
+# plan step it targets — every other step's raw_text is passed through
+# unchanged, so "steps 1 and 3 remain unchanged" holds structurally, not
+# just by convention.
+# ---------------------------------------------------------------------------
+_PLAN_EDIT_STEP_KEY = "_plan_edit_step"
+
+
+def _validate_plan_step_edit_error(raw: str) -> ValidationResult:
+    """Always-fails, echoing `raw` back as the error text. Exists purely
+    to surface a step-specific "I didn't understand that change" message
+    through the existing generic edit-reply pipeline (agents/dispatcher.
+    py's _collect_or_advance: a validation failure's `error` becomes the
+    turn's reply, and — critically — `collected`/the conversation step
+    are left UNTOUCHED when validate fails, so the user stays in the
+    exact same "editing step N" state and can just try again, without any
+    new dispatcher-level state machine)."""
+    return ValidationResult(ok=False, error=raw)
+
+
+PLAN_STEP_EDIT_ERROR_FIELD = FieldSpec(
+    key="_plan_step_edit_error", label="Plan Step Edit Error", question="",
+    validate=_validate_plan_step_edit_error, required=False,
+)
+
+_PLAN_STEP_KIND_LABELS = {
+    "casting.add": "ADD", "casting.move": "MOVE", "casting.share": "SHARE", "casting.send": "SEND",
+}
+
+
+def _describe_plan_step_for_edit(rs: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """(current_description, example_instructions) for ONE resolved plan
+    step — reuses the exact same resolved data _describe_plan_step_lines
+    renders (never a second, possibly-diverging description)."""
+    intent_id = rs["intent_id"]
+    if intent_id == "casting.add":
+        r = rs.get("resolved")
+        if r is None:
+            return rs.get("raw_text") or "", []
+        current = f"Add {', '.join(r.talent_labels)} to {r.project_label}."
+        examples = ["Change the project to [Project]"]
+        if len(r.talent_labels) > 1:
+            examples.append(f"Remove {r.talent_labels[-1]}")
+        examples.append("Remove this step")
+        return current, examples
+    if intent_id == "casting.move":
+        r = rs.get("resolved")
+        if r is None:
+            return rs.get("raw_text") or "", []
+        current = f"Move {', '.join(r.talent_labels)} to {nlu.stage_label(r.target_stage)} in {r.project_label}."
+        examples = ["Change the stage to Shortlisted", "Change the project to [Project]"]
+        if len(r.talent_labels) > 1:
+            examples.append(f"Remove {r.talent_labels[-1]}")
+            examples.append(f"Move only {r.talent_labels[0]}")
+        examples.append("Remove this step")
+        return current, examples
+    if intent_id == "casting.share":
+        sr = rs.get("share_resolution")
+        if sr is None or not sr.ok:
+            return rs.get("raw_text") or "", []
+        recipients_desc = "everyone in the pipeline" if sr.is_pipeline_target else ", ".join(sr.talent_labels)
+        current = f"Share the casting call with {recipients_desc} for {', '.join(sr.project_labels)}."
+        examples = []
+        if not sr.is_pipeline_target:
+            examples.append("Share it with [Talent] instead")
+            examples.append("Share it with both")
+        examples.append("Change the project")
+        examples.append("Remove this step")
+        return current, examples
+    if intent_id == "casting.send":
+        sf = rs.get("send_fields") or {}
+        talent_desc = sf.get("talent_selector") or "?"
+        project_desc = sf.get("project_query") or "?"
+        current = f"Send {talent_desc}'s submission for {project_desc}."
+        return current, ["SEND has its own separate approval after this plan runs — nothing to change here."]
+    return rs.get("raw_text") or "", []
+
+
+def _build_plan_step_edit_prompt_from_resolved(resolved_steps: List[Dict[str, Any]], step_index: int) -> str:
+    rs = resolved_steps[step_index - 1]
+    kind_label = _PLAN_STEP_KIND_LABELS.get(rs["intent_id"], rs["intent_id"])
+    current, examples = _describe_plan_step_for_edit(rs)
+    lines = [f"EDITING STEP {step_index} — {kind_label}", "", "Current:", current, "",
+             "What would you like to change?"]
+    if examples:
+        lines += ["", "You can say:"]
+        lines += [f"• {e}" for e in examples]
+    lines += ["", "Nothing will execute until you confirm."]
+    return "\n".join(lines)
+
+
+_EDIT_STAGE_RE = re.compile(r"^\s*change\s+(?:the\s+)?stage\s+to\s+(.+?)\s*$", re.IGNORECASE)
+_EDIT_PROJECT_RE = re.compile(r"^\s*change\s+(?:the\s+)?project\s+to\s+(.+?)\s*$", re.IGNORECASE)
+_EDIT_REMOVE_STEP_RE = re.compile(r"^\s*(?:remove|delete)\s+(?:this\s+step|step)\s*$", re.IGNORECASE)
+_EDIT_REMOVE_NAME_RE = re.compile(r"^\s*remove\s+(.+?)\s*$", re.IGNORECASE)
+_EDIT_MOVE_ONLY_RE = re.compile(r"^\s*(?:move|keep)\s+only\s+(.+?)\s*$", re.IGNORECASE)
+_EDIT_SHARE_WITH_RE = re.compile(r"^\s*share\s+(?:it\s+)?with\s+(.+?)(?:\s+instead)?\s*$", re.IGNORECASE)
+
+
+def _rebuild_add_raw_text(talent_labels: List[str], project_text: str) -> str:
+    return f"Add {', '.join(talent_labels)} to {project_text}"
+
+
+def _rebuild_move_raw_text(
+    talent_labels: List[str], stage_label: str, project_text: Optional[str] = None,
+) -> str:
+    """project_text=None deliberately omits the "in <project>" clause —
+    see _plan_step_project_is_chained's docstring for why a stage-only/
+    narrowing edit on a step chained from an earlier not-yet-executed ADD
+    must stay implicit (naming only the talent(s) and stage) rather than
+    naming an explicit project, so it keeps resolving through the plan's
+    own touched_pairs fan-out instead of a live DB lookup that would find
+    nothing yet."""
+    base = f"Move {', '.join(talent_labels)} to {stage_label}"
+    return f"{base} in {project_text}" if project_text else base
+
+
+def _rebuild_share_raw_text(project_text: str, recipient_text: str) -> str:
+    return f"Share the casting call for {project_text} with {recipient_text}"
+
+
+def _plan_step_project_is_chained(
+    raw_i: int, project_id: str, talent_ids: List[str], resolved_steps: List[Dict[str, Any]],
+) -> bool:
+    """True when an EARLIER step (smaller _raw_step_index) in this SAME
+    plan already resolved at least one of `talent_ids` into `project_id`
+    — meaning this step's project traces back to that earlier step
+    (typically a chained ADD that hasn't been written to the database
+    yet by the time a later step is being edited/previewed), not an
+    independent, already-existing DB fact. See _rebuild_move_raw_text."""
+    talent_id_set = set(talent_ids)
+    for other in resolved_steps:
+        if other.get("_raw_step_index", raw_i) >= raw_i:
+            continue
+        other_r = other.get("resolved")
+        if other_r is None:
+            continue
+        if getattr(other_r, "project_id", None) != project_id:
+            continue
+        if talent_id_set & set(getattr(other_r, "talent_ids", None) or []):
+            return True
+    return False
+
+
+async def _apply_plan_step_edit_instruction(
+    collected: dict, ctx: ExecContext, step_index: int, instruction: str,
+    resolved_steps: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Applies ONE free-text edit instruction to step `step_index` (1-
+    based, matching the number the confirmation card displayed) of a
+    compound plan. Returns (new_plan_json, None) on success, or
+    (None, error_message) — the error is shown VERBATIM to the user while
+    the conversation stays in the exact same "editing step N" state (see
+    PLAN_STEP_EDIT_ERROR_FIELD), never silently discarding the pending
+    edit or the rest of the plan. Only ever rewrites raw step
+    `steps[raw_step_index]` (or removes that one entry) — every other
+    step's raw_text is passed through byte-for-byte unchanged."""
+    steps = _deserialize_plan(collected.get(PLAN_FIELD.key))
+    if resolved_steps is None:
+        resolved_steps, _ = await _resolve_plan_steps_for_display(collected, ctx)
+    if step_index < 1 or step_index > len(resolved_steps):
+        return None, "That step number doesn't exist in this plan anymore."
+    rs = resolved_steps[step_index - 1]
+    raw_i = rs.get("_raw_step_index")
+    if raw_i is None or raw_i >= len(steps):
+        return None, "I couldn't locate that step to edit — try re-sending the whole command."
+
+    intent_id = rs["intent_id"]
+    if intent_id == "casting.send":
+        return None, "SEND has its own separate approval after this plan runs — there's nothing to edit here."
+
+    stripped = (instruction or "").strip()
+
+    if _EDIT_REMOVE_STEP_RE.match(stripped):
+        if len(steps) <= 1:
+            return None, "Can't remove the only step in this plan — reply 3 to cancel the whole thing instead."
+        new_steps = steps[:raw_i] + steps[raw_i + 1:]
+        return json.dumps(new_steps), None
+
+    sibling_count = sum(1 for other in resolved_steps if other.get("_raw_step_index") == raw_i)
+    if sibling_count > 1:
+        return None, (
+            "This step represents multiple talents/projects combined and can't be "
+            'edited individually yet — cancel and re-send the command with your '
+            'correction, or say "remove this step".'
+        )
+
+    new_raw_text: Optional[str] = None
+
+    if intent_id in ("casting.add", "casting.move"):
+        r = rs.get("resolved")
+        if r is None:
+            # The ONE edit ever allowed against an unresolved step: filling
+            # in an ADD step's genuinely missing project (Guided ADD-
+            # Missing-Project Resume, 2026-09-02) — reached via
+            # _plan_aware_parse_edits_async wrapping the user's numbered/
+            # free-text reply into this exact instruction shape. Every
+            # other unresolved-step case (ambiguous talent, talent not
+            # found, etc.) has its own existing clarification flow and
+            # still can't be edited this way.
+            m = _EDIT_PROJECT_RE.match(stripped)
+            if intent_id == "casting.add" and m and rs.get("error") == _ADD_MISSING_PROJECT_ERROR:
+                original_raw = (steps[raw_i].get("raw_text") or "").strip()
+                new_raw_text = f"{original_raw} to {m.group(1).strip()}"
+            else:
+                return None, rs.get("error") or "This step hasn't resolved yet — nothing to edit."
+
+        # Preserving-the-project edits (stage-only, narrowing) must stay
+        # implicit ("Move X to Y", no "in <project>") when this step's
+        # project traces back to an EARLIER step in this same plan — see
+        # _plan_step_project_is_chained/_rebuild_move_raw_text. Only the
+        # explicit "change the project" edit below ever names a project
+        # outright, since that's the one case actually changing it.
+        move_project_text = (
+            None
+            if r is not None and intent_id == "casting.move"
+            and _plan_step_project_is_chained(raw_i, r.project_id, r.talent_ids, resolved_steps)
+            else (r.project_label if r is not None else None)
+        )
+
+        m = _EDIT_STAGE_RE.match(stripped) if (r is not None and intent_id == "casting.move") else None
+        if m:
+            stage_result = _validate_target_stage(m.group(1))
+            if not stage_result.ok:
+                return None, stage_result.error
+            new_raw_text = _rebuild_move_raw_text(
+                r.talent_labels, nlu.stage_label(stage_result.value), move_project_text,
+            )
+
+        if new_raw_text is None:
+            m = _EDIT_PROJECT_RE.match(stripped)
+            if m:
+                new_project_text = m.group(1).strip()
+                if intent_id == "casting.move":
+                    new_raw_text = _rebuild_move_raw_text(
+                        r.talent_labels, nlu.stage_label(r.target_stage), new_project_text,
+                    )
+                else:
+                    new_raw_text = _rebuild_add_raw_text(r.talent_labels, new_project_text)
+
+        if new_raw_text is None and intent_id == "casting.move":
+            m = _EDIT_MOVE_ONLY_RE.match(stripped)
+            if m:
+                keep_names = [n.strip().lower() for n in (nlu.split_multi_names(m.group(1)) or [m.group(1)]) if n.strip()]
+                kept = [t for t in r.talent_labels if any(k in t.lower() for k in keep_names)]
+                if not kept:
+                    return None, f"Couldn't find {m.group(1).strip()} among this step's talents."
+                new_raw_text = _rebuild_move_raw_text(kept, nlu.stage_label(r.target_stage), move_project_text)
+
+        if new_raw_text is None:
+            m = _EDIT_REMOVE_NAME_RE.match(stripped)
+            if m:
+                remove_name = m.group(1).strip().lower()
+                remaining = [t for t in r.talent_labels if remove_name not in t.lower()]
+                if len(remaining) == len(r.talent_labels):
+                    return None, f"Couldn't find {m.group(1).strip()} among this step's talents."
+                if not remaining:
+                    if len(steps) <= 1:
+                        return None, "Can't remove the only talent and leave an empty step — reply 3 to cancel instead."
+                    new_steps = steps[:raw_i] + steps[raw_i + 1:]
+                    return json.dumps(new_steps), None
+                if intent_id == "casting.move":
+                    new_raw_text = _rebuild_move_raw_text(remaining, nlu.stage_label(r.target_stage), move_project_text)
+                else:
+                    new_raw_text = _rebuild_add_raw_text(remaining, r.project_label)
+
+    elif intent_id == "casting.share":
+        sr = rs.get("share_resolution")
+        if sr is None or not sr.ok:
+            return None, (sr.error if sr is not None else None) or "This step hasn't resolved yet — nothing to edit."
+
+        m = _EDIT_PROJECT_RE.match(stripped)
+        if m:
+            recipient_text = "pipeline" if sr.is_pipeline_target else ",".join(sr.talent_labels)
+            new_raw_text = _rebuild_share_raw_text(m.group(1).strip(), recipient_text)
+
+        if new_raw_text is None:
+            m = _EDIT_SHARE_WITH_RE.match(stripped)
+            if m:
+                new_raw_text = _rebuild_share_raw_text(",".join(sr.project_labels), m.group(1).strip())
+
+        if new_raw_text is None and not sr.is_pipeline_target:
+            m = _EDIT_REMOVE_NAME_RE.match(stripped)
+            if m:
+                remove_name = m.group(1).strip().lower()
+                remaining = [t for t in sr.talent_labels if remove_name not in t.lower()]
+                if len(remaining) == len(sr.talent_labels):
+                    return None, f"Couldn't find {m.group(1).strip()} among this step's recipients."
+                if not remaining:
+                    if len(steps) <= 1:
+                        return None, "Can't remove the only recipient and leave an empty step — reply 3 to cancel instead."
+                    new_steps = steps[:raw_i] + steps[raw_i + 1:]
+                    return json.dumps(new_steps), None
+                new_raw_text = _rebuild_share_raw_text(",".join(sr.project_labels), ",".join(remaining))
+
+    if new_raw_text is None:
+        return None, (
+            'I didn\'t understand that change.\n\n'
+            'Try: "change the stage to Shortlisted", "change the project to [Project]", '
+            '"remove [Name]", or "remove this step".'
+        )
+
+    new_steps = list(steps)
+    new_steps[raw_i] = dict(new_steps[raw_i])
+    new_steps[raw_i]["raw_text"] = new_raw_text
+    return json.dumps(new_steps), None
+
+
+async def _plan_aware_parse_edits_async(
+    text: str, collected: Dict[str, str], fields: List[FieldSpec], ctx: ExecContext,
+) -> Dict[str, str]:
+    """Wraps _move_parse_edits_async (shared by ADD_INTENT/MOVE_INTENT):
+    when the conversation is mid- "edit ONE specific plan step" (see
+    _plan_step_handle_confirming_reply), the free-text reply is
+    interpreted as an instruction for THAT step only. Every other case —
+    including a plain (non-plan) ADD/MOVE edit, or a plan reached via the
+    literal word "edit" instead of a step number — falls straight through
+    to the existing, unmodified _move_parse_edits_async."""
+    step_index_raw = (collected.get(_PLAN_EDIT_STEP_KEY) or "").strip()
+    if step_index_raw and (collected.get(PLAN_FIELD.key) or "").strip():
+        try:
+            step_index = int(step_index_raw)
+        except ValueError:
+            step_index = 0
+        if step_index >= 1:
+            instruction = text
+            # Guided ADD-Missing-Project Resume (2026-09-02) — a pending
+            # "plan_missing_project" disambiguation means we're SPECIFICALLY
+            # waiting for the project this ADD step never had: a bare
+            # number picks from the shown suggestions, otherwise the raw
+            # reply IS the project name/query itself — never a generic
+            # "change X to Y" instruction, since nothing about this step
+            # has resolved yet for the user to be referring back to.
+            session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+            pending = (session or {}).get("pending_disambiguation")
+            if pending and pending.get("kind") == "plan_missing_project":
+                options = pending.get("options") or []
+                idx = nlu.resolve_option_reply((text or "").strip(), options) if options else None
+                project_text = options[idx - 1]["value"] if idx is not None else (text or "").strip()
+                instruction = f"change the project to {project_text}"
+                await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+            new_plan_json, err = await _apply_plan_step_edit_instruction(collected, ctx, step_index, instruction)
+            if err:
+                return {PLAN_STEP_EDIT_ERROR_FIELD.key: err}
+            return {PLAN_FIELD.key: new_plan_json}
+    return await _move_parse_edits_async(text, collected, fields, ctx)
+
+
+_PLAN_STEP_NUMBER_RE = re.compile(r"^\s*(\d+)\s*$")
+_PLAN_STEP_NUMBER_THEN_TEXT_RE = re.compile(r"^\s*(\d+)\s+(\S.*)$", re.DOTALL)
+
+
+async def _plan_step_handle_confirming_reply(
+    text: str, collected: Dict[str, str], ctx: ExecContext,
+) -> Optional[str]:
+    """AgentDefinition.handle_confirming_reply hook (shared by ADD_INTENT
+    and MOVE_INTENT — the only two intents whose extract_fields can build
+    a PLAN_FIELD) — checked FIRST, before the generic 1/2/3 Approve/Edit/
+    Cancel parsing. For a multi-step compound plan, a bare number that
+    matches an actual step ("2" on a 3-step plan) opens step-specific
+    editing directly ("EDITING STEP 2 — MOVE") instead of the old generic
+    "EDITING YOUR PLAN, tell me which part" prompt — collapsing what used
+    to be two round trips into one. "N <instruction>" in ONE message
+    (e.g. "2 change the stage to Shortlisted") applies the edit
+    immediately and re-shows the updated confirmation, without even
+    visiting "editing". "1" always stays Approve — never reinterpreted,
+    the overwhelmingly common/expected meaning — and a number beyond the
+    plan's own step count falls straight through to the ordinary parser
+    (so "3 -> Cancel" still works on a 2-step plan; "cancel"/"no" always
+    work regardless of step count). Returns None for every other reply —
+    free text, the word "edit", "approve", etc — leaving 1/2/3 exactly as
+    they already behave for every non-plan (single ADD/MOVE) confirmation."""
+    if not (collected.get(PLAN_FIELD.key) or "").strip():
+        return None
+    stripped = (text or "").strip()
+    m_combo = _PLAN_STEP_NUMBER_THEN_TEXT_RE.match(stripped)
+    m_bare = _PLAN_STEP_NUMBER_RE.match(stripped) if not m_combo else None
+    if not m_combo and not m_bare:
+        return None
+    n = int((m_combo or m_bare).group(1))
+    if n <= 1:
+        return None
+    resolved_steps, _ = await _resolve_plan_steps_for_display(collected, ctx)
+    if n > len(resolved_steps):
+        return None
+
+    if m_combo:
+        instruction = m_combo.group(2)
+        new_plan_json, err = await _apply_plan_step_edit_instruction(
+            collected, ctx, n, instruction, resolved_steps=resolved_steps,
+        )
+        if err:
+            return err
+        new_collected = dict(collected)
+        new_collected[PLAN_FIELD.key] = new_plan_json
+        new_collected.pop(_PLAN_EDIT_STEP_KEY, None)
+        await conversation.update_conversation(
+            ctx.agent_id, ctx.sender_phone, collected=new_collected, step="confirming"
+        )
+        return await _build_plan_confirmation(new_collected, ctx)
+
+    new_collected = dict(collected)
+    new_collected[_PLAN_EDIT_STEP_KEY] = str(n)
+    await conversation.update_conversation(
+        ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing"
+    )
+    return _build_plan_step_edit_prompt_from_resolved(resolved_steps, n)
+
+
+async def _move_plan_handle_confirming_reply(
+    text: str, collected: Dict[str, str], ctx: ExecContext,
+) -> Optional[str]:
+    """MOVE_INTENT's handle_confirming_reply chains its existing Whole-
+    Stage-Move "exclude X" interception (_stage_move_handle_confirming_
+    reply — narrow, only ever fires for an in-progress stage-move, which
+    never carries a PLAN_FIELD) with the new plan-step editing shortcut
+    above. Neither hook's own trigger condition can ever overlap with the
+    other's (stage-move keys off talent_selector's STAGE_MOVE_MARKER, the
+    plan hook keys off PLAN_FIELD — a conversation only ever carries one
+    of those), so order between them doesn't change behaviour; kept
+    stage-move first only for stability."""
+    result = await _stage_move_handle_confirming_reply(text, collected, ctx)
+    if result is not None:
+        return result
+    return await _plan_step_handle_confirming_reply(text, collected, ctx)
+
+
+async def _plan_step_editing_claims_reply(
+    text: str, collected: Dict[str, str], ctx: ExecContext,
+) -> bool:
+    """IntentDefinition.claims_editing_reply hook (see agents/models.py) —
+    shared by ADD_INTENT/MOVE_INTENT. Called ONLY when a conversation is
+    mid- "edit ONE specific plan step" (_PLAN_EDIT_STEP_KEY set) AND the
+    incoming message would otherwise be treated as a fresh trigger. Pure,
+    side-effect-free pattern matching against the SAME instruction shapes
+    _apply_plan_step_edit_instruction actually understands — deliberately
+    NOT a blanket "any editing turn is immune" grant: a message that
+    doesn't match any recognized edit instruction (e.g. a genuinely new,
+    unrelated compound command) returns False, so dispatcher.py's normal
+    "a fresh trigger always restarts" rule still applies to it exactly as
+    before this feature existed."""
+    if not (collected.get(_PLAN_EDIT_STEP_KEY) or "").strip():
+        return False
+    if not (collected.get(PLAN_FIELD.key) or "").strip():
+        return False
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    # Guided ADD-Missing-Project Resume — while that specific
+    # clarification is pending, ANY non-empty reply is meaningful (a
+    # number picking a suggestion, or the project's own name/query,
+    # which could itself start with a trigger word by pure coincidence).
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    pending = (session or {}).get("pending_disambiguation")
+    if pending and pending.get("kind") == "plan_missing_project":
+        return True
+    if _PLAN_STEP_NUMBER_RE.match(stripped):
+        return True
+    return bool(
+        _EDIT_STAGE_RE.match(stripped) or _EDIT_PROJECT_RE.match(stripped)
+        or _EDIT_REMOVE_STEP_RE.match(stripped) or _EDIT_REMOVE_NAME_RE.match(stripped)
+        or _EDIT_MOVE_ONLY_RE.match(stripped) or _EDIT_SHARE_WITH_RE.match(stripped)
+    )
 
 
 async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
@@ -2897,6 +3506,9 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
     summary_lines = ["Completed", ""]
     any_success = False
     touched_pairs: List[Dict[str, str]] = []
+    # Never reset at a group boundary — see _resolve_plan_steps_for_
+    # display's identical flag and _resolve_one_plan_segment's docstring.
+    plan_resolved_flag: List[bool] = [False]
     last_group: Optional[Any] = None
     group_send_template: Optional[str] = None
     group_send_data: Dict[str, _GroupSendBucket] = {}
@@ -2954,7 +3566,7 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
             continue
 
         try:
-            sub_steps = await _resolve_one_plan_step(step, ctx, touched_pairs)
+            sub_steps = await _resolve_one_plan_step(step, ctx, touched_pairs, plan_resolved_flag)
         except Exception:
             logger.exception("plan step resolution failed raw_text=%r", step.get("raw_text"))
             summary_lines += [f"✗ {step.get('raw_text', 'step')}", "", "Something went wrong resolving this step.", ""]
@@ -3487,14 +4099,18 @@ async def _build_move_edit_prompt(collected: dict, ctx: ExecContext) -> str:
 MOVE_INTENT = IntentDefinition(
     intent_id="casting.move",
     triggers=nlu.MOVE_TRIGGERS,
-    fields=[TALENT_SELECTOR_FIELD, TARGET_STAGE_FIELD, PROJECT_QUERY_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD],
+    fields=[
+        TALENT_SELECTOR_FIELD, TARGET_STAGE_FIELD, PROJECT_QUERY_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD,
+        PLAN_STEP_EDIT_ERROR_FIELD,
+    ],
     executor=_move_executor,
     extract_fields=_extract_move_fields,
     build_confirmation=_build_move_confirmation,
     build_edit_prompt=_build_move_edit_prompt,
-    parse_edits_async=_move_parse_edits_async,
+    parse_edits_async=_plan_aware_parse_edits_async,
     try_auto_execute=_move_try_auto_execute,
-    handle_confirming_reply=_stage_move_handle_confirming_reply,
+    handle_confirming_reply=_move_plan_handle_confirming_reply,
+    claims_editing_reply=_plan_step_editing_claims_reply,
     summary_title="You are about to move:",
 )
 
@@ -3958,20 +4574,27 @@ async def _build_add_edit_prompt(collected: dict, ctx: ExecContext) -> str:
 ADD_INTENT = IntentDefinition(
     intent_id="casting.add",
     triggers=nlu.ADD_TRIGGERS,
-    fields=[ADD_TALENT_SELECTOR_FIELD, ADD_PROJECT_QUERY_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD],
+    fields=[
+        ADD_TALENT_SELECTOR_FIELD, ADD_PROJECT_QUERY_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD,
+        PLAN_STEP_EDIT_ERROR_FIELD,
+    ],
     executor=_add_executor,
     extract_fields=_extract_add_fields,
     build_confirmation=_build_add_confirmation,
     build_edit_prompt=_build_add_edit_prompt,
     try_auto_execute=_add_try_auto_execute,
-    # Reused verbatim from MOVE — it only ever reads session's
-    # pending_disambiguation (agent+phone scoped, not intent-specific) and
-    # resolves a numbered/ordinal/label reply or a free-text retry against
-    # whichever field_key is pending; Add's disambiguation shapes ("kind":
-    # "project"/"talent"/"free_text_retry") are the exact same ones MOVE
-    # produces, and Add never produces a "retry_global" kind, so that
-    # branch simply never fires here.
-    parse_edits_async=_move_parse_edits_async,
+    # Reused verbatim from MOVE (wrapped by _plan_aware_parse_edits_async
+    # — see its docstring — for Guided Step-Specific Editing, 2026-09-02)
+    # — it only ever reads session's pending_disambiguation (agent+phone
+    # scoped, not intent-specific) and resolves a numbered/ordinal/label
+    # reply or a free-text retry against whichever field_key is pending;
+    # Add's disambiguation shapes ("kind": "project"/"talent"/
+    # "free_text_retry") are the exact same ones MOVE produces, and Add
+    # never produces a "retry_global" kind, so that branch simply never
+    # fires here.
+    parse_edits_async=_plan_aware_parse_edits_async,
+    handle_confirming_reply=_plan_step_handle_confirming_reply,
+    claims_editing_reply=_plan_step_editing_claims_reply,
     summary_title="You are about to add:",
 )
 
@@ -4466,6 +5089,18 @@ async def _resolve_share_step_for_plan(
     project_raw = (fields.get("project_query") or "").strip()
     recipient_raw = (fields.get("recipient_query") or "").strip()
     template_query = fields.get("template_query") or ""
+
+    # Current-Command Context Only (2026-09-02) — see the identical guard
+    # in _resolve_one_plan_segment. An implicit recipient ("her"/"both"/
+    # unnamed) with NOTHING yet touched by this same plan must never be
+    # handed to _resolve_share as literal text (which would try to fuzzy-
+    # match the pronoun word itself against real talent names) — it
+    # depends on an earlier step that hasn't resolved yet.
+    if _share_recipient_is_implicit(recipient_raw) and not touched_pairs:
+        return _ShareResolution(ok=False, error=(
+            "This step depends on an earlier step in this command that "
+            "hasn't been resolved yet — nothing has been shared."
+        ))
 
     if _share_recipient_is_implicit(recipient_raw) and touched_pairs:
         labels, err = _resolve_plan_pronoun_talents(recipient_raw, touched_pairs)

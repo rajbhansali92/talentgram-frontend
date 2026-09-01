@@ -182,6 +182,24 @@ class IntentDefinition:
     handle_confirming_reply: Optional[
         Callable[[str, Dict[str, str], "ExecContext"], Awaitable[Optional[str]]]
     ] = None
+    # Guided Step-Specific Editing (2026-09-02) — checked ONLY when a
+    # conversation is in the "editing" step AND the incoming message would
+    # otherwise be treated as a fresh trigger (dispatcher.py's usual "a
+    # fresh trigger always restarts" rule). A domain module's own
+    # suggested edit phrasing can start with that same module's trigger
+    # word (e.g. casting-agent's "Share it with X instead" while editing
+    # a SHARE step of a compound plan) — without this hook, that reply
+    # would restart a brand-new command instead of applying the edit.
+    # Returns True ONLY when the message plausibly targets whatever is
+    # currently being edited (checked with pure, side-effect-free pattern
+    # matching against `collected`, never blanket "any editing turn is
+    # immune") — a genuinely unrelated fresh command still restarts
+    # normally. None (the default, every existing intent) preserves the
+    # exact prior behaviour: nothing about a normal "editing" turn
+    # changes for any agent that doesn't set this.
+    claims_editing_reply: Optional[
+        Callable[[str, Dict[str, str], "ExecContext"], Awaitable[bool]]
+    ] = None
 
 
 @dataclass

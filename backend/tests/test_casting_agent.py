@@ -6935,11 +6935,15 @@ async def test_guided_3_share_edit_response_shows_resolved_template():
         await _restore_config(original)
 
 
-async def test_guided_4_compound_plan_edit_response_opens_specific_step():
-    """Guided Step-Specific Editing (2026-09-02) — replying "2" to a
-    multi-step plan's confirmation opens "EDITING STEP 2 — MOVE" directly
-    (naming that step's own current talent/stage/project), not the old
-    generic "EDITING YOUR PLAN, tell me which part" listing every step."""
+async def test_guided_4_compound_plan_edit_response_shows_step_selector():
+    """Guided Step Selector (2026-09-03) — replying "2" to a multi-step
+    plan's confirmation NEVER jumps straight into a specific step (that
+    was the source of the reported "3" ambiguity — see the module-level
+    "Guided Step-Specific Editing" comment). Instead it shows "EDITING
+    YOUR PLAN — which step would you like to edit? 1 -> ADD / 2 -> MOVE /
+    3 -> SHARE"; only a SUBSEQUENT step-number reply opens that specific
+    step's own editor. The literal word "edit" reaches the exact same
+    selector — no separate generic fallback."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_test_config(group)
     phone = _phone()
@@ -6960,20 +6964,30 @@ async def test_guided_4_compound_plan_edit_response_opens_specific_step():
         assert "You are about to run this plan" in r.reply, r.reply
         assert "2 → Edit a step" in r.reply, r.reply
 
-        edit = await handle_inbound_message(
+        selector = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="2",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "EDITING STEP 2 — MOVE" in edit.reply, edit.reply
-        assert f"GuidedPlanTalent {tag}" in edit.reply, edit.reply
-        assert "Shortlisted" in edit.reply, edit.reply
-        # Step 2 only — not step 1 (Add) or step 3 (Share) descriptions.
-        assert "Share" not in edit.reply, edit.reply
-        assert "Nothing will execute until you confirm" in edit.reply, edit.reply
+        assert "EDITING YOUR PLAN" in selector.reply, selector.reply
+        assert "Which step would you like to edit?" in selector.reply, selector.reply
+        assert "1 → ADD" in selector.reply, selector.reply
+        assert "2 → MOVE" in selector.reply, selector.reply
+        assert "3 → SHARE" in selector.reply, selector.reply
+        assert "Or type CANCEL to leave editing." in selector.reply, selector.reply
+        # Not yet a specific step's own editor.
+        assert "EDITING STEP" not in selector.reply, selector.reply
 
-        # The literal word "edit" still reaches the generic, all-steps
-        # listing — a deliberate fallback for anyone who doesn't reply
-        # with a step number.
+        step2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING STEP 2 — MOVE" in step2.reply, step2.reply
+        assert f"GuidedPlanTalent {tag}" in step2.reply, step2.reply
+        assert "Shortlisted" in step2.reply, step2.reply
+        assert "Share" not in step2.reply, step2.reply
+        assert "Nothing will execute until you confirm" in step2.reply, step2.reply
+
+        # The literal word "edit" reaches the exact same selector.
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=(
@@ -6983,16 +6997,23 @@ async def test_guided_4_compound_plan_edit_response_opens_specific_step():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert "You are about to run this plan" in r2.reply, r2.reply
-        edit2 = await handle_inbound_message(
+        selector2 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="edit",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "EDITING YOUR PLAN" in edit2.reply, edit2.reply
-        assert "Current plan:" in edit2.reply, edit2.reply
-        assert "Add" in edit2.reply and f"GuidedPlanTalent {tag}" in edit2.reply, edit2.reply
-        assert "Move" in edit2.reply and "Shortlisted" in edit2.reply, edit2.reply
-        assert "Share" in edit2.reply, edit2.reply
+        assert "Which step would you like to edit?" in selector2.reply, selector2.reply
+        assert "1 → ADD" in selector2.reply and "2 → MOVE" in selector2.reply and "3 → SHARE" in selector2.reply
 
+        # CANCEL from inside the selector cancels the whole plan, with
+        # the edit-specific wording (never confused with "3").
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="CANCEL",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert cancel.reply == "Editing cancelled. Nothing has been executed.", cancel.reply
+
+        # And "3" from the CONFIRMATION card (a fresh command, no editing
+        # in progress) is still unambiguously Cancel.
         await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=(
@@ -7001,31 +7022,28 @@ async def test_guided_4_compound_plan_edit_response_opens_specific_step():
             ),
             sender_name="Raj", sender_is_group_member=True,
         )
-        # "3" on a 3-step plan now opens step-specific editing (see
-        # test_guided_8_reply_3_opens_editing_step_3_share below) — the
-        # word "cancel" (always supported, never reinterpreted) is the
-        # unambiguous way to cancel a plan whose own step count reaches 3.
-        cancel = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="cancel",
+        cancel3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "CANCELLED" in cancel.reply, cancel.reply
+        assert "CANCELLED" in cancel3.reply, cancel3.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_config(original)
 
 
 # ---------------------------------------------------------------------------
-# ADD -> MOVE -> SHARE production hardening (2026-09-02) — a real reported
-# WhatsApp regression: "Add Anusha Sharma, move her to follow up, share the
-# casting call with her" (missing project on ADD) fabricated a completely
-# unrelated "Move Vikram Sharma to Follow Up in Hinge" step, sourced from
-# session.last_talent_id left over by an EARLIER, unrelated command. Fixed
-# by making an implicit pronoun on a compound-plan MOVE/SHARE step resolve
-# ONLY against what THIS SAME command has already touched — never a stale
-# session value from a different command. Also covers the new step-
-# specific EDIT UX (replying "2"/"3" opens that exact step, not a generic
-# "which part" prompt).
+# ADD -> MOVE -> SHARE production hardening (2026-09-02/03) — a real
+# reported WhatsApp regression: "Add Anusha Sharma, move her to follow up,
+# share the casting call with her" (missing project on ADD) fabricated a
+# completely unrelated "Move Vikram Sharma to Follow Up in Hinge" step,
+# sourced from session.last_talent_id left over by an EARLIER, unrelated
+# command. Fixed by making an implicit pronoun on a compound-plan MOVE/
+# SHARE step resolve ONLY against what THIS SAME command has already
+# touched — never a stale session value from a different command. Also
+# covers the Guided Step Selector EDIT UX (replying "2"/"edit" always
+# shows "which step?" first, never colliding with the confirmation card's
+# own "3 -> Cancel").
 # ---------------------------------------------------------------------------
 async def test_stale_context_missing_project_never_fabricates_a_step():
     """#1/#2/#3 — "Add X, move her to Follow Up, share the casting call
@@ -7165,6 +7183,12 @@ async def test_guided_8_reply_2_opens_editing_step_2_move_only():
         )
         assert "You are about to run this plan" in r.reply, r.reply
 
+        selector = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Which step would you like to edit?" in selector.reply, selector.reply
+
         edit = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="2",
             sender_name="Raj", sender_is_group_member=True,
@@ -7204,9 +7228,9 @@ async def test_guided_8_reply_2_opens_editing_step_2_move_only():
 
 
 async def test_guided_8_reply_3_opens_editing_step_3_share():
-    """#8/#10 — on a 3-step plan, "3" now opens "EDITING STEP 3 — SHARE"
-    directly (not Cancel — "cancel"/"no" remain the unambiguous way to
-    cancel); editing it changes ONLY step 3."""
+    """#8/#10 — on a 3-step plan, from the STEP SELECTOR (never the
+    confirmation card's own "3 -> Cancel"), "3" opens "EDITING STEP 3 —
+    SHARE" specifically; editing it changes ONLY step 3."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_test_config(group)
     phone = _phone()
@@ -7222,6 +7246,12 @@ async def test_guided_8_reply_3_opens_editing_step_3_share():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert "You are about to run this plan" in r.reply, r.reply
+
+        selector = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Which step would you like to edit?" in selector.reply, selector.reply
 
         edit = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
@@ -7242,6 +7272,124 @@ async def test_guided_8_reply_3_opens_editing_step_3_share():
         assert f"EditStep3B {tag}" in numbered_lines[2], changed.reply  # step 3 (Share) — CHANGED
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_a, talent_b])
+        await _restore_config(original)
+
+
+async def test_guided_8_reply_1_opens_editing_step_1_add_only():
+    """#8/#13 — from the step selector, "1" opens "EDITING STEP 1 — ADD"
+    specifically; "change ADD to [Talent]" changes ONLY step 1 — steps 2
+    and 3 (which refer back to whoever ADD resolves to) correctly follow
+    the NEW talent once the plan is re-resolved, proving the edit was
+    applied to the right raw step, not a stale copy."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"EditStep1Proj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_a = await _seed_talent(f"EditStep1A {tag}")
+    talent_b = await _seed_talent(f"EditStep1B {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add EditStep1A {tag} to {label}, move her to Follow Up, share the casting call with her",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan" in r.reply, r.reply
+
+        selector = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Which step would you like to edit?" in selector.reply, selector.reply
+
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING STEP 1 — ADD" in edit.reply, edit.reply
+        assert f"EditStep1A {tag}" in edit.reply, edit.reply
+
+        changed = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"change ADD to EditStep1B {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan" in changed.reply, changed.reply
+        numbered_lines = [ln for ln in changed.reply.splitlines() if re.match(r"^\d+\. ", ln)]
+        assert len(numbered_lines) == 3, changed.reply
+        assert f"EditStep1B {tag}" in numbered_lines[0], changed.reply  # step 1 (Add) — CHANGED
+        assert f"EditStep1A {tag}" not in numbered_lines[0], changed.reply
+        # Steps 2/3 re-resolve from step 1's own touched_pairs, so they
+        # correctly follow the newly-ADDed talent, not the old one.
+        assert f"EditStep1B {tag}" in numbered_lines[1], changed.reply
+        assert f"EditStep1B {tag}" in numbered_lines[2], changed.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Completed" in r3.reply, r3.reply
+        doc_b = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_b})
+        assert doc_b is not None and doc_b["stage"] == "follow_up", (r3.reply, doc_b)
+        doc_a = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_a})
+        assert doc_a is None, doc_a
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_a, talent_b])
+        await _restore_config(original)
+
+
+async def test_missing_project_searches_full_catalogue_with_pagination():
+    """#1 — the missing-project clarification must search the COMPLETE
+    ongoing-project catalogue, never an arbitrary first-N slice — proven
+    two ways: (a) the header's own reported total matches the REAL
+    database count (this local dev DB already has hundreds of ongoing
+    projects, so a stale "first 6" slice would silently show a much
+    smaller/wrong number), and (b) a project seeded to sort dead LAST
+    alphabetically still resolves correctly by typing its exact name,
+    even though it is never on the very first displayed page — proving
+    resolution reads the full catalogue, not just whatever page happens
+    to be shown. "MORE" is separately confirmed to actually advance the
+    page (a different set of projects than page 1)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    target_id = await _seed_project(brand_name=f"ZZZZZZLastProj {tag}")
+    talent_id = await _seed_talent(f"PaginateTalent {tag}")
+    try:
+        import agents.modules.casting_pipeline as cp_module
+        real_total = len(await cp_module._fetch_ongoing_projects())
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add PaginateTalent {tag}, move her to follow up, share the casting call with her",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "ADD needs a project before I can continue." in r.reply, r.reply
+        assert f"I found {real_total} active projects." in r.reply, r.reply
+        first_page_lines = [ln for ln in r.reply.splitlines() if "→" in ln]
+        assert len(first_page_lines) == 8, r.reply  # page size, never a bare "first 6" slice
+        assert f"ZZZZZZLastProj {tag}" not in r.reply, r.reply  # sorts dead last, not on page 1
+        assert "MORE" in r.reply, r.reply
+
+        more = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="MORE",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        more_page_lines = [ln for ln in more.reply.splitlines() if "→" in ln]
+        assert more_page_lines != first_page_lines, "MORE did not actually advance the page"
+
+        # Reply with the project's own NAME (not a number, not visible on
+        # ANY page shown so far) — proves the full catalogue, not just
+        # whatever's currently displayed, is what actually resolves it.
+        resumed = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"ZZZZZZLastProj {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan" in resumed.reply, resumed.reply
+        assert f"ZZZZZZLastProj {tag}" in resumed.reply, resumed.reply
+    finally:
+        await _cleanup(phone, project_ids=[target_id], talent_ids=[talent_id])
         await _restore_config(original)
 
 

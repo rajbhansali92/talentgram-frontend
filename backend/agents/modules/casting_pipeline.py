@@ -2913,14 +2913,54 @@ def _describe_plan_step_lines(resolved_steps: "List[Dict[str, Any]]") -> List[st
 
 _ADD_MISSING_PROJECT_ERROR = 'Which project? e.g. "Add Prajal Tushir to Toyota Glanza".'
 
+# Guided Project Selection (2026-09-03) — the missing-project clarification
+# (and the "change the project" mid-edit clarification below) must search
+# the COMPLETE ongoing-project catalogue every time — _fetch_ongoing_
+# projects already returns every ongoing project (no arbitrary slice), so
+# the fix is simply to stop truncating it before display. Only the
+# DISPLAY is paged, via the same "next page" recognizer Conversational
+# Talent Search already uses (nlu.extract_talent_search_pagination, which
+# already accepts "more"/"next"/"show more") — reused, not reinvented, per
+# "a simple, reliable existing mechanism is preferred."
+_PROJECT_CHOICE_PAGE_SIZE = 8
+
+
+def _format_project_choice(
+    all_projects: List[Dict[str, str]], offset: int, header: str,
+) -> Tuple[str, List[Dict[str, str]]]:
+    """(text, options_for_this_page). `all_projects` is ALWAYS the full,
+    freshly-fetched ongoing-project catalogue — nothing about which
+    projects exist is ever guessed, cached-stale, or silently truncated
+    before this point; only how many are SHOWN at once is paged."""
+    total = len(all_projects)
+    page = all_projects[offset:offset + _PROJECT_CHOICE_PAGE_SIZE]
+    lines = [header, ""]
+    if total > _PROJECT_CHOICE_PAGE_SIZE:
+        if offset == 0:
+            lines.append(f"I found {total} active projects. Here are the closest matches:")
+        else:
+            lines.append(f"Showing projects {offset + 1}-{offset + len(page)} of {total}:")
+        lines.append("")
+    options = []
+    for i, p in enumerate(page, start=1):
+        lines.append(f"{i} → {p['label']}")
+        options.append({"label": p["label"], "value": p["label"]})
+    lines.append("")
+    if offset + _PROJECT_CHOICE_PAGE_SIZE < total:
+        lines.append('Reply with the number, type the project name, or "MORE" to see more projects.')
+    else:
+        lines.append("Reply with the number or type the project name.")
+    return "\n".join(lines), options
+
 
 async def _build_plan_missing_project_clarification(
     resolved_steps: List[Dict[str, Any]], ctx: ExecContext, collected: dict,
 ) -> Optional[str]:
-    """Guided ADD-Missing-Project Resume (2026-09-02) — the exact reported
-    regression's OTHER half: "Add Anusha Sharma, move her to Follow Up,
-    share the casting call with her" (no project on ADD) must ask ONLY
-    for the missing project, with a clean numbered way to answer that
+    """Guided ADD-Missing-Project Resume — "Add Anusha Sharma, move her to
+    Follow Up, share the casting call with her" (no project on ADD) must
+    ask ONLY for the missing project, searching the FULL ongoing-project
+    catalogue (never an arbitrary first-N slice, never stale/previous-
+    command context), with a clean numbered/paginated way to answer that
     resumes THIS SAME command — never a bare "Which project?" line buried
     inside a full plan card with no way to continue except retyping
     everything. Scoped narrowly to the FIRST step being casting.add with
@@ -2937,34 +2977,29 @@ async def _build_plan_missing_project_clarification(
         return None
 
     projects = await _fetch_ongoing_projects()
-    suggestions = projects[:6]
     # raw_text still carries this step's own "Add" trigger word (plan
     # chunks are the un-stripped chunk text — see nlu.preprocess_command_
     # grouped) — strip it so the resend example doesn't double up on "Add".
     _, talent_hint = nlu._strip_leading_trigger((rs.get("raw_text") or "").strip(), nlu.ADD_TRIGGERS)
     talent_hint = talent_hint.strip()
 
-    lines = ["ADD needs a project before I can continue.", ""]
-    options = []
-    for i, p in enumerate(suggestions, start=1):
-        lines.append(f"{i} → {p['label']}")
-        options.append({"label": p["label"], "value": p["label"]})
-    if suggestions:
-        lines.append("")
-    lines.append("Reply with the number, or send:")
-    lines.append(f"Add {talent_hint or '[Talent]'} to [Project Name]")
-    lines += ["", "Nothing has been added, moved, or shared yet."]
+    text, options = _format_project_choice(projects, 0, "ADD needs a project before I can continue.")
+    text += f"\n\nOr send:\nAdd {talent_hint or '[Talent]'} to [Project Name]"
+    text += "\n\nNothing has been added, moved, or shared yet."
 
     await session_context.update_session(
         AGENT_ID, ctx.sender_phone,
-        pending_disambiguation={"kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY, "options": options},
+        pending_disambiguation={
+            "kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY,
+            "options": options, "offset": 0,
+        },
     )
     new_collected = dict(collected)
     new_collected[_PLAN_EDIT_STEP_KEY] = "1"
     await conversation.update_conversation(
         ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing"
     )
-    return "\n".join(lines)
+    return text
 
 
 async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
@@ -2980,53 +3015,80 @@ async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
     lines.append("")
     lines.append("Reply:")
     lines.append("1 → Approve")
-    # "Edit a step" (2026-09-02) — was plain "Edit"; now a bare step
-    # number (2, 3, ...) opens that SPECIFIC step directly (see
-    # _plan_step_handle_confirming_reply below), not a generic "which
-    # part do you mean" prompt, so the wording says so up front.
     lines.append("2 → Edit a step")
     lines.append("3 → Cancel")
     return "\n".join(lines)
 
 
 async def _build_plan_edit_prompt(collected: dict, ctx: ExecContext) -> str:
-    """Guided Edit Prompts (2026-08-28) — describes the SAME pending
-    compound plan the confirmation card just showed (reusing
-    _resolve_plan_steps_for_display/_describe_plan_step_lines verbatim,
-    not a second resolution). Reachable when the literal word "edit" (or
-    "change") was typed instead of a step number — every numbered reply
-    is now caught earlier by _plan_step_handle_confirming_reply and goes
-    straight to a step-specific prompt (Guided Step-Specific Editing,
-    2026-09-02), so this generic fallback only fires for that one case."""
+    """Guided Step Selector (2026-09-03) — replying "2" (or the word
+    "edit"/"change") to a multi-step plan's confirmation ALWAYS lands
+    here first, asking WHICH step to edit (1/2/3 = this plan's own ADD/
+    MOVE/SHARE order), before any step-specific instruction is possible.
+    This is the fix for the exact reported ambiguity: from the
+    CONFIRMATION card, 1/2/3 always mean Approve/Edit/Cancel (unchanged);
+    it is only INSIDE this selector — a completely separate state — that
+    a bare number is reinterpreted as a step choice, so "3" can never be
+    misread as Cancel one screen after the confirmation card. The user's
+    next reply (a step number, or CANCEL) is handled by
+    _plan_aware_parse_edits_async's "selecting which step" branch, which
+    persists the choice and shows that step's own "EDITING STEP N —
+    KIND" prompt — never both in one round trip, so the user is never
+    asked to already know which number means what."""
     resolved_steps, _preview_send_lines = await _resolve_plan_steps_for_display(collected, ctx)
-    lines = ["EDITING YOUR PLAN", "", "Current plan:"]
-    lines.extend(_describe_plan_step_lines(resolved_steps))
+    lines = ["EDITING YOUR PLAN", "", "Which step would you like to edit?", ""]
+    for i, rs in enumerate(resolved_steps, start=1):
+        kind_label = _PLAN_STEP_KIND_LABELS.get(rs["intent_id"], rs["intent_id"])
+        lines.append(f"{i} → {kind_label}")
+    example_n = 2 if len(resolved_steps) >= 2 else 1
     lines += [
-        "", "Reply with the step number to edit just that step (e.g. \"2\"), "
-        "or tell me which part you want to change.", "",
-        "Examples:",
-        "• 2",
-        "• Change the stage to Shortlisted",
-        "• Remove one of the talents",
-        "• Change the project",
-        "", "Nothing will execute until you confirm.",
+        "", f'Reply with the step number, for example "{example_n}".',
+        "", "Or type CANCEL to leave editing.",
     ]
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# Guided Step-Specific Editing (2026-09-02) — replying "2" to a multi-step
-# plan's confirmation card now opens "EDITING STEP 2 — MOVE" directly
-# (naming the CURRENT talent/project/stage for that one step and offering
-# concrete next instructions), instead of a generic "tell me which part
-# you want to change" that made the user say which step a second time.
-# "N <instruction>" in one message ("2 change the stage to Shortlisted")
-# applies the change immediately. Every edit rewrites ONLY the one raw
-# plan step it targets — every other step's raw_text is passed through
-# unchanged, so "steps 1 and 3 remain unchanged" holds structurally, not
-# just by convention.
+# Guided Step-Specific Editing (2026-09-02, revised 2026-09-03) — TWO
+# clearly separate "editing" sub-states, never sharing a number's meaning:
+#
+#   1. SELECTING WHICH STEP (_PLAN_EDIT_STEP_KEY unset) — reached right
+#      after "2"/"edit" on the confirmation card (_build_plan_edit_prompt
+#      shows "1 -> ADD / 2 -> MOVE / 3 -> SHARE"). A step number opens
+#      that step's own editor; CANCEL cancels the whole plan.
+#   2. EDITING ONE STEP (_PLAN_EDIT_STEP_KEY set) — "EDITING STEP N —
+#      KIND" is shown, and a free-text instruction ("change the stage to
+#      Shortlisted", "share it with X instead", ...) rewrites ONLY that
+#      one raw plan step — every other step's raw_text passes through
+#      unchanged, so "only that step changes" holds structurally, not
+#      just by convention. CANCEL still cancels the whole plan here too.
+#
+# This is the fix for the reported ambiguity: from the CONFIRMATION card,
+# "3" always means Cancel; a bare number is ONLY ever reinterpreted as a
+# step choice inside the SELECTING-WHICH-STEP sub-state, a completely
+# separate turn/state the confirmation card's own 1/2/3 never overlaps
+# with.
 # ---------------------------------------------------------------------------
 _PLAN_EDIT_STEP_KEY = "_plan_edit_step"
+
+_EDIT_CANCEL_RE = re.compile(
+    r"^\s*(?:cancel(?:\s+editing)?|stop\s+editing)\s*[.!?]*\s*$", re.IGNORECASE
+)
+_EDITING_CANCELLED_MESSAGE = "Editing cancelled. Nothing has been executed."
+
+
+async def _cancel_plan_edit(ctx: ExecContext) -> str:
+    """Cancels the WHOLE pending plan from inside either editing sub-
+    state — the only unambiguous meaning of CANCEL there (never "go back
+    one level"), matching the master requirement that a bare step number
+    can never double as a cancel word once the user is selecting/editing
+    a step. Reuses the exact same conversation-clearing primitive the
+    ordinary "3 -> Cancel" confirmation reply already uses; only the
+    wording differs (confirming CANCEL was understood specifically as an
+    edit-time cancel, not a generic "3")."""
+    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+    return _EDITING_CANCELLED_MESSAGE
 
 
 def _validate_plan_step_edit_error(raw: str) -> ValidationResult:
@@ -3061,7 +3123,7 @@ def _describe_plan_step_for_edit(rs: Dict[str, Any]) -> Tuple[str, List[str]]:
         if r is None:
             return rs.get("raw_text") or "", []
         current = f"Add {', '.join(r.talent_labels)} to {r.project_label}."
-        examples = ["Change the project to [Project]"]
+        examples = ["Change the project to [Project]", "Change ADD to [Talent(s)]"]
         if len(r.talent_labels) > 1:
             examples.append(f"Remove {r.talent_labels[-1]}")
         examples.append("Remove this step")
@@ -3114,10 +3176,22 @@ def _build_plan_step_edit_prompt_from_resolved(resolved_steps: List[Dict[str, An
 
 _EDIT_STAGE_RE = re.compile(r"^\s*change\s+(?:the\s+)?stage\s+to\s+(.+?)\s*$", re.IGNORECASE)
 _EDIT_PROJECT_RE = re.compile(r"^\s*change\s+(?:the\s+)?project\s+to\s+(.+?)\s*$", re.IGNORECASE)
+# "Change the project" / "Change project" with NOTHING after it — a clear
+# intent missing only the destination; see the guided clarification this
+# triggers in _apply_plan_step_edit_instruction. Must be checked BEFORE
+# _EDIT_PROJECT_RE only in the sense that the "to ..." form should win
+# when present — matched separately (mutually exclusive patterns; a "to"
+# clause always fails this one) so ordering between them doesn't matter.
+_EDIT_PROJECT_BARE_RE = re.compile(r"^\s*change\s+(?:the\s+)?project\s*[.!?]*\s*$", re.IGNORECASE)
 _EDIT_REMOVE_STEP_RE = re.compile(r"^\s*(?:remove|delete)\s+(?:this\s+step|step)\s*$", re.IGNORECASE)
 _EDIT_REMOVE_NAME_RE = re.compile(r"^\s*remove\s+(.+?)\s*$", re.IGNORECASE)
 _EDIT_MOVE_ONLY_RE = re.compile(r"^\s*(?:move|keep)\s+only\s+(.+?)\s*$", re.IGNORECASE)
 _EDIT_SHARE_WITH_RE = re.compile(r"^\s*share\s+(?:it\s+)?with\s+(.+?)(?:\s+instead)?\s*$", re.IGNORECASE)
+# "Change ADD to Anusha and Nikita" — replaces WHO an ADD step names
+# entirely (never partial — "remove X"/narrowing already cover the
+# incremental cases). ADD-specific per the explicit example; MOVE keeps
+# its own "remove X"/"move only X" narrowing vocabulary unchanged.
+_EDIT_CHANGE_ADD_TALENTS_RE = re.compile(r"^\s*change\s+add\s+to\s+(.+?)\s*$", re.IGNORECASE)
 
 
 def _rebuild_add_raw_text(talent_labels: List[str], project_text: str) -> str:
@@ -3196,7 +3270,7 @@ async def _apply_plan_step_edit_instruction(
 
     if _EDIT_REMOVE_STEP_RE.match(stripped):
         if len(steps) <= 1:
-            return None, "Can't remove the only step in this plan — reply 3 to cancel the whole thing instead."
+            return None, "Can't remove the only step in this plan — type CANCEL to cancel the whole thing instead."
         new_steps = steps[:raw_i] + steps[raw_i + 1:]
         return json.dumps(new_steps), None
 
@@ -3211,6 +3285,29 @@ async def _apply_plan_step_edit_instruction(
     new_raw_text: Optional[str] = None
 
     if intent_id in ("casting.add", "casting.move"):
+        # Guided ambiguous-instruction clarification (Part 2, 2026-09-03)
+        # — "change the project" with NO destination named is a CLEAR
+        # intent missing only one piece of information; ask a specific,
+        # numbered question (reusing the exact same full-catalogue/
+        # pagination mechanism the initial missing-project clarification
+        # uses) instead of a generic "I didn't understand that change"
+        # parser error. Checked before resolution-state matters — even an
+        # unresolved (missing-project) ADD step can answer "change the
+        # project" this way, landing on the identical clarification its
+        # own auto-shown prompt already offers.
+        if _EDIT_PROJECT_BARE_RE.match(stripped):
+            projects = await _fetch_ongoing_projects()
+            header = f"I can change the project for Step {step_index}.\n\nWhich project should I use?"
+            text_out, options = _format_project_choice(projects, 0, header)
+            await session_context.update_session(
+                AGENT_ID, ctx.sender_phone,
+                pending_disambiguation={
+                    "kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY,
+                    "options": options, "offset": 0,
+                },
+            )
+            return None, text_out
+
         r = rs.get("resolved")
         if r is None:
             # The ONE edit ever allowed against an unresolved step: filling
@@ -3261,6 +3358,14 @@ async def _apply_plan_step_edit_instruction(
                 else:
                     new_raw_text = _rebuild_add_raw_text(r.talent_labels, new_project_text)
 
+        if new_raw_text is None and intent_id == "casting.add":
+            m = _EDIT_CHANGE_ADD_TALENTS_RE.match(stripped)
+            if m:
+                new_names = [n.strip() for n in (nlu.split_multi_names(m.group(1)) or [m.group(1)]) if n.strip()]
+                if not new_names:
+                    return None, f"Couldn't understand \"{m.group(1).strip()}\" as talent name(s)."
+                new_raw_text = _rebuild_add_raw_text(new_names, r.project_label)
+
         if new_raw_text is None and intent_id == "casting.move":
             m = _EDIT_MOVE_ONLY_RE.match(stripped)
             if m:
@@ -3279,7 +3384,7 @@ async def _apply_plan_step_edit_instruction(
                     return None, f"Couldn't find {m.group(1).strip()} among this step's talents."
                 if not remaining:
                     if len(steps) <= 1:
-                        return None, "Can't remove the only talent and leave an empty step — reply 3 to cancel instead."
+                        return None, "Can't remove the only talent and leave an empty step — type CANCEL instead."
                     new_steps = steps[:raw_i] + steps[raw_i + 1:]
                     return json.dumps(new_steps), None
                 if intent_id == "casting.move":
@@ -3288,6 +3393,19 @@ async def _apply_plan_step_edit_instruction(
                     new_raw_text = _rebuild_add_raw_text(remaining, r.project_label)
 
     elif intent_id == "casting.share":
+        if _EDIT_PROJECT_BARE_RE.match(stripped):
+            projects = await _fetch_ongoing_projects()
+            header = f"I can change the project for Step {step_index}.\n\nWhich project should I use?"
+            text_out, options = _format_project_choice(projects, 0, header)
+            await session_context.update_session(
+                AGENT_ID, ctx.sender_phone,
+                pending_disambiguation={
+                    "kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY,
+                    "options": options, "offset": 0,
+                },
+            )
+            return None, text_out
+
         sr = rs.get("share_resolution")
         if sr is None or not sr.ok:
             return None, (sr.error if sr is not None else None) or "This step hasn't resolved yet — nothing to edit."
@@ -3311,7 +3429,7 @@ async def _apply_plan_step_edit_instruction(
                     return None, f"Couldn't find {m.group(1).strip()} among this step's recipients."
                 if not remaining:
                     if len(steps) <= 1:
-                        return None, "Can't remove the only recipient and leave an empty step — reply 3 to cancel instead."
+                        return None, "Can't remove the only recipient and leave an empty step — type CANCEL instead."
                     new_steps = steps[:raw_i] + steps[raw_i + 1:]
                     return json.dumps(new_steps), None
                 new_raw_text = _rebuild_share_raw_text(",".join(sr.project_labels), ",".join(remaining))
@@ -3320,7 +3438,8 @@ async def _apply_plan_step_edit_instruction(
         return None, (
             'I didn\'t understand that change.\n\n'
             'Try: "change the stage to Shortlisted", "change the project to [Project]", '
-            '"remove [Name]", or "remove this step".'
+            '"remove [Name]", or "remove this step".\n\n'
+            'Or type CANCEL to leave editing.'
         )
 
     new_steps = list(steps)
@@ -3329,123 +3448,112 @@ async def _apply_plan_step_edit_instruction(
     return json.dumps(new_steps), None
 
 
+_PLAN_STEP_NUMBER_RE = re.compile(r"^\s*(\d+)\s*$")
+
+
 async def _plan_aware_parse_edits_async(
     text: str, collected: Dict[str, str], fields: List[FieldSpec], ctx: ExecContext,
 ) -> Dict[str, str]:
-    """Wraps _move_parse_edits_async (shared by ADD_INTENT/MOVE_INTENT):
-    when the conversation is mid- "edit ONE specific plan step" (see
-    _plan_step_handle_confirming_reply), the free-text reply is
-    interpreted as an instruction for THAT step only. Every other case —
-    including a plain (non-plan) ADD/MOVE edit, or a plan reached via the
-    literal word "edit" instead of a step number — falls straight through
-    to the existing, unmodified _move_parse_edits_async."""
-    step_index_raw = (collected.get(_PLAN_EDIT_STEP_KEY) or "").strip()
-    if step_index_raw and (collected.get(PLAN_FIELD.key) or "").strip():
-        try:
-            step_index = int(step_index_raw)
-        except ValueError:
-            step_index = 0
-        if step_index >= 1:
-            instruction = text
-            # Guided ADD-Missing-Project Resume (2026-09-02) — a pending
-            # "plan_missing_project" disambiguation means we're SPECIFICALLY
-            # waiting for the project this ADD step never had: a bare
-            # number picks from the shown suggestions, otherwise the raw
-            # reply IS the project name/query itself — never a generic
-            # "change X to Y" instruction, since nothing about this step
-            # has resolved yet for the user to be referring back to.
-            session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
-            pending = (session or {}).get("pending_disambiguation")
-            if pending and pending.get("kind") == "plan_missing_project":
-                options = pending.get("options") or []
-                idx = nlu.resolve_option_reply((text or "").strip(), options) if options else None
-                project_text = options[idx - 1]["value"] if idx is not None else (text or "").strip()
-                instruction = f"change the project to {project_text}"
-                await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
-            new_plan_json, err = await _apply_plan_step_edit_instruction(collected, ctx, step_index, instruction)
-            if err:
-                return {PLAN_STEP_EDIT_ERROR_FIELD.key: err}
-            return {PLAN_FIELD.key: new_plan_json}
-    return await _move_parse_edits_async(text, collected, fields, ctx)
-
-
-_PLAN_STEP_NUMBER_RE = re.compile(r"^\s*(\d+)\s*$")
-_PLAN_STEP_NUMBER_THEN_TEXT_RE = re.compile(r"^\s*(\d+)\s+(\S.*)$", re.DOTALL)
-
-
-async def _plan_step_handle_confirming_reply(
-    text: str, collected: Dict[str, str], ctx: ExecContext,
-) -> Optional[str]:
-    """AgentDefinition.handle_confirming_reply hook (shared by ADD_INTENT
-    and MOVE_INTENT — the only two intents whose extract_fields can build
-    a PLAN_FIELD) — checked FIRST, before the generic 1/2/3 Approve/Edit/
-    Cancel parsing. For a multi-step compound plan, a bare number that
-    matches an actual step ("2" on a 3-step plan) opens step-specific
-    editing directly ("EDITING STEP 2 — MOVE") instead of the old generic
-    "EDITING YOUR PLAN, tell me which part" prompt — collapsing what used
-    to be two round trips into one. "N <instruction>" in ONE message
-    (e.g. "2 change the stage to Shortlisted") applies the edit
-    immediately and re-shows the updated confirmation, without even
-    visiting "editing". "1" always stays Approve — never reinterpreted,
-    the overwhelmingly common/expected meaning — and a number beyond the
-    plan's own step count falls straight through to the ordinary parser
-    (so "3 -> Cancel" still works on a 2-step plan; "cancel"/"no" always
-    work regardless of step count). Returns None for every other reply —
-    free text, the word "edit", "approve", etc — leaving 1/2/3 exactly as
-    they already behave for every non-plan (single ADD/MOVE) confirmation."""
+    """Wraps _move_parse_edits_async (shared by ADD_INTENT/MOVE_INTENT).
+    Handles BOTH "editing" sub-states for a compound plan — see the
+    "Guided Step-Specific Editing" block comment above for what each
+    means and why they're kept structurally separate. Every other case —
+    a plain (non-plan) ADD/MOVE edit, or no PLAN_FIELD at all — falls
+    straight through to the existing, unmodified _move_parse_edits_async,
+    completely unaffected."""
     if not (collected.get(PLAN_FIELD.key) or "").strip():
-        return None
+        return await _move_parse_edits_async(text, collected, fields, ctx)
+
     stripped = (text or "").strip()
-    m_combo = _PLAN_STEP_NUMBER_THEN_TEXT_RE.match(stripped)
-    m_bare = _PLAN_STEP_NUMBER_RE.match(stripped) if not m_combo else None
-    if not m_combo and not m_bare:
-        return None
-    n = int((m_combo or m_bare).group(1))
-    if n <= 1:
-        return None
-    resolved_steps, _ = await _resolve_plan_steps_for_display(collected, ctx)
-    if n > len(resolved_steps):
-        return None
 
-    if m_combo:
-        instruction = m_combo.group(2)
-        new_plan_json, err = await _apply_plan_step_edit_instruction(
-            collected, ctx, n, instruction, resolved_steps=resolved_steps,
-        )
-        if err:
-            return err
+    # CANCEL (and "cancel editing"/"stop editing") is unambiguous in
+    # EITHER sub-state — it never means "step 3" or anything else, only
+    # ever "cancel the whole pending plan". Checked before either
+    # sub-state's own number/instruction parsing so it can never be
+    # shadowed by them.
+    if _EDIT_CANCEL_RE.match(stripped):
+        message = await _cancel_plan_edit(ctx)
+        return {PLAN_STEP_EDIT_ERROR_FIELD.key: message}
+
+    step_index_raw = (collected.get(_PLAN_EDIT_STEP_KEY) or "").strip()
+
+    if not step_index_raw:
+        # Sub-state 1: SELECTING WHICH STEP (just saw "EDITING YOUR PLAN
+        # — which step would you like to edit? 1 -> ADD / 2 -> MOVE / 3
+        # -> SHARE"). A bare number here — and ONLY here — is
+        # reinterpreted as a step choice; this state is never reachable
+        # from the confirmation card's own "3 -> Cancel" reply (CANCEL is
+        # handled above, and the confirmation card's 1/2/3 are parsed by
+        # dispatcher.py's ordinary approve/edit/cancel logic BEFORE this
+        # function is ever called for a plan at all).
+        resolved_steps, _ = await _resolve_plan_steps_for_display(collected, ctx)
+        m = _PLAN_STEP_NUMBER_RE.match(stripped)
+        n = int(m.group(1)) if m else 0
+        if not m or n < 1 or n > len(resolved_steps):
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                f"I didn't understand that.\n\n"
+                f"Reply with a step number from 1 to {len(resolved_steps)}, "
+                f"or type CANCEL to leave editing."
+            )}
         new_collected = dict(collected)
-        new_collected[PLAN_FIELD.key] = new_plan_json
-        new_collected.pop(_PLAN_EDIT_STEP_KEY, None)
+        new_collected[_PLAN_EDIT_STEP_KEY] = str(n)
         await conversation.update_conversation(
-            ctx.agent_id, ctx.sender_phone, collected=new_collected, step="confirming"
+            ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing"
         )
-        return await _build_plan_confirmation(new_collected, ctx)
+        prompt = _build_plan_step_edit_prompt_from_resolved(resolved_steps, n)
+        return {PLAN_STEP_EDIT_ERROR_FIELD.key: prompt}
 
-    new_collected = dict(collected)
-    new_collected[_PLAN_EDIT_STEP_KEY] = str(n)
-    await conversation.update_conversation(
-        ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing"
-    )
-    return _build_plan_step_edit_prompt_from_resolved(resolved_steps, n)
+    # Sub-state 2: EDITING ONE STEP ("EDITING STEP N — KIND" was just
+    # shown). The free-text reply is an instruction for THAT step only.
+    try:
+        step_index = int(step_index_raw)
+    except ValueError:
+        step_index = 0
+    if step_index < 1:
+        return {PLAN_STEP_EDIT_ERROR_FIELD.key: "Something went wrong — type CANCEL and try again."}
 
+    instruction = text
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    pending = (session or {}).get("pending_disambiguation")
+    if pending and pending.get("kind") == "plan_missing_project":
+        # Guided Project Selection (2026-09-03) — a pending
+        # "plan_missing_project" disambiguation means we're SPECIFICALLY
+        # waiting for a project (either the ADD step's own missing
+        # project, or an in-progress "change the project" edit on any
+        # step): "MORE" pages through the FULL catalogue (reusing the
+        # same "next page" recognizer Conversational Talent Search
+        # already uses), a bare number picks from the shown page,
+        # otherwise the raw reply IS the project name/query itself —
+        # never a generic "change X to Y" instruction, since nothing
+        # about this specific field has resolved yet for the user to be
+        # referring back to.
+        page = nlu.extract_talent_search_pagination(stripped)
+        if page and page.get("action") == "next":
+            projects = await _fetch_ongoing_projects()
+            offset = int(pending.get("offset") or 0) + _PROJECT_CHOICE_PAGE_SIZE
+            if offset >= len(projects):
+                offset = 0  # wrap — "MORE" can never dead-end the conversation
+            header = pending.get("header") or "ADD needs a project before I can continue."
+            text_out, options = _format_project_choice(projects, offset, header)
+            await session_context.update_session(
+                AGENT_ID, ctx.sender_phone,
+                pending_disambiguation={
+                    "kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY,
+                    "options": options, "offset": offset, "header": header,
+                },
+            )
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: text_out}
 
-async def _move_plan_handle_confirming_reply(
-    text: str, collected: Dict[str, str], ctx: ExecContext,
-) -> Optional[str]:
-    """MOVE_INTENT's handle_confirming_reply chains its existing Whole-
-    Stage-Move "exclude X" interception (_stage_move_handle_confirming_
-    reply — narrow, only ever fires for an in-progress stage-move, which
-    never carries a PLAN_FIELD) with the new plan-step editing shortcut
-    above. Neither hook's own trigger condition can ever overlap with the
-    other's (stage-move keys off talent_selector's STAGE_MOVE_MARKER, the
-    plan hook keys off PLAN_FIELD — a conversation only ever carries one
-    of those), so order between them doesn't change behaviour; kept
-    stage-move first only for stability."""
-    result = await _stage_move_handle_confirming_reply(text, collected, ctx)
-    if result is not None:
-        return result
-    return await _plan_step_handle_confirming_reply(text, collected, ctx)
+        options = pending.get("options") or []
+        idx = nlu.resolve_option_reply(stripped, options) if options else None
+        project_text = options[idx - 1]["value"] if idx is not None else stripped
+        instruction = f"change the project to {project_text}"
+        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+
+    new_plan_json, err = await _apply_plan_step_edit_instruction(collected, ctx, step_index, instruction)
+    if err:
+        return {PLAN_STEP_EDIT_ERROR_FIELD.key: err}
+    return {PLAN_FIELD.key: new_plan_json}
 
 
 async def _plan_step_editing_claims_reply(
@@ -3453,15 +3561,18 @@ async def _plan_step_editing_claims_reply(
 ) -> bool:
     """IntentDefinition.claims_editing_reply hook (see agents/models.py) —
     shared by ADD_INTENT/MOVE_INTENT. Called ONLY when a conversation is
-    mid- "edit ONE specific plan step" (_PLAN_EDIT_STEP_KEY set) AND the
-    incoming message would otherwise be treated as a fresh trigger. Pure,
-    side-effect-free pattern matching against the SAME instruction shapes
-    _apply_plan_step_edit_instruction actually understands — deliberately
-    NOT a blanket "any editing turn is immune" grant: a message that
-    doesn't match any recognized edit instruction (e.g. a genuinely new,
-    unrelated compound command) returns False, so dispatcher.py's normal
-    "a fresh trigger always restarts" rule still applies to it exactly as
-    before this feature existed."""
+    mid- "edit ONE specific plan step" (_PLAN_EDIT_STEP_KEY set — the
+    "selecting which step" sub-state never needs this: its only valid
+    replies are bare numbers/CANCEL, none of which collide with a
+    trigger word) AND the incoming message would otherwise be treated as
+    a fresh trigger. Pure, side-effect-free pattern matching against the
+    SAME instruction shapes _apply_plan_step_edit_instruction actually
+    understands — deliberately NOT a blanket "any editing turn is
+    immune" grant: a message that doesn't match any recognized edit
+    instruction (e.g. a genuinely new, unrelated compound command)
+    returns False, so dispatcher.py's normal "a fresh trigger always
+    restarts" rule still applies to it exactly as before this feature
+    existed."""
     if not (collected.get(_PLAN_EDIT_STEP_KEY) or "").strip():
         return False
     if not (collected.get(PLAN_FIELD.key) or "").strip():
@@ -3469,18 +3580,19 @@ async def _plan_step_editing_claims_reply(
     stripped = (text or "").strip()
     if not stripped:
         return False
-    # Guided ADD-Missing-Project Resume — while that specific
-    # clarification is pending, ANY non-empty reply is meaningful (a
-    # number picking a suggestion, or the project's own name/query,
-    # which could itself start with a trigger word by pure coincidence).
+    # Guided Project Selection — while a project clarification is
+    # pending, ANY non-empty reply is meaningful (a number, "MORE", or
+    # the project's own name/query, which could itself start with a
+    # trigger word by pure coincidence).
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
     if pending and pending.get("kind") == "plan_missing_project":
         return True
-    if _PLAN_STEP_NUMBER_RE.match(stripped):
+    if _PLAN_STEP_NUMBER_RE.match(stripped) or _EDIT_CANCEL_RE.match(stripped):
         return True
     return bool(
         _EDIT_STAGE_RE.match(stripped) or _EDIT_PROJECT_RE.match(stripped)
+        or _EDIT_PROJECT_BARE_RE.match(stripped) or _EDIT_CHANGE_ADD_TALENTS_RE.match(stripped)
         or _EDIT_REMOVE_STEP_RE.match(stripped) or _EDIT_REMOVE_NAME_RE.match(stripped)
         or _EDIT_MOVE_ONLY_RE.match(stripped) or _EDIT_SHARE_WITH_RE.match(stripped)
     )
@@ -4109,7 +4221,14 @@ MOVE_INTENT = IntentDefinition(
     build_edit_prompt=_build_move_edit_prompt,
     parse_edits_async=_plan_aware_parse_edits_async,
     try_auto_execute=_move_try_auto_execute,
-    handle_confirming_reply=_move_plan_handle_confirming_reply,
+    # Unchanged from before the plan-editing feature existed — "2"/"3" on
+    # a plan's CONFIRMATION card are now always the ordinary Approve/
+    # Edit/Cancel (dispatcher.py's generic parser); the step-selector/
+    # step-editor sub-states live entirely inside "editing" via
+    # parse_edits_async above, so no confirming-reply interception is
+    # needed for plans at all — only Whole-Stage-Move's own "exclude X"
+    # interception remains here.
+    handle_confirming_reply=_stage_move_handle_confirming_reply,
     claims_editing_reply=_plan_step_editing_claims_reply,
     summary_title="You are about to move:",
 )
@@ -4593,7 +4712,10 @@ ADD_INTENT = IntentDefinition(
     # never produces a "retry_global" kind, so that branch simply never
     # fires here.
     parse_edits_async=_plan_aware_parse_edits_async,
-    handle_confirming_reply=_plan_step_handle_confirming_reply,
+    # No handle_confirming_reply — "2"/"3" on a plan's CONFIRMATION card
+    # are always the ordinary Approve/Edit/Cancel (dispatcher.py's
+    # generic parser); the step-selector/step-editor sub-states live
+    # entirely inside "editing" via parse_edits_async above.
     claims_editing_reply=_plan_step_editing_claims_reply,
     summary_title="You are about to add:",
 )

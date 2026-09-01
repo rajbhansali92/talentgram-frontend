@@ -2913,6 +2913,114 @@ async def test_add_does_not_affect_move_workflow():
 
 
 # ---------------------------------------------------------------------------
+# ADD production-readiness (2026-09-01) — the standalone ADD trigger word
+# itself must be as typo-tolerant as MOVE/SEND/UPLOAD's triggers already
+# are. Regression guard for a real bug: `extract_add_fields` used its own
+# separate, exact-match-only `_ADD_TRIGGER_RE` instead of the shared,
+# typo-tolerant `_strip_leading_trigger` helper every other intent uses, so
+# a typo'd trigger ("Addd") stayed glued onto the talent name and produced
+# a false "multiple matching talents" ambiguity instead of a clean single
+# match. Fixed by routing extract_add_fields through the same canonical
+# `_strip_leading_trigger(text, ADD_TRIGGERS)` mechanism as MOVE/SEND.
+# ---------------------------------------------------------------------------
+async def test_add_typo_trigger_word_resolves_cleanly():
+    """"Addd"/"Ad" (typo'd trigger, not a typo'd name) must still resolve to
+    exactly the one matching talent — never a false ambiguity caused by the
+    garbled trigger text leaking into the talent-name fuzzy match."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"AddTypoTrigger Brand {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    t = await _seed_talent(f"AddTypoTriggerTalent {tag}")
+    try:
+        for trigger in ("Addd", "Ad"):
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone,
+                text=f"{trigger} AddTypoTriggerTalent {tag} to {label}",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "I found multiple matching talents" not in r.reply, (trigger, r.reply)
+            assert "You are about to add" in r.reply, (trigger, r.reply)
+            assert f"AddTypoTriggerTalent {tag}" in r.reply, (trigger, r.reply)
+
+            r = await handle_inbound_message(
+                group_name=group, sender_phone=phone, text="1",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "Done." in r.reply, (trigger, r.reply)
+            doc = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t})
+            assert doc is not None and doc["stage"] == "ask_to_test"
+            await db.casting_pipeline.delete_many({"project_id": project_id})
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
+        await _restore_config(original)
+
+
+async def test_add_stale_context_never_leaks_across_separate_commands():
+    """Regression guard for the class of bug this whole hardening pass was
+    named after (the prior Callum/Kripa production incident): a fully
+    separate, already-completed ADD command for Talent X must never leak
+    into a LATER, unrelated ADD+MOVE+SHARE compound command for Talent Y —
+    not via session.last_talent_id, not via stale last_pair, not via any
+    other cross-command state. Verified by direct DB inspection of both
+    talents' pipeline rows, not by reply-text matching (the execution-mode
+    summary text doesn't echo names, so text-matching alone is unreliable
+    here)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    other_project_id = await _seed_project(brand_name=f"StaleOtherProj {tag}")
+    stale_project_id = await _seed_project(brand_name=f"StaleTargetProj {tag}")
+    label_other = (await db.projects.find_one({"id": other_project_id}))["brand_name"]
+    label_stale = (await db.projects.find_one({"id": stale_project_id}))["brand_name"]
+    tal_x = await _seed_talent(f"StaleContextX {tag}")
+    tal_y = await _seed_talent(f"StaleContextY {tag}")
+    try:
+        # A fully separate, prior, completed command establishing session
+        # context around Talent X.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add StaleContextX {tag} to {label_other} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Done." in r.reply, r.reply
+        assert (await db.casting_pipeline.find_one(
+            {"project_id": other_project_id, "talent_id": tal_x}
+        ))["stage"] == "ask_to_test"
+
+        # A later, unrelated compound command establishing its OWN context
+        # around Talent Y — must never resolve any step against X.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add StaleContextY {tag} to {label_stale}, move her to Follow Up, "
+                f"share the casting call with her and confirm"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+
+        stale_rows = await db.casting_pipeline.find({"project_id": stale_project_id}).to_list(10)
+        assert len(stale_rows) == 1, stale_rows
+        assert stale_rows[0]["talent_id"] == tal_y, stale_rows
+        assert stale_rows[0]["stage"] == "follow_up", stale_rows
+
+        # X's own, separately-established row must be completely untouched.
+        x_row = await db.casting_pipeline.find_one({"project_id": other_project_id, "talent_id": tal_x})
+        assert x_row is not None and x_row["stage"] == "ask_to_test"
+        # And X must never have been pulled into the stale/target project.
+        assert (await db.casting_pipeline.find_one(
+            {"project_id": stale_project_id, "talent_id": tal_x}
+        )) is None
+    finally:
+        await _cleanup(phone, project_ids=[other_project_id, stale_project_id], talent_ids=[tal_x, tal_y])
+        await _restore_config(original)
+
+
+# ---------------------------------------------------------------------------
 # "and confirm" — skips the approval card when resolution is unambiguous;
 # still asks when ambiguous, then auto-continues (no second approval) once
 # the ambiguity is resolved.

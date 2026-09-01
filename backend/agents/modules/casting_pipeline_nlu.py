@@ -1925,7 +1925,6 @@ def translate_simple_commands_in_text(text: str, stage_order: Optional[List[str]
     return "\n".join(out)
 
 
-_ADD_TRIGGER_RE = re.compile(r"^\s*(?:add|attach)\b[\s:]*", re.IGNORECASE)
 # Tolerant of a comma (from the newline-join below) OR plain whitespace on
 # either side of the connector, so both message shapes above resolve to
 # the same project tail.
@@ -1935,16 +1934,23 @@ _PROJECT_IN_ADD_RE = re.compile(r"[,\s]*\b(?:to|in|for)\b[,\s]*(.+)$", re.IGNORE
 def extract_add_fields(text: str) -> Dict[str, str]:
     """IntentDefinition.extract_fields-compatible: {field_key: raw_value}
     for casting.add. Strips the "add" trigger from the first non-blank
-    line, joins any remaining lines with ", " — turning the one-name-per-
-    line form into the exact same comma-separated shape
-    "Add Prajal, Arya to Toyota Glanza" already has — then extracts the
-    trailing "to"/"in"/"for" project reference, leaving whatever's left as
-    the talent selector text (fed to parse_talent_selector unchanged,
-    which already understands comma/"and"-separated multi-name lists)."""
+    line (P0 fix, 2026-08-30: via the SAME _strip_leading_trigger MOVE's
+    own extract_move_fields already uses — this used to have its own
+    separate, non-typo-tolerant regex here, _ADD_TRIGGER_RE, which is why
+    "Addd Talent to Project" left "Addd" glued onto the talent selector
+    even though detect_trigger correctly opened casting.add for it —
+    "two different implementations producing different behaviour" is
+    exactly what this consolidation removes), joins any remaining lines
+    with ", " — turning the one-name-per-line form into the exact same
+    comma-separated shape "Add Prajal, Arya to Toyota Glanza" already
+    has — then extracts the trailing "to"/"in"/"for" project reference,
+    leaving whatever's left as the talent selector text (fed to
+    parse_talent_selector unchanged, which already understands comma/
+    "and"-separated multi-name lists)."""
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     if not lines:
         return {}
-    lines[0] = _ADD_TRIGGER_RE.sub("", lines[0], count=1).strip()
+    _, lines[0] = _strip_leading_trigger(lines[0], ADD_TRIGGERS)
     if not lines[0]:
         lines = lines[1:]
     remainder = ", ".join(lines)

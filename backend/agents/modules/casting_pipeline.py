@@ -3108,6 +3108,20 @@ PLAN_STEP_EDIT_ERROR_FIELD = FieldSpec(
     validate=_validate_plan_step_edit_error, required=False,
 )
 
+# Registered as a REAL field (not just a raw collected[] key someone reads
+# directly) purely so a successful edit can CLEAR it via the normal edits-
+# dict merge in agents/dispatcher.py's _collect_or_advance — that merge
+# only ever applies keys present in intent.fields, silently dropping
+# anything else (see PLAN_STEP_EDIT_ERROR_FIELD's own docstring on this
+# same mechanism). Without this, a resolved step index would leak into
+# the NEXT "confirming" -> "editing" cycle: the very next "2" reply
+# (meant to pick a fresh step from the "which step" selector) would be
+# misread as a free-text instruction for the STALE step instead.
+PLAN_EDIT_STEP_FIELD = FieldSpec(
+    key=_PLAN_EDIT_STEP_KEY, label="Plan Edit Step", question="",
+    validate=_validate_hidden, required=False,
+)
+
 _PLAN_STEP_KIND_LABELS = {
     "casting.add": "ADD", "casting.move": "MOVE", "casting.share": "SHARE", "casting.send": "SEND",
 }
@@ -3553,7 +3567,10 @@ async def _plan_aware_parse_edits_async(
     new_plan_json, err = await _apply_plan_step_edit_instruction(collected, ctx, step_index, instruction)
     if err:
         return {PLAN_STEP_EDIT_ERROR_FIELD.key: err}
-    return {PLAN_FIELD.key: new_plan_json}
+    # Clear _PLAN_EDIT_STEP_KEY now that this step's edit succeeded and
+    # we're heading back to "confirming" — see PLAN_EDIT_STEP_FIELD's
+    # docstring for why leaving it set would misroute the NEXT "2" reply.
+    return {PLAN_FIELD.key: new_plan_json, _PLAN_EDIT_STEP_KEY: ""}
 
 
 async def _plan_step_editing_claims_reply(
@@ -4213,7 +4230,7 @@ MOVE_INTENT = IntentDefinition(
     triggers=nlu.MOVE_TRIGGERS,
     fields=[
         TALENT_SELECTOR_FIELD, TARGET_STAGE_FIELD, PROJECT_QUERY_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD,
-        PLAN_STEP_EDIT_ERROR_FIELD,
+        PLAN_STEP_EDIT_ERROR_FIELD, PLAN_EDIT_STEP_FIELD,
     ],
     executor=_move_executor,
     extract_fields=_extract_move_fields,
@@ -4695,7 +4712,7 @@ ADD_INTENT = IntentDefinition(
     triggers=nlu.ADD_TRIGGERS,
     fields=[
         ADD_TALENT_SELECTOR_FIELD, ADD_PROJECT_QUERY_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD,
-        PLAN_STEP_EDIT_ERROR_FIELD,
+        PLAN_STEP_EDIT_ERROR_FIELD, PLAN_EDIT_STEP_FIELD,
     ],
     executor=_add_executor,
     extract_fields=_extract_add_fields,

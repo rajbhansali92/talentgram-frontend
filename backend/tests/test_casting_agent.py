@@ -7393,6 +7393,54 @@ async def test_missing_project_searches_full_catalogue_with_pagination():
         await _restore_config(original)
 
 
+async def test_edit_step_selector_works_correctly_after_missing_project_resume():
+    """Regression guard for a bug a live diagnostic caught (2026-09-03):
+    resolving the missing-project clarification internally routes through
+    the SAME "editing one step" machinery step-editing itself uses
+    (_PLAN_EDIT_STEP_KEY="1"), and returning to "confirming" afterward
+    must CLEAR that marker — otherwise the very NEXT "2" (opening the
+    step selector) followed by a second "2" (meant to pick step 2/MOVE
+    from that selector) gets misrouted as a stale free-text instruction
+    for step 1, producing "I didn't understand that change" instead of
+    "EDITING STEP 2 — MOVE"."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"ResumeEditProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"ResumeEditTalent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add ResumeEditTalent {tag}, move her to Follow Up, share the casting call with her",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "ADD needs a project before I can continue." in r.reply, r.reply
+
+        resumed = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=label,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to run this plan" in resumed.reply, resumed.reply
+
+        selector = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Which step would you like to edit?" in selector.reply, selector.reply
+
+        step2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING STEP 2 — MOVE" in step2.reply, step2.reply
+        assert "I didn't understand" not in step2.reply, step2.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
+
+
 async def test_send_approval_flow_untouched_by_plan_step_editing():
     """#12 — a compound plan ending in SEND still hands off to SEND's own,
     completely separate approval/edit flow once the rest of the plan

@@ -5211,6 +5211,16 @@ class _ShareResolution:
     # BatchIn.variable_data["message"], the SAME field the WhatsApp
     # Campaign Agent's own Custom Message mode already renders via.
     variable_data: Dict[str, str] = dataclass_field(default_factory=dict)
+    # Pipeline-Check Option 2 (Production fix, 2026-09-04) — set ONLY when
+    # collected[SHARE_PAIR_RESTRICTION_FIELD.key] narrows a named-talent
+    # SHARE down to specific (project, talent) pairs already in that
+    # project's pipeline (the admin chose "share only where already in
+    # the pipeline" after a Pipeline Check). None means "no restriction",
+    # i.e. every project sends to the full talent_ids list, exactly the
+    # pre-existing behaviour. project_ids/project_labels are ALREADY
+    # filtered down to only projects with at least one surviving pair
+    # when this is set — see _resolve_share's talent-target tail.
+    pair_talent_ids: Optional[Dict[str, List[str]]] = None
 
 
 _SHARE_LEGACY_REDIRECT = (
@@ -5448,10 +5458,38 @@ async def _resolve_share(collected: dict) -> _ShareResolution:
                 disambiguation={"kind": "project", "field_key": "project_query", "options": options},
             )
 
+    # Pipeline-Check Option 2 (Production fix, 2026-09-04) — when set, an
+    # earlier Pipeline Check turn narrowed this SHARE to specific (project,
+    # talent) pairs already in that project's pipeline; apply it here so
+    # EVERY downstream consumer (confirmation card, _run_share_sends) sees
+    # the SAME narrowed picture from one place, never two. A project left
+    # with zero surviving talents is dropped entirely rather than shown
+    # with nobody to send to.
+    pair_talent_ids: Optional[Dict[str, List[str]]] = None
+    restriction_raw = (collected.get(SHARE_PAIR_RESTRICTION_FIELD.key) or "").strip()
+    if restriction_raw:
+        try:
+            restriction = json.loads(restriction_raw)
+        except (TypeError, ValueError):
+            restriction = {}
+        kept_project_ids: List[str] = []
+        kept_project_labels: List[str] = []
+        pair_map: Dict[str, List[str]] = {}
+        for pid, plabel in zip(project_ids, project_labels):
+            allowed = set(restriction.get(pid) or [])
+            keep = [tid for tid in resolved.talent_ids if tid in allowed]
+            if keep:
+                kept_project_ids.append(pid)
+                kept_project_labels.append(plabel)
+                pair_map[pid] = keep
+        project_ids, project_labels = kept_project_ids, kept_project_labels
+        pair_talent_ids = pair_map
+
     return _ShareResolution(
         ok=True, template=template, template_label=template_label, variable_data=variable_data,
         project_ids=project_ids, project_labels=project_labels,
         talent_ids=resolved.talent_ids, talent_labels=resolved.talent_labels,
+        pair_talent_ids=pair_talent_ids,
     )
 
 
@@ -5519,23 +5557,31 @@ async def _resolve_share_step_for_plan(
     return await _resolve_share(collected)
 
 
-async def _check_share_pipeline_membership(
-    resolved: "_ShareResolution",
-) -> List[Tuple[str, str, str, str]]:
-    """[(talent_id, talent_label, project_id, project_label), ...] for
-    every (project, talent) pair that has NO existing casting_pipeline
-    row — checked BEFORE the confirmation is even shown, never discovered
-    only after "Approve" (Part 10). Only meaningful for a named-talent
-    SHARE; a stage/whole-pipeline target is inherently scoped to EXISTING
-    pipeline members already, so there's nothing to check. A template
-    send needs a pipeline row to render {{project_name}}/{{shoot_dates}}/
-    {{budget}} from (resolve_recipients_engine's PROJECT branch,
-    routers/whatsapp.py) — confirmed by inspection, not assumed; there is
-    no "share anyway" bypass in the underlying mechanism, so none is
-    invented here either."""
+@dataclass
+class _SharePairCheck:
+    talent_id: str
+    talent_label: str
+    project_id: str
+    project_label: str
+    in_pipeline: bool
+
+
+async def _share_pipeline_matrix(resolved: "_ShareResolution") -> List[_SharePairCheck]:
+    """The FULL (project, talent) cross-product this named-talent SHARE
+    would touch, each flagged with whether a casting_pipeline row already
+    exists — checked BEFORE the confirmation is even shown, never
+    discovered only after "Approve" (Part 10; extended to a true
+    cross-product Pipeline Check, Production fix 2026-09-04). Only
+    meaningful for a named-talent SHARE; a stage/whole-pipeline target is
+    inherently scoped to EXISTING pipeline members already, so there's
+    nothing to check. A template send needs a pipeline row to render
+    {{project_name}}/{{shoot_dates}}/{{budget}} from
+    (resolve_recipients_engine's PROJECT branch, routers/whatsapp.py) —
+    confirmed by inspection, not assumed; there is no "share anyway"
+    bypass in the underlying mechanism, so none is invented here either."""
     if resolved.is_pipeline_target or resolved.is_stage_target or not resolved.talent_ids:
         return []
-    missing: List[Tuple[str, str, str, str]] = []
+    out: List[_SharePairCheck] = []
     for pid, plabel in zip(resolved.project_ids, resolved.project_labels):
         rows = await db.casting_pipeline.find(
             {"project_id": pid, "talent_id": {"$in": resolved.talent_ids}},
@@ -5543,9 +5589,98 @@ async def _check_share_pipeline_membership(
         ).to_list(len(resolved.talent_ids))
         existing_ids = {r["talent_id"] for r in rows}
         for tid, tlabel in zip(resolved.talent_ids, resolved.talent_labels):
-            if tid not in existing_ids:
-                missing.append((tid, tlabel, pid, plabel))
-    return missing
+            out.append(_SharePairCheck(tid, tlabel, pid, plabel, tid in existing_ids))
+    return out
+
+
+def _format_share_pipeline_check(matrix: List[_SharePairCheck]) -> str:
+    """The structured Pipeline Check message (Production fix, 2026-09-04)
+    — replaces the old single-pair-only "X is not currently in the Y
+    pipeline" message AND the old multi-pair "list + Reply CANCEL" dead
+    end with ONE format that always shows the full cross-product picture
+    and always offers a real, numbered decision (never just an error)."""
+    missing = [r for r in matrix if not r.in_pipeline]
+    lines = ["Pipeline check", ""]
+    for row in matrix:
+        mark = "✓" if row.in_pipeline else "❌"
+        lines.append(f"{mark} {row.talent_label} — {row.project_label}")
+    lines.append("")
+
+    distinct_talents: List[str] = []
+    distinct_projects: List[str] = []
+    for row in missing:
+        if row.talent_label not in distinct_talents:
+            distinct_talents.append(row.talent_label)
+        if row.project_label not in distinct_projects:
+            distinct_projects.append(row.project_label)
+    if len(distinct_talents) == 1:
+        subject = distinct_talents[0]
+        if len(distinct_projects) == 1:
+            lines.append(f"{subject} is not currently in the {distinct_projects[0]} pipeline.")
+        else:
+            lines.append(f"{subject} is not currently in these project pipelines.")
+    else:
+        lines.append("Some of the named talent(s) are not currently in these project pipelines.")
+
+    lines += [
+        "", "What would you like to do?", "",
+        "1 → Add the missing talent(s) to the project(s), move them to Follow Up, "
+        "then share the casting call",
+        "2 → Share only for project(s) where they are already in the pipeline",
+        "3 → Cancel",
+        "", "Nothing has been sent yet.",
+    ]
+    return "\n".join(lines)
+
+
+def _build_share_gate_add_move_share_text(
+    resolved: "_ShareResolution", missing: List[_SharePairCheck], collected: dict,
+) -> str:
+    """Builds ONE compound "Add ..., move ..., share ..." command text
+    covering EXACTLY the missing (project, talent) pairs.
+
+    The Add clause uses one explicit "talent to project" segment per
+    missing pair, reusing nlu.split_multi_segment_pairs (the SAME "A to
+    X, B to Y, C to X" multi-mapping grammar the compound-plan engine
+    already understands, confirmed by direct testing) so an IRREGULAR
+    missing set (e.g. talent A missing only from project 1, talent B
+    missing only from project 2) is never over-added beyond what's
+    actually missing.
+
+    The Move clause deliberately does NOT name a project — it names each
+    DISTINCT missing talent once ("move Nikita Tiwari to Follow Up") and
+    relies on the compound-plan's own touched_pairs continuation
+    (_touched_pairs_matching_talent — the SAME mechanism the proven
+    single-pair handoff already used via "her") to move exactly the
+    pair(s) THIS plan's own Add step just touched. Naming the project
+    explicitly here would make Move re-check the LIVE pipeline at preview
+    time (before Add has actually run) and report "nothing to move" —
+    the real bug this construction avoids. It also means an
+    already-Shortlisted talent is never silently demoted back to Follow
+    Up just because a DIFFERENT pair happened to be missing (Production
+    fix, 2026-09-04): touched_pairs only ever contains what THIS Add
+    step just created, never a pre-existing valid pair.
+
+    By the time this plan finishes, every pair the ORIGINAL SHARE request
+    named is valid, so the Share step itself reuses the ORIGINAL, full
+    talent/project lists unchanged — never just the newly-added ones."""
+    add_segments = [f"{row.talent_label} to {row.project_label}" for row in missing]
+    move_names: List[str] = []
+    for row in missing:
+        if row.talent_label not in move_names:
+            move_names.append(row.talent_label)
+    project_list = ", ".join(resolved.project_labels)
+    talent_list = ", ".join(resolved.talent_labels)
+    custom_message = collected.get("custom_message")
+    if custom_message is not None:
+        share_clause = f'share custom message "{custom_message}" for {project_list} with {talent_list}'
+    else:
+        share_clause = f"share {resolved.template_label} for {project_list} with {talent_list}"
+    return (
+        f"Add {', '.join(add_segments)}, "
+        f"move {', '.join(move_names)} to Follow Up, "
+        f"{share_clause}"
+    )
 
 
 async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
@@ -5560,44 +5695,32 @@ async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
             await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
         return resolved.error
 
-    missing_pairs = await _check_share_pipeline_membership(resolved)
-    if missing_pairs:
+    matrix = await _share_pipeline_matrix(resolved)
+    if any(not row.in_pipeline for row in matrix):
         await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
-        if len(missing_pairs) == 1:
-            tid, tlabel, pid, plabel = missing_pairs[0]
-            await session_context.update_session(
-                AGENT_ID, ctx.sender_phone,
-                pending_disambiguation={
-                    "kind": "share_not_in_pipeline",
-                    "talent_label": tlabel, "project_label": plabel,
-                    "template_label": resolved.template_label,
-                },
-            )
-            return (
-                f"{tlabel} is not currently in the {plabel} pipeline.\n\n"
-                "The casting-call share requires her to be in the project pipeline.\n\n"
-                "Reply:\n"
-                f"1 → Add her to {plabel} and move her to Follow Up\n"
-                "2 → Cancel"
-            )
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
-        lines = ["These talents aren't currently in their project's pipeline:", ""]
-        for _tid, tlabel, _pid, plabel in missing_pairs:
-            lines.append(f"• {tlabel} — {plabel}")
-        lines += [
-            "", "Add each of them to their project's pipeline first (e.g. \"Add "
-            f"{missing_pairs[0][1]} to {missing_pairs[0][3]}\"), then try SHARE again.",
-            "", "Reply CANCEL to stop.",
-        ]
-        return "\n".join(lines)
+        await session_context.update_session(
+            AGENT_ID, ctx.sender_phone,
+            pending_disambiguation={"kind": "share_pipeline_check"},
+        )
+        return _format_share_pipeline_check(matrix)
 
     await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    return _build_share_confirmation_preview(resolved)
 
-    # Confirmation Card Quality (Part 11) — the single-project shape stays
-    # compact (Content/Project/Recipients/Messages); 2+ projects switch to
-    # one block per project plus a running total, matching the exact
-    # formats specified. Never duplicated numbering/steps — this is a
-    # flat, single-operation preview, not a multi-step plan card.
+
+def _build_share_confirmation_preview(resolved: "_ShareResolution") -> str:
+    """The actual "You are about to SHARE:" preview for an already-
+    resolved, already pipeline-checked SHARE — factored out of
+    _build_share_confirmation so Pipeline Check Option 2 (Production fix,
+    2026-09-04) can build the SAME preview for a resolution that's been
+    narrowed to only the pairs already in a pipeline, without duplicating
+    this formatting a second time.
+
+    Confirmation Card Quality (Part 11) — the single-project shape stays
+    compact (Content/Project/Recipients/Messages); 2+ projects switch to
+    one block per project plus a running total, matching the exact
+    formats specified. Never duplicated numbering/steps — this is a
+    flat, single-operation preview, not a multi-step plan card."""
     lines = ["You are about to SHARE:", "", "Template:", resolved.template_label, ""]
     is_multi_project = len(resolved.project_ids) > 1
     if resolved.is_pipeline_target or resolved.is_stage_target:
@@ -5620,19 +5743,31 @@ async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
                 "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel",
             ]
     else:
-        n_talents = len(resolved.talent_ids)
+        # Pipeline-Check Option 2 — a restricted resolution can send a
+        # DIFFERENT talent subset per project; every other SHARE keeps
+        # showing the same full talent_labels list for every project,
+        # exactly the pre-existing behaviour.
+        labels_by_id = dict(zip(resolved.talent_ids, resolved.talent_labels))
+
+        def _names_for(pid: str) -> List[str]:
+            if resolved.pair_talent_ids is None:
+                return resolved.talent_labels
+            return [labels_by_id.get(tid, tid) for tid in resolved.pair_talent_ids.get(pid, [])]
+
         if is_multi_project:
             total = 0
-            for plabel in resolved.project_labels:
-                lines += [f"Project: {plabel}", f"Recipients: {', '.join(resolved.talent_labels)}",
-                          f"Messages: {n_talents}", ""]
-                total += n_talents
+            for pid, plabel in zip(resolved.project_ids, resolved.project_labels):
+                names = _names_for(pid)
+                lines += [f"Project: {plabel}", f"Recipients: {', '.join(names)}",
+                          f"Messages: {len(names)}", ""]
+                total += len(names)
             lines += ["Total:", f"{total} WhatsApp message{'' if total == 1 else 's'}", "",
                       "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel"]
         else:
+            names = _names_for(resolved.project_ids[0])
             lines += ["Project:", resolved.project_labels[0], "", "Recipients:"]
-            lines += [f"{i}. {t}" for i, t in enumerate(resolved.talent_labels, start=1)]
-            lines += ["", f"Messages:\n{n_talents}", "", "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel"]
+            lines += [f"{i}. {t}" for i, t in enumerate(names, start=1)]
+            lines += ["", f"Messages:\n{len(names)}", "", "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel"]
     return "\n".join(lines)
 
 
@@ -5653,12 +5788,19 @@ async def _run_share_sends(resolved: "_ShareResolution") -> Tuple[List[str], int
     for pid, plabel in zip(resolved.project_ids, resolved.project_labels):
         body_lines.append("")
         body_lines.append(plabel)
+        # Pipeline-Check Option 2 — a restricted resolution narrows WHICH
+        # talents this specific project actually targets; every other
+        # SHARE keeps sending to the full talent_ids list, unchanged.
+        project_talent_ids = (
+            resolved.pair_talent_ids.get(pid, []) if resolved.pair_talent_ids is not None
+            else resolved.talent_ids
+        )
         if resolved.is_pipeline_target or resolved.is_stage_target:
             source_params = SourceParams(project_id=pid, pipeline_stages=stages)
         else:
             source_params = SourceParams(
                 project_id=pid, pipeline_stages=stages,
-                talent_ids=resolved.talent_ids,
+                talent_ids=project_talent_ids,
             )
         try:
             result = await create_batch(
@@ -5677,7 +5819,9 @@ async def _run_share_sends(resolved: "_ShareResolution") -> Tuple[List[str], int
             body_lines.append(f"• {len(jobs)} message{'' if len(jobs) == 1 else 's'} queued")
         else:
             sent_ids = {j.get("talent_id") for j in jobs}
-            for tid, label in zip(resolved.talent_ids, resolved.talent_labels):
+            labels_by_id = dict(zip(resolved.talent_ids, resolved.talent_labels))
+            for tid in project_talent_ids:
+                label = labels_by_id.get(tid, tid)
                 if tid in sent_ids:
                     body_lines.append(f"• {label} — sent")
                 else:
@@ -5732,7 +5876,8 @@ async def _share_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional
     # bypass, so an auto-confirming SHARE that hits it still falls
     # through to the normal confirmation flow, exactly like an
     # unresolved ambiguity does above.
-    if await _check_share_pipeline_membership(resolved):
+    matrix = await _share_pipeline_matrix(resolved)
+    if any(not row.in_pipeline for row in matrix):
         return None
     return await _share_executor(collected, ctx)
 
@@ -5892,32 +6037,43 @@ async def _share_handle_confirming_reply(
 ) -> Optional[str]:
     """AgentDefinition.handle_confirming_reply hook — checked FIRST while
     a SHARE conversation sits in "confirming", but only ever ACTS when
-    session.pending_disambiguation.kind == "share_not_in_pipeline" (set
-    by _build_share_confirmation's Part 10 gate). "1" there means "add +
-    move the talent, then share" — a completely different action from
-    the ordinary confirmation card's "1 -> Approve" (approving THIS card
-    would try to send without the required pipeline row) — so it must be
+    session.pending_disambiguation.kind == "share_pipeline_check" (set by
+    _build_share_confirmation's Pipeline Check gate, Production fix
+    2026-09-04). 1/2/3 there mean Add+Move+Share / Share-only-valid-pairs
+    / Cancel — a completely different decision from the ordinary
+    confirmation card's own "1 -> Approve" (approving THIS card would try
+    to send pairs that aren't in the pipeline yet) — so it must be
     intercepted before the generic parser reaches it. Returns None for
     every other case (no pending gate at all), leaving the ordinary
     1/2/3 Approve/Edit/Cancel behaviour of every other SHARE confirmation
     completely unchanged."""
     session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
-    if not pending or pending.get("kind") != "share_not_in_pipeline":
+    if not pending or pending.get("kind") != "share_pipeline_check":
         return None
     stripped = (text or "").strip()
+
+    # Re-resolve fresh rather than trusting anything stashed on `pending`
+    # — collected (the ORIGINAL SHARE request's own fields) is the single
+    # source of truth here, exactly as everywhere else in this module, so
+    # there's no separate copy of talent/project data to go stale.
+    resolved = await _resolve_share(collected)
+    if not resolved.ok:
+        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+        await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+        return resolved.error
+    matrix = await _share_pipeline_matrix(resolved)
+    missing = [row for row in matrix if not row.in_pipeline]
+    valid = [row for row in matrix if row.in_pipeline]
+
     if stripped == "1":
+        if not missing:
+            return None  # nothing left to add/move — let the normal flow re-check.
         # Hand off to the EXISTING, already-production-verified ADD ->
         # MOVE -> SHARE compound-plan engine — never a second, invented
         # execution path. Built the exact same way a user would type it
         # themselves, then dispatched as a fresh casting.add trigger.
-        talent_label = pending["talent_label"]
-        project_label = pending["project_label"]
-        template_label = pending.get("template_label") or "Casting Call"
-        compound_text = (
-            f"Add {talent_label} to {project_label}, move her to Follow Up, "
-            f"share {template_label} with her"
-        )
+        compound_text = _build_share_gate_add_move_share_text(resolved, missing, collected)
         add_fields = _extract_add_fields(compound_text)
         await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
         await conversation.start_conversation(
@@ -5926,15 +6082,54 @@ async def _share_handle_confirming_reply(
         )
         await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
         return await _build_add_confirmation(add_fields, ctx)
-    if stripped == "2" or parse_confirmation_reply(stripped) == "cancel":
+
+    if stripped == "2":
+        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+        if not valid:
+            await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+            return (
+                "None of the requested talent × project pairs are in a "
+                "pipeline yet, so there's nothing to share.\n\n"
+                "Nothing was sent."
+            )
+        restriction: Dict[str, List[str]] = {}
+        for row in valid:
+            restriction.setdefault(row.project_id, []).append(row.talent_id)
+        new_collected = dict(collected)
+        new_collected[SHARE_PAIR_RESTRICTION_FIELD.key] = json.dumps(restriction)
+        await conversation.update_conversation(
+            ctx.agent_id, ctx.sender_phone, step="confirming", collected=new_collected,
+        )
+        restricted = await _resolve_share(new_collected)
+        if not restricted.ok:
+            return restricted.error
+        preview = _build_share_confirmation_preview(restricted)
+        if missing:
+            skip_lines = "\n".join(f"• {row.talent_label} — {row.project_label}" for row in missing)
+            preview = f"Skipping (not in pipeline):\n{skip_lines}\n\n{preview}"
+        return preview
+
+    if stripped == "3" or parse_confirmation_reply(stripped) == "cancel":
         await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
-        return "CANCELLED\n\nNothing was added, moved, or shared."
+        return "CANCELLED\n\nNothing from the pending SHARE action was executed or sent."
+
     return None
 
 
 SHARE_CUSTOM_MESSAGE_FIELD = FieldSpec(
     key="custom_message", label="Message", question="", validate=_validate_hidden, required=False,
+)
+
+# Pipeline-Check Option 2 (Production fix, 2026-09-04) — a hidden field,
+# same pattern as SHARE_CUSTOM_MESSAGE_FIELD above: never surfaced to the
+# admin, never asked for, just carries a JSON {project_id: [talent_id,...]}
+# restriction across turns inside `collected` (the ONLY thing conversation
+# state persists) after "2 -> Share only where already in the pipeline".
+# See _resolve_share's own use of it and _share_handle_confirming_reply.
+SHARE_PAIR_RESTRICTION_FIELD = FieldSpec(
+    key="_share_pair_restriction", label="Pair restriction", question="",
+    validate=_validate_hidden, required=False,
 )
 
 
@@ -5943,7 +6138,7 @@ SHARE_INTENT = IntentDefinition(
     triggers=SHARE_TRIGGERS,
     fields=[
         SHARE_PROJECT_FIELD, SHARE_RECIPIENT_FIELD, SHARE_TEMPLATE_FIELD, SHARE_CUSTOM_MESSAGE_FIELD,
-        AUTO_CONFIRM_FIELD, PLAN_STEP_EDIT_ERROR_FIELD,
+        SHARE_PAIR_RESTRICTION_FIELD, AUTO_CONFIRM_FIELD, PLAN_STEP_EDIT_ERROR_FIELD,
     ],
     executor=_share_executor,
     extract_fields=_extract_share_fields,

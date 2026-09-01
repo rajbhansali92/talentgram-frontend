@@ -194,7 +194,10 @@ def test_extract_fields_all_natural_language_variants():
     cases = [
         ("Send Toyota requirement to Ahana", "Ahana", "Toyota requirement"),
         ("Send Toyota requirement to Ahana Pocha", "Ahana Pocha", "Toyota requirement"),
-        ("Share Toyota requirement with Ahana", "Ahana", "Toyota requirement"),
+        # "Share ..." removed (Production fix, 2026-09-05) — "share" no
+        # longer triggers this generic SEND intent; it's now the
+        # canonical casting-call SHARE command's own trigger instead
+        # (see agents/modules/casting_pipeline.py's SHARE_INTENT).
         ("Forward Toyota brief to Ahana", "Ahana", "Toyota brief"),
         ("Message Ahana the Toyota requirement", "Ahana", "Toyota requirement"),
         ("Deliver Toyota requirement to Ahana", "Ahana", "Toyota requirement"),
@@ -3025,8 +3028,11 @@ def test_extract_instagram_fields_insta_link_of_connector():
 
 
 def test_extract_instagram_fields_possessive_no_recipient():
+    # "send", not "share" (Production fix, 2026-09-05) — "share" no
+    # longer triggers this generic SEND intent; see the module-level
+    # comment on SEND_VERBS in whatsapp_campaign_agent.py.
     remainder = wca._strip_leading_trigger_preserve_newlines(
-        "share Pankuri's instagram", wca.SEND_TRIGGERS,
+        "send Pankuri's instagram", wca.SEND_TRIGGERS,
     )
     fields = wca._extract_instagram_fields(remainder)
     assert fields["source_query"] == "Pankuri"
@@ -3425,7 +3431,9 @@ async def test_instagram_profile_no_recipient_replies_inline_no_batch():
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"share {pankuri}'s instagram",
+            # "send", not "share" (Production fix, 2026-09-05) — see
+            # SEND_VERBS's own comment in whatsapp_campaign_agent.py.
+            text=f"send {pankuri}'s instagram",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply

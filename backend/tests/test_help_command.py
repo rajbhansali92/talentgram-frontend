@@ -180,7 +180,13 @@ async def test_each_agent_has_distinct_help_text():
     assert "SEND / SHARE A CAMPAIGN" not in CASTING_HELP_TEXT
 
     assert "TALENTGRAM WHATSAPP AGENT" in CAMPAIGN_HELP_TEXT
-    assert "SEND / SHARE A CAMPAIGN" in CAMPAIGN_HELP_TEXT
+    # SHARE Ownership/Routing (Production fix, 2026-09-05) — "share" no
+    # longer triggers the generic SEND campaign intent (it's now the
+    # canonical casting-call SHARE command's own trigger instead), so
+    # this section's own title dropped the "/ SHARE" it used to carry —
+    # accurate now that mentioning it there would be misleading.
+    assert "SEND A CAMPAIGN" in CAMPAIGN_HELP_TEXT
+    assert "SHARE — CASTING CALL" in CAMPAIGN_HELP_TEXT
     # Old Interface Deprecation (2026-08-30) — the hyphen grammar
     # ("Action - Who - What - Where") is no longer advertised; HELP shows
     # only natural-language examples now.

@@ -5594,11 +5594,22 @@ async def _share_pipeline_matrix(resolved: "_ShareResolution") -> List[_SharePai
 
 
 def _format_share_pipeline_check(matrix: List[_SharePairCheck]) -> str:
-    """The structured Pipeline Check message (Production fix, 2026-09-04)
-    — replaces the old single-pair-only "X is not currently in the Y
-    pipeline" message AND the old multi-pair "list + Reply CANCEL" dead
-    end with ONE format that always shows the full cross-product picture
-    and always offers a real, numbered decision (never just an error)."""
+    """The structured Pipeline Check message (Production fix, 2026-09-04;
+    adjusted 2026-09-05 for the standalone-SHARE routing move) — replaces
+    the old single-pair-only "X is not currently in the Y pipeline"
+    message AND the old multi-pair "list + Reply CANCEL" dead end with
+    ONE format that always shows the full cross-product picture and
+    always offers a real, numbered decision (never just an error).
+
+    No "Add + Move, then Share" auto-handoff option here: standalone
+    SHARE now runs ONLY in the Talentgram WhatsApp Agent group (see
+    SHARE_INTENT's registration on CAMPAIGN_AGENT below), which has no
+    ADD/MOVE intents of its own — Casting Pipeline ownership of ADD/MOVE
+    is deliberate and must stay exclusive (Section 1 of the routing
+    fix). A cross-agent conversation handoff isn't something this
+    platform supports (conversation state is scoped to whichever agent
+    owns the group a reply arrives in), so instead of silently failing,
+    this points the admin at the right group directly."""
     missing = [r for r in matrix if not r.in_pipeline]
     lines = ["Pipeline check", ""]
     for row in matrix:
@@ -5623,64 +5634,15 @@ def _format_share_pipeline_check(matrix: List[_SharePairCheck]) -> str:
         lines.append("Some of the named talent(s) are not currently in these project pipelines.")
 
     lines += [
+        "", "To add them, use the Talentgram Casting Pipeline group "
+        "(e.g. \"Add Nikita Tiwari to Hinge, move her to Follow Up\"), "
+        "then resend this SHARE command.",
         "", "What would you like to do?", "",
-        "1 → Add the missing talent(s) to the project(s), move them to Follow Up, "
-        "then share the casting call",
-        "2 → Share only for project(s) where they are already in the pipeline",
-        "3 → Cancel",
+        "1 → Share only for project(s) where they are already in the pipeline",
+        "2 → Cancel",
         "", "Nothing has been sent yet.",
     ]
     return "\n".join(lines)
-
-
-def _build_share_gate_add_move_share_text(
-    resolved: "_ShareResolution", missing: List[_SharePairCheck], collected: dict,
-) -> str:
-    """Builds ONE compound "Add ..., move ..., share ..." command text
-    covering EXACTLY the missing (project, talent) pairs.
-
-    The Add clause uses one explicit "talent to project" segment per
-    missing pair, reusing nlu.split_multi_segment_pairs (the SAME "A to
-    X, B to Y, C to X" multi-mapping grammar the compound-plan engine
-    already understands, confirmed by direct testing) so an IRREGULAR
-    missing set (e.g. talent A missing only from project 1, talent B
-    missing only from project 2) is never over-added beyond what's
-    actually missing.
-
-    The Move clause deliberately does NOT name a project — it names each
-    DISTINCT missing talent once ("move Nikita Tiwari to Follow Up") and
-    relies on the compound-plan's own touched_pairs continuation
-    (_touched_pairs_matching_talent — the SAME mechanism the proven
-    single-pair handoff already used via "her") to move exactly the
-    pair(s) THIS plan's own Add step just touched. Naming the project
-    explicitly here would make Move re-check the LIVE pipeline at preview
-    time (before Add has actually run) and report "nothing to move" —
-    the real bug this construction avoids. It also means an
-    already-Shortlisted talent is never silently demoted back to Follow
-    Up just because a DIFFERENT pair happened to be missing (Production
-    fix, 2026-09-04): touched_pairs only ever contains what THIS Add
-    step just created, never a pre-existing valid pair.
-
-    By the time this plan finishes, every pair the ORIGINAL SHARE request
-    named is valid, so the Share step itself reuses the ORIGINAL, full
-    talent/project lists unchanged — never just the newly-added ones."""
-    add_segments = [f"{row.talent_label} to {row.project_label}" for row in missing]
-    move_names: List[str] = []
-    for row in missing:
-        if row.talent_label not in move_names:
-            move_names.append(row.talent_label)
-    project_list = ", ".join(resolved.project_labels)
-    talent_list = ", ".join(resolved.talent_labels)
-    custom_message = collected.get("custom_message")
-    if custom_message is not None:
-        share_clause = f'share custom message "{custom_message}" for {project_list} with {talent_list}'
-    else:
-        share_clause = f"share {resolved.template_label} for {project_list} with {talent_list}"
-    return (
-        f"Add {', '.join(add_segments)}, "
-        f"move {', '.join(move_names)} to Follow Up, "
-        f"{share_clause}"
-    )
 
 
 async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
@@ -5688,23 +5650,23 @@ async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
     if not resolved.ok:
         if resolved.disambiguation:
             await session_context.update_session(
-                AGENT_ID, ctx.sender_phone, pending_disambiguation=resolved.disambiguation
+                ctx.agent_id, ctx.sender_phone, pending_disambiguation=resolved.disambiguation
             )
             await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="editing")
         else:
-            await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+            await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         return resolved.error
 
     matrix = await _share_pipeline_matrix(resolved)
     if any(not row.in_pipeline for row in matrix):
         await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             pending_disambiguation={"kind": "share_pipeline_check"},
         )
         return _format_share_pipeline_check(matrix)
 
-    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
     return _build_share_confirmation_preview(resolved)
 
 
@@ -5953,7 +5915,7 @@ async def _share_parse_edits_async(
     stripped = (text or "").strip()
 
     if _EDIT_CANCEL_RE.match(stripped):
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return {PLAN_STEP_EDIT_ERROR_FIELD.key: _EDITING_CANCELLED_MESSAGE}
 
@@ -6039,15 +6001,18 @@ async def _share_handle_confirming_reply(
     a SHARE conversation sits in "confirming", but only ever ACTS when
     session.pending_disambiguation.kind == "share_pipeline_check" (set by
     _build_share_confirmation's Pipeline Check gate, Production fix
-    2026-09-04). 1/2/3 there mean Add+Move+Share / Share-only-valid-pairs
-    / Cancel — a completely different decision from the ordinary
-    confirmation card's own "1 -> Approve" (approving THIS card would try
-    to send pairs that aren't in the pipeline yet) — so it must be
-    intercepted before the generic parser reaches it. Returns None for
-    every other case (no pending gate at all), leaving the ordinary
-    1/2/3 Approve/Edit/Cancel behaviour of every other SHARE confirmation
-    completely unchanged."""
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    2026-09-04; renumbered to 2 options 2026-09-05 — see
+    _format_share_pipeline_check's own docstring on why the old "Add +
+    Move, then Share" auto-handoff option was dropped when standalone
+    SHARE moved to a group with no ADD/MOVE intents of its own). 1/2
+    here mean Share-only-valid-pairs / Cancel — a completely different
+    decision from the ordinary confirmation card's own "1 -> Approve"
+    (approving THIS card would try to send pairs that aren't in the
+    pipeline yet) — so it must be intercepted before the generic parser
+    reaches it. Returns None for every other case (no pending gate at
+    all), leaving the ordinary 1/2/3 Approve/Edit/Cancel behaviour of
+    every other SHARE confirmation completely unchanged."""
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
     if not pending or pending.get("kind") != "share_pipeline_check":
         return None
@@ -6059,7 +6024,7 @@ async def _share_handle_confirming_reply(
     # there's no separate copy of talent/project data to go stale.
     resolved = await _resolve_share(collected)
     if not resolved.ok:
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return resolved.error
     matrix = await _share_pipeline_matrix(resolved)
@@ -6067,24 +6032,7 @@ async def _share_handle_confirming_reply(
     valid = [row for row in matrix if row.in_pipeline]
 
     if stripped == "1":
-        if not missing:
-            return None  # nothing left to add/move — let the normal flow re-check.
-        # Hand off to the EXISTING, already-production-verified ADD ->
-        # MOVE -> SHARE compound-plan engine — never a second, invented
-        # execution path. Built the exact same way a user would type it
-        # themselves, then dispatched as a fresh casting.add trigger.
-        compound_text = _build_share_gate_add_move_share_text(resolved, missing, collected)
-        add_fields = _extract_add_fields(compound_text)
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
-        await conversation.start_conversation(
-            agent_id=ctx.agent_id, phone=ctx.sender_phone,
-            group_name=ctx.group_name, intent_id="casting.add", collected=add_fields,
-        )
-        await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
-        return await _build_add_confirmation(add_fields, ctx)
-
-    if stripped == "2":
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         if not valid:
             await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
             return (
@@ -6109,8 +6057,8 @@ async def _share_handle_confirming_reply(
             preview = f"Skipping (not in pipeline):\n{skip_lines}\n\n{preview}"
         return preview
 
-    if stripped == "3" or parse_confirmation_reply(stripped) == "cancel":
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    if stripped == "2" or parse_confirmation_reply(stripped) == "cancel":
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return "CANCELLED\n\nNothing from the pending SHARE action was executed or sent."
 
@@ -6168,6 +6116,40 @@ SHARE_INTENT = IntentDefinition(
     # See _share_editing_claims_reply's own docstring.
     claims_editing_reply=_share_editing_claims_reply,
     summary_title="You are about to share:",
+)
+
+
+# ---------------------------------------------------------------------------
+# SHARE ownership/routing (Production fix, 2026-09-05) — standalone SHARE
+# now belongs ONLY to the Talentgram WhatsApp Agent group (SHARE_INTENT,
+# the real implementation above, is registered on CAMPAIGN_AGENT instead —
+# see whatsapp_campaign_agent.py). Casting Pipeline keeps ADD, MOVE, and
+# the approved compound ADD -> MOVE -> SHARE workflow (that workflow's own
+# SHARE step never goes through an intent trigger at all — it's resolved
+# directly by _resolve_share_step_for_plan inside the compound-plan engine,
+# untouched by anything below), but a STANDALONE "Share ..." typed here
+# must never execute, pipeline-check, or send anything — just point the
+# admin at the right group. A trivial auto_confirm intent (same shape
+# QUERY_INTENT already uses for "nothing to approve, just answer") is the
+# smallest way to guarantee that: no fields, no build_confirmation, no DB
+# access of any kind — the executor is a pure constant.
+# ---------------------------------------------------------------------------
+SHARE_REROUTE_MESSAGE = (
+    "SHARE is handled in the Talentgram WhatsApp Agent group.\n"
+    "Please send the SHARE command there."
+)
+
+
+async def _share_reroute_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    return ExecResult(ok=True, message=SHARE_REROUTE_MESSAGE)
+
+
+SHARE_REROUTE_INTENT = IntentDefinition(
+    intent_id="casting.share_reroute",
+    triggers=SHARE_TRIGGERS,
+    fields=[],
+    executor=_share_reroute_executor,
+    auto_confirm=True,
 )
 
 
@@ -7216,41 +7198,17 @@ HELP_TEXT = (
     "restore, not available, not interested, and every existing stage "
     "name. Shows a preview and waits for approval, same as ADD.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "3. SHARE\n"
+    "3. SHARE (as part of ADD + MOVE)\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: shares a saved template or a custom message with "
-    "talent(s), or with everyone currently in a pipeline stage. This is "
-    "for sharing INFORMATION — for sending a talent's own submission, "
-    "use SEND instead.\n\n"
-    "THREE WAYS TO USE IT:\n\n"
-    "1. Saved template → talent(s):\n"
-    "Share Casting Call with Kripa Trivedi\n"
-    "Share Casting Call for Parachute Jasmine Oil with Kripa Trivedi,"
-    "Siddhi Bankhele\n\n"
-    "2. Saved template → everyone in a pipeline stage:\n"
-    "Share Casting Call for Parachute Jasmine Oil to Follow Up\n"
-    "Share Casting Call with everyone in the Shortlisted stage for "
-    "Project A\n\n"
-    "3. Custom message → talent(s) or a pipeline stage:\n"
-    "Share custom message \"Please confirm your availability.\" with "
-    "Kripa Trivedi\n"
-    "Share custom message \"Please confirm your availability.\" to "
-    "Follow Up for Project A\n\n"
-    "IMPORTANT NOTES:\n"
-    "• A custom message goes in quotation marks — everything inside "
-    "them (commas, line breaks, punctuation) is sent exactly as "
-    "written; only a comma OUTSIDE the quotes separates multiple "
-    "talents.\n"
-    "• If you don't name a project, I use the one the talent is "
-    "already in — if that's ambiguous (more than one), I'll ask "
-    "which.\n"
-    "• If a talent isn't yet in that project's pipeline, I'll offer to "
-    "add and move her first rather than sending to someone who isn't "
-    "there.\n"
-    "• Extra/uneven spacing and small typos are tolerated; if a "
-    "template, project, or talent name is ambiguous, I list numbered "
-    "options and ask rather than guess.\n"
-    "• Shows a preview and waits for approval before anything sends.\n\n"
+    "WHAT IT DOES: as the last step of a chained ADD + MOVE command, "
+    "shares the casting call with whoever was just added and moved — "
+    "one confirmed workflow.\n\n"
+    "EXAMPLE:\n"
+    "Add Kripa Trivedi to Parachute Jasmine Oil, move her to Follow Up, "
+    "share the casting call with her\n\n"
+    "IMPORTANT NOTES: a standalone SHARE command (one that isn't chained "
+    "after ADD/MOVE) is NOT handled in this group — send it in the "
+    "Talentgram WhatsApp Agent group instead.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "4. SEND\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
@@ -7379,7 +7337,12 @@ CASTING_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="Talentgram Casting Pipeline",
     module="casting_pipeline",
-    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, SEND_INTENT, SHARE_INTENT, UNDO_INTENT],
+    # SHARE_REROUTE_INTENT, not SHARE_INTENT — standalone SHARE is now
+    # owned exclusively by the Talentgram WhatsApp Agent group (see the
+    # "SHARE ownership/routing" block above SHARE_REROUTE_INTENT's own
+    # definition). The approved compound ADD -> MOVE -> SHARE workflow is
+    # unaffected — it never goes through this registration at all.
+    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, SEND_INTENT, SHARE_REROUTE_INTENT, UNDO_INTENT],
     resolve_bare_reply=_resolve_bare_reply,
     # Concurrent Task Engine (2026-08-05) — casting-agent is the first (and
     # so far only) agent to opt into independently-addressable, concurrent

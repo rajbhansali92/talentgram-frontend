@@ -94,6 +94,15 @@ from agents.modules.casting_pipeline import (
     _fetch_ongoing_projects,
     _fetch_all_talent_candidates,
     _format_instagram_link,
+    # SHARE ownership/routing (Production fix, 2026-09-05) — the real,
+    # already-production-ready SHARE implementation (templates, custom
+    # messages, pipeline-stage targeting, ambiguity/edit/cancel, the
+    # Pipeline Check gate) lives entirely in casting_pipeline.py and is
+    # reused here UNCHANGED, never duplicated. Standalone SHARE now
+    # belongs to THIS agent/group exclusively — see SHARE_INTENT's own
+    # registration below and casting_pipeline.py's SHARE_REROUTE_INTENT
+    # for what Casting Pipeline shows instead.
+    SHARE_INTENT,
 )
 
 AGENT_ID = "whatsapp-campaign-agent"
@@ -106,8 +115,15 @@ logger = logging.getLogger(__name__)
 # intent it always did — they're longer, so parser.detect_trigger's
 # longest-match tie-break naturally still prefers them when present, though
 # it no longer matters which one wins since both route here now.
+#
+# "share" removed (Production fix, 2026-09-05) — it used to double as a
+# SEND_VERBS synonym for this generic broadcast intent, colliding with the
+# NEW, structured SHARE command ("Share the casting call for Hinge with
+# Nikita Tiwari") now registered as its own intent below. "send"/
+# "forward"/"broadcast"/etc. still open this intent exactly as before —
+# nothing else about general template broadcasting changed.
 SEND_VERBS = [
-    "send", "share", "forward", "deliver", "message",
+    "send", "forward", "deliver", "message",
     "broadcast", "push", "dispatch",
 ]
 LEGACY_CAMPAIGN_PHRASES = [
@@ -3762,7 +3778,7 @@ HELP_TEXT = (
     "━━━━━━━━━━━━━━━━━━\n"
     "COMMANDS\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "1. SEND / SHARE A CAMPAIGN\n\n"
+    "1. SEND A CAMPAIGN\n\n"
     "WHAT IT DOES: sends a saved template to named talent(s), or to "
     "everyone currently in a project's pipeline stage.\n\n"
     "HOW TO WRITE IT: Send [template] to [talent(s)] / Send [template] "
@@ -3773,7 +3789,29 @@ HELP_TEXT = (
     "Send Reminder template to Follow Up pipeline of Parachute Jasmine Oil\n\n"
     "IMPORTANT NOTES: the template name is required — if you leave it "
     "out, I'll ask which one, there's no automatic default.\n\n"
-    "2. SEND A CUSTOM MESSAGE\n\n"
+    "2. SHARE — CASTING CALL\n\n"
+    "WHAT IT DOES: shares a saved casting-call template with one or "
+    "more talents, one or more projects, or everyone in a pipeline "
+    "stage.\n\n"
+    "HOW TO WRITE IT: Share the casting call for [project(s)] with "
+    "[talent(s)]\n\n"
+    "EXAMPLES:\n"
+    "Share the casting call for Hinge with Nikita Tiwari\n"
+    "Share the casting call for Hinge, L'Oreal with Nikita Tiwari, Riya Sharma\n"
+    "Share the casting call for Hinge with everyone in Follow Up\n\n"
+    "CUSTOM MESSAGE:\n"
+    "Share your own free-text message instead of a saved template — put "
+    "it in quotation marks:\n\n"
+    "Share the custom message \"your message here\" with Nikita Tiwari\n"
+    "Share the custom message \"your message here\" with everyone in Follow Up\n\n"
+    "IMPORTANT NOTES: everything between the opening and closing "
+    "quotation marks is treated as the message exactly as written — "
+    "commas, line breaks, and other punctuation inside it are never "
+    "interpreted as command structure. If a talent isn't yet in a "
+    "named project's pipeline, I'll say so and offer to share only "
+    "where they already are. Shows a preview and waits for approval "
+    "before anything sends.\n\n"
+    "3. SEND A CUSTOM MESSAGE\n\n"
     "WHAT IT DOES: sends your own free-text message instead of a saved "
     "template.\n\n"
     "HOW TO WRITE IT: send custom message \"[your message]\" to [talent(s) "
@@ -3781,13 +3819,13 @@ HELP_TEXT = (
     "EXAMPLES:\n"
     "send custom message \"Hi, your profile has been shortlisted.\" to Kripa Trivedi,Siddhi Bankhele\n"
     "send custom message \"Reminder about tomorrow's call.\" to Follow Up pipeline of Parachute Jasmine Oil\n\n"
-    "3. SHARE AN INSTAGRAM PROFILE\n\n"
+    "4. SHARE AN INSTAGRAM PROFILE\n\n"
     "WHAT IT DOES: shares a talent's Instagram profile with someone else.\n\n"
     "HOW TO WRITE IT: Send [talent]'s instagram to [recipient]\n\n"
     "EXAMPLES:\n"
     "Send Kripa Trivedi's instagram to Raj\n"
     "Send Kripa Trivedi's insta to the Casting WhatsApp group\n\n"
-    "4. HELP\n\n"
+    "5. HELP\n\n"
     "WHAT IT DOES: shows this manual.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "MULTIPLE RECIPIENTS / PROJECTS\n"
@@ -3836,7 +3874,13 @@ CAMPAIGN_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="WhatsApp Campaign Agent",
     module="whatsapp_campaign_agent",
-    intents=[SEND_REQUIREMENT_INTENT],
+    # SHARE_INTENT (Production fix, 2026-09-05) — the SAME IntentDefinition
+    # object casting_pipeline.py builds and used to register on the
+    # Casting Pipeline group; standalone SHARE now runs here instead. Its
+    # own internal session_context/conversation calls already key off
+    # ctx.agent_id (not a hardcoded constant), so reusing it unchanged
+    # under THIS agent's id is correct, not merely convenient.
+    intents=[SEND_REQUIREMENT_INTENT, SHARE_INTENT],
     # Deliberately NOT opting into supports_concurrent_tasks — single-
     # conversation flow is sufficient for v1; this is an additive,
     # per-agent flag that can be turned on later with zero risk to any

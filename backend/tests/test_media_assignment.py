@@ -40,23 +40,29 @@ agent_modules.register_all()
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
 
-async def _use_test_config(group_name: str):
-    original = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": AGENT_ID})
+async def _use_test_config(group_name: str, agent_id: str = AGENT_ID):
+    """agent_id defaults to casting-agent (every pre-existing call site
+    unaffected); Send/Share Semantic Router tests (Production fix,
+    2026-09-06 — "send" is no longer directly triggerable on
+    casting-agent, only via a hand-off from whatsapp-campaign-agent's
+    own SHARE_INTENT) pass agent_id="whatsapp-campaign-agent" instead —
+    see test_media_send.py's own send-triggered tests."""
+    original = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": agent_id})
     doc = {
-        "agent_id": AGENT_ID, "group_names": [group_name], "allowed_senders": [],
+        "agent_id": agent_id, "group_names": [group_name], "allowed_senders": [],
         "security_mode": "group_members", "active": True,
         "created_at": _now(), "updated_at": _now(),
     }
-    await db[registry.CONFIG_COLLECTION].replace_one({"agent_id": AGENT_ID}, doc, upsert=True)
+    await db[registry.CONFIG_COLLECTION].replace_one({"agent_id": agent_id}, doc, upsert=True)
     return original
 
 
-async def _restore_config(original):
+async def _restore_config(original, agent_id: str = AGENT_ID):
     if original is None:
-        await db[registry.CONFIG_COLLECTION].delete_one({"agent_id": AGENT_ID})
+        await db[registry.CONFIG_COLLECTION].delete_one({"agent_id": agent_id})
     else:
         original.pop("_id", None)
-        await db[registry.CONFIG_COLLECTION].replace_one({"agent_id": AGENT_ID}, original, upsert=True)
+        await db[registry.CONFIG_COLLECTION].replace_one({"agent_id": agent_id}, original, upsert=True)
 
 
 async def _seed_project(brand_name: str, *, whatsapp_casting_group_name: str = "") -> str:
@@ -554,7 +560,7 @@ def test_validate_candidates_unresolved_mark_reports_failure_not_guess():
 # ---------------------------------------------------------------------------
 async def test_upload_command_creates_scan_request_and_acks_immediately():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     phone = "917000600001"
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.upload.{tag}@example.com"
@@ -585,7 +591,7 @@ async def test_upload_command_creates_scan_request_and_acks_immediately():
     finally:
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 async def test_upload_command_talent_not_found_never_guesses():
@@ -605,7 +611,7 @@ async def test_upload_command_talent_not_found_never_guesses():
     # an earlier test file), so a query containing "Person" is NOT a safe
     # probe for "matches nothing" — it can legitimately match by design.
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(f"Google TalentNotFound {tag}")
     try:
@@ -618,12 +624,12 @@ async def test_upload_command_talent_not_found_never_guesses():
         assert "no matching" in r.reply.lower() or "couldn't" in r.reply.lower()
     finally:
         await _cleanup(project_ids=[project_id])
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 async def test_upload_command_no_whatsapp_group_reports_clearly():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(f"Google NoGroup {tag}")
     talent_id = await _seed_talent(f"NoGroup Talent {tag}", whatsapp_group_name="")
@@ -637,7 +643,7 @@ async def test_upload_command_no_whatsapp_group_reports_clearly():
         assert "no whatsapp group" in r.reply.lower()
     finally:
         await _cleanup(talent_ids=[talent_id], project_ids=[project_id])
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +667,7 @@ async def test_upload_command_duplicate_talent_resolves_via_submission_email_not
     command must resolve to Record B via the project's submission email,
     never by picking either one by name."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     name = f"Ahana Dup {tag}"
     email = f"ahana.dup.{tag}@example.com"
@@ -687,7 +693,7 @@ async def test_upload_command_duplicate_talent_resolves_via_submission_email_not
     finally:
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"project_id": project_id})]
         await _cleanup(talent_ids=[talent_a, talent_b], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 async def test_resolve_authoritative_talent_no_submission_stops():

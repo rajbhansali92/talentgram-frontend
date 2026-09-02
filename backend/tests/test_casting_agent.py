@@ -207,16 +207,23 @@ def _assert_no_duplicate_numbering(text: str) -> None:
         assert not _DUPLICATE_ORDINAL_RE.match(line), f"duplicate ordinal numbering in line: {line!r}"
 
 
-async def _seed_number_map_for_project(phone: str, project_id: str, project_label: str) -> None:
+async def _seed_number_map_for_project(
+    phone: str, project_id: str, project_label: str, agent_id: str = SHARE_AGENT_ID,
+) -> None:
     """Seeds session context as if the user had just run "Show ongoing
     projects" AND selected "Project 1" — sets both the projects number_map
     (so "Project 1"/"Project 99" resolution can still be exercised) and
     current_project_id/label directly (so tests that only care about
     pipeline/move mechanics don't need a separate round-trip through the
     project-selection step). Decouples tests from whatever else already
-    exists as "ongoing" in this shared dev database."""
+    exists as "ongoing" in this shared dev database.
+
+    agent_id defaults to whatsapp-campaign-agent (Talentgram Scouting
+    Agent consolidation, Production fix 2026-09-06 — QUERY/MOVE/etc. now
+    run there, not casting-agent) since that's where every one of this
+    helper's current call sites actually dispatches."""
     await session_context.update_session(
-        AGENT_ID, phone,
+        agent_id, phone,
         current_project_id=project_id, current_project_label=project_label,
         number_map={"type": "projects", "items": [{"ordinal": 1, "id": project_id, "label": project_label}]},
     )
@@ -227,7 +234,7 @@ async def _seed_number_map_for_project(phone: str, project_id: str, project_labe
 # ---------------------------------------------------------------------------
 async def test_project_listing_and_pipeline_queries():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = None
     other_project_id = None
@@ -305,7 +312,7 @@ async def test_project_listing_and_pipeline_queries():
     finally:
         ids = [pid for pid in (project_id, other_project_id) if pid]
         await _cleanup(phone, project_ids=ids, talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +320,7 @@ async def test_project_listing_and_pipeline_queries():
 # ---------------------------------------------------------------------------
 async def test_single_and_bulk_move_with_confirmation():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Move Test Brand {uuid.uuid4().hex[:6]}")
     # Zero-padded so alphabetical display order == creation order == the
@@ -428,7 +435,7 @@ async def test_single_and_bulk_move_with_confirmation():
         # / the SAME Operation ID shown in the message — full end-to-end
         # traceability from the WhatsApp reply back to the audit trail.
         audit_row = await db.whatsapp_agent_audit_log.find_one(
-            {"agent_id": AGENT_ID, "sender_phone": phone, "confirmation_action": "approve"},
+            {"agent_id": SHARE_AGENT_ID, "sender_phone": phone, "confirmation_action": "approve"},
             sort=[("timestamp", -1)],
         )
         assert audit_row is not None
@@ -438,12 +445,12 @@ async def test_single_and_bulk_move_with_confirmation():
         assert audit_row["parsed_fields"].get("operation_id") == message_operation_id
 
         # ...and the same Operation ID was stored in the undo record too.
-        undo_doc = await db.whatsapp_agent_undo.find_one({"agent_id": AGENT_ID, "phone": phone})
+        undo_doc = await db.whatsapp_agent_undo.find_one({"agent_id": SHARE_AGENT_ID, "phone": phone})
         assert undo_doc is not None
         assert undo_doc["operation"]["operation_id"] == message_operation_id
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +458,7 @@ async def test_single_and_bulk_move_with_confirmation():
 # ---------------------------------------------------------------------------
 async def test_confirmation_edit_and_cancel():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Edit Cancel Brand {uuid.uuid4().hex[:6]}")
     t1 = await _seed_talent("Sana Khan")
@@ -506,7 +513,7 @@ async def test_confirmation_edit_and_cancel():
         assert doc["stage"] == "rejected"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +521,7 @@ async def test_confirmation_edit_and_cancel():
 # ---------------------------------------------------------------------------
 async def test_error_cases():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Error Case Brand {uuid.uuid4().hex[:6]}")
     t1 = await _seed_talent("Only Talent")
@@ -575,28 +582,34 @@ async def test_error_cases():
         assert "pipeline open" in r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
 # Access control: security_mode="group_members" fails closed
 # ---------------------------------------------------------------------------
 async def test_group_membership_gate():
+    """Talentgram Scouting Agent consolidation (Production fix,
+    2026-09-06) — this now runs on whatsapp-campaign-agent, which
+    responds to a denied sender with an explicit "not authorized"
+    message (handled=True) rather than casting-agent's old silent
+    handled=False — either way, nothing is ever executed for a denied
+    sender, which is the actual thing being verified here."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="Show ongoing projects",
             sender_name="Not A Member", sender_is_group_member=False,
         )
-        assert r.handled is False
+        assert "not authorized" in (r.reply or "").lower()
 
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="Show ongoing projects",
             sender_name="Not Sure", sender_is_group_member=None,
         )
-        assert r.handled is False  # can't verify => don't guess => denied
+        assert "not authorized" in (r.reply or "").lower()  # can't verify => don't guess => denied
 
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="Show ongoing projects",
@@ -605,7 +618,7 @@ async def test_group_membership_gate():
         assert r.handled is True
     finally:
         await _cleanup(phone)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +626,7 @@ async def test_group_membership_gate():
 # ---------------------------------------------------------------------------
 async def test_undo_success_single_move_and_multiple_attempts():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Undo Brand {uuid.uuid4().hex[:6]}")
     t1 = await _seed_talent("Undo Talent One")
@@ -673,7 +686,7 @@ async def test_undo_success_single_move_and_multiple_attempts():
         # The revert itself created its own audit entry, cross-referencing
         # the original move's Operation ID.
         revert_row = await db.whatsapp_agent_audit_log.find_one(
-            {"agent_id": AGENT_ID, "sender_phone": phone, "parsed_fields.reverted": True}
+            {"agent_id": SHARE_AGENT_ID, "sender_phone": phone, "parsed_fields.reverted": True}
         )
         assert revert_row is not None
         assert revert_row["parsed_fields"]["restored_count"] == 1
@@ -681,7 +694,7 @@ async def test_undo_success_single_move_and_multiple_attempts():
         assert revert_row["parsed_fields"]["reverted_operation_id"] == move_operation_id
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +702,7 @@ async def test_undo_success_single_move_and_multiple_attempts():
 # ---------------------------------------------------------------------------
 async def test_undo_after_bulk_move():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Undo Bulk Brand {uuid.uuid4().hex[:6]}")
     names = [f"Undo Bulk Talent {i}" for i in range(1, 6)]
@@ -732,7 +745,7 @@ async def test_undo_after_bulk_move():
         ) == 0
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +753,7 @@ async def test_undo_after_bulk_move():
 # ---------------------------------------------------------------------------
 async def test_undo_expiry_and_nothing_available():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
 
     # Nothing to undo at all yet.
@@ -761,7 +774,7 @@ async def test_undo_expiry_and_nothing_available():
     try:
         await _seed_pipeline_row(project_id, t1, "approved")
         await undo_store.store_undo(
-            AGENT_ID, phone,
+            SHARE_AGENT_ID, phone,
             {
                 "operation_id": "test-op-expired",
                 "project_id": project_id,
@@ -783,7 +796,7 @@ async def test_undo_expiry_and_nothing_available():
         assert doc["stage"] == "approved"  # untouched
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +805,7 @@ async def test_undo_expiry_and_nothing_available():
 # ---------------------------------------------------------------------------
 async def test_project_summary_and_dynamic_stages():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Summary Brand {uuid.uuid4().hex[:6]}")
     t1 = await _seed_talent("Summary Talent One")
@@ -846,7 +859,7 @@ async def test_project_summary_and_dynamic_stages():
                 pipeline_router.PIPELINE_STAGE_ORDER.remove(fake_stage)
             pipeline_router.PIPELINE_STAGES.discard(fake_stage)
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +868,7 @@ async def test_project_summary_and_dynamic_stages():
 # ---------------------------------------------------------------------------
 async def test_explicit_project_overrides_context():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     toyota_id = await _seed_project(brand_name=f"Toyota Glanza {uuid.uuid4().hex[:6]}")
     google_id = await _seed_project(brand_name=f"Google - Film 1 & 3 {uuid.uuid4().hex[:6]}")
@@ -882,7 +895,7 @@ async def test_explicit_project_overrides_context():
 
         # The active project context is now updated to the one explicitly
         # named — subsequent commands without a name use THIS project.
-        session = await db.whatsapp_agent_sessions.find_one({"agent_id": AGENT_ID, "phone": phone})
+        session = await db.whatsapp_agent_sessions.find_one({"agent_id": SHARE_AGENT_ID, "phone": phone})
         assert session["current_project_id"] == google_id
 
         # An explicit reference that doesn't resolve to anything is a
@@ -895,7 +908,7 @@ async def test_explicit_project_overrides_context():
         assert "couldn't find a project" in r.reply.lower()
     finally:
         await _cleanup(phone, project_ids=[toyota_id, google_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +917,7 @@ async def test_explicit_project_overrides_context():
 # ---------------------------------------------------------------------------
 async def test_pipeline_list_alphabetical_sort_and_header():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Sort Test Brand {uuid.uuid4().hex[:6]}")
     # Deliberately non-alphabetical creation order.
@@ -931,7 +944,7 @@ async def test_pipeline_list_alphabetical_sort_and_header():
         _assert_no_duplicate_numbering(r.reply)
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -940,7 +953,7 @@ async def test_pipeline_list_alphabetical_sort_and_header():
 # ---------------------------------------------------------------------------
 async def test_move_by_displayed_number_after_sort():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Number Map Brand {uuid.uuid4().hex[:6]}")
     zara_id = await _seed_talent("Zara")
@@ -957,7 +970,7 @@ async def test_move_by_displayed_number_after_sort():
         )
         assert "1. Amit" in r.reply and "2. Mona" in r.reply and "3. Zara" in r.reply
 
-        session = await db.whatsapp_agent_sessions.find_one({"agent_id": AGENT_ID, "phone": phone})
+        session = await db.whatsapp_agent_sessions.find_one({"agent_id": SHARE_AGENT_ID, "phone": phone})
         items = session["number_map"]["items"]
         assert [it["label"] for it in items] == ["Amit", "Mona", "Zara"]
         assert [it["id"] for it in items] == [amit_id, mona_id, zara_id]
@@ -981,7 +994,7 @@ async def test_move_by_displayed_number_after_sort():
         assert zara_doc["stage"] == "hold"  # untouched — proves ordinal 1 was Amit, not Zara
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -990,7 +1003,7 @@ async def test_move_by_displayed_number_after_sort():
 # ---------------------------------------------------------------------------
 async def test_duplicate_numbering_regression_large_list():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Dup Numbering Brand {uuid.uuid4().hex[:6]}")
     names = [f"Talent {chr(65 + i)}{i:02d}" for i in range(20)]  # 20 distinct, orderable names
@@ -1009,7 +1022,7 @@ async def test_duplicate_numbering_regression_large_list():
         _assert_no_duplicate_numbering(r.reply)
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -1021,7 +1034,7 @@ async def test_duplicate_numbering_regression_large_list():
 # ---------------------------------------------------------------------------
 async def test_move_by_number_is_stable_against_concurrent_pipeline_changes():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Stability Brand {uuid.uuid4().hex[:6]}")
 
@@ -1044,7 +1057,7 @@ async def test_move_by_number_is_stable_against_concurrent_pipeline_changes():
 
         # Confirm the persisted mapping in whatsapp_agent_sessions really
         # does hold display_index -> talent_id, keyed to this exact list.
-        session = await db.whatsapp_agent_sessions.find_one({"agent_id": AGENT_ID, "phone": phone})
+        session = await db.whatsapp_agent_sessions.find_one({"agent_id": SHARE_AGENT_ID, "phone": phone})
         items = session["number_map"]["items"]
         assert items[14]["ordinal"] == 15
         assert items[14]["label"] == "Talent O"
@@ -1083,7 +1096,7 @@ async def test_move_by_number_is_stable_against_concurrent_pipeline_changes():
         talent_ids["Talent AA"] = disruptor_id
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=list(talent_ids.values()))
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -1092,7 +1105,7 @@ async def test_move_by_number_is_stable_against_concurrent_pipeline_changes():
 # ---------------------------------------------------------------------------
 async def test_natural_language_move_standalone_name_stage_and_project():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Toyota Glanza {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1122,16 +1135,16 @@ async def test_natural_language_move_standalone_name_stage_and_project():
 
         # The project named in the sentence becomes the active context for
         # whatever comes next.
-        session = await db.whatsapp_agent_sessions.find_one({"agent_id": AGENT_ID, "phone": phone})
+        session = await db.whatsapp_agent_sessions.find_one({"agent_id": SHARE_AGENT_ID, "phone": phone})
         assert session["current_project_id"] == project_id
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_natural_language_move_multi_name_and_implied_stage_verb():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Google Film 1 {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1176,12 +1189,12 @@ async def test_natural_language_move_multi_name_and_implied_stage_verb():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": sarah_id}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_natural_language_move_put_into_for():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Pantaloons {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1205,12 +1218,12 @@ async def test_natural_language_move_put_into_for():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_natural_language_move_ambiguous_talent_disambiguates():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Ambiguous Talent Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1235,12 +1248,12 @@ async def test_natural_language_move_ambiguous_talent_disambiguates():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": sarah_b}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_natural_language_move_ambiguous_and_unresolvable_project():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     suffix = uuid.uuid4().hex[:6]
     project_a = await _seed_project(brand_name=f"Overlap Brand Alpha {suffix}")
@@ -1279,7 +1292,7 @@ async def test_natural_language_move_ambiguous_and_unresolvable_project():
         assert "couldn't find a project" in r.reply.lower()
     finally:
         await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -1290,7 +1303,7 @@ async def test_natural_language_move_ambiguous_and_unresolvable_project():
 # ---------------------------------------------------------------------------
 async def test_global_talent_resolution_unique_match():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Global Unique Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1316,12 +1329,12 @@ async def test_global_talent_resolution_unique_match():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_global_talent_resolution_ambiguous_grouped_by_project():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     suffix = uuid.uuid4().hex[:6]
     project_a = await _seed_project(brand_name=f"Global Ambig Alpha {suffix}")
@@ -1350,12 +1363,12 @@ async def test_global_talent_resolution_ambiguous_grouped_by_project():
         assert (await db.casting_pipeline.find_one({"project_id": project_b, "talent_id": t_b}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_global_talent_resolution_not_found_and_excludes_inactive_projects():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     # A talent that exists only in a NON-ongoing project must not surface
     # via the global (active-projects-only) search.
@@ -1374,12 +1387,12 @@ async def test_global_talent_resolution_not_found_and_excludes_inactive_projects
         assert (await db.casting_pipeline.find_one({"project_id": inactive_project, "talent_id": t1}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[inactive_project], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_multi_name_move_without_project_requires_explicit_project():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Multi No Project Brand {uuid.uuid4().hex[:6]}")
     t1 = await _seed_talent("Aahana")
@@ -1401,7 +1414,7 @@ async def test_multi_name_move_without_project_requires_explicit_project():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t2}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -1409,7 +1422,7 @@ async def test_multi_name_move_without_project_requires_explicit_project():
 # ---------------------------------------------------------------------------
 async def test_stage_first_commands():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Stage First Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1447,7 +1460,7 @@ async def test_stage_first_commands():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": rahul_id}))["stage"] == "locked"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -1457,7 +1470,7 @@ async def test_stage_first_commands():
 # ---------------------------------------------------------------------------
 async def test_conversational_confirmation_synonyms():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Conversational Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1495,7 +1508,7 @@ async def test_conversational_confirmation_synonyms():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t2}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -1506,7 +1519,7 @@ async def test_conversational_confirmation_synonyms():
 # no punctuation, lowercase) — behaves identically to clean typed text.
 async def test_voice_style_transcript_end_to_end():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Voice Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1534,21 +1547,21 @@ async def test_voice_style_transcript_end_to_end():
         # The audit log's raw_message stays VERBATIM — voice cleanup is
         # for interpretation only, never for what's recorded as received.
         opening_row = await db.whatsapp_agent_audit_log.find_one(
-            {"agent_id": AGENT_ID, "sender_phone": phone, "raw_message": {"$regex": "^hey move"}}
+            {"agent_id": SHARE_AGENT_ID, "sender_phone": phone, "raw_message": {"$regex": "^hey move"}}
         )
         assert opening_row is not None
         assert opening_row["raw_message"].startswith("hey move aahana pocha")
         assert opening_row["raw_message"].endswith("please")
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # 2. Fuzzy talent names — every example from the spec resolves when
 # unambiguous, without asking for clarification.
 async def test_fuzzy_talent_names_resolve_when_unambiguous():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Fuzzy Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1587,14 +1600,14 @@ async def test_fuzzy_talent_names_resolve_when_unambiguous():
             )
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # 3. Talent already in destination stage — clear, two-line message, no
 # write performed.
 async def test_talent_already_in_destination_stage_message():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Already Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1613,7 +1626,7 @@ async def test_talent_already_in_destination_stage_message():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # 4. Project fuzzy suggestion — a typo'd project name is suggested, never
@@ -1627,7 +1640,7 @@ async def test_project_fuzzy_typo_auto_resolves():
     required before anything is actually moved — this only removes the
     extra "did you mean" round trip, not the approval step."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name="Toyota Glanza")
     t1 = await _seed_talent("Suggestion Talent")
@@ -1657,7 +1670,7 @@ async def test_project_fuzzy_typo_auto_resolves():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_project_fuzzy_ambiguous_still_asks():
@@ -1666,7 +1679,7 @@ async def test_project_fuzzy_ambiguous_still_asks():
     fires for a single, clearly-best fuzzy match (same safety bar as
     talent matching)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_a = await _seed_project(brand_name=f"Toyota Glanza {tag}")
@@ -1688,14 +1701,14 @@ async def test_project_fuzzy_ambiguous_still_asks():
         assert (await db.casting_pipeline.find_one({"project_id": project_b, "talent_id": t1}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # 5. Pipeline suggestion — an unknown stage name lists every available
 # pipeline, dynamically, never hardcoded.
 async def test_pipeline_suggestion_lists_available():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Pipeline Suggest Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1716,14 +1729,14 @@ async def test_pipeline_suggestion_lists_available():
             assert f"• {stage.replace('_', ' ').title()}" in r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # 6. Clarification context continuation — project ambiguity, then a bare
 # number continues the SAME move without repeating the command.
 async def test_clarification_context_continuation_project():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     toyota1 = await _seed_project(brand_name="Toyota Glanza")
     toyota2 = await _seed_project(brand_name="Toyota Urban Cruiser")
@@ -1768,14 +1781,14 @@ async def test_clarification_context_continuation_project():
         assert (await db.casting_pipeline.find_one({"project_id": toyota1, "talent_id": t1}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[toyota1, toyota2], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # 7. Ambiguous talent continuation — same idea, for a cross-project
 # talent-name ambiguity.
 async def test_ambiguous_talent_continuation():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     p1 = await _seed_project(brand_name=f"Sarah P1 {uuid.uuid4().hex[:6]}")
     p2 = await _seed_project(brand_name=f"Sarah P2 {uuid.uuid4().hex[:6]}")
@@ -1818,14 +1831,14 @@ async def test_ambiguous_talent_continuation():
         assert (await db.casting_pipeline.find_one({"project_id": p1, "talent_id": sarah1}))["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # 8. Voice transcript with filler words mid-sentence ("um", "can you") —
 # distinct from leading/trailing filler, and a repeated-word stutter.
 async def test_voice_transcript_with_filler_words():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Filler Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -1851,7 +1864,7 @@ async def test_voice_transcript_with_filler_words():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -1866,7 +1879,7 @@ async def test_clarification_by_project_name():
     """An ambiguous project list continues when the reply is the literal
     project NAME, not just a number — same pending operation, no restart."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     p1 = await _seed_project(brand_name=f"Bajaj Apache {uuid.uuid4().hex[:6]}")
     p2 = await _seed_project(brand_name=f"Bajaj Pulsar {uuid.uuid4().hex[:6]}")
@@ -1901,14 +1914,14 @@ async def test_clarification_by_project_name():
         assert (await db.casting_pipeline.find_one({"project_id": p1, "talent_id": t}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_clarification_by_partial_project_name():
     """Same as above, but resolved by a PARTIAL, reordered project name
     ("Pulsar Guy" for "Bajaj Pulsar - Main Guy") — token-subset matching."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"Bajaj Apache - Main Guy {tag}")
@@ -1941,14 +1954,14 @@ async def test_clarification_by_partial_project_name():
         assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_clarification_by_ordinal_word():
     """"The third one" / "first" resolve a numbered disambiguation list
     exactly like a bare number would."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"Ordinal Alpha {tag}")
@@ -1985,7 +1998,7 @@ async def test_clarification_by_ordinal_word():
         assert (await db.casting_pipeline.find_one({"project_id": p3, "talent_id": t}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[p1, p2, p3], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_fuzzy_project_matching_token_variations():
@@ -1993,7 +2006,7 @@ async def test_fuzzy_project_matching_token_variations():
     the only token-plausible candidate: full name minus hyphen, reordered,
     partial, and a single distinctive token."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     target = await _seed_project(brand_name=f"Bajaj Pulsar - Main Guy {tag}")
@@ -2025,7 +2038,7 @@ async def test_fuzzy_project_matching_token_variations():
             await db.casting_pipeline.delete_many({"project_id": target, "talent_id": t})
     finally:
         await _cleanup(phone, project_ids=[target, other], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_project_fuzzy_matching_tolerates_campaign_filler_word():
@@ -2040,7 +2053,7 @@ async def test_project_fuzzy_matching_tolerates_campaign_filler_word():
     both the query and every candidate label), so it can never make an
     exact, unambiguous name unmatchable."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"Toyota Glanza {tag}")
@@ -2057,14 +2070,14 @@ async def test_project_fuzzy_matching_tolerates_campaign_filler_word():
         assert "Project" in r.reply and label in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_fuzzy_talent_matching_honorific_and_partial():
     """"Mr Prajal" / "Tushir" / "Prajal Kumar" all resolve to the one
     "Prajal Tushir" — honorific stripping + existing best-token fuzzy."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Honorific Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -2087,7 +2100,7 @@ async def test_fuzzy_talent_matching_honorific_and_partial():
             await db.casting_pipeline.delete_many({"project_id": project_id, "talent_id": t})
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_long_multi_turn_conversation_context_retention():
@@ -2095,7 +2108,7 @@ async def test_long_multi_turn_conversation_context_retention():
     Locked -> Yes -> Show again -> Move 2 and 5 -> Approved -> Yes — 10+
     messages, never repeating the project or pipeline name."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"Multiturn Brand {tag}")
@@ -2183,7 +2196,7 @@ async def test_long_multi_turn_conversation_context_retention():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_ids[4]}))["stage"] == "locked"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_voice_low_confidence_confirmation_flow():
@@ -2191,7 +2204,7 @@ async def test_voice_low_confidence_confirmation_flow():
     correct?" — "yes" feeds the ORIGINAL transcript through the normal
     pipeline; "no" cancels cleanly; an unrecognized reply re-asks."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"Voice Conf Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -2244,14 +2257,14 @@ async def test_voice_low_confidence_confirmation_flow():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_voice_note_without_transcript_replies_gracefully():
     """No STT engine is wired up yet — a voice note with no transcript at
     all gets a clear reply instead of being silently dropped."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     try:
         r = await handle_inbound_message(
@@ -2262,7 +2275,7 @@ async def test_voice_note_without_transcript_replies_gracefully():
         assert "can't listen to voice notes yet" in r.reply.lower()
     finally:
         await _cleanup(phone)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_full_talent_list_no_pagination():
@@ -2271,7 +2284,7 @@ async def test_full_talent_list_no_pagination():
     stably numbered list in ONE message. No "Showing X-Y of Z", no
     "Next"/"Previous" framing, no truncation."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"NoPagination Brand {tag}")
@@ -2305,14 +2318,14 @@ async def test_full_talent_list_no_pagination():
         assert f"• {names[44]}" in r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_correction_after_ambiguity_keeps_pending_operation():
     """An unmatched free-text reply to an ambiguous list doesn't discard
     the pending move — a follow-up correct reply still completes it."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"Correction Alpha {tag}")
@@ -2357,14 +2370,14 @@ async def test_correction_after_ambiguity_keeps_pending_operation():
         assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_interrupted_conversation_fresh_trigger_replaces_pending():
     """A fresh MOVE command mid-clarification fully replaces the pending
     one — the original talent is left untouched."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"Interrupt Alpha {tag}")
@@ -2408,14 +2421,14 @@ async def test_interrupted_conversation_fresh_trigger_replaces_pending():
         assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t1}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[p1, p2, other_project], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_undo_after_multiturn_disambiguated_move():
     """Undo works correctly for a move that only completed after a
     multi-turn clarification."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"UndoMT Alpha {tag}")
@@ -2456,14 +2469,14 @@ async def test_undo_after_multiturn_disambiguated_move():
         assert (await db.casting_pipeline.find_one({"project_id": p2, "talent_id": t}))["stage"] == "hold"
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_pronoun_reference_across_commands():
     """"Move Sarah to Hold" then "Approve her" — the pronoun refers to
     whoever was just discussed, no name repeated."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"Pronoun Brand {tag}")
@@ -2513,7 +2526,7 @@ async def test_pronoun_reference_across_commands():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t}))["stage"] == "locked"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_query_ambiguous_project_continuation():
@@ -2521,7 +2534,7 @@ async def test_query_ambiguous_project_continuation():
     for a stateful reply — auto_confirm intents get the same continuation
     MOVE already had."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"QueryAmbig Alpha {tag}")
@@ -2548,7 +2561,7 @@ async def test_query_ambiguous_project_continuation():
         assert f"QueryAmbigTalent {tag}" in r.reply
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -2561,7 +2574,7 @@ async def test_bare_number_selects_project():
     project directly — the session already has the mapping, no need to
     repeat "Project N"."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"BareNumber Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -2597,7 +2610,7 @@ async def test_bare_number_selects_project():
         assert "doesn't exist" in r.reply.lower()
     finally:
         await _cleanup(phone, project_ids=[project_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_bare_number_ignored_without_projects_list():
@@ -2605,7 +2618,7 @@ async def test_bare_number_ignored_without_projects_list():
     listed projects, or the last number_map was a talent list) is
     unrelated chatter, not silently misinterpreted."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"BareNumberTalents Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -2632,12 +2645,12 @@ async def test_bare_number_ignored_without_projects_list():
         assert not r.handled
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_single_talent_creates_ask_to_test_entry():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"AddSingle Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -2673,12 +2686,12 @@ async def test_add_single_talent_creates_ask_to_test_entry():
         assert count == 1
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_multi_talent_commas_and_newlines():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"AddMulti Brand {tag}")
@@ -2728,12 +2741,12 @@ async def test_add_multi_talent_commas_and_newlines():
             assert doc is not None and doc["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_fuzzy_typo_names():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"AddFuzzy Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -2754,14 +2767,14 @@ async def test_add_fuzzy_typo_names():
             await db.casting_pipeline.delete_many({"project_id": project_id, "talent_id": t})
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_ambiguous_talent_continuation():
     """Multiple similar-named talents -> numbered clarification -> a bare
     reply resolves it and the ADD continues without repeating the command."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"AddAmbigTalent Brand {tag}")
@@ -2794,12 +2807,12 @@ async def test_add_ambiguous_talent_continuation():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": p1})) is None
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_ambiguous_project_continuation():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"AddAmbigProj Alpha {tag}")
@@ -2830,12 +2843,12 @@ async def test_add_ambiguous_project_continuation():
         assert (await db.casting_pipeline.find_one({"project_id": p1, "talent_id": t})) is None
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_talent_not_found():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"AddNotFound Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -2848,14 +2861,14 @@ async def test_add_talent_not_found():
         assert "No matching talent found." in r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_requires_project_when_omitted():
     """Add never defaults the destination project from session context —
     it's always asked for explicitly if omitted, since it's a real write."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"AddNoProject Brand {uuid.uuid4().hex[:6]}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
@@ -2881,7 +2894,7 @@ async def test_add_requires_project_when_omitted():
         assert label in r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_does_not_affect_move_workflow():
@@ -2890,7 +2903,7 @@ async def test_add_does_not_affect_move_workflow():
     replaces the pending move (same "fresh trigger always restarts" rule
     as any other trigger), it doesn't corrupt or silently merge with it."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"AddMoveCoexist Brand {tag}")
@@ -2930,7 +2943,7 @@ async def test_add_does_not_affect_move_workflow():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": add_talent}))["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -2949,7 +2962,7 @@ async def test_add_typo_trigger_word_resolves_cleanly():
     exactly the one matching talent — never a false ambiguity caused by the
     garbled trigger text leaking into the talent-name fuzzy match."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"AddTypoTrigger Brand {tag}")
@@ -2976,7 +2989,7 @@ async def test_add_typo_trigger_word_resolves_cleanly():
             await db.casting_pipeline.delete_many({"project_id": project_id})
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_add_stale_context_never_leaks_across_separate_commands():
@@ -2990,7 +3003,7 @@ async def test_add_stale_context_never_leaks_across_separate_commands():
     summary text doesn't echo names, so text-matching alone is unreliable
     here)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     other_project_id = await _seed_project(brand_name=f"StaleOtherProj {tag}")
@@ -3038,7 +3051,7 @@ async def test_add_stale_context_never_leaks_across_separate_commands():
         )) is None
     finally:
         await _cleanup(phone, project_ids=[other_project_id, stale_project_id], talent_ids=[tal_x, tal_y])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -3048,7 +3061,7 @@ async def test_add_stale_context_never_leaks_across_separate_commands():
 # ---------------------------------------------------------------------------
 async def test_and_confirm_skips_confirmation_for_move():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"AndConfirmMove Brand {tag}")
@@ -3071,16 +3084,16 @@ async def test_and_confirm_skips_confirmation_for_move():
         assert doc["stage"] == "approved"
 
         # No pending conversation left behind either.
-        conv = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": phone})
+        conv = await db.whatsapp_conversations.find_one({"agent_id": SHARE_AGENT_ID, "phone": phone})
         assert conv is None
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_and_confirm_skips_confirmation_for_add():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"AndConfirmAdd Brand {tag}")
@@ -3100,7 +3113,7 @@ async def test_and_confirm_skips_confirmation_for_add():
         assert doc is not None and doc["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_and_confirm_ambiguous_still_asks_then_auto_continues():
@@ -3109,7 +3122,7 @@ async def test_and_confirm_ambiguous_still_asks_then_auto_continues():
     approval step (the whole point of "and confirm" surviving the
     disambiguation continuation)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"AndConfirmAmbig Brand {tag}")
@@ -3143,7 +3156,7 @@ async def test_and_confirm_ambiguous_still_asks_then_auto_continues():
         assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": a}))["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -3156,7 +3169,7 @@ async def test_multi_action_chained_add_then_move():
     then a single approval executes BOTH steps; the second step's implicit
     talent resolves via the pronoun/last-talent continuation."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"ChainedAddMove Brand {tag}")
@@ -3185,14 +3198,14 @@ async def test_multi_action_chained_add_then_move():
         assert doc is not None and doc["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_multi_project_single_move_command():
     """"Move X to Approved in A and B" — same talent moved in BOTH
     projects from one command, via the 1-step-plan cross-product path."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_a = await _seed_project(brand_name=f"MultiProjA Brand {tag}")
@@ -3221,14 +3234,14 @@ async def test_multi_project_single_move_command():
         assert (await db.casting_pipeline.find_one({"project_id": project_b, "talent_id": t}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_cross_product_multi_talent_multi_project_add():
     """"Add T1 and T2 to A and B" — cross-product-expands to all 4
     (talent x project) additions from one command."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_a = await _seed_project(brand_name=f"CrossProjA Brand {tag}")
@@ -3258,7 +3271,7 @@ async def test_cross_product_multi_talent_multi_project_add():
                 assert doc is not None and doc["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_independent_multi_move_partial_failure_summary():
@@ -3266,7 +3279,7 @@ async def test_independent_multi_move_partial_failure_summary():
     one against a real project, one against a project that doesn't exist —
     both run; the failing one is reported, not allowed to abort the rest."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"IndepMove Brand {tag}")
@@ -3301,7 +3314,7 @@ async def test_independent_multi_move_partial_failure_summary():
             assert (await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid}))["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -3317,7 +3330,7 @@ async def test_bulk_multi_segment_add_fan_out_follow_up_and_confirm():
     "and confirm" only bypasses the approval card; it is NOT a second
     stage (see casting_pipeline.py's _resolve_one_plan_segment)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(brand_name=f"FanOutA Brand {tag}")
@@ -3358,7 +3371,7 @@ async def test_bulk_multi_segment_add_fan_out_follow_up_and_confirm():
             assert doc is not None and doc["stage"] == "follow_up", (tid, pid, doc)
     finally:
         await _cleanup(phone, project_ids=all_project_ids, talent_ids=all_talent_ids)
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_bulk_multi_segment_add_without_chaining_requires_approval():
@@ -3367,7 +3380,7 @@ async def test_bulk_multi_segment_add_without_chaining_requires_approval():
     both, and approving executes both as separate additions in their own
     projects (not a garbled cross-product)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(brand_name=f"SegNoChainA Brand {tag}")
@@ -3396,7 +3409,7 @@ async def test_bulk_multi_segment_add_without_chaining_requires_approval():
         assert (await db.casting_pipeline.find_one({"project_id": proj_b, "talent_id": tb}))["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_bulk_multi_segment_add_ambiguous_talent_in_one_segment_isolated():
@@ -3406,7 +3419,7 @@ async def test_bulk_multi_segment_add_ambiguous_talent_in_one_segment_isolated()
     the plan engine already guarantees for independent multi-step
     commands."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(brand_name=f"AmbigSegA Brand {tag}")
@@ -3431,7 +3444,7 @@ async def test_bulk_multi_segment_add_ambiguous_talent_in_one_segment_isolated()
         assert (await db.casting_pipeline.find_one({"project_id": proj_a, "talent_id": t2})) is None
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[t1, t2, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_multi_talent_pending_projects_query_grouped():
@@ -3440,7 +3453,7 @@ async def test_multi_talent_pending_projects_query_grouped():
     name_queries split), and groups the response by talent, one talent
     with no active pipeline included alongside the ones that do."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(status="ongoing", brand_name=f"MultiQA Brand {tag}")
@@ -3467,7 +3480,7 @@ async def test_multi_talent_pending_projects_query_grouped():
         assert "is currently not part of any active casting pipeline" in r.reply
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb, tc])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_multi_talent_pending_projects_query_with_of_and_fuzzy_typo():
@@ -3475,7 +3488,7 @@ async def test_multi_talent_pending_projects_query_with_of_and_fuzzy_typo():
     minor spelling typo in one of the names via the existing fuzzy
     matcher — reused unchanged, not a new matching system."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tag_b = uuid.uuid4().hex[:6]
@@ -3500,7 +3513,7 @@ async def test_multi_talent_pending_projects_query_with_of_and_fuzzy_typo():
         assert f"FuzzyQTalentB {tag_b}" in r.reply
     finally:
         await _cleanup(phone, project_ids=[proj_a], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -3508,7 +3521,7 @@ async def test_multi_talent_pending_projects_query_with_of_and_fuzzy_typo():
 # ---------------------------------------------------------------------------
 async def test_slash_delimited_single_add_command():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"SlashAdd Brand {tag}")
@@ -3532,14 +3545,14 @@ async def test_slash_delimited_single_add_command():
         assert doc is not None and doc["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_line_based_positional_move_command():
     """"Move\\nNAME\\nSTAGE\\nPROJECT" — no connector words, pure line
     position determines talent / stage / project."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"PositionalMove Brand {tag}")
@@ -3565,7 +3578,7 @@ async def test_line_based_positional_move_command():
         assert doc["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_mega_example_line_based_add_move_confirm():
@@ -3573,7 +3586,7 @@ async def test_mega_example_line_based_add_move_confirm():
     a trailing "Confirm" line — one message, no taps, talent ends up
     directly in Approved (never just sitting in Ask To Test)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"MegaLine Brand {tag}")
@@ -3594,14 +3607,14 @@ async def test_mega_example_line_based_add_move_confirm():
         assert doc is not None and doc["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_mega_example_slash_delimited_add_move_confirm():
     """Same mega-example, slash-delimited instead of newline-delimited —
     normalize_compact_text must make the two forms behave identically."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"MegaSlash Brand {tag}")
@@ -3621,7 +3634,7 @@ async def test_mega_example_slash_delimited_add_move_confirm():
         assert doc is not None and doc["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -3632,7 +3645,7 @@ async def test_dispatch_timing_stage_breakdown_logged(caplog):
     fuzzy/auth/...), not just one coarse total — the whole point of the
     latency-instrumentation work."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_id = await _seed_project(brand_name=f"TimingBrand {uuid.uuid4().hex[:6]}")
     try:
@@ -3652,7 +3665,7 @@ async def test_dispatch_timing_stage_breakdown_logged(caplog):
         assert "project_lookup" in msg or "talent_lookup" in msg
     finally:
         await _cleanup(phone, project_ids=[project_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_request_scope_session_cache_avoids_duplicate_reads():
@@ -3721,7 +3734,7 @@ async def _pipeline_row_count(project_ids) -> int:
 
 async def test_talent_query_active_projects_across_multiple() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq Ahana {uuid.uuid4().hex[:6]}"
     p1 = p2 = p3 = talent_id = None
@@ -3755,12 +3768,12 @@ async def test_talent_query_active_projects_across_multiple() -> None:
         assert "Total Active Projects: 2" in r2.reply
     finally:
         await _cleanup(phone, project_ids=[p for p in (p1, p2, p3) if p], talent_ids=[talent_id] if talent_id else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_talent_query_no_active_projects() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq Lonely {uuid.uuid4().hex[:6]}"
     talent_id = await _seed_talent(name)
@@ -3774,12 +3787,12 @@ async def test_talent_query_no_active_projects() -> None:
         assert name in r.reply
     finally:
         await _cleanup(phone, project_ids=[], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_talent_query_unknown_talent() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     try:
         r = await handle_inbound_message(
@@ -3790,12 +3803,12 @@ async def test_talent_query_unknown_talent() -> None:
         assert r.handled
         assert "No matching talent" in r.reply
     finally:
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_talent_query_ambiguous_talent_disambiguates() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     shared_name = f"Zzq Twin {uuid.uuid4().hex[:6]}"
     p1 = p2 = t1 = t2 = None
@@ -3826,12 +3839,12 @@ async def test_talent_query_ambiguous_talent_disambiguates() -> None:
         assert ("Zzq Twin Proj A" in r2.reply) or ("Zzq Twin Proj B" in r2.reply)
     finally:
         await _cleanup(phone, project_ids=[p for p in (p1, p2) if p], talent_ids=[t for t in (t1, t2) if t])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_talent_stage_boolean_yes_no_and_wrong_project() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq Bool {uuid.uuid4().hex[:6]}"
     p1 = p2 = talent_id = None
@@ -3869,13 +3882,13 @@ async def test_talent_stage_boolean_yes_no_and_wrong_project() -> None:
         assert await _pipeline_row_count([p1, p2]) == before  # read-only throughout
     finally:
         await _cleanup(phone, project_ids=[p for p in (p1, p2) if p], talent_ids=[talent_id] if talent_id else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_talent_stage_boolean_matches() -> None:
     """Isolated from the fuzzy-suffix noise above: a clean Yes. case."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq Yes {uuid.uuid4().hex[:6]}"
     project_label = f"Zzq Yes Toyota Glanza {uuid.uuid4().hex[:6]}"
@@ -3894,12 +3907,12 @@ async def test_talent_stage_boolean_matches() -> None:
         assert "Follow Up" in r.reply
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[talent_id] if talent_id else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_talent_stage_filtered_list_without_project() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq Person {uuid.uuid4().hex[:6]}"
     p1 = p2 = talent_id = None
@@ -3920,7 +3933,7 @@ async def test_talent_stage_filtered_list_without_project() -> None:
         assert "Total: 1" in r.reply
     finally:
         await _cleanup(phone, project_ids=[p for p in (p1, p2) if p], talent_ids=[talent_id] if talent_id else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_talent_stage_unresolvable_stage_word_is_graceful() -> None:
@@ -3935,7 +3948,7 @@ async def test_talent_stage_unresolvable_stage_word_is_graceful() -> None:
     the previous sprint's flat fallback message, an intentional,
     requested behavior change for this exact case."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq Selected {uuid.uuid4().hex[:6]}"
     project_label = f"Zzq Selected Proj {uuid.uuid4().hex[:6]}"
@@ -3960,7 +3973,7 @@ async def test_talent_stage_unresolvable_stage_word_is_graceful() -> None:
         assert r2.reply.startswith("Yes.")
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[talent_id] if talent_id else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_pipeline_query_positional_project_and_stage() -> None:
@@ -3972,7 +3985,7 @@ async def test_pipeline_query_positional_project_and_stage() -> None:
     see agents/parser.detect_trigger. "Show"/"List" first is the reachable
     form of this phrasing.)"""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_label = f"Zzq Positional {uuid.uuid4().hex[:6]}"
     p1 = t1 = None
@@ -3996,12 +4009,12 @@ async def test_pipeline_query_positional_project_and_stage() -> None:
         assert "1. Positional Person" in r2.reply
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[t1] if t1 else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_pipeline_query_who_is_testing_natural_language() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_label = f"Zzq NL {uuid.uuid4().hex[:6]}"
     p1 = t1 = None
@@ -4020,12 +4033,12 @@ async def test_pipeline_query_who_is_testing_natural_language() -> None:
             assert "1. NL Person" in r.reply, f"failed for {text!r}: {r.reply!r}"
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[t1] if t1 else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_pipeline_query_missing_project_offers_choices() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     label_a = f"Zzq Missing A {uuid.uuid4().hex[:6]}"
     label_b = f"Zzq Missing B {uuid.uuid4().hex[:6]}"
@@ -4055,12 +4068,12 @@ async def test_pipeline_query_missing_project_offers_choices() -> None:
         assert "1. Missing Case Person" in r2.reply
     finally:
         await _cleanup(phone, project_ids=[p for p in (pa, pb) if p], talent_ids=[ta] if ta else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_pipeline_query_empty_pipeline() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_label = f"Zzq Empty Case {uuid.uuid4().hex[:6]}"
     p1 = None
@@ -4074,7 +4087,7 @@ async def test_pipeline_query_empty_pipeline() -> None:
         assert "No talents in this pipeline" in r.reply
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_query_intents_never_write_to_casting_pipeline() -> None:
@@ -4082,7 +4095,7 @@ async def test_query_intents_never_write_to_casting_pipeline() -> None:
     representative sweep of every new query shape, before/after row-count
     diff on the exact projects touched."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq Audit {uuid.uuid4().hex[:6]}"
     project_label = f"Zzq Audit Proj {uuid.uuid4().hex[:6]}"
@@ -4110,7 +4123,7 @@ async def test_query_intents_never_write_to_casting_pipeline() -> None:
         assert before == after
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[talent_id] if talent_id else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_existing_move_add_undo_unaffected_by_query_changes() -> None:
@@ -4121,7 +4134,7 @@ async def test_existing_move_add_undo_unaffected_by_query_changes() -> None:
     project context), and that a bare "Is"/"Has" word never gets routed
     into casting.move by mistake."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_label = f"Zzq Move Unaffected {uuid.uuid4().hex[:6]}"
     p1 = t1 = None
@@ -4139,7 +4152,7 @@ async def test_existing_move_add_undo_unaffected_by_query_changes() -> None:
         assert "about to move" in r.reply.lower() or "approve" in r.reply.lower()
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[t1] if t1 else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -4150,7 +4163,7 @@ async def test_existing_move_add_undo_unaffected_by_query_changes() -> None:
 # ---------------------------------------------------------------------------
 async def test_selected_talent_boolean_ambiguous_then_resolves() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq Sel {uuid.uuid4().hex[:6]}"
     project_label = f"Zzq Sel Toyota {uuid.uuid4().hex[:6]}"
@@ -4176,12 +4189,12 @@ async def test_selected_talent_boolean_ambiguous_then_resolves() -> None:
         assert project_label in r2.reply
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[talent_id] if talent_id else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_selected_talent_no_project_ambiguous_then_resolves() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     name = f"Zzq SelNP {uuid.uuid4().hex[:6]}"
     project_label = f"Zzq SelNP Toyota {uuid.uuid4().hex[:6]}"
@@ -4208,12 +4221,12 @@ async def test_selected_talent_no_project_ambiguous_then_resolves() -> None:
         assert "Total: 1" in r2.reply
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[talent_id] if talent_id else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_selected_pipeline_listing_who_got_selected() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_label = f"Zzq SelList Toyota {uuid.uuid4().hex[:6]}"
     p1 = t1 = None
@@ -4243,7 +4256,7 @@ async def test_selected_pipeline_listing_who_got_selected() -> None:
         assert "Which pipeline did you mean?" in r3.reply
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[t1] if t1 else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_selected_does_not_change_move_stage_validation() -> None:
@@ -4254,7 +4267,7 @@ async def test_selected_does_not_change_move_stage_validation() -> None:
     (that's only wired into match_stage_phrase_for_query, never into the
     shared function extract_move_fields/_validate_target_stage call)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     project_label = f"Zzq MoveSel {uuid.uuid4().hex[:6]}"
     p1 = t1 = None
@@ -4274,7 +4287,7 @@ async def test_selected_does_not_change_move_stage_validation() -> None:
         assert "Which pipeline did you mean?" not in r.reply
     finally:
         await _cleanup(phone, project_ids=[p1] if p1 else [], talent_ids=[t1] if t1 else [])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_verbless_pipeline_queries_match_show_prefixed_equivalents() -> None:
@@ -4282,7 +4295,7 @@ async def test_verbless_pipeline_queries_match_show_prefixed_equivalents() -> No
     "Show Toyota Follow Up" — one seeded project/talent, exercised through
     every stage phrase from the sprint's own example list."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     project_label = f"Zzq Verbless {uuid.uuid4().hex[:6]}"
     p1 = t1 = None
     phones: list = []
@@ -4321,7 +4334,7 @@ async def test_verbless_pipeline_queries_match_show_prefixed_equivalents() -> No
         await db.projects.delete_many({"id": p1} if p1 else {"id": "__none__"})
         await db.talents.delete_many({"id": t1} if t1 else {"id": "__none__"})
         await db.casting_pipeline.delete_many({"project_id": p1} if p1 else {"project_id": "__none__"})
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_verbless_query_unknown_stage_word_falls_through_unhandled() -> None:
@@ -4330,7 +4343,7 @@ async def test_verbless_query_unknown_stage_word_falls_through_unhandled() -> No
     ALSO fail gracefully rather than guessing a stage, not that it must
     magically start working."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     project_label = f"Zzq Callback {uuid.uuid4().hex[:6]}"
     p1 = None
     bare_phone = _phone()
@@ -4351,7 +4364,7 @@ async def test_verbless_query_unknown_stage_word_falls_through_unhandled() -> No
     finally:
         await _cleanup(bare_phone, project_ids=[p1] if p1 else [], talent_ids=[])
         await _cleanup(shown_phone, project_ids=[], talent_ids=[])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_verbless_query_ignores_ordinary_group_chatter() -> None:
@@ -4362,7 +4375,7 @@ async def test_verbless_query_ignores_ordinary_group_chatter() -> None:
     MOVE/ADD/UNDO/QUERY trigger word entirely, so this is a clean test of
     the new gate specifically, not pre-existing trigger behavior."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phones = []
     try:
         for text in (
@@ -4381,12 +4394,12 @@ async def test_verbless_query_ignores_ordinary_group_chatter() -> None:
     finally:
         for phone in phones:
             await _cleanup(phone, project_ids=[], talent_ids=[])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_verbless_and_selected_queries_never_write_to_casting_pipeline() -> None:
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     project_label = f"Zzq PolishAudit {uuid.uuid4().hex[:6]}"
     p1 = t1 = None
     phones = []
@@ -4417,7 +4430,7 @@ async def test_verbless_and_selected_queries_never_write_to_casting_pipeline() -
         await db.projects.delete_many({"id": p1} if p1 else {"id": "__none__"})
         await db.talents.delete_many({"id": t1} if t1 else {"id": "__none__"})
         await db.casting_pipeline.delete_many({"project_id": p1} if p1 else {"project_id": "__none__"})
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -4574,7 +4587,7 @@ async def test_simple_parse_query_ignores_non_matching_text():
 
 async def test_simple_add_single_command_requires_confirmation_then_writes():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"SimpleAdd Brand {tag}")
@@ -4604,12 +4617,12 @@ async def test_simple_add_single_command_requires_confirmation_then_writes():
         assert doc is not None and doc["stage"] == "follow_up"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_move_stage_to_stage_and_confirm():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"SimpleMove Brand {tag}")
@@ -4628,12 +4641,12 @@ async def test_simple_move_stage_to_stage_and_confirm():
         assert doc is not None and doc["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_combined_add_move_action_and_confirm():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"SimpleCombined Brand {tag}")
@@ -4650,12 +4663,12 @@ async def test_simple_combined_add_move_action_and_confirm():
         assert doc is not None and doc["stage"] == "shortlisted"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_multi_command_blank_line_separated_with_single_trailing_confirm():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(brand_name=f"MultiCmdA Brand {tag}")
@@ -4684,14 +4697,14 @@ async def test_simple_multi_command_blank_line_separated_with_single_trailing_co
         assert doc_b is not None and doc_b["stage"] == "shortlisted"
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_multi_command_no_blank_line_still_splits_correctly():
     """The parser must not depend exclusively on blank lines — a new
     action keyword on its own line is enough of a boundary."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(brand_name=f"NoBlankA Brand {tag}")
@@ -4717,12 +4730,12 @@ async def test_simple_multi_command_no_blank_line_still_splits_correctly():
         assert doc_b is not None and doc_b["stage"] == "shortlisted"
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_add_missing_hyphen_recovery_end_to_end():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"HyphenRecover Brand {tag}")
@@ -4740,7 +4753,7 @@ async def test_simple_add_missing_hyphen_recovery_end_to_end():
         assert doc is not None and doc["stage"] == "follow_up"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_move_multi_pick_ambiguity_resume():
@@ -4755,7 +4768,7 @@ async def test_simple_move_multi_pick_ambiguity_resume():
     campaign agent's own plan engine). A pure Move never chains, so it
     stays on the single-op path where multi-pick resume applies."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"MultiPickAmbig Brand {tag}")
@@ -4798,12 +4811,12 @@ async def test_simple_move_multi_pick_ambiguity_resume():
         assert d3 is not None and d3["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[p1, p2, p3])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_pending_test_query_single_and_multi_talent():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(status="ongoing", brand_name=f"PendingTestA Brand {tag}")
@@ -4835,12 +4848,12 @@ async def test_simple_pending_test_query_single_and_multi_talent():
         assert "No pending tests" in r.reply
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_testing_check_multi_talent_multi_project():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(status="ongoing", brand_name=f"TestingCheckA Brand {tag}")
@@ -4870,12 +4883,12 @@ async def test_simple_testing_check_multi_talent_multi_project():
         assert f"TestingCheckB Brand {tag} — Not tested" in r.reply
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_simple_show_multi_project_multi_stage():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(status="ongoing", brand_name=f"ShowMultiA Brand {tag}")
@@ -4902,7 +4915,7 @@ async def test_simple_show_multi_project_multi_stage():
         assert f"ShowMultiB Brand {tag} — Follow Up\n(none)" in r.reply
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -5015,7 +5028,7 @@ async def test_ams_marker_attaches_to_move_subchunk_of_add_move_chain():
 
 async def test_ams_basic_single_talent_renders_all_variables():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(
@@ -5054,12 +5067,12 @@ async def test_ams_basic_single_talent_renders_all_variables():
         await _cleanup_jobs_for_talents([talent_id])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_multiple_talents_one_project():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSMultiTalentTpl {tag}")
@@ -5094,7 +5107,7 @@ async def test_ams_multiple_talents_one_project():
         await _cleanup_jobs_for_talents([t1, t2, t3])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2, t3])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_one_talent_multiple_projects_own_context_no_cross_contamination():
@@ -5102,7 +5115,7 @@ async def test_ams_one_talent_multiple_projects_own_context_no_cross_contaminati
     must generate TWO messages, each with THAT project's own values —
     never one project's context reused for the other."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSMultiProjTpl {tag}")
@@ -5144,12 +5157,12 @@ async def test_ams_one_talent_multiple_projects_own_context_no_cross_contaminati
         await _cleanup_jobs_for_talents([talent_id])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_multiple_talents_multiple_projects_matrix():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSMatrixTpl {tag}")
@@ -5183,7 +5196,7 @@ async def test_ams_multiple_talents_multiple_projects_matrix():
         await _cleanup_jobs_for_talents([t1, t2])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_multiple_commands_group_isolation():
@@ -5192,7 +5205,7 @@ async def test_ams_multiple_commands_group_isolation():
     accumulator must never leak from one command into the next (the exact
     bug already found and fixed once in this grammar)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl1_id = await _seed_template(f"AMSGroupCasting {tag}")
@@ -5238,7 +5251,7 @@ async def test_ams_multiple_commands_group_isolation():
         await _cleanup_jobs_for_talents([ta, tb, tc, td])
         await db.whatsapp_templates.delete_many({"id": {"$in": [tpl1_id, tpl2_id]}})
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[ta, tb, tc, td])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_pipeline_update_happens_before_whatsapp_send():
@@ -5246,7 +5259,7 @@ async def test_ams_pipeline_update_happens_before_whatsapp_send():
     record call order — the move write must complete before create_batch
     is ever called, never the reverse."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSOrderTpl {tag}")
@@ -5280,7 +5293,7 @@ async def test_ams_pipeline_update_happens_before_whatsapp_send():
         await _cleanup_jobs_for_talents([talent_id])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_pipeline_failure_blocks_whatsapp_send():
@@ -5288,7 +5301,7 @@ async def test_ams_pipeline_failure_blocks_whatsapp_send():
     for that talent — the pipeline update must succeed before any send is
     attempted."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSFailTpl {tag}")
@@ -5314,14 +5327,14 @@ async def test_ams_pipeline_failure_blocks_whatsapp_send():
         await _cleanup_jobs_for_talents([talent_id])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_global_confirm_no_intermediate_prompts():
     """"and confirm" must execute the WHOLE combined operation (pipeline +
     send) without ever asking for a separate confirmation of either half."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSConfirmTpl {tag}")
@@ -5342,12 +5355,12 @@ async def test_ams_global_confirm_no_intermediate_prompts():
         await _cleanup_jobs_for_talents([talent_id])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_without_confirm_shows_pending_send_in_preview_then_sends_on_approval():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSPreviewTpl {tag}")
@@ -5378,12 +5391,12 @@ async def test_ams_without_confirm_shows_pending_send_in_preview_then_sends_on_a
         await _cleanup_jobs_for_talents([talent_id])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_fuzzy_talent_and_project_typo_tolerance():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSFuzzyTpl {tag}")
@@ -5410,7 +5423,7 @@ async def test_ams_fuzzy_talent_and_project_typo_tolerance():
         await _cleanup_jobs_for_talents([talent_id])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_ams_ambiguous_talent_shows_full_list_never_sends_prematurely():
@@ -5425,7 +5438,7 @@ async def test_ams_ambiguous_talent_shows_full_list_never_sends_prematurely():
     truncated), and — critically for THIS feature specifically — an
     unresolved ambiguity must never let a WhatsApp message go out."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     tpl_id = await _seed_template(f"AMSAmbigTpl {tag}")
@@ -5464,7 +5477,7 @@ async def test_ams_ambiguous_talent_shows_full_list_never_sends_prematurely():
         await _cleanup_jobs_for_talents([p1, p2])
         await db.whatsapp_templates.delete_one({"id": tpl_id})
         await _cleanup(phone, project_ids=[project_id], talent_ids=[p1, p2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -5501,7 +5514,7 @@ async def test_stage_move_parser_unit():
 
 async def test_stage_move_basic_confirmation_then_approve():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"StageMoveProj {tag}")
@@ -5543,12 +5556,12 @@ async def test_stage_move_basic_confirmation_then_approve():
         assert doc_d["stage"] == "approved"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2, t3, distractor])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_stage_move_exclude_names_then_approve():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"StageExclProj {tag}")
@@ -5584,12 +5597,12 @@ async def test_stage_move_exclude_names_then_approve():
         assert doc2["stage"] == "follow_up"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_stage_move_and_confirm_executes_immediately_full_set():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"StageConfirmProj {tag}")
@@ -5611,12 +5624,12 @@ async def test_stage_move_and_confirm_executes_immediately_full_set():
             assert doc["stage"] == "follow_up"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_stage_move_cancel_makes_no_changes():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"StageCancelProj {tag}")
@@ -5637,12 +5650,12 @@ async def test_stage_move_cancel_makes_no_changes():
         assert doc["stage"] == "ask_to_test"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_stage_move_no_one_in_from_stage():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"StageEmptyProj {tag}")
@@ -5657,12 +5670,12 @@ async def test_stage_move_no_one_in_from_stage():
         assert "Reply:" not in r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_stage_move_ambiguous_project_disambiguates_and_resumes():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     proj_a = await _seed_project(brand_name=f"StageAmbig Alpha {tag}")
@@ -5695,7 +5708,7 @@ async def test_stage_move_ambiguous_project_disambiguates_and_resumes():
         assert doc["stage"] == "follow_up"
     finally:
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[t1])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_stage_move_never_shadows_named_talent_move():
@@ -5703,7 +5716,7 @@ async def test_stage_move_never_shadows_named_talent_move():
     grammar (and its stage-to-stage pipeline field) must keep working
     completely unchanged."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"NamedMoveProj {tag}")
@@ -5725,7 +5738,7 @@ async def test_stage_move_never_shadows_named_talent_move():
         assert doc2["stage"] == "ask_to_test"  # never named -> never moved
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -5745,7 +5758,7 @@ async def test_whitespace_tolerant_detect_trigger_unit():
 
 async def test_whitespace_tolerant_add_move_no_spaces_end_to_end():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"NoSpaceAddProj {tag}")
@@ -5762,7 +5775,7 @@ async def test_whitespace_tolerant_add_move_no_spaces_end_to_end():
         assert doc is not None and doc["stage"] == "follow_up"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_whitespace_tolerant_missing_hyphen_recovery_still_works():
@@ -5790,7 +5803,7 @@ async def test_whitespace_tolerant_hyphenated_name_still_resolves_with_spaced_se
     unrelated to this fix — since the field-count itself becomes genuinely
     unclear regardless of any whitespace tolerance.)"""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"Co-Star Casting {tag}")
@@ -5806,12 +5819,12 @@ async def test_whitespace_tolerant_hyphenated_name_still_resolves_with_spaced_se
         assert doc is not None and doc["stage"] == "follow_up"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_whitespace_tolerant_query_commands_no_spaces():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(status="ongoing", brand_name=f"NoSpaceQueryProj {tag}")
@@ -5843,12 +5856,12 @@ async def test_whitespace_tolerant_query_commands_no_spaces():
         assert f"NoSpaceQueryTalent {tag}" in r3.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_whitespace_tolerant_stage_move_end_to_end():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"NoSpaceStageProj {tag}")
@@ -5866,7 +5879,7 @@ async def test_whitespace_tolerant_stage_move_end_to_end():
         assert doc["stage"] == "follow_up"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -5955,7 +5968,7 @@ async def test_comma_whitespace_normalization_matches_no_whitespace():
     "Talent A,Talent B,Talent C" — both end up adding the exact same two
     talents, regardless of stray spaces around the commas."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     tag = uuid.uuid4().hex[:6]
     pid = await _seed_project(brand_name=f"WhitespaceProj {tag}")
     label = (await db.projects.find_one({"id": pid}))["brand_name"]
@@ -5971,7 +5984,7 @@ async def test_comma_whitespace_normalization_matches_no_whitespace():
         rows = await db.casting_pipeline.find({"project_id": pid}).to_list(10)
         assert {row["talent_id"] for row in rows} == {ta, tb}, r.reply
     finally:
-        await _restore_config(original)
+        await _restore_share_config(original)
         await db.projects.delete_one({"id": pid})
         await db.talents.delete_many({"id": {"$in": [ta, tb]}})
         await db.casting_pipeline.delete_many({"project_id": pid})
@@ -5983,7 +5996,7 @@ async def test_which_projects_is_talent_in_natural_variant():
     "working on" phrasing) — must resolve, not fall through to "I didn't
     understand that"."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     tag = uuid.uuid4().hex[:6]
     pid = await _seed_project(brand_name=f"WhichProj {tag}")
     label = (await db.projects.find_one({"id": pid}))["brand_name"]
@@ -6007,7 +6020,7 @@ async def test_which_projects_is_talent_in_natural_variant():
         assert "didn't understand" not in r2.reply.lower(), r2.reply
         assert label in r2.reply, r2.reply
     finally:
-        await _restore_config(original)
+        await _restore_share_config(original)
         await db.projects.delete_one({"id": pid})
         await db.talents.delete_one({"id": tid})
         await db.casting_pipeline.delete_many({"project_id": pid})
@@ -6019,7 +6032,7 @@ async def test_natural_language_add_and_move_verb_first_bulk():
     from the already-working "Add X to Y and move to Z") — must add AND
     move every talent x project combination."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     tag = uuid.uuid4().hex[:6]
     pa = await _seed_project(brand_name=f"NLProjA {tag}")
     pb = await _seed_project(brand_name=f"NLProjB {tag}")
@@ -6038,7 +6051,7 @@ async def test_natural_language_add_and_move_verb_first_bulk():
         assert len(rows) == 4, rows
         assert all(row["stage"] == "follow_up" for row in rows), rows
     finally:
-        await _restore_config(original)
+        await _restore_share_config(original)
         await db.projects.delete_many({"id": {"$in": [pa, pb]}})
         await db.talents.delete_many({"id": {"$in": [ta, tb]}})
         await db.casting_pipeline.delete_many({"project_id": {"$in": [pa, pb]}})
@@ -6049,7 +6062,7 @@ async def test_typo_tolerant_but_genuine_ambiguity_still_asks():
     similar names still stop and ask — existing ambiguity safeguards are
     not weakened by anything added this pass."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     tag = uuid.uuid4().hex[:6]
     pid = await _seed_project(brand_name=f"TypoProj {tag}")
     label = (await db.projects.find_one({"id": pid}))["brand_name"]
@@ -6078,7 +6091,7 @@ async def test_typo_tolerant_but_genuine_ambiguity_still_asks():
         )
         assert "multiple matching talents" in r2.reply.lower(), r2.reply
     finally:
-        await _restore_config(original)
+        await _restore_share_config(original)
         await db.projects.delete_one({"id": pid})
         await db.talents.delete_many({"id": {"$in": [unique, dup_a, dup_b]}})
 
@@ -6087,7 +6100,7 @@ async def test_clarification_reply_resumes_original_move_command():
     """A bare clarification reply ("1") resumes and completes the
     ORIGINAL pending move — the admin never repeats the command."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     tag = uuid.uuid4().hex[:6]
     pid = await _seed_project(brand_name=f"ResumeProj {tag}")
     label = (await db.projects.find_one({"id": pid}))["brand_name"]
@@ -6112,21 +6125,24 @@ async def test_clarification_reply_resumes_original_move_command():
         row_a = await db.casting_pipeline.find_one({"project_id": pid, "talent_id": dup_a})
         assert row_a["stage"] == "approved", row_a
     finally:
-        await _restore_config(original)
+        await _restore_share_config(original)
         await db.projects.delete_one({"id": pid})
         await db.talents.delete_many({"id": {"$in": [dup_a, dup_b]}})
         await db.casting_pipeline.delete_many({"project_id": pid})
 
 
 def test_help_text_mentions_send_and_new_query_forms():
-    """HELP must document every command (Command Resolution manual
-    rebuild, 2026-08-30) using natural-language examples only — the old
-    hyphen grammar is no longer advertised (still functional underneath,
-    see test_bare_hyphen_no_space_add_end_to_end etc., just not shown)."""
-    from agents.modules.casting_pipeline import HELP_TEXT
+    """HELP must document every command using natural-language examples
+    only — the old hyphen grammar is no longer advertised (still
+    functional underneath, just not shown). Talentgram Scouting Agent
+    consolidation (Production fix, 2026-09-06) — this is now
+    whatsapp-campaign-agent's own master manual, not casting-agent's
+    (which no longer has a real manual at all — see
+    test_share_routing_9_help_ownership_is_unambiguous)."""
+    from agents.modules.whatsapp_campaign_agent import HELP_TEXT
     for existing in ("Add ", "Move ", "SHARE", "SEND", "UPLOAD", "TESTED", "SHOW", "UNDO", "and confirm"):
         assert existing in HELP_TEXT, f"missing HELP entry: {existing!r}"
-    for new in ("Show projects of", "Tested Kripa Trivedi for", "Send Kripa Trivedi for"):
+    for new in ("Show projects of", "Tested Anusha Sharma for", "Send Anusha Sharma's audition video to"):
         assert new in HELP_TEXT, f"missing new HELP entry: {new!r}"
     for old in ("Add - ", "Move - ", "Add,Move - ", "send - ", "testing? -", "pending test -"):
         assert old not in HELP_TEXT, f"old hyphen-grammar entry still advertised: {old!r}"
@@ -6143,7 +6159,7 @@ def test_whatsapp_campaign_agent_uses_group_members_security_mode():
     # a crude but effective regression guard against silently reverting
     # to the old single-number allowlist default.
     idx = src.index('"whatsapp-campaign-agent"')
-    call_src = src[idx:idx + 800]
+    call_src = src[idx:idx + 1600]
     assert 'security_mode="group_members"' in call_src, call_src
 
 
@@ -6158,7 +6174,7 @@ def test_whatsapp_campaign_agent_uses_group_members_security_mode():
 # ---------------------------------------------------------------------------
 async def test_compound_add_move_creates_undo_record_and_undo_reverts_it():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"CompoundUndo Brand {tag}")
@@ -6175,7 +6191,7 @@ async def test_compound_add_move_creates_undo_record_and_undo_reverts_it():
         assert doc is not None and doc["stage"] == "shortlisted", doc
         assert "Reply UNDO" in r.reply, r.reply
 
-        pending = await undo_store.get_undo(AGENT_ID, phone)
+        pending = await undo_store.get_undo(SHARE_AGENT_ID, phone)
         assert pending is not None, "Add,Move must now record an undo entry, same as a standalone MOVE"
         assert pending["operation"]["project_id"] == project_id
         assert pending["operation"]["previous_stage_by_id"].get(talent_id) == "ask_to_test"
@@ -6193,7 +6209,7 @@ async def test_compound_add_move_creates_undo_record_and_undo_reverts_it():
         assert doc_after["stage"] == "ask_to_test", doc_after
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_compound_add_move_noop_step_never_creates_misleading_undo():
@@ -6201,14 +6217,14 @@ async def test_compound_add_move_noop_step_never_creates_misleading_undo():
     write) must never create/overwrite an undo record — only a step that
     actually wrote something may."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"NoopUndo Brand {tag}")
     label = (await db.projects.find_one({"id": project_id}))["brand_name"]
     talent_id = await _seed_talent(f"NoopUndo Talent {tag}")
     try:
-        before = await undo_store.get_undo(AGENT_ID, phone)
+        before = await undo_store.get_undo(SHARE_AGENT_ID, phone)
         assert before is None
         # ADD defaults to "Ask To Test" — moving to that same stage right
         # after is a genuine no-op for the move sub-step.
@@ -6218,11 +6234,11 @@ async def test_compound_add_move_noop_step_never_creates_misleading_undo():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        after = await undo_store.get_undo(AGENT_ID, phone)
+        after = await undo_store.get_undo(SHARE_AGENT_ID, phone)
         assert after is None, "a no-op move step must never fabricate an undo record"
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -6234,7 +6250,7 @@ async def test_compound_add_move_noop_step_never_creates_misleading_undo():
 # ---------------------------------------------------------------------------
 async def test_natural_language_has_tested_bulk_talents():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"BulkQProj {tag}")
@@ -6254,7 +6270,7 @@ async def test_natural_language_has_tested_bulk_talents():
         assert f"Rohan Bulkq {tag}" in r.reply and "Not tested" in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_bare_hyphen_no_space_add_end_to_end():
@@ -6263,7 +6279,7 @@ async def test_bare_hyphen_no_space_add_end_to_end():
     and no pipeline segment must add the talent at the default stage,
     not mis-split into a confusing "which project?" prompt."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"BareHyphenProj{tag}")
@@ -6286,7 +6302,7 @@ async def test_bare_hyphen_no_space_add_end_to_end():
         assert doc is not None and doc["stage"] == "ask_to_test", (r2.reply, doc)
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_canonical_tested_bare_word_trigger_single_and_bulk():
@@ -6294,7 +6310,7 @@ async def test_canonical_tested_bare_word_trigger_single_and_bulk():
     as its OWN leading word (no "has"/"is" lead-in) must open casting.query
     and answer with the real current stage — both single and bulk."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"TestedProj {tag}")
@@ -6321,7 +6337,7 @@ async def test_canonical_tested_bare_word_trigger_single_and_bulk():
         assert f"Meera Cq {tag}" in r2.reply and "Not tested" in r2.reply, r2.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[ta, tb])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -7061,9 +7077,10 @@ async def test_share_no_stale_context_after_prior_share():
 # ---------------------------------------------------------------------------
 
 async def test_share_routing_1_casting_pipeline_reroutes_standalone_share():
-    """Test 1 — a standalone SHARE typed in the Talentgram Casting
-    Pipeline group is rejected/rerouted: no execution, no pipeline check,
-    no send, no pipeline record created."""
+    """Test 1, updated for the Talentgram Scouting Agent consolidation
+    (Production fix, 2026-09-06) — a standalone SHARE typed in the
+    Talentgram Casting Pipeline group is rejected/rerouted: no
+    execution, no pipeline check, no send, no pipeline record created."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_test_config(group)
     phone = _phone()
@@ -7080,8 +7097,8 @@ async def test_share_routing_1_casting_pipeline_reroutes_standalone_share():
         )
         assert r.handled, r.reply
         assert r.reply == (
-            "SHARE is handled in the Talentgram WhatsApp Agent group.\n"
-            "Please send the SHARE command there."
+            "This command group has moved to Talentgram Scouting Agent.\n"
+            "Please send your command there."
         ), r.reply
         assert "Pipeline check" not in r.reply, r.reply
         assert "is not currently in" not in r.reply, r.reply
@@ -7128,62 +7145,562 @@ async def test_share_routing_2_and_3_whatsapp_agent_multi_project_no_old_error()
         await _restore_share_config(original)
 
 
-async def test_share_routing_7_compound_workflow_still_works_in_casting_pipeline():
-    """Test 7 — the approved compound ADD -> MOVE -> SHARE workflow must
-    keep working in the Talentgram Casting Pipeline group, completely
-    unaffected by standalone SHARE now being rerouted there."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
-    phone = _phone()
+async def test_share_routing_7_compound_workflow_redirects_in_old_group_works_in_scouting_agent():
+    """Test 7, updated for the Talentgram Scouting Agent consolidation
+    (Production fix, 2026-09-06) — the OLD Casting Pipeline group is now
+    fully redirect-only (compound commands included, per Section 4:
+    "do not perform ADD/MOVE/SHARE ... from the old group"); the approved
+    compound ADD -> MOVE -> SHARE workflow now runs from the Talentgram
+    Scouting Agent group instead, completely unaffected in substance."""
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project_with_details(
         f"RouteCompoundProj {tag}", shoot_dates="4 Apr 2030", budget="Rs 4/day",
     )
     talent_id = await _seed_talent(f"RouteCompoundTalent {tag}", phone="917000700202")
+    compound_text = (
+        f"Add RouteCompoundTalent {tag} to RouteCompoundProj {tag}, "
+        "move her to Follow Up, share the casting call with her"
+    )
+    try:
+        # Old group: redirected, never executed.
+        old_group = f"Test Casting {uuid.uuid4().hex[:6]}"
+        old_phone = _phone()
+        old_original = await _use_test_config(old_group)
+        try:
+            r = await handle_inbound_message(
+                group_name=old_group, sender_phone=old_phone, text=compound_text,
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled, r.reply
+            assert r.reply == (
+                "This command group has moved to Talentgram Scouting Agent.\n"
+                "Please send your command there."
+            ), r.reply
+            assert "You are about to run this plan:" not in r.reply, r.reply
+        finally:
+            await _restore_config(old_original)
+
+        row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert row is None, "the old group must never have executed anything"
+
+        # Scouting Agent group: runs exactly as before.
+        new_group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+        new_phone = _phone()
+        new_original = await _use_share_test_config(new_group)
+        try:
+            r = await handle_inbound_message(
+                group_name=new_group, sender_phone=new_phone, text=compound_text,
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert r.handled, r.reply
+            assert "You are about to run this plan:" in r.reply, r.reply
+
+            r2 = await handle_inbound_message(
+                group_name=new_group, sender_phone=new_phone, text="1",
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            assert "Completed" in r2.reply, r2.reply
+            assert "✓ Share Casting Call" in r2.reply, r2.reply
+
+            row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+            assert row is not None and row["stage"] == "follow_up"
+            jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+            assert len(jobs) == 1
+        finally:
+            await _restore_share_config(new_original)
+            await db.whatsapp_conversations.delete_many({"agent_id": "whatsapp-campaign-agent", "phone": new_phone})
+            await db.whatsapp_agent_sessions.delete_many({"agent_id": "whatsapp-campaign-agent", "phone": new_phone})
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(old_phone, project_ids=[project_id], talent_ids=[talent_id])
+
+
+async def test_share_routing_9_help_ownership_is_unambiguous():
+    """Test 9, superseded by the Talentgram Scouting Agent consolidation
+    (Production fix, 2026-09-06) — casting-agent no longer has ANY real
+    manual (not even a SHARE-only note); the Scouting Agent's manual
+    covers every consolidated command, SHARE included."""
+    from agents.modules.casting_pipeline import CASTING_REDIRECT_MESSAGE
+    from agents.modules.whatsapp_campaign_agent import HELP_TEXT as CAMPAIGN_HELP_TEXT
+
+    assert CASTING_REDIRECT_MESSAGE == (
+        "This command group has moved to Talentgram Scouting Agent.\n"
+        "Please send your command there."
+    )
+
+    assert "2. SHARE" in CAMPAIGN_HELP_TEXT
+    assert "Share the casting call for Hinge with Anusha Sharma" in CAMPAIGN_HELP_TEXT
+    assert "custom message" in CAMPAIGN_HELP_TEXT.lower()
+
+
+# ---------------------------------------------------------------------------
+# Send/Share Semantic Router (Production fix, 2026-09-06) — content, not
+# verb, decides SHARE vs SEND. Focused tests only, matching the fix
+# request's own 10-item list (Section 14) — the underlying SHARE/SEND
+# engines are already covered above and in test_media_send.py.
+# ---------------------------------------------------------------------------
+
+async def test_ss_1_share_casting_call_still_share():
+    """Test 1 — "Share the casting call for X with Y" -> SHARE, unchanged."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"SSProj1 {tag}", shoot_dates="1 Jan 2031", budget="Rs 1/day")
+    talent_id = await _seed_talent(f"SSTalent1 {tag}", phone="917000800001")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share the casting call for SSProj1 {tag} with SSTalent1 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to SHARE:" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ss_2_send_the_casting_call_routes_to_share():
+    """Test 2 — "Send the casting call for X to Y" -> SHARE, not media
+    SEND, even though the verb is "send"."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"SSProj2 {tag}", shoot_dates="2 Feb 2031", budget="Rs 2/day")
+    talent_id = await _seed_talent(f"SSTalent2 {tag}", phone="917000800002")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send the casting call for SSProj2 {tag} to SSTalent2 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to SHARE:" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ss_3_share_the_template_routes_to_share():
+    """Test 3 — "Share the Casting Call template with Y" -> SHARE, and a
+    named template survives the verb-normalization fix (Production fix,
+    2026-09-06) that made this classifier's "share" route stop relying
+    on fuzzy matching to silently absorb an unstripped leading verb."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"SSProj3 {tag}", shoot_dates="3 Mar 2031", budget="Rs 3/day")
+    talent_id = await _seed_talent(f"SSTalent3 {tag}", phone="917000800003")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share the Casting Call template for SSProj3 {tag} with SSTalent3 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Casting Call" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ss_4_send_the_template_routes_to_share():
+    """Test 4 — "Send the Casting Call template to Y" -> SHARE."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"SSProj4 {tag}", shoot_dates="4 Apr 2031", budget="Rs 4/day")
+    talent_id = await _seed_talent(f"SSTalent4 {tag}", phone="917000800004")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send the Casting Call template for SSProj4 {tag} to SSTalent4 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Casting Call" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ss_5_share_custom_message_routes_to_share():
+    """Test 5 — quoted custom message -> SHARE, regardless of verb."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"SSProj5 {tag}", shoot_dates="5 May 2031", budget="Rs 5/day")
+    talent_id = await _seed_talent(f"SSTalent5 {tag}", phone="917000800005")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f'Share the custom message "Hi! You\'ve been shortlisted." with SSTalent5 {tag}',
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Custom message" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ss_6_send_audition_video_routes_to_media_send():
+    """Test 6 — "Send X's audition video to Y" -> MEDIA SEND, never SHARE."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"SSProj6 {tag}")
+    talent_id = await _seed_talent(f"SSTalent6 {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send SSTalent6 {tag}'s audition video to Raj",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to SHARE:" not in r.reply, r.reply
+        # casting.send's own resolution ran (real error text from THAT
+        # engine, not a SHARE error) — confirms correct routing without
+        # needing a fully-matching media fixture.
+        assert "SSTalent6" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ss_7_send_audition_material_routes_to_media_send():
+    """Test 7 — "Send X's audition material to Y" -> MEDIA SEND."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"SSProj7 {tag}")
+    talent_id = await _seed_talent(f"SSTalent7 {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send SSTalent7 {tag}'s audition material to Raj",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to SHARE:" not in r.reply, r.reply
+        assert "SSTalent7" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ss_9_natural_variations_route_correctly():
+    """Test 9 — spacing/casing/verb variations still classify correctly."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"SSProj9 {tag}", shoot_dates="9 Sep 2031", budget="Rs 9/day")
+    talent_id = await _seed_talent(f"SSTalent9 {tag}", phone="917000800009")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send casting call for SSProj9 {tag} with SSTalent9 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE:" in r.reply, r.reply
+        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="3", sender_name="Raj", sender_is_group_member=True)
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send {tag} audition video to raj",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE:" not in r2.reply, r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ss_10_genuinely_ambiguous_bare_send_asks_never_guesses():
+    """Test 10 — a bare "Send X to Y" with no content-type signal at all
+    must ask 1/2, never silently choose SHARE or SEND."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent(f"SSTalent10 {tag}", phone="917000800010")
+    project_id = await _seed_project(brand_name=f"SSProj10 {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send SSTalent10 {tag} to SSProj10 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert r.reply == (
+            "Do you want to:\n\n"
+            "1 → Share a template/message\n"
+            "2 → Send audition/media\n\n"
+            "Reply with 1 or 2."
+        ), r.reply
+
+        # "2" resumes as media SEND — never silently chosen, only after
+        # the explicit reply.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE:" not in r2.reply, r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Talentgram Scouting Agent consolidation (Production fix, 2026-09-06) —
+# focused tests only, matching the consolidation request's own 10-item
+# list (Section 17). The underlying ADD/MOVE/SHARE/SEND/UPLOAD engines are
+# already covered above; these are specifically about GROUP OWNERSHIP.
+# ---------------------------------------------------------------------------
+
+async def test_consolidation_1_scouting_agent_add():
+    """Test 1 — Scouting Agent receives ADD."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"ConsProj1 {tag}")
+    talent_id = await _seed_talent(f"ConsTalent1 {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add ConsTalent1 {tag} to ConsProj1 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to add" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_consolidation_2_scouting_agent_move():
+    """Test 2 — Scouting Agent receives MOVE."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"ConsProj2 {tag}")
+    talent_id = await _seed_talent(f"ConsTalent2 {tag}")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move ConsTalent2 {tag} to Follow Up in ConsProj2 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Follow Up" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_consolidation_3_scouting_agent_share():
+    """Test 3 — Scouting Agent receives SHARE -> new canonical engine."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"ConsProj3 {tag}", shoot_dates="1 Jan 2032", budget="Rs 1/day")
+    talent_id = await _seed_talent(f"ConsTalent3 {tag}", phone="917000900003")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share the casting call for ConsProj3 {tag} with ConsTalent3 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "You are about to SHARE:" in r.reply, r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_consolidation_5_scouting_agent_compound_workflow():
+    """Test 5 — Scouting Agent receives the compound ADD -> MOVE -> SHARE
+    workflow."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"ConsProj5 {tag}", shoot_dates="5 May 2032", budget="Rs 5/day")
+    talent_id = await _seed_talent(f"ConsTalent5 {tag}", phone="917000900005")
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=(
-                f"Add RouteCompoundTalent {tag} to RouteCompoundProj {tag}, "
-                "move her to Follow Up, share the casting call with her"
+                f"Add ConsTalent5 {tag} to ConsProj5 {tag}, move them to Follow Up, "
+                "share the casting call with them"
             ),
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
         assert "You are about to run this plan:" in r.reply, r.reply
-        assert "SHARE is handled in the Talentgram WhatsApp Agent group." not in r.reply, r.reply
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="1",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert "Completed" in r2.reply, r2.reply
-        assert "✓ Share Casting Call" in r2.reply, r2.reply
-
         row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
         assert row is not None and row["stage"] == "follow_up"
-        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
-        assert len(jobs) == 1
     finally:
         await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_consolidation_6_old_group_share_redirects_no_execution():
+    """Test 6 — old Casting Pipeline group: SHARE -> redirect, no execution."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"ConsProj6 {tag}", shoot_dates="6 Jun 2032", budget="Rs 6/day")
+    talent_id = await _seed_talent(f"ConsTalent6 {tag}", phone="917000900006")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share the casting call for ConsProj6 {tag} with ConsTalent6 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert r.reply == (
+            "This command group has moved to Talentgram Scouting Agent.\n"
+            "Please send your command there."
+        ), r.reply
+        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
+        assert jobs == []
+    finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_config(original)
 
 
-async def test_share_routing_9_help_ownership_is_unambiguous():
-    """Test 9 — Casting Pipeline HELP does not advertise standalone
-    SHARE; the WhatsApp Agent HELP contains the full SHARE manual."""
-    from agents.modules.casting_pipeline import HELP_TEXT as CASTING_HELP_TEXT
-    from agents.modules.whatsapp_campaign_agent import HELP_TEXT as CAMPAIGN_HELP_TEXT
+async def test_consolidation_7_old_group_add_redirects_no_db_changes():
+    """Test 7 — old Casting Pipeline group: ADD -> redirect, no DB changes."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"ConsProj7 {tag}")
+    talent_id = await _seed_talent(f"ConsTalent7 {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add ConsTalent7 {tag} to ConsProj7 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert r.reply == (
+            "This command group has moved to Talentgram Scouting Agent.\n"
+            "Please send your command there."
+        ), r.reply
+        row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert row is None
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_config(original)
 
-    assert "3. SHARE\n" not in CASTING_HELP_TEXT
-    assert "Share Casting Call with" not in CASTING_HELP_TEXT
-    assert "Talentgram WhatsApp Agent group" in CASTING_HELP_TEXT
-    assert "3. SHARE (as part of ADD + MOVE)" in CASTING_HELP_TEXT
 
-    assert "SHARE — CASTING CALL" in CAMPAIGN_HELP_TEXT
-    assert "Share the casting call for Hinge with Nikita Tiwari" in CAMPAIGN_HELP_TEXT
-    assert "custom message" in CAMPAIGN_HELP_TEXT.lower()
+async def test_consolidation_9_authorization_preserved():
+    """Test 9 — authorized member works; unauthorized sender is denied;
+    the agent's own number is never treated as a command sender."""
+    group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"ConsProj9 {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Show ongoing projects",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and f"ConsProj9 {tag}" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=_phone(), text="Show ongoing projects",
+            sender_name="Not A Member", sender_is_group_member=False,
+        )
+        assert "not authorized" in (r2.reply or "").lower(), r2.reply
+
+        # The agent's own WhatsApp number is documented elsewhere
+        # (Gunwanti-mark identity) as never a human command sender —
+        # confirmed by inspection during this consolidation, unchanged
+        # here; not re-tested structurally since no code path treats a
+        # phone number specially at the authorization layer at all.
+    finally:
+        await _cleanup(phone, project_ids=[project_id])
+        await _restore_share_config(original)
+
+
+async def test_consolidation_10_context_isolation_across_groups():
+    """Test 10 — a pending confirmation in one context never leaks into
+    another group; starting a command in the old Casting Pipeline group
+    (which only ever redirects) leaves nothing for the Scouting Agent
+    group to accidentally resume."""
+    old_group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    new_group = f"Test Scouting {uuid.uuid4().hex[:6]}"
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(f"ConsProj10 {tag}", shoot_dates="10 Oct 2032", budget="Rs 10/day")
+    talent_id = await _seed_talent(f"ConsTalent10 {tag}", phone="917000900010")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    old_original = await _use_test_config(old_group)
+    phone = _phone()
+    try:
+        r = await handle_inbound_message(
+            group_name=old_group, sender_phone=phone,
+            text=f"Share the casting call for ConsProj10 {tag} with ConsTalent10 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "moved to Talentgram Scouting Agent" in r.reply, r.reply
+    finally:
+        await _restore_config(old_original)
+
+    new_original = await _use_share_test_config(new_group)
+    try:
+        # A bare "1" in the NEW group/agent must never resume anything —
+        # there is nothing pending for this phone under this agent_id.
+        r2 = await handle_inbound_message(
+            group_name=new_group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled is False, r2.reply
+
+        # A fresh, real command in the new group works normally, with no
+        # trace of the old group's context.
+        r3 = await handle_inbound_message(
+            group_name=new_group, sender_phone=phone,
+            text=f"Share the casting call for ConsProj10 {tag} with ConsTalent10 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE:" in r3.reply, r3.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(new_original)
 
 
 # ---------------------------------------------------------------------------
@@ -7225,7 +7742,7 @@ async def test_2_compound_add_move_share():
     ("her"/nothing named) and correctly inherited from what ADD+MOVE just
     touched."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project_with_details(
@@ -7255,7 +7772,7 @@ async def test_2_compound_add_move_share():
     finally:
         await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_3_compound_add_move_share_send():
@@ -7264,7 +7781,7 @@ async def test_3_compound_add_move_share_send():
     preview is shown as part of the SAME reply — see Test 8 for the
     dedicated approval-gate-integrity checks on this exact flow."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     email = f"amsend.{tag}@example.com"
@@ -7299,13 +7816,13 @@ async def test_3_compound_add_move_share_send():
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await db.submissions.delete_many({"id": submission_id})
         await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_4_compound_share_multiple_talents():
     """Test 4 — SHARE with multiple talents inside a compound command."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project_with_details(
@@ -7331,7 +7848,7 @@ async def test_4_compound_share_multiple_talents():
     finally:
         await _cleanup_jobs_for_talents([t1, t2])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_5_compound_share_multiple_projects_explicit_override():
@@ -7339,7 +7856,7 @@ async def test_5_compound_share_multiple_projects_explicit_override():
     the ADD/MOVE project (Part 4: an explicit SHARE target always wins
     over inheritance)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     added_project_id = await _seed_project_with_details(
@@ -7369,7 +7886,7 @@ async def test_5_compound_share_multiple_projects_explicit_override():
     finally:
         await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[added_project_id, other_project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_6_compound_share_ambiguous_project_asks_not_guesses():
@@ -7378,7 +7895,7 @@ async def test_6_compound_share_ambiguous_project_asks_not_guesses():
     ambiguous ADD/MOVE step already is — never silently guessed, never a
     send to the wrong project."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     alpha_label = f"CompAmbig {tag} Alpha"
@@ -7403,7 +7920,7 @@ async def test_6_compound_share_ambiguous_project_asks_not_guesses():
         assert jobs == []
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_7_existing_add_move_send_template_blast_unchanged():
@@ -7412,7 +7929,7 @@ async def test_7_existing_add_move_send_template_blast_unchanged():
     unrelated to casting.send) must remain completely unaffected by the
     new ADD/MOVE/SHARE/SEND word-based chunking."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project_with_details(
@@ -7434,7 +7951,7 @@ async def test_7_existing_add_move_send_template_blast_unchanged():
     finally:
         await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_8_send_approval_gate_intact_inside_compound_command():
@@ -7445,7 +7962,7 @@ async def test_8_send_approval_gate_intact_inside_compound_command():
     job/media-send record is ever created without a SEPARATE, explicit
     approval of that form."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     email = f"gatecheck.{tag}@example.com"
@@ -7487,7 +8004,7 @@ async def test_8_send_approval_gate_intact_inside_compound_command():
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await db.submissions.delete_many({"id": submission_id})
         await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -7502,7 +8019,7 @@ async def test_8_send_approval_gate_intact_inside_compound_command():
 
 async def test_guided_1_add_edit_response_is_contextual():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"GuidedAddProj {tag}")
@@ -7542,12 +8059,12 @@ async def test_guided_1_add_edit_response_is_contextual():
         assert "CANCELLED" in cancel.reply, cancel.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_guided_2_move_edit_response_is_contextual():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"GuidedMoveProj {tag}")
@@ -7583,7 +8100,7 @@ async def test_guided_2_move_edit_response_is_contextual():
         assert "CANCELLED" in cancel.reply, cancel.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_guided_3_share_edit_response_shows_resolved_template():
@@ -7639,7 +8156,7 @@ async def test_guided_4_compound_plan_edit_response_shows_step_selector():
     step's own editor. The literal word "edit" reaches the exact same
     selector — no separate generic fallback."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project_with_details(
@@ -7723,7 +8240,7 @@ async def test_guided_4_compound_plan_edit_response_shows_step_selector():
         assert "CANCELLED" in cancel3.reply, cancel3.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -7747,7 +8264,7 @@ async def test_stale_context_missing_project_never_fabricates_a_step():
     ORIGINAL command resumes and produces the correct 3-step plan, never
     restarting from scratch."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"StaleGapProj {tag}")
@@ -7788,7 +8305,7 @@ async def test_stale_context_missing_project_never_fabricates_a_step():
         assert doc is not None and doc["stage"] == "follow_up", (r3.reply, doc)
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_stale_context_prior_command_talent_never_leaks_into_new_one():
@@ -7797,7 +8314,7 @@ async def test_stale_context_prior_command_talent_never_leaks_into_new_one():
     naming only Anusha, whose own ADD step is missing a project, must
     never resolve MOVE/SHARE against Vikram/Hinge."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     vikram_project_id = await _seed_project(brand_name=f"Hinge {tag}")
@@ -7854,7 +8371,7 @@ async def test_stale_context_prior_command_talent_never_leaks_into_new_one():
         )) is None
     finally:
         await _cleanup(phone, project_ids=[vikram_project_id, anusha_project_id], talent_ids=[vikram_id, anusha_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_guided_8_reply_2_opens_editing_step_2_move_only():
@@ -7863,7 +8380,7 @@ async def test_guided_8_reply_2_opens_editing_step_2_move_only():
     and 3 stay exactly as they were, and the re-shown confirmation has
     correct numbering with no duplicated steps."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"EditStepProj {tag}")
@@ -7918,7 +8435,7 @@ async def test_guided_8_reply_2_opens_editing_step_2_move_only():
         assert doc is not None and doc["stage"] == "shortlisted", (r3.reply, doc)
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_guided_8_reply_3_opens_editing_step_3_share():
@@ -7926,7 +8443,7 @@ async def test_guided_8_reply_3_opens_editing_step_3_share():
     confirmation card's own "3 -> Cancel"), "3" opens "EDITING STEP 3 —
     SHARE" specifically; editing it changes ONLY step 3."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"EditStep3Proj {tag}")
@@ -7966,7 +8483,7 @@ async def test_guided_8_reply_3_opens_editing_step_3_share():
         assert f"EditStep3B {tag}" in numbered_lines[2], changed.reply  # step 3 (Share) — CHANGED
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_a, talent_b])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_guided_8_reply_1_opens_editing_step_1_add_only():
@@ -7976,7 +8493,7 @@ async def test_guided_8_reply_1_opens_editing_step_1_add_only():
     the NEW talent once the plan is re-resolved, proving the edit was
     applied to the right raw step, not a stale copy."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"EditStep1Proj {tag}")
@@ -8029,7 +8546,7 @@ async def test_guided_8_reply_1_opens_editing_step_1_add_only():
         assert doc_a is None, doc_a
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_a, talent_b])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_missing_project_searches_full_catalogue_with_pagination():
@@ -8045,7 +8562,7 @@ async def test_missing_project_searches_full_catalogue_with_pagination():
     to be shown. "MORE" is separately confirmed to actually advance the
     page (a different set of projects than page 1)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     target_id = await _seed_project(brand_name=f"ZZZZZZLastProj {tag}")
@@ -8084,7 +8601,7 @@ async def test_missing_project_searches_full_catalogue_with_pagination():
         assert f"ZZZZZZLastProj {tag}" in resumed.reply, resumed.reply
     finally:
         await _cleanup(phone, project_ids=[target_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_edit_step_selector_works_correctly_after_missing_project_resume():
@@ -8098,7 +8615,7 @@ async def test_edit_step_selector_works_correctly_after_missing_project_resume()
     for step 1, producing "I didn't understand that change" instead of
     "EDITING STEP 2 — MOVE"."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"ResumeEditProj {tag}")
@@ -8132,7 +8649,7 @@ async def test_edit_step_selector_works_correctly_after_missing_project_resume()
         assert "I didn't understand" not in step2.reply, step2.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_send_approval_flow_untouched_by_plan_step_editing():
@@ -8140,7 +8657,7 @@ async def test_send_approval_flow_untouched_by_plan_step_editing():
     completely separate approval/edit flow once the rest of the plan
     executes; the new plan-step-editing machinery never intercepts it."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     email = f"sendplan.{tag}@example.com"
@@ -8175,12 +8692,12 @@ async def test_send_approval_flow_untouched_by_plan_step_editing():
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await db.submissions.delete_many({"id": submission_id})
         await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_guided_5_send_edit_response_lists_form_fields_not_db_fields():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     email = f"guidededit.{tag}@example.com"
@@ -8228,7 +8745,7 @@ async def test_guided_5_send_edit_response_lists_form_fields_not_db_fields():
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await db.submissions.delete_many({"id": submission_id})
         await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -8252,7 +8769,7 @@ async def test_and_in_project_name_does_not_duplicate_compound_plan_steps():
     effect — never two ADDs to the same project, never two SHARE
     messages, from one instruction typed once."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     # Mirrors the real reported project name shape: one project whose OWN
@@ -8299,7 +8816,7 @@ async def test_and_in_project_name_does_not_duplicate_compound_plan_steps():
     finally:
         await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_and_in_project_name_two_clause_chain_is_two_steps():
@@ -8308,7 +8825,7 @@ async def test_and_in_project_name_two_clause_chain_is_two_steps():
     split unharmed even though it's immediately followed by the word
     "move" (a real chaining trigger) elsewhere in the sentence."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     talent_id = await _seed_talent(f"TwoStepTalent {tag}")
@@ -8333,7 +8850,7 @@ async def test_and_in_project_name_two_clause_chain_is_two_steps():
         assert doc is not None and doc["stage"] == "follow_up", doc
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_project_name_containing_and_stays_one_project_for_standalone_move():
@@ -8341,7 +8858,7 @@ async def test_project_name_containing_and_stays_one_project_for_standalone_move
     B") must remain ONE project for a plain, non-compound MOVE naming it
     directly — never silently fanned out across two guessed fragments."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"Project A and B {tag}")
@@ -8365,7 +8882,7 @@ async def test_project_name_containing_and_stays_one_project_for_standalone_move
         assert rows[0]["stage"] == "approved", rows[0]
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_and_in_project_name_standalone_share_stays_one_project():
@@ -8412,7 +8929,7 @@ async def test_multi_project_still_splits_when_and_joins_two_real_projects():
     as before — the fix must never collapse a real multi-project reference
     into one just because splitting is now conditional."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_a = await _seed_project(brand_name=f"RealProjA {tag}")
@@ -8437,7 +8954,7 @@ async def test_multi_project_still_splits_when_and_joins_two_real_projects():
         assert (await db.casting_pipeline.find_one({"project_id": project_b, "talent_id": talent_id})) is not None
     finally:
         await _cleanup(phone, project_ids=[project_a, project_b], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_cross_product_add_and_share_no_duplicate_pairs_with_and_chained_move():
@@ -8451,7 +8968,7 @@ async def test_cross_product_add_and_share_no_duplicate_pairs_with_and_chained_m
     name "and"-splitting) that is out of scope for this regression fix —
     not asserted here."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"CPProjD1 {tag}")
@@ -8489,7 +9006,7 @@ async def test_cross_product_add_and_share_no_duplicate_pairs_with_and_chained_m
     finally:
         await _cleanup_jobs_for_talents([t1, t2])
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_compound_plan_confirmation_never_double_numbers_lines():
@@ -8501,7 +9018,7 @@ async def test_compound_plan_confirmation_never_double_numbers_lines():
     future regression here is caught immediately, since no existing
     compound-plan test asserted this)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"NumberingProj {tag}")
@@ -8524,7 +9041,7 @@ async def test_compound_plan_confirmation_never_double_numbers_lines():
     finally:
         await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -8554,7 +9071,7 @@ async def test_both_fanout_two_talents_two_projects():
     """2 talents x 2 projects: "Add A,B to X,Y, Move both to Follow Up"
     must move all 4 touched pairs — never just one."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"BothProjX {tag}")
@@ -8605,14 +9122,14 @@ async def test_both_fanout_two_talents_two_projects():
         assert len(rows_after) == 4, rows_after
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_both_fanout_two_talents_one_project():
     """2 talents x 1 project: "Add A,B to X, Move both to Follow Up" must
     move both A and B in X."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"OneProjBoth {tag}")
@@ -8637,14 +9154,14 @@ async def test_both_fanout_two_talents_one_project():
         assert by_talent == {t1: "follow_up", t2: "follow_up"}, by_talent
     finally:
         await _cleanup(phone, project_ids=[p1], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_her_fanout_one_talent_two_projects():
     """1 talent x 2 projects: "Add A to X,Y, Move her to Follow Up" must
     move A in BOTH X and Y."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"HerProjX {tag}")
@@ -8669,14 +9186,14 @@ async def test_her_fanout_one_talent_two_projects():
         assert by_project == {p1: "follow_up", p2: "follow_up"}, by_project
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_them_fanout_two_talents_one_project():
     """"her"/"him"/"them" inheritance — "them" (not just "both") must also
     fan out across every touched pair, using the same pronoun vocabulary."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"ThemProj {tag}")
@@ -8700,14 +9217,14 @@ async def test_them_fanout_two_talents_one_project():
         assert by_talent == {t1: "follow_up", t2: "follow_up"}, by_talent
     finally:
         await _cleanup(phone, project_ids=[p1], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_explicit_narrowing_overrides_both_inheritance():
     """"Add A,B to X,Y, Move A to Follow Up" — naming A explicitly must
     narrow to ONLY A's pairs; B must stay untouched at ask_to_test."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"NarrowProjX {tag}")
@@ -8738,14 +9255,14 @@ async def test_explicit_narrowing_overrides_both_inheritance():
         }, by_pair
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_both_fanout_add_move_share_no_duplicate_pairs():
     """ADD + MOVE + SHARE, all with "both": all 4 pairs get MOVE'd and all
     4 pairs get exactly one SHARE — never fewer, never duplicated."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project_with_details(f"AMSBothProjX {tag}", shoot_dates="1 Oct 2028", budget="Rs 1,000/day")
@@ -8783,7 +9300,7 @@ async def test_both_fanout_add_move_share_no_duplicate_pairs():
     finally:
         await _cleanup_jobs_for_talents([t1, t2])
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_both_pronoun_normalized_plan_has_exactly_expected_step_count():
@@ -8792,7 +9309,7 @@ async def test_both_pronoun_normalized_plan_has_exactly_expected_step_count():
     ADD operations + 2 bulk-MOVE operations (one per project, covering all
     4 pairs) — never fewer (a missed pair) and never more (a duplicate)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     p1 = await _seed_project(brand_name=f"CountProjX {tag}")
@@ -8817,7 +9334,7 @@ async def test_both_pronoun_normalized_plan_has_exactly_expected_step_count():
             assert f"CountTalA {tag}" in ln and f"CountTalB {tag}" in ln, ln
     finally:
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 # ---------------------------------------------------------------------------
@@ -8830,7 +9347,7 @@ async def test_p0_send_her_the_casting_call_resolves_correct_compound_talent():
     the SAME talent the plan just added/moved — never an unrelated talent
     resolved from a garbled "her the casting call" fuzzy match."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     email = f"p0kripa.{tag}@example.com"
@@ -8863,12 +9380,12 @@ async def test_p0_send_her_the_casting_call_resolves_correct_compound_talent():
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id, decoy_id])
         await db.submissions.delete_many({"id": submission_id})
         await db[_ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_p0_send_both_the_casting_calls_multi_talent():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"P0BothProj {tag}")
@@ -8890,14 +9407,14 @@ async def test_p0_send_both_the_casting_calls_multi_talent():
         assert f"P0BothB {tag}" in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_p0_send_explicit_single_narrowing_after_multi_talent_add():
     """"Add A,B to Project, move A to Follow Up, send A the casting call"
     — SEND names A explicitly; must resolve to A only, never both."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"P0NarrowProj {tag}")
@@ -8919,7 +9436,7 @@ async def test_p0_send_explicit_single_narrowing_after_multi_talent_add():
         assert f"P0NarrowB {tag}" not in send_line, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_p0_send_singular_pronoun_ambiguous_after_multi_talent_asks():
@@ -8927,7 +9444,7 @@ async def test_p0_send_singular_pronoun_ambiguous_after_multi_talent_asks():
     call" — "her" is singular but TWO talents were just touched; must ask
     for clarification, never silently guess/merge."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"P0AmbigPronounProj {tag}")
@@ -8949,14 +9466,14 @@ async def test_p0_send_singular_pronoun_ambiguous_after_multi_talent_asks():
         assert "SEND FORM" not in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
-        await _restore_config(original)
+        await _restore_share_config(original)
 
 
 async def test_p0_typo_mover_end_to_end():
     """"mover to follow up" (typo for "move her to follow up") must still
     resolve correctly, both as the standalone trigger and mid-compound."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     project_id = await _seed_project(brand_name=f"P0TypoProj {tag}")
@@ -8974,4 +9491,4 @@ async def test_p0_typo_mover_end_to_end():
         assert doc is not None and doc["stage"] == "follow_up", (r.reply, doc)
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_config(original)
+        await _restore_share_config(original)

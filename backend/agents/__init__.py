@@ -14,6 +14,32 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def _migrate_scouting_agent_group_name(db, registry) -> None:
+    """Talentgram Scouting Agent consolidation (Production fix,
+    2026-09-06) — the ALREADY-DEPLOYED whatsapp-campaign-agent config doc
+    has group_names=["Talentgram WhatsApp Agent"] only; seed_agent_config
+    (above) never overwrites an existing doc, so the new canonical group
+    name is added here explicitly, once. Idempotent (a config that
+    already has it is left untouched) and additive-only — the old name
+    is kept, never removed, so routing keeps working from EITHER group
+    name until the real WhatsApp group is actually renamed by hand (this
+    backend has no way to rename a real WhatsApp group itself)."""
+    existing = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": "whatsapp-campaign-agent"})
+    if not existing:
+        return
+    names = existing.get("group_names") or []
+    if "Talentgram Scouting Agent" in names:
+        return
+    await db[registry.CONFIG_COLLECTION].update_one(
+        {"agent_id": "whatsapp-campaign-agent"},
+        {"$set": {"group_names": ["Talentgram Scouting Agent"] + list(names)}},
+    )
+    logger.info(
+        "migrated whatsapp-campaign-agent group_names to include 'Talentgram Scouting Agent' (was: %r)",
+        names,
+    )
+
+
 async def ensure_agents_ready() -> None:
     """Called once at app startup (mirrors whatsapp.ensure_whatsapp_ready):
     registers every domain module's AgentDefinition, seeds default DB
@@ -40,7 +66,16 @@ async def ensure_agents_ready() -> None:
     )
     await registry.seed_agent_config(
         "whatsapp-campaign-agent",
-        group_names=["Talentgram WhatsApp Agent"],
+        # Talentgram Scouting Agent consolidation (Production fix,
+        # 2026-09-06) — "Talentgram Scouting Agent" is the new canonical,
+        # primary group; "Talentgram WhatsApp Agent" is kept as a second
+        # working name only until that WhatsApp group is renamed by hand
+        # (this backend config can't rename a real WhatsApp group itself
+        # — see _migrate_scouting_agent_group_name's own note and the
+        # deployment report's manual-step callout). Only used when NO
+        # config doc exists yet (a fresh environment) — the already-
+        # deployed production doc is migrated explicitly below instead.
+        group_names=["Talentgram Scouting Agent", "Talentgram WhatsApp Agent"],
         allowed_senders=[],
         # group_members (2026-08-27, Command Enhancement P0/P1 — explicit
         # product decision) — was "allowlist" restricted to one phone
@@ -52,6 +87,7 @@ async def ensure_agents_ready() -> None:
         # may issue commands here.
         security_mode="group_members",
     )
+    await _migrate_scouting_agent_group_name(db, registry)
 
     try:
         await db["whatsapp_conversations"].create_index(

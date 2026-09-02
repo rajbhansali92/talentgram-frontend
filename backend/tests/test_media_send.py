@@ -89,7 +89,7 @@ async def _cleanup_send(*, talent_ids=(), project_ids=(), scan_request_ids=(), s
 # ---------------------------------------------------------------------------
 async def test_send_command_works_without_any_uploaded_submission_media():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.send.{tag}@example.com"
     project_id = await _seed_project(f"Google Send {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -131,7 +131,7 @@ async def test_send_command_works_without_any_uploaded_submission_media():
     finally:
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ async def test_send_command_works_without_any_uploaded_submission_media():
 # ---------------------------------------------------------------------------
 async def test_send_command_duplicate_talent_resolves_via_submission_email_not_name():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     name = f"Ahana SendDup {tag}"
     email = f"ahana.senddup.{tag}@example.com"
@@ -173,7 +173,7 @@ async def test_send_command_duplicate_talent_resolves_via_submission_email_not_n
     finally:
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"project_id": project_id})]
         await _cleanup_send(talent_ids=[talent_a, talent_b], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +449,7 @@ async def test_send_never_mutates_pipeline_stage():
 # ---------------------------------------------------------------------------
 async def test_send_proceeds_with_pending_submission_after_explicit_form_approval():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.noapprove.{tag}@example.com"
     project_id = await _seed_project(f"Google NoApprove {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -487,12 +487,12 @@ async def test_send_proceeds_with_pending_submission_after_explicit_form_approva
     finally:
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 async def test_send_includes_form_message_on_first_send_and_records_marked_row():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.formsend.{tag}@example.com"
     project_id = await _seed_project(f"Google FormSend {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -537,12 +537,12 @@ async def test_send_includes_form_message_on_first_send_and_records_marked_row()
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
         await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 async def test_send_skips_form_message_when_already_sent_same_content():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.formskip.{tag}@example.com"
     project_id = await _seed_project(f"Google FormSkip {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -587,7 +587,7 @@ async def test_send_skips_form_message_when_already_sent_same_content():
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
         await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 def test_build_form_send_message_includes_populated_fields_skips_empty():
@@ -884,7 +884,7 @@ async def test_send_executor_no_override_missing_destination_still_refuses():
 # ---------------------------------------------------------------------------
 async def test_send_admin_edit_overrides_field_and_approval_freezes_it():
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.edit.{tag}@example.com"
     project_id = await _seed_project(f"Google Edit {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -940,7 +940,7 @@ async def test_send_admin_edit_overrides_field_and_approval_freezes_it():
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
         await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 async def test_send_retry_reuses_approved_snapshot_not_regenerated():
@@ -949,7 +949,7 @@ async def test_send_retry_reuses_approved_snapshot_not_regenerated():
     the EXACT frozen message, never a freshly regenerated one, even if the
     underlying submission has since changed."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.resume.{tag}@example.com"
     project_id = await _seed_project(f"Google Resume {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -988,7 +988,7 @@ async def test_send_retry_reuses_approved_snapshot_not_regenerated():
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
         await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 # ---------------------------------------------------------------------------
@@ -1270,7 +1270,7 @@ async def _cleanup_approval_lifecycle(*, talent_id, project_id, submission_id, r
 async def test_approval_lifecycle_test_a_no_send_approval_means_nothing_sent():
     """TEST A: pending submission + no SEND approval -> nothing sent."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.lifecyclea.{tag}@example.com"
     project_id = await _seed_project(f"Google LifecycleA {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -1302,7 +1302,7 @@ async def test_approval_lifecycle_test_a_no_send_approval_means_nothing_sent():
         assert sub["decision"] == "pending"
     finally:
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 async def test_approval_lifecycle_full_state_transition_trace():
@@ -1324,7 +1324,7 @@ async def test_approval_lifecycle_full_state_transition_trace():
          approval or silently regenerating a different one.
     """
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.fulltrace.{tag}@example.com"
     project_id = await _seed_project(f"Google FullTrace {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -1380,7 +1380,7 @@ async def test_approval_lifecycle_full_state_transition_trace():
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
         await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 async def test_approval_lifecycle_test_c_full_success_approves_submission():
@@ -1514,7 +1514,7 @@ async def test_approval_lifecycle_test_g_exact_approved_form_is_what_is_sent():
     """TEST G: the exact admin-approved form text is what actually reaches
     the outgoing scan request -- an edited field survives verbatim."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.lifecycleg.{tag}@example.com"
     project_id = await _seed_project(f"Google LifecycleG {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -1551,7 +1551,7 @@ async def test_approval_lifecycle_test_g_exact_approved_form_is_what_is_sent():
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
         await db[ms.FORM_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
         await db[ms.SEND_APPROVALS_COLLECTION].delete_many({"talent_id": talent_id})
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 # ---------------------------------------------------------------------------
@@ -1599,8 +1599,12 @@ async def test_download_result_endpoint_persists_marker_result():
 # (still "confirming", same operation_id) for the admin to resolve later.
 # ---------------------------------------------------------------------------
 async def test_send_confirming_state_does_not_swallow_unrelated_query_command():
+    """Talentgram Scouting Agent consolidation (Production fix,
+    2026-09-06) — casting.send and QUERY now both run on
+    whatsapp-campaign-agent (which gained supports_concurrent_tasks
+    specifically to preserve this guarantee); migrated accordingly."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_test_config(group)
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
     tag = uuid.uuid4().hex[:6]
     email = f"ahana.swallow.{tag}@example.com"
     project_id = await _seed_project(f"Google Swallow {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
@@ -1627,7 +1631,7 @@ async def test_send_confirming_state_does_not_swallow_unrelated_query_command():
         assert pending_op_id is not None
 
         from agents import tasks as agent_tasks
-        pending_task = await agent_tasks.get_task("casting-agent", pending_op_id)
+        pending_task = await agent_tasks.get_task("whatsapp-campaign-agent", pending_op_id)
         assert pending_task is not None and pending_task["status"] == "confirming"
 
         # A completely unrelated FRESH command (not a reply-to-message, no
@@ -1645,10 +1649,10 @@ async def test_send_confirming_state_does_not_swallow_unrelated_query_command():
 
         # The abandoned SEND task itself is completely untouched — still
         # sitting exactly where the admin left it, ready to be resumed.
-        still_pending = await agent_tasks.get_task("casting-agent", pending_op_id)
+        still_pending = await agent_tasks.get_task("whatsapp-campaign-agent", pending_op_id)
         assert still_pending is not None
         assert still_pending["status"] == "confirming"
         assert still_pending["updated_at"] == pending_task["updated_at"]
     finally:
-        await _restore_config(original)
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])

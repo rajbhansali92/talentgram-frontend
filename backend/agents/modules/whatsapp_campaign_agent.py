@@ -103,6 +103,26 @@ from agents.modules.casting_pipeline import (
     # registration below and casting_pipeline.py's SHARE_REROUTE_INTENT
     # for what Casting Pipeline shows instead.
     SHARE_INTENT,
+    # SEND_INTENT (casting.send, Production fix 2026-09-06) — registered
+    # here too (triggers=[], never directly reachable — see its own
+    # comment in casting_pipeline.py) purely so registry.get_intent(agent,
+    # "casting.send") resolves when SHARE_INTENT hands a media-classified
+    # message off to it. Its own resolution/executor logic is completely
+    # unchanged and untouched.
+    SEND_INTENT,
+    # Talentgram Scouting Agent consolidation (Production fix, 2026-09-06)
+    # — ADD/MOVE/QUERY(SHOW/TESTED)/UPLOAD/UNDO, unchanged, imported and
+    # registered on THIS agent so the whole Casting Pipeline command
+    # surface is reachable from ONE WhatsApp group. Casting Pipeline
+    # (casting-agent) keeps ONLY the approved compound ADD->MOVE->SHARE
+    # workflow's underlying engine; its own top-level group is redirect-
+    # only (CASTING_REDIRECT_INTENT) — see casting_pipeline.py.
+    QUERY_INTENT,
+    MOVE_INTENT,
+    ADD_INTENT,
+    UPLOAD_INTENT,
+    UNDO_INTENT,
+    _resolve_bare_reply,
 )
 
 AGENT_ID = "whatsapp-campaign-agent"
@@ -3743,7 +3763,14 @@ async def _handle_campaign_confirming_edit(text: str, collected: dict, ctx: Exec
 
 SEND_REQUIREMENT_INTENT = IntentDefinition(
     intent_id="whatsapp_campaign.send_requirement",
-    triggers=SEND_TRIGGERS,
+    # Send/Share Semantic Router (Production fix, 2026-09-06) — no longer
+    # directly triggerable at the top level; casting_pipeline.py's
+    # SHARE_INTENT now owns every communication verb (send/share/forward/
+    # deliver/message/broadcast/push/dispatch) and hands off to THIS
+    # intent, unchanged, once content is classified as Instagram-sharing.
+    # Still registered so registry.get_intent(agent, "whatsapp_campaign.
+    # send_requirement") keeps resolving for that hand-off.
+    triggers=[],
     fields=[
         SOURCE_QUERY_FIELD, RECIPIENT_QUERY_FIELD, STAGE_QUERY_FIELD, PROJECT_QUERY_FIELD,
         SEND_MODE_FIELD, AUTO_CONFIRM_FIELD, PLAN_FIELD, LEGACY_SYNTAX_FIELD,
@@ -3769,105 +3796,148 @@ UNAUTHORIZED_SENDER_MESSAGE = (
 # category, saved list) plus the real interactive-edit commands from
 # _EDIT_REDIRECT_MESSAGE above. Update by hand if a new recipient shape or
 # edit command is added.
+# Talentgram Scouting Agent — master manual (Production fix, 2026-09-06,
+# Consolidation + SEND/SHARE Semantic Model). Every command that used to
+# be split across "Talentgram Casting Pipeline" and "Talentgram WhatsApp
+# Agent" lives here now — this is the one place a Talentgram team member
+# needs to remember. Every example is a real, tested command shape.
 HELP_TEXT = (
-    "TALENTGRAM WHATSAPP AGENT\n"
+    "TALENTGRAM SCOUTING AGENT\n"
     "QUICK MANUAL\n\n"
-    "This group sends casting requirements and communication through "
-    "WhatsApp — to talents, WhatsApp groups, individual recipients, or "
-    "everyone in a project's pipeline.\n\n"
+    "You can use this group for:\n\n"
+    "1. CASTING PIPELINE — add/move talents\n"
+    "2. SHARE — casting calls, templates, custom messages, Instagram\n"
+    "3. SEND — audition/media files\n"
+    "4. MEDIA — pull a talent's marked WhatsApp media into Talentgram\n"
+    "5. SHOW / TESTED — look things up\n"
+    "6. UNDO\n"
+    "7. HELP\n\n"
+    "Talk to it in plain English; the examples below are the reliable "
+    "way to write each command.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "COMMANDS\n"
+    "1. CASTING PIPELINE (ADD / MOVE)\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "1. SEND A CAMPAIGN\n\n"
-    "WHAT IT DOES: sends a saved template to named talent(s), or to "
-    "everyone currently in a project's pipeline stage.\n\n"
-    "HOW TO WRITE IT: Send [template] to [talent(s)] / Send [template] "
-    "to [stage] pipeline of [project]\n\n"
-    "EXAMPLES:\n"
-    "Send the Casting Call template to Kripa Trivedi\n"
-    "Send Casting Call to Kripa Trivedi,Siddhi Bankhele\n"
-    "Send Reminder template to Follow Up pipeline of Parachute Jasmine Oil\n\n"
-    "IMPORTANT NOTES: the template name is required — if you leave it "
-    "out, I'll ask which one, there's no automatic default.\n\n"
-    "2. SHARE — CASTING CALL\n\n"
-    "WHAT IT DOES: shares a saved casting-call template with one or "
-    "more talents, one or more projects, or everyone in a pipeline "
-    "stage.\n\n"
-    "HOW TO WRITE IT: Share the casting call for [project(s)] with "
-    "[talent(s)]\n\n"
-    "EXAMPLES:\n"
-    "Share the casting call for Hinge with Nikita Tiwari\n"
-    "Share the casting call for Hinge, L'Oreal with Nikita Tiwari, Riya Sharma\n"
-    "Share the casting call for Hinge with everyone in Follow Up\n\n"
-    "CUSTOM MESSAGE:\n"
-    "Share your own free-text message instead of a saved template — put "
-    "it in quotation marks:\n\n"
-    "Share the custom message \"your message here\" with Nikita Tiwari\n"
-    "Share the custom message \"your message here\" with everyone in Follow Up\n\n"
-    "IMPORTANT NOTES: everything between the opening and closing "
-    "quotation marks is treated as the message exactly as written — "
-    "commas, line breaks, and other punctuation inside it are never "
-    "interpreted as command structure. If a talent isn't yet in a "
+    "ADD — adds talent(s) to a project's pipeline, at Ask To Test.\n\n"
+    "Add Anusha Sharma to Hinge\n"
+    "Add Anusha Sharma, Riya Sharma to Hinge\n"
+    "Add Anusha Sharma to Hinge, L'Oreal\n\n"
+    "MOVE — moves talent(s) already in a pipeline to a different stage "
+    "(also understands shortlist, select, reject, hold, restore, not "
+    "available, not interested, and every existing stage name).\n\n"
+    "Move Anusha Sharma to Follow Up in Hinge\n\n"
+    "ADD + MOVE, and ADD + MOVE + SHARE, in one message:\n\n"
+    "Add Anusha Sharma to Hinge, move her to Follow Up\n"
+    "Add Anusha Sharma to Hinge, move her to Follow Up, share the "
+    "casting call with her\n\n"
+    "IMPORTANT NOTES: only commas separate lists of talents/projects — "
+    "a name that itself contains \"and\" is still treated as one. Before "
+    "anything is added or moved, I show exactly what will happen and "
+    "wait for your approval (reply 1, or \"and confirm\" to skip the "
+    "approval step). Adding someone already in that pipeline reports it "
+    "instead of creating a duplicate.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "2. SHARE\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "Use SHARE when you want to send a casting call, template, custom "
+    "message, campaign communication, or Instagram profile.\n\n"
+    "Share the casting call for Hinge with Anusha Sharma\n"
+    "Share the Hinge template with Anusha Sharma\n"
+    "Share the template for Hinge, L'Oreal with Anusha Sharma, Riya Sharma\n"
+    "Share the casting call for Hinge with everyone in Follow Up\n"
+    "Share the custom message \"Hi! You've been shortlisted for Dulux.\" "
+    "with Anusha Sharma\n"
+    "Share Anusha Sharma's Instagram profile with Raj\n\n"
+    "IMPORTANT NOTES: a custom message goes in quotation marks — "
+    "everything between the opening and closing quote is sent exactly "
+    "as written; commas, line breaks, and other punctuation inside it "
+    "are never treated as command structure, and only a comma OUTSIDE "
+    "the quotes separates multiple talents. If a talent isn't yet in a "
     "named project's pipeline, I'll say so and offer to share only "
     "where they already are. Shows a preview and waits for approval "
     "before anything sends.\n\n"
-    "3. SEND A CUSTOM MESSAGE\n\n"
-    "WHAT IT DOES: sends your own free-text message instead of a saved "
-    "template.\n\n"
-    "HOW TO WRITE IT: send custom message \"[your message]\" to [talent(s) "
-    "or pipeline]\n\n"
-    "EXAMPLES:\n"
-    "send custom message \"Hi, your profile has been shortlisted.\" to Kripa Trivedi,Siddhi Bankhele\n"
-    "send custom message \"Reminder about tomorrow's call.\" to Follow Up pipeline of Parachute Jasmine Oil\n\n"
-    "4. SHARE AN INSTAGRAM PROFILE\n\n"
-    "WHAT IT DOES: shares a talent's Instagram profile with someone else.\n\n"
-    "HOW TO WRITE IT: Send [talent]'s instagram to [recipient]\n\n"
-    "EXAMPLES:\n"
-    "Send Kripa Trivedi's instagram to Raj\n"
-    "Send Kripa Trivedi's insta to the Casting WhatsApp group\n\n"
-    "5. HELP\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "3. SEND\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "Use SEND only when you want to forward audition/media files — "
+    "templates and messages use SHARE instead.\n\n"
+    "Send Anusha Sharma's audition video to Raj\n"
+    "Send Anusha Sharma's audition material to the casting team\n\n"
+    "IMPORTANT NOTES: ALWAYS shows the exact form first and needs an "
+    "explicit approval — nothing is ever sent automatically. If it's "
+    "genuinely unclear whether you mean a template/message or a media "
+    "file, I'll ask which one rather than guessing.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "4. MEDIA (UPLOAD)\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "WHAT IT DOES: pulls a talent's @Gunwanti-marked WhatsApp media "
+    "(takes/intro/photos) into their Talentgram submission, for the "
+    "app's own review pages. Different from SEND — this never touches "
+    "WhatsApp, and SEND never touches this.\n\n"
+    "Upload Anusha Sharma's marked media for Hinge\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "5. SHOW / TESTED\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "SHOW — looks up ongoing projects, a project's pipeline, or which "
+    "projects a talent is in.\n\n"
+    "Show ongoing projects\n"
+    "Show projects of Anusha Sharma\n"
+    "Show the Follow Up pipeline of Hinge\n\n"
+    "TESTED — checks a talent's current pipeline stage for a project "
+    "(answers with the ACTUAL stage, not just yes/no).\n\n"
+    "Tested Anusha Sharma for Hinge\n"
+    "Has Anusha Sharma tested for Hinge\n\n"
+    "Both run immediately — no approval needed, since they don't change "
+    "anything.\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "6. UNDO\n"
+    "━━━━━━━━━━━━━━━━━━\n\n"
+    "Reverses the last pipeline move, within 5 minutes — including the "
+    "move half of a combined Add+Move. Never undoes a SEND or SHARE — "
+    "those are outbound WhatsApp messages, not pipeline changes.\n\n"
+    "Undo\n\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    "7. HELP\n\n"
     "WHAT IT DOES: shows this manual.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "MULTIPLE RECIPIENTS / PROJECTS\n"
+    "MULTIPLE TALENTS / PROJECTS\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Comma-separate multiple talents (Kripa Trivedi,Siddhi Bankhele) or "
-    "multiple projects (Project A,Project B) — I understand them as "
-    "lists, not one combined name.\n\n"
+    "Comma-separate multiple talents (Anusha Sharma,Riya Sharma) or "
+    "multiple projects (Hinge,L'Oreal) — I understand them as lists. "
+    "Naming both means every combination (never duplicated).\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "MULTIPLE COMMANDS IN ONE MESSAGE\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Put each command on its own line, then add \"and confirm\" once at "
-    "the very end to send everything immediately, no preview for each "
-    "one:\n\n"
-    "Send Template A to Talent A\n"
-    "Send Template B to Talent B\n"
-    "and confirm\n\n"
+    "ADD, MOVE, SHARE, and SEND can be chained in one message, or put "
+    "each command on its own line — add \"and confirm\" once at the very "
+    "end to skip the approval step on everything except SEND, which "
+    "always keeps its own separate approval:\n\n"
+    "Add Anusha Sharma to Hinge, move her to Follow Up, share the "
+    "casting call with her and confirm\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "CONFIRMATION\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Before anything sends, I show a preview and wait for your reply:\n\n"
+    "Before anything changes or sends, I show exactly what will happen "
+    "and wait:\n\n"
     "Reply:\n"
     "1 → Approve\n"
     "2 → Edit\n"
     "3 → Cancel\n\n"
-    "On Edit, you can adjust the preview before approving — Exclude "
-    "Ahana, Exclude 5, Include 7, Change template to Reminder, Preview.\n\n"
+    "On Edit, I'll ask specifically what you want to change about THAT "
+    "pending action — no need to repeat the whole command.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "WHEN A RECIPIENT CAN'T BE FOUND\n"
+    "WHEN SOMETHING IS AMBIGUOUS\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
-    "Recipients are checked against saved CRM contacts, saved lists, "
-    "saved groups, and known talents. If someone isn't found there, "
-    "save them as a CRM contact or in a saved list/group first, then "
-    "resend the command. If a name is ambiguous, I'll ask which one you "
-    "meant — just reply with your answer (e.g. \"2\"); you don't need to "
-    "repeat the whole command.\n\n"
+    "If a talent, project, or template name matches more than one real "
+    "record, I'll show numbered options and ask — I never guess on a "
+    "close match. Reply with the number and the original command "
+    "continues, it doesn't need to be retyped.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "IMPORTANT RULES\n"
+    "GENERAL\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "• Spaces around commas are ignored\n"
-    "• Minor spelling mistakes are tolerated (talent names, project "
-    "names, and recipients)\n"
-    "• Nothing is ever sent without your explicit approval"
+    "• Minor spelling mistakes are tolerated, including in command "
+    "words (e.g. \"mover\" for \"move\")\n"
+    "• Nothing is ever added, moved, or sent without your approval"
 )
 
 CAMPAIGN_AGENT = AgentDefinition(
@@ -3880,13 +3950,30 @@ CAMPAIGN_AGENT = AgentDefinition(
     # own internal session_context/conversation calls already key off
     # ctx.agent_id (not a hardcoded constant), so reusing it unchanged
     # under THIS agent's id is correct, not merely convenient.
-    intents=[SEND_REQUIREMENT_INTENT, SHARE_INTENT],
-    # Deliberately NOT opting into supports_concurrent_tasks — single-
-    # conversation flow is sufficient for v1; this is an additive,
-    # per-agent flag that can be turned on later with zero risk to any
-    # other agent's code.
+    intents=[
+        SEND_REQUIREMENT_INTENT, SHARE_INTENT, SEND_INTENT,
+        QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, UNDO_INTENT,
+    ],
+    # Talentgram Scouting Agent consolidation (Production fix, 2026-09-06)
+    # — casting.send now runs exclusively through this agent (it's no
+    # longer independently triggerable on casting-agent, which is
+    # redirect-only), and casting.send relies on the Concurrent Task
+    # Engine so an abandoned "confirming" SEND survives an unrelated
+    # fresh command from the same phone instead of being silently
+    # overwritten by the single conversation.py slot — the same
+    # protection casting-agent always gave it. Purely additive per the
+    # dispatcher's own design (a task record is created ALONGSIDE, never
+    # instead of, the conversation.py record), so SHARE/ADD/MOVE/QUERY/
+    # UPLOAD/UNDO's existing conversation-based flows on this agent are
+    # unaffected.
+    supports_concurrent_tasks=True,
     unauthorized_sender_message=UNAUTHORIZED_SENDER_MESSAGE,
     help_text=HELP_TEXT,
+    # Talentgram Scouting Agent consolidation (Production fix, 2026-09-06)
+    # — casting-agent's own bare-number/verb-less-query resolver, now
+    # needed here since QUERY_INTENT itself moved. Already fixed to read
+    # session state via ctx.agent_id rather than a hardcoded constant.
+    resolve_bare_reply=_resolve_bare_reply,
 )
 
 

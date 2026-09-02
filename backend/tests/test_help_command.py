@@ -24,7 +24,10 @@ from agents import modules as agent_modules
 from agents import registry
 from agents.dispatcher import handle_inbound_message
 from agents.modules.crm import HELP_TEXT as CRM_HELP_TEXT
-from agents.modules.casting_pipeline import HELP_TEXT as CASTING_HELP_TEXT
+# Talentgram Scouting Agent consolidation (Production fix, 2026-09-06) —
+# casting-agent no longer has a real command manual; its own help_text is
+# now the same redirect every command there shows (CASTING_REDIRECT_MESSAGE).
+from agents.modules.casting_pipeline import CASTING_REDIRECT_MESSAGE as CASTING_HELP_TEXT
 from agents.modules.whatsapp_campaign_agent import HELP_TEXT as CAMPAIGN_HELP_TEXT
 
 agent_modules.register_all()
@@ -153,40 +156,33 @@ async def test_each_agent_has_distinct_help_text():
     assert "Talent Search" not in CRM_HELP_TEXT
     assert "Send a Campaign" not in CRM_HELP_TEXT
 
-    # Simplified Command Language (2026-08-17) — the help text now leads
-    # with the concise "Action - Talent - Project - Pipeline" grammar
-    # rather than the old per-feature walkthrough; these checks confirm
-    # it's still distinctly casting-flavored and still mentions the
-    # older natural-language features (talent search, selection, undo)
-    # remain available, without requiring the old verbose phrasing.
-    # Command Simplification (2026-08-27) — HELP now leads with an
-    # ALL-CAPS group-name header (Part 28: "every HELP response must
-    # clearly start with which group it belongs to"), so a new intern
-    # never confuses one agent's capabilities with another's.
-    assert "TALENTGRAM CASTING PIPELINE" in CASTING_HELP_TEXT
-    # Command Resolution + Old Interface Cleanup (2026-08-30) — the
-    # hyphenated "Action - Talent - Project - Pipeline" grammar (and its
-    # "pending test -"/"testing? -" structured siblings) is no longer
-    # advertised in HELP — natural language ("Add X to Y", "Tested X for
-    # Y") is now the one documented interface, even though the old
-    # grammar still quietly works underneath (Part 4/8: capabilities
-    # preserved, interface simplified).
-    assert "Action - Talent - Project - Pipeline" not in CASTING_HELP_TEXT
-    assert "pending test -" not in CASTING_HELP_TEXT
-    assert "testing? -" not in CASTING_HELP_TEXT
-    assert "talent search" in CASTING_HELP_TEXT.lower()
-    assert "Move" in CASTING_HELP_TEXT
+    # Talentgram Scouting Agent consolidation (Production fix, 2026-09-06)
+    # — casting-agent is no longer an active command interface at all, so
+    # its own "help" reply is just the same redirect every command there
+    # shows, never a real manual (Section 9/Test 8 of the consolidation
+    # spec: "the old Casting Pipeline group does not present itself as an
+    # active command interface").
+    assert CASTING_HELP_TEXT == (
+        "This command group has moved to Talentgram Scouting Agent.\n"
+        "Please send your command there."
+    )
+    assert "TALENTGRAM CASTING PIPELINE" not in CASTING_HELP_TEXT
     assert "Save a Contact" not in CASTING_HELP_TEXT
-    assert "SEND / SHARE A CAMPAIGN" not in CASTING_HELP_TEXT
 
-    assert "TALENTGRAM WHATSAPP AGENT" in CAMPAIGN_HELP_TEXT
-    # SHARE Ownership/Routing (Production fix, 2026-09-05) — "share" no
-    # longer triggers the generic SEND campaign intent (it's now the
-    # canonical casting-call SHARE command's own trigger instead), so
-    # this section's own title dropped the "/ SHARE" it used to carry —
-    # accurate now that mentioning it there would be misleading.
-    assert "SEND A CAMPAIGN" in CAMPAIGN_HELP_TEXT
-    assert "SHARE — CASTING CALL" in CAMPAIGN_HELP_TEXT
+    # Talentgram Scouting Agent consolidation (Production fix, 2026-09-06)
+    # — this agent's group/header/manual were rebuilt as the ONE master
+    # manual for every consolidated command (ADD/MOVE/SHARE/SEND/UPLOAD/
+    # SHOW/TESTED/UNDO/HELP); the old "SEND A CAMPAIGN" section (a
+    # separate, now-retired generic-broadcast command) is gone — SHARE
+    # covers templates/messages/Instagram, SEND is media-only.
+    assert "TALENTGRAM SCOUTING AGENT" in CAMPAIGN_HELP_TEXT
+    assert "SEND A CAMPAIGN" not in CAMPAIGN_HELP_TEXT
+    assert "1. CASTING PIPELINE" in CAMPAIGN_HELP_TEXT
+    assert "2. SHARE" in CAMPAIGN_HELP_TEXT
+    assert "3. SEND" in CAMPAIGN_HELP_TEXT
+    assert "Add Anusha Sharma to Hinge" in CAMPAIGN_HELP_TEXT
+    assert "Share the casting call for Hinge with Anusha Sharma" in CAMPAIGN_HELP_TEXT
+    assert "Send Anusha Sharma's audition video to Raj" in CAMPAIGN_HELP_TEXT
     # Old Interface Deprecation (2026-08-30) — the hyphen grammar
     # ("Action - Who - What - Where") is no longer advertised; HELP shows
     # only natural-language examples now.
@@ -276,9 +272,12 @@ async def test_help_does_not_interrupt_crm_field_collection():
 
 
 async def test_help_does_not_interrupt_casting_disambiguation():
-    group = f"Test Casting Help {uuid.uuid4().hex[:6]}"
+    """Talentgram Scouting Agent consolidation (Production fix,
+    2026-09-06) — MOVE now runs on whatsapp-campaign-agent, not
+    casting-agent (which is redirect-only); migrated accordingly."""
+    group = f"Test Scouting Help {uuid.uuid4().hex[:6]}"
     phone = _phone()
-    original = await _use_test_config(CASTING_AGENT_ID, group, phone, group_members=True)
+    original = await _use_test_config(CAMPAIGN_AGENT_ID, group, phone, group_members=True)
     project_id = f"test-cp-proj-{uuid.uuid4().hex[:8]}"
     label = f"Help Guard Brand {uuid.uuid4().hex[:6]}"
     sarah_a = f"test-cp-tal-{uuid.uuid4().hex[:8]}"
@@ -304,9 +303,9 @@ async def test_help_does_not_interrupt_casting_disambiguation():
         )
         assert r.handled
         assert "I found multiple matching talents." in r.reply
-        assert r.reply != CASTING_HELP_TEXT
+        assert r.reply != CAMPAIGN_HELP_TEXT
 
-        conv = await db.whatsapp_conversations.find_one({"agent_id": CASTING_AGENT_ID, "phone": phone})
+        conv = await db.whatsapp_conversations.find_one({"agent_id": CAMPAIGN_AGENT_ID, "phone": phone})
         assert conv is not None  # needs_clarification kept the conversation alive
 
         # "help" mid-disambiguation must NOT show the static Help Center.
@@ -314,7 +313,7 @@ async def test_help_does_not_interrupt_casting_disambiguation():
             group_name=group, sender_phone=phone, text="help",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert r.reply != CASTING_HELP_TEXT
+        assert r.reply != CAMPAIGN_HELP_TEXT
 
         # Neither pipeline row was touched by any of this.
         row_a = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": sarah_a})
@@ -325,8 +324,8 @@ async def test_help_does_not_interrupt_casting_disambiguation():
         await db.projects.delete_many({"id": project_id})
         await db.talents.delete_many({"id": {"$in": [sarah_a, sarah_b]}})
         await db.casting_pipeline.delete_many({"project_id": project_id})
-        await _cleanup_conversation_state(CASTING_AGENT_ID, phone)
-        await _restore_config(CASTING_AGENT_ID, original)
+        await _cleanup_conversation_state(CAMPAIGN_AGENT_ID, phone)
+        await _restore_config(CAMPAIGN_AGENT_ID, original)
 
 
 # ---------------------------------------------------------------------------
@@ -336,9 +335,12 @@ async def test_help_does_not_interrupt_casting_disambiguation():
 # proves the new dispatcher branch doesn't shadow them).
 # ---------------------------------------------------------------------------
 async def test_existing_casting_query_command_still_works():
-    group = f"Test Casting Help {uuid.uuid4().hex[:6]}"
+    """Talentgram Scouting Agent consolidation (Production fix,
+    2026-09-06) — QUERY (SHOW) now runs on whatsapp-campaign-agent, not
+    casting-agent (which is redirect-only); migrated accordingly."""
+    group = f"Test Scouting Help {uuid.uuid4().hex[:6]}"
     phone = _phone()
-    original = await _use_test_config(CASTING_AGENT_ID, group, phone, group_members=True)
+    original = await _use_test_config(CAMPAIGN_AGENT_ID, group, phone, group_members=True)
     project_id = f"test-cp-proj-{uuid.uuid4().hex[:8]}"
     label = f"Smoke Brand {uuid.uuid4().hex[:6]}"
     try:
@@ -352,8 +354,8 @@ async def test_existing_casting_query_command_still_works():
         )
         assert r.handled
         assert label in r.reply
-        assert r.reply != CASTING_HELP_TEXT
+        assert r.reply != CAMPAIGN_HELP_TEXT
     finally:
         await db.projects.delete_many({"id": project_id})
-        await _cleanup_conversation_state(CASTING_AGENT_ID, phone)
-        await _restore_config(CASTING_AGENT_ID, original)
+        await _cleanup_conversation_state(CAMPAIGN_AGENT_ID, phone)
+        await _restore_config(CAMPAIGN_AGENT_ID, original)

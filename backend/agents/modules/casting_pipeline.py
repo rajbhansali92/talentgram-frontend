@@ -506,7 +506,7 @@ async def _handle_list_projects(ctx: ExecContext, classification: nlu.QueryInten
 
     items = [{"ordinal": i + 1, "id": p["id"], "label": p["label"]} for i, p in enumerate(projects)]
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         current_project_id=None, current_project_label=None, current_stage=None,
         number_map={"type": "projects", "items": items},
         talent_search=None,
@@ -529,7 +529,7 @@ async def _ask_project_clarification(
     command."""
     options = [{"label": o, "value": o} for o in ambiguous]
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         pending_disambiguation={
             "kind": "project", "field_key": "query_text", "options": options, "resume": resume,
         },
@@ -570,7 +570,7 @@ async def _handle_project_detail(
         rendered = "\n".join(lines)
 
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         current_project_id=project["id"], current_project_label=project["label"],
         current_stage=None,
         number_map={"type": None, "items": []},
@@ -672,7 +672,7 @@ async def _handle_pipeline_query(
     if classification.stage_ambiguous:
         options = [{"label": o, "value": o} for o in classification.stage_ambiguous]
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             pending_disambiguation={
                 "kind": "stage", "field_key": "query_text", "options": options,
                 "resume": {
@@ -712,7 +712,7 @@ async def _handle_pipeline_query(
 
     if classification.count_only:
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             current_project_id=project["id"], current_project_label=project["label"],
             current_stage=stage,
             talent_search=None,
@@ -734,7 +734,7 @@ async def _handle_pipeline_query(
         items = [{"ordinal": i + 1, "id": c.id, "label": c.label} for i, c in enumerate(sorted_candidates)]
         rendered = _render_talent_list(project["label"], stage, items)
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         current_project_id=project["id"], current_project_label=project["label"],
         current_stage=stage,
         number_map={"type": "talents", "items": items},
@@ -809,7 +809,7 @@ async def _ask_talent_clarification(
         for c in candidates
     ]
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         pending_disambiguation={"kind": "talent", "field_key": "query_text", "options": options, "resume": resume},
     )
     return ExecResult(ok=False, error="ambiguous_talent", message=err, needs_clarification=True)
@@ -1071,7 +1071,7 @@ async def _handle_talent_stage_query(
     if classification.stage_ambiguous:
         options = [{"label": o, "value": o} for o in classification.stage_ambiguous]
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             pending_disambiguation={
                 "kind": "stage", "field_key": "query_text", "options": options,
                 "resume": {
@@ -1163,7 +1163,7 @@ async def _resume_pending_query(session: Optional[dict], ctx: ExecContext) -> Ex
     pending = (session or {}).get("pending_disambiguation") or {}
     resume = pending.get("resume") or {}
     resolved_value = pending.get("resolved_value")
-    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
 
     query_kind = resume.get("query_kind")
     if query_kind == "project_detail":
@@ -1453,7 +1453,7 @@ async def _run_talent_search(
         for i, t in enumerate(talents)
     ]
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         talent_search={"filters": filters, "skip": skip, "page_size": page_size, "total": total},
         talent_search_pending_vague=None,
         talent_search_pending_unsupported=None,
@@ -1472,7 +1472,7 @@ async def _handle_talent_search(
     if classification.search_unsupported:
         kinds = " and ".join(classification.search_unsupported)
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             talent_search_pending_unsupported={
                 "filters": classification.search_filters or {},
                 "is_refinement": is_refinement,
@@ -1488,7 +1488,7 @@ async def _handle_talent_search(
         field_key = nlu.VAGUE_TERM_FIELD.get(term)
         question = nlu.VAGUE_CLARIFY_QUESTIONS.get(field_key, "Could you be more specific?")
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             talent_search_pending_vague={"field": field_key},
             talent_search_pending_filters=classification.search_filters or {},
             talent_search_pending_is_refinement=is_refinement,
@@ -1606,7 +1606,7 @@ async def _handle_selection_command(
     ctx: ExecContext, session: Optional[dict], action: str, spec: Optional[str]
 ) -> ExecResult:
     if action == "clear":
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, selection_basket=None)
         return ExecResult(ok=True, message="Selection cleared.")
 
     number_map = (session or {}).get("number_map") or {}
@@ -1640,7 +1640,7 @@ async def _handle_selection_command(
         basket_items = [it for it in basket_items if it["id"] not in remove_ids]
 
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone, selection_basket={"items": basket_items},
+        ctx.agent_id, ctx.sender_phone, selection_basket={"items": basket_items},
     )
     if not basket_items:
         return ExecResult(ok=True, message="Selection cleared.")
@@ -1657,13 +1657,13 @@ async def _handle_move_selection_shorthand(collected: dict, ctx: ExecContext) ->
     command = nlu.extract_selection_command("select " + remainder)
     if not command:
         return ExecResult(ok=False, error="unrecognized_selection", message="I didn't understand that.")
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     return await _handle_selection_command(ctx, session, command["action"], command.get("spec"))
 
 
 async def _query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     raw_text = collected.get("query_text", "")
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
 
     if raw_text == _QUERY_RESUME_MARKER:
         return await _resume_pending_query(session, ctx)
@@ -1750,7 +1750,7 @@ async def _query_parse_edits_async(
     word, or free-text label match against the pending options resumes the
     original query via _QUERY_RESUME_MARKER (see _resume_pending_query),
     without the user repeating the whole command."""
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     stripped = (text or "").strip()
 
     pending_unsupported = (session or {}).get("talent_search_pending_unsupported")
@@ -1758,14 +1758,14 @@ async def _query_parse_edits_async(
         decision = parse_confirmation_reply(stripped)
         if decision == "approve":
             await session_context.update_session(
-                AGENT_ID, ctx.sender_phone,
+                ctx.agent_id, ctx.sender_phone,
                 talent_search_pending_unsupported=None,
                 talent_search_pending_filters=pending_unsupported.get("filters") or {},
                 talent_search_pending_is_refinement=pending_unsupported.get("is_refinement", False),
             )
             return {"query_text": _TALENT_SEARCH_RESUME_MARKER}
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone, talent_search_pending_unsupported=None,
+            ctx.agent_id, ctx.sender_phone, talent_search_pending_unsupported=None,
         )
         return {"query_text": _TALENT_SEARCH_CANCELLED_MARKER}
 
@@ -1777,7 +1777,7 @@ async def _query_parse_edits_async(
         staged = (session or {}).get("talent_search_pending_filters") or {}
         filters = {**staged, pending_vague["field"]: value}
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             talent_search_pending_vague=None,
             talent_search_pending_filters=filters,
         )
@@ -1793,7 +1793,7 @@ async def _query_parse_edits_async(
         return {}
     resolved_value = options[idx - 1]["value"]
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         pending_disambiguation={**pending, "resolved_value": resolved_value},
     )
     return {"query_text": _QUERY_RESUME_MARKER}
@@ -2364,7 +2364,7 @@ async def _remember_last_talent(ctx: ExecContext, resolved: "ResolvedMove") -> N
     commands too, e.g. "Move Sarah to Hold" then later "Approve her")."""
     if len(resolved.talent_ids) == 1:
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             last_talent_id=resolved.talent_ids[0],
             last_talent_label=resolved.talent_labels[0],
             last_talent_project_id=resolved.project_id,
@@ -2663,7 +2663,7 @@ async def _resolve_one_plan_segment(
         sub_fields["talent_selector"] = talent_text
         if project_text is not None:
             sub_fields["project_query"] = project_text
-        session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+        session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
         if intent_id == "casting.add":
             resolved, err, _dis = await _resolve_add_selection(sub_fields, session)
         else:
@@ -2988,7 +2988,7 @@ async def _build_plan_missing_project_clarification(
     text += "\n\nNothing has been added, moved, or shared yet."
 
     await session_context.update_session(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         pending_disambiguation={
             "kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY,
             "options": options, "offset": 0,
@@ -3086,7 +3086,7 @@ async def _cancel_plan_edit(ctx: ExecContext) -> str:
     ordinary "3 -> Cancel" confirmation reply already uses; only the
     wording differs (confirming CANCEL was understood specifically as an
     edit-time cancel, not a generic "3")."""
-    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
     await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
     return _EDITING_CANCELLED_MESSAGE
 
@@ -3314,7 +3314,7 @@ async def _apply_plan_step_edit_instruction(
             header = f"I can change the project for Step {step_index}.\n\nWhich project should I use?"
             text_out, options = _format_project_choice(projects, 0, header)
             await session_context.update_session(
-                AGENT_ID, ctx.sender_phone,
+                ctx.agent_id, ctx.sender_phone,
                 pending_disambiguation={
                     "kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY,
                     "options": options, "offset": 0,
@@ -3412,7 +3412,7 @@ async def _apply_plan_step_edit_instruction(
             header = f"I can change the project for Step {step_index}.\n\nWhich project should I use?"
             text_out, options = _format_project_choice(projects, 0, header)
             await session_context.update_session(
-                AGENT_ID, ctx.sender_phone,
+                ctx.agent_id, ctx.sender_phone,
                 pending_disambiguation={
                     "kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY,
                     "options": options, "offset": 0,
@@ -3527,7 +3527,7 @@ async def _plan_aware_parse_edits_async(
         return {PLAN_STEP_EDIT_ERROR_FIELD.key: "Something went wrong — type CANCEL and try again."}
 
     instruction = text
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
     if pending and pending.get("kind") == "plan_missing_project":
         # Guided Project Selection (2026-09-03) — a pending
@@ -3550,7 +3550,7 @@ async def _plan_aware_parse_edits_async(
             header = pending.get("header") or "ADD needs a project before I can continue."
             text_out, options = _format_project_choice(projects, offset, header)
             await session_context.update_session(
-                AGENT_ID, ctx.sender_phone,
+                ctx.agent_id, ctx.sender_phone,
                 pending_disambiguation={
                     "kind": "plan_missing_project", "field_key": _PLAN_EDIT_STEP_KEY,
                     "options": options, "offset": offset, "header": header,
@@ -3562,7 +3562,7 @@ async def _plan_aware_parse_edits_async(
         idx = nlu.resolve_option_reply(stripped, options) if options else None
         project_text = options[idx - 1]["value"] if idx is not None else stripped
         instruction = f"change the project to {project_text}"
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
 
     new_plan_json, err = await _apply_plan_step_edit_instruction(collected, ctx, step_index, instruction)
     if err:
@@ -3601,7 +3601,7 @@ async def _plan_step_editing_claims_reply(
     # pending, ANY non-empty reply is meaningful (a number, "MORE", or
     # the project's own name/query, which could itself start with a
     # trigger word by pure coincidence).
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
     if pending and pending.get("kind") == "plan_missing_project":
         return True
@@ -3761,7 +3761,7 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
                     # system at all and is untouched by this change.
                     plan_operation_id = str(uuid.uuid4())
                     await undo_store.store_undo(
-                        AGENT_ID, ctx.sender_phone,
+                        ctx.agent_id, ctx.sender_phone,
                         {
                             "operation_id": plan_operation_id,
                             "project_id": r.project_id,
@@ -3846,7 +3846,7 @@ async def _move_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[
         return await _execute_plan(collected, ctx)
     if not collected.get(AUTO_CONFIRM_FIELD.key):
         return None
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     _resolved, err, _dis = await _resolve_move_selection(collected, session)
     if err:
         # Still ambiguous/erroring — fall through to the normal
@@ -3870,7 +3870,7 @@ async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
     if collected.get(PLAN_FIELD.key):
         return await _build_plan_confirmation(collected, ctx)
 
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     resolved, err, disambiguation = await _resolve_move_selection(collected, session)
 
     if err:
@@ -3885,17 +3885,17 @@ async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
             # already committed to for this turn — there is nothing to
             # approve/edit/cancel yet, so 1/2/3 semantics would be wrong.
             await session_context.update_session(
-                AGENT_ID, ctx.sender_phone, pending_disambiguation=disambiguation
+                ctx.agent_id, ctx.sender_phone, pending_disambiguation=disambiguation
             )
             await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="editing")
         else:
-            await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+            await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         return err
 
     # Resolved cleanly — clear any stale pending clarification so a LATER,
     # unrelated "editing" turn (for a totally different reason) can't be
     # misread as answering an already-settled disambiguation.
-    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
     await _remember_last_talent(ctx, resolved)
 
     split = await _split_by_current_stage(resolved)
@@ -3939,7 +3939,7 @@ async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if collected.get(PLAN_FIELD.key):
         return await _execute_plan(collected, ctx)
 
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     resolved, err, _disambiguation = await _resolve_move_selection(collected, session)
     if err:
         # By the time a real confirmation was shown and approved, any
@@ -3954,7 +3954,7 @@ async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     # A real move (not the Phase 2 selection shorthand, intercepted above)
     # is an unrelated workflow — PART 10's session-reset rule, same as
     # every other query/move/add success path in this file.
-    await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
+    await session_context.update_session(ctx.agent_id, ctx.sender_phone, selection_basket=None)
 
     if collected.get("project_query"):
         # An explicit project named in a natural-language move ("... in
@@ -3964,7 +3964,7 @@ async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         # sprint's stability guarantee: only "Show <Pipeline>" is allowed
         # to regenerate the displayed-list mapping).
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             current_project_id=resolved.project_id,
             current_project_label=resolved.project_label,
         )
@@ -3991,7 +3991,7 @@ async def _move_executor(collected: dict, ctx: ExecContext) -> ExecResult:
 
     operation_id = str(uuid.uuid4())
     await undo_store.store_undo(
-        AGENT_ID, ctx.sender_phone,
+        ctx.agent_id, ctx.sender_phone,
         {
             "operation_id": operation_id,
             "project_id": resolved.project_id,
@@ -4073,7 +4073,7 @@ async def _move_parse_edits_async(
     and finally — if a clarification is pending but the reply matched
     neither of the above — treats the raw reply as a more specific retry
     of whichever field was unclear (e.g. retyping a fuller name)."""
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
     stripped = (text or "").strip()
 
@@ -4084,7 +4084,7 @@ async def _move_parse_edits_async(
 
         if kind == "retry_global":
             if parse_confirmation_reply(stripped) == "approve":
-                await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+                await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
                 return {"project_query": nlu.FORCE_GLOBAL_MARKER}
         elif field_key and options:
             # A number, an ordinal word ("the third one", "last"), or a
@@ -4094,7 +4094,7 @@ async def _move_parse_edits_async(
             # picking a close-but-not-clearly-unique option.
             idx = nlu.resolve_option_reply(stripped, options)
             if idx is not None:
-                await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+                await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
                 return {field_key: options[idx - 1]["value"]}
             if kind == "talent":
                 # Multi-pick fallback ("1 and 3", "Thakur and Singh") —
@@ -4110,7 +4110,7 @@ async def _move_parse_edits_async(
                 # the selector grammar itself are needed.
                 multi_idx = nlu.resolve_option_reply_multi(stripped, options)
                 if multi_idx and len(multi_idx) > 1:
-                    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+                    await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
                     labels = ", ".join(options[i - 1]["label"] for i in multi_idx)
                     return {field_key: labels}
 
@@ -4548,20 +4548,20 @@ async def _build_add_confirmation(collected: dict, ctx: ExecContext) -> str:
     if collected.get(PLAN_FIELD.key):
         return await _build_plan_confirmation(collected, ctx)
 
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     resolved, err, disambiguation = await _resolve_add_selection(collected, session)
 
     if err:
         if disambiguation:
             await session_context.update_session(
-                AGENT_ID, ctx.sender_phone, pending_disambiguation=disambiguation
+                ctx.agent_id, ctx.sender_phone, pending_disambiguation=disambiguation
             )
             await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="editing")
         else:
-            await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+            await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         return err
 
-    await session_context.update_session(AGENT_ID, ctx.sender_phone, pending_disambiguation=None)
+    await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
     await _remember_last_talent(ctx, resolved)
 
     split = await _split_by_existing_membership(resolved)
@@ -4593,7 +4593,7 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if collected.get(PLAN_FIELD.key):
         return await _execute_plan(collected, ctx)
 
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     resolved, err, _disambiguation = await _resolve_add_selection(collected, session)
     if err:
         return ExecResult(ok=False, error="add_resolution_failed", message=err)
@@ -4607,10 +4607,10 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         # selection_basket in either direction — it must NOT be swept up
         # by this reset, or it would silently wipe out an unrelated, real
         # selection the user might already be building.
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, selection_basket=None)
     if collected.get("project_query"):
         await session_context.update_session(
-            AGENT_ID, ctx.sender_phone,
+            ctx.agent_id, ctx.sender_phone,
             current_project_id=resolved.project_id, current_project_label=resolved.project_label,
         )
 
@@ -4646,7 +4646,7 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         # "Add/Attach selected to X" — the whole point of the basket was
         # this one action, and leaving it populated risks a later,
         # unrelated "Add selected to Y" silently re-adding the same people.
-        await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, selection_basket=None)
         lines.append("")
         lines.append("Selection cleared.")
 
@@ -4671,7 +4671,7 @@ async def _add_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[E
         return await _execute_plan(collected, ctx)
     if not collected.get(AUTO_CONFIRM_FIELD.key):
         return None
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     _resolved, err, _dis = await _resolve_add_selection(collected, session)
     if err:
         # Still ambiguous/erroring — fall through to the normal
@@ -4978,6 +4978,195 @@ UPLOAD_INTENT = IntentDefinition(
 # ---------------------------------------------------------------------------
 SHARE_TRIGGERS = ["share"]
 
+# ---------------------------------------------------------------------------
+# Send/Share Semantic Router (Production fix, 2026-09-06) — "send" and
+# "share" (plus every other communication verb: forward/deliver/message/
+# broadcast/push/dispatch) now carry ONE canonical meaning split by
+# CONTENT, not by which verb the admin happened to type: sending/sharing a
+# saved template, a custom message, casting-call details, or an Instagram
+# profile/link is SHARE; forwarding a talent's own marked audition media/
+# files is SEND. SHARE_INTENT becomes the single top-level entry point for
+# ALL of these verbs (SHARE_OR_SEND_TRIGGERS, below) — casting.send and the
+# WhatsApp Campaign Agent's own send_requirement resolver keep their EXACT
+# existing resolution logic completely unchanged, reached only through an
+# internal conversation hand-off (the SAME pattern already used for the
+# Pipeline Check gate's Add+Move handoff), never a second/duplicate
+# implementation. _resolve_share_step_for_plan (the compound-plan engine)
+# calls the real _extract_share_fields directly and is NEVER routed
+# through this classifier — the compound ADD->MOVE->SHARE workflow's own
+# SHARE step is completely unaffected.
+# ---------------------------------------------------------------------------
+SHARE_OR_SEND_TRIGGERS = [
+    "share", "send", "forward", "deliver", "message", "broadcast", "push", "dispatch",
+]
+
+_INSTAGRAM_SIGNAL_RE = re.compile(r"\binsta(?:gram)?\b", re.IGNORECASE)
+_SHARE_CONTENT_SIGNAL_RE = re.compile(
+    r"\b(template|casting\s*call|custom\s+message|campaign|communication)\b", re.IGNORECASE,
+)
+_MEDIA_CONTENT_SIGNAL_RE = re.compile(
+    r"\b(audition|video|videos|photo|photos|picture|pictures|material|materials|media|file|files)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_share_send_target(trigger: str, remainder: str) -> str:
+    """Content, not verb, decides SHARE vs SEND — "Send the casting call
+    to X" is SHARE, "Send X's audition video to Y" is SEND, even though
+    both start with the same word. Returns "instagram" | "share" |
+    "send" | "ambiguous".
+
+    An explicit Instagram mention always wins (its own established
+    handling, reused unchanged). The trigger word "share" itself is a
+    strong, historically-unambiguous signal on its own — it has never
+    meant media-forwarding — so it resolves to "share" immediately once
+    Instagram is ruled out. Every other verb is classified by the OBJECT
+    being sent: a quoted custom message or an explicit share-content
+    word (template/casting call/custom message/campaign/communication)
+    means SHARE; an explicit media word (audition/video/photo/material/
+    file/...) means SEND.
+
+    When NEITHER content word is present, casting.send's own two
+    already-established grammar shapes ("Talent - Project" hyphen form,
+    "Talent for Project" natural form — checked via the EXACT SAME
+    functions/regex its own extraction already uses, never new parsing)
+    are a strong enough structural signal to mean SEND on their own —
+    otherwise its single most common phrasing ("Send Kripa Trivedi for
+    Parachute Jasmine Oil", no "audition"/"video"/... word anywhere in
+    it) would wrongly ask a clarification every single time. Genuinely
+    conflicting or absent signals are never guessed — "ambiguous" asks
+    instead, exactly like the spec's own "Send Anusha Sharma to Hinge"
+    example (no "for", no content word — structurally unrecognized)."""
+    if _INSTAGRAM_SIGNAL_RE.search(remainder):
+        return "instagram"
+    if (trigger or "").strip().lower() == "share":
+        return "share"
+    if '"' in remainder:
+        return "share"
+    has_share_signal = bool(_SHARE_CONTENT_SIGNAL_RE.search(remainder))
+    has_media_signal = bool(_MEDIA_CONTENT_SIGNAL_RE.search(remainder))
+    if has_share_signal and not has_media_signal:
+        return "share"
+    if has_media_signal and not has_share_signal:
+        return "send"
+    if has_share_signal and has_media_signal:
+        return "ambiguous"
+    if nlu._split_hyphen_fields(remainder, 2):
+        return "send"
+    m = _SEND_STEP_FOR_PROJECT_RE.match(remainder)
+    if m:
+        # "X for Y" alone (nothing trailing) is casting.send's own
+        # canonical shape ("Kripa Trivedi for Parachute Jasmine Oil");
+        # "X for Y to Z" is a DIFFERENT, three-part shape ("template for
+        # project TO talent") that's actually SHARE's own grammar
+        # (casting SHARE_INTENT already understands "for <project> to/
+        # with <talent>") — a trailing "to" clause means this was never
+        # casting.send's simpler two-part phrasing to begin with.
+        return "share" if re.search(r"\bto\b", m.group(2)) else "send"
+    return "ambiguous"
+
+
+SHARE_ROUTE_FIELD = FieldSpec(
+    key="_share_route", label="Route", question="", validate=_validate_hidden, required=False,
+)
+SHARE_RAW_REMAINDER_FIELD = FieldSpec(
+    key="_share_raw_remainder", label="Raw text", question="", validate=_validate_hidden, required=False,
+)
+
+
+def _extract_share_or_send_fields(text: str) -> Dict[str, str]:
+    """SHARE_INTENT's real extract_fields hook — classifies BEFORE
+    parsing, delegating to the existing, UNCHANGED _extract_share_fields
+    only once content genuinely means SHARE."""
+    raw_text, auto_confirm = nlu.strip_and_confirm(text or "")
+    trigger, remainder = nlu._strip_leading_trigger(raw_text, SHARE_OR_SEND_TRIGGERS)
+    remainder = (remainder or "").strip()
+    if not remainder:
+        return {}
+    route = _classify_share_send_target(trigger or "", remainder)
+    if route == "share":
+        # Normalize to the "share" trigger _extract_share_fields itself
+        # actually recognizes (SHARE_TRIGGERS=["share"]) — the ORIGINAL
+        # verb could have been "send"/"forward"/etc., which that function
+        # has no reason to know about on its own. Without this, an
+        # unstripped leading verb ("Send the template for X to Y") was
+        # only ever silently absorbed by luck, via the fuzzy template
+        # matcher tolerating extra filler words — real cases with no
+        # fuzzy match to fall back on (a bare "template", a quoted
+        # custom message right after the verb) broke outright.
+        normalized = f"share {remainder}" + (" and confirm" if auto_confirm else "")
+        return _extract_share_fields(normalized)
+    out = {
+        SHARE_ROUTE_FIELD.key: route,
+        SHARE_RAW_REMAINDER_FIELD.key: remainder,
+        # A non-empty placeholder so the generic dispatcher's own
+        # missing-required-field check doesn't intercept before
+        # _build_share_confirmation gets a chance to hand off — never
+        # actually shown or used for these routes.
+        "recipient_query": remainder,
+    }
+    if auto_confirm:
+        out[AUTO_CONFIRM_FIELD.key] = "1"
+    return out
+
+
+async def _handoff_share_route(route: str, collected: dict, ctx: ExecContext) -> str:
+    """Hands off a "send"/"instagram"-classified SHARE trigger to the
+    EXISTING, unchanged engine that actually owns it, via a fresh
+    conversation for that intent — the SAME hand-off pattern the
+    Pipeline Check gate's own Option 1 already established. Never
+    invents new resolution logic; both target functions are called
+    completely unmodified."""
+    raw_remainder = collected.get(SHARE_RAW_REMAINDER_FIELD.key) or ""
+    if route == "instagram":
+        from agents.modules import whatsapp_campaign_agent as wa
+        ig_fields = wa.extract_send_requirement_fields(f"send {raw_remainder}")
+        await conversation.start_conversation(
+            agent_id=ctx.agent_id, phone=ctx.sender_phone,
+            group_name=ctx.group_name, intent_id="whatsapp_campaign.send_requirement",
+            collected=ig_fields,
+        )
+        await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
+        return await wa._build_send_requirement_confirmation(ig_fields, ctx)
+    # route == "send"
+    send_fields = _extract_send_fields(f"send {raw_remainder}")
+    await conversation.start_conversation(
+        agent_id=ctx.agent_id, phone=ctx.sender_phone,
+        group_name=ctx.group_name, intent_id="casting.send",
+        collected=send_fields,
+    )
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
+    return await _build_send_confirmation(send_fields, ctx)
+
+
+async def _handle_share_send_ambiguous_reply(
+    text: str, pending: Dict[str, Any], ctx: ExecContext,
+) -> Optional[str]:
+    """"1"/"2" reply to the "Do you want to: 1 -> Share a template/
+    message 2 -> Send audition/media" clarification (Production fix,
+    2026-09-06) — re-runs extraction with the CANONICAL trigger word for
+    whichever the admin picked, reusing the exact same real engines
+    _handoff_share_route/_extract_share_fields already use, never a
+    third interpretation path."""
+    stripped = (text or "").strip()
+    raw_remainder = pending.get("raw_remainder") or ""
+    if stripped == "1":
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+        new_fields = _extract_share_fields(f"share {raw_remainder}")
+        await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, collected=new_fields)
+        return await _build_share_confirmation(new_fields, ctx)
+    if stripped == "2":
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+        return await _handoff_share_route(
+            "send", {SHARE_RAW_REMAINDER_FIELD.key: raw_remainder}, ctx,
+        )
+    if parse_confirmation_reply(stripped) == "cancel":
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+        await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+        return "CANCELLED\n\nNothing was sent."
+    return None
+
+
 # Production Readiness (2026-09-03) — SHARE has exactly 3 purposes: a
 # saved template (ANY saved template, resolved by name via the WhatsApp
 # Campaign Agent's own wa._resolve_source/resolve_template_by_name fuzzy
@@ -4989,7 +5178,7 @@ SHARE_TRIGGERS = ["share"]
 # One canonical grammar; the legacy "share - Project - Talent" hyphen
 # syntax is detected and redirected (_SHARE_LEGACY_MARKER below) rather
 # than silently parsed, per "remove/restrict confusing legacy syntax."
-_SHARE_CUSTOM_MESSAGE_RE = re.compile(r"^\s*custom\s+message\b", re.IGNORECASE)
+_SHARE_CUSTOM_MESSAGE_RE = re.compile(r"^\s*(?:the\s+)?custom\s+message\b", re.IGNORECASE)
 _SHARE_TO_RECIPIENT_RE = re.compile(r"\b(?:to|with)\b\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _SHARE_FOR_PROJECT_RE = re.compile(r"\bfor\b\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _SHARE_LEADING_FILLER_RE = re.compile(r"^\s*(?:the|this|that|a|an|same)\s+", re.IGNORECASE)
@@ -5646,6 +5835,28 @@ def _format_share_pipeline_check(matrix: List[_SharePairCheck]) -> str:
 
 
 async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
+    # Send/Share Semantic Router (Production fix, 2026-09-06) — set by
+    # _extract_share_or_send_fields; must be checked BEFORE _resolve_share
+    # even runs, since project_query/recipient_query mean nothing for
+    # these routes (they're a raw, unparsed remainder).
+    route = collected.get(SHARE_ROUTE_FIELD.key)
+    if route == "ambiguous":
+        await session_context.update_session(
+            ctx.agent_id, ctx.sender_phone,
+            pending_disambiguation={
+                "kind": "share_send_ambiguous",
+                "raw_remainder": collected.get(SHARE_RAW_REMAINDER_FIELD.key) or "",
+            },
+        )
+        return (
+            "Do you want to:\n\n"
+            "1 → Share a template/message\n"
+            "2 → Send audition/media\n\n"
+            "Reply with 1 or 2."
+        )
+    if route in ("instagram", "send"):
+        return await _handoff_share_route(route, collected, ctx)
+
     resolved = await _resolve_share(collected)
     if not resolved.ok:
         if resolved.disambiguation:
@@ -5825,6 +6036,15 @@ async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
 
 async def _share_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
     if not collected.get(AUTO_CONFIRM_FIELD.key):
+        return None
+    # Send/Share Semantic Router — a "send"/"instagram"/"ambiguous" route
+    # is never auto-confirmable here: it needs its own hand-off/
+    # clarification, always via the normal confirmation flow
+    # (_build_share_confirmation). A trailing "and confirm" on a message
+    # that ends up routed to SEND/Instagram is not preserved through the
+    # hand-off (a minor, acceptable gap — worst case one extra
+    # confirmation prompt, never a wrong action).
+    if collected.get(SHARE_ROUTE_FIELD.key) in ("instagram", "send", "ambiguous"):
         return None
     resolved = await _resolve_share(collected)
     if not resolved.ok:
@@ -6014,7 +6234,13 @@ async def _share_handle_confirming_reply(
     every other SHARE confirmation completely unchanged."""
     session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
-    if not pending or pending.get("kind") != "share_pipeline_check":
+    if not pending:
+        return None
+
+    if pending.get("kind") == "share_send_ambiguous":
+        return await _handle_share_send_ambiguous_reply(text, pending, ctx)
+
+    if pending.get("kind") != "share_pipeline_check":
         return None
     stripped = (text or "").strip()
 
@@ -6083,13 +6309,19 @@ SHARE_PAIR_RESTRICTION_FIELD = FieldSpec(
 
 SHARE_INTENT = IntentDefinition(
     intent_id="casting.share",
-    triggers=SHARE_TRIGGERS,
+    # Send/Share Semantic Router (Production fix, 2026-09-06) — SHARE_INTENT
+    # is now the single top-level entry point for every communication verb
+    # (send/share/forward/deliver/message/broadcast/push/dispatch); content,
+    # not the verb, decides whether it stays here or hands off to
+    # casting.send/Instagram. See SHARE_OR_SEND_TRIGGERS's own comment.
+    triggers=SHARE_OR_SEND_TRIGGERS,
     fields=[
         SHARE_PROJECT_FIELD, SHARE_RECIPIENT_FIELD, SHARE_TEMPLATE_FIELD, SHARE_CUSTOM_MESSAGE_FIELD,
-        SHARE_PAIR_RESTRICTION_FIELD, AUTO_CONFIRM_FIELD, PLAN_STEP_EDIT_ERROR_FIELD,
+        SHARE_PAIR_RESTRICTION_FIELD, SHARE_ROUTE_FIELD, SHARE_RAW_REMAINDER_FIELD,
+        AUTO_CONFIRM_FIELD, PLAN_STEP_EDIT_ERROR_FIELD,
     ],
     executor=_share_executor,
-    extract_fields=_extract_share_fields,
+    extract_fields=_extract_share_or_send_fields,
     build_confirmation=_build_share_confirmation,
     build_edit_prompt=_build_share_edit_prompt,
     try_auto_execute=_share_try_auto_execute,
@@ -6120,35 +6352,44 @@ SHARE_INTENT = IntentDefinition(
 
 
 # ---------------------------------------------------------------------------
-# SHARE ownership/routing (Production fix, 2026-09-05) — standalone SHARE
-# now belongs ONLY to the Talentgram WhatsApp Agent group (SHARE_INTENT,
-# the real implementation above, is registered on CAMPAIGN_AGENT instead —
-# see whatsapp_campaign_agent.py). Casting Pipeline keeps ADD, MOVE, and
-# the approved compound ADD -> MOVE -> SHARE workflow (that workflow's own
-# SHARE step never goes through an intent trigger at all — it's resolved
-# directly by _resolve_share_step_for_plan inside the compound-plan engine,
-# untouched by anything below), but a STANDALONE "Share ..." typed here
-# must never execute, pipeline-check, or send anything — just point the
-# admin at the right group. A trivial auto_confirm intent (same shape
-# QUERY_INTENT already uses for "nothing to approve, just answer") is the
-# smallest way to guarantee that: no fields, no build_confirmation, no DB
-# access of any kind — the executor is a pure constant.
+# Talentgram Scouting Agent consolidation (Production fix, 2026-09-06) —
+# the Talentgram Casting Pipeline group is no longer an active command-
+# execution surface at all: EVERY command that used to work here (ADD,
+# MOVE, SHARE, SEND, UPLOAD, QUERY/SHOW/TESTED, UNDO — the approved
+# compound ADD -> MOVE -> SHARE workflow included) now lives exclusively
+# on the Talentgram Scouting Agent group instead (see whatsapp_campaign_
+# agent.py's CAMPAIGN_AGENT, which imports and registers every one of
+# those real, UNCHANGED intents). This group's own registration below
+# replaces every one of them with ONE trivial redirect intent whose
+# trigger list is the union of every trigger word any of them used to
+# answer to, so a previously-working command here gets a clear, honest
+# redirect instead of being silently ignored — never executes anything,
+# never touches the database, never sends a WhatsApp message. A trivial
+# auto_confirm intent (the same shape QUERY_INTENT already uses for
+# "nothing to approve, just answer") is the smallest way to guarantee
+# that: no fields, no build_confirmation, no DB access of any kind — the
+# executor is a pure constant.
 # ---------------------------------------------------------------------------
-SHARE_REROUTE_MESSAGE = (
-    "SHARE is handled in the Talentgram WhatsApp Agent group.\n"
-    "Please send the SHARE command there."
+CASTING_REDIRECT_MESSAGE = (
+    "This command group has moved to Talentgram Scouting Agent.\n"
+    "Please send your command there."
 )
 
+CASTING_REDIRECT_TRIGGERS = list(dict.fromkeys(
+    nlu.QUERY_TRIGGERS + nlu.MOVE_TRIGGERS + nlu.ADD_TRIGGERS
+    + ["upload", "send", "undo", "undo that"] + SHARE_TRIGGERS
+))
 
-async def _share_reroute_executor(collected: dict, ctx: ExecContext) -> ExecResult:
-    return ExecResult(ok=True, message=SHARE_REROUTE_MESSAGE)
+
+async def _casting_redirect_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    return ExecResult(ok=True, message=CASTING_REDIRECT_MESSAGE)
 
 
-SHARE_REROUTE_INTENT = IntentDefinition(
-    intent_id="casting.share_reroute",
-    triggers=SHARE_TRIGGERS,
+CASTING_REDIRECT_INTENT = IntentDefinition(
+    intent_id="casting.redirect",
+    triggers=CASTING_REDIRECT_TRIGGERS,
     fields=[],
-    executor=_share_reroute_executor,
+    executor=_casting_redirect_executor,
     auto_confirm=True,
 )
 
@@ -6931,7 +7172,16 @@ async def _build_send_cancel_message(collected: dict, ctx: ExecContext) -> str:
 
 SEND_INTENT = IntentDefinition(
     intent_id="casting.send",
-    triggers=["send"],
+    # Send/Share Semantic Router (Production fix, 2026-09-06) — no longer
+    # directly triggerable at the top level; "send" now belongs to
+    # SHARE_INTENT (which classifies content and hands off to THIS intent,
+    # unchanged, only once it genuinely means media). Still registered
+    # (and its own triggers=[] is fine — detect_trigger simply never
+    # matches it) so registry.get_intent(agent, "casting.send") keeps
+    # resolving for that hand-off, and the compound-plan engine's own
+    # trailing-SEND-step recognition (_SEND_CHUNK_TRIGGERS, a completely
+    # separate constant) is unaffected either way.
+    triggers=[],
     fields=[SEND_TALENT_FIELD, SEND_PROJECT_FIELD, SEND_FORM_EDIT_FIELD],
     executor=_send_executor,
     extract_fields=_extract_send_fields,
@@ -6950,21 +7200,21 @@ SEND_INTENT = IntentDefinition(
 # window "yes I meant to reverse that" reply.
 # ---------------------------------------------------------------------------
 async def _undo_executor(collected: dict, ctx: ExecContext) -> ExecResult:
-    doc = await undo_store.get_undo(AGENT_ID, ctx.sender_phone)
+    doc = await undo_store.get_undo(ctx.agent_id, ctx.sender_phone)
     if doc is None:
         return ExecResult(ok=False, error="no_undo_available", message="No recent operation available to undo.")
     if undo_store.is_expired(doc):
-        await undo_store.clear_undo(AGENT_ID, ctx.sender_phone)
+        await undo_store.clear_undo(ctx.agent_id, ctx.sender_phone)
         return ExecResult(ok=False, error="undo_expired", message="Undo period has expired.")
 
     # An unrelated workflow — PART 10's session-reset rule.
-    await session_context.update_session(AGENT_ID, ctx.sender_phone, selection_basket=None)
+    await session_context.update_session(ctx.agent_id, ctx.sender_phone, selection_basket=None)
 
     operation = doc["operation"]
     # One-shot: clear BEFORE restoring so a duplicate/concurrent "UNDO"
     # reply can't double-apply the same restore (matches "expire
     # immediately after use").
-    await undo_store.clear_undo(AGENT_ID, ctx.sender_phone)
+    await undo_store.clear_undo(ctx.agent_id, ctx.sender_phone)
 
     project_id = operation["project_id"]
     new_stage = operation["new_stage"]
@@ -7107,7 +7357,7 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
     require an explicit filter- or page-shaped clause — a bare "ok thanks"
     returns None regardless of session state."""
     stripped = (text or "").strip()
-    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
 
     if stripped.isdigit():
         number_map = (session or {}).get("number_map") or {}
@@ -7133,223 +7383,33 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
     return None
 
 
-# Static Help Command text (see parser.is_help_trigger / dispatcher.py).
-# Hand-written, not generated from QUERY_INTENT/MOVE_INTENT/ADD_INTENT/
-# UNDO_INTENT's trigger lists — those are internal NLU vocabulary (~30
-# query-trigger words alone), not user-facing command syntax. Every example
-# below is a real, tested command shape (see tests/test_talent_search_agent.py
-# and tests/test_casting_agent.py). Update this string by hand alongside any
-# future intent/command change.
-HELP_TEXT = (
-    "TALENTGRAM CASTING PIPELINE\n"
-    "QUICK MANUAL\n\n"
-    "This group manages talents, projects, and the casting pipeline — "
-    "adding talents, moving them through stages, sharing casting calls, "
-    "sending submissions, and checking status. Talk to it in plain "
-    "English; the examples below are the reliable way to write each "
-    "command.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "1. ADD\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: adds talent(s) to a project's pipeline, at Ask To Test.\n\n"
-    "BASIC FORMAT: Add [talent] to [project]\n"
-    "Add Kripa Trivedi to Parachute Jasmine Oil\n\n"
-    "MULTIPLE TALENTS (comma-separate):\n"
-    "Add Kripa Trivedi,Siddhi Bankhele to Parachute Jasmine Oil\n\n"
-    "MULTIPLE PROJECTS (comma-separate):\n"
-    "Add Kripa Trivedi to Project A,Project B\n\n"
-    "MULTIPLE TALENTS + MULTIPLE PROJECTS (every combination — Kripa→A, "
-    "Kripa→B, Siddhi→A, Siddhi→B, never duplicated):\n"
-    "Add Kripa Trivedi,Siddhi Bankhele to Project A,Project B\n\n"
-    "ADD + MOVE in one message:\n"
-    "Add Kripa Trivedi to Parachute Jasmine Oil, move her to Follow Up\n\n"
-    "ADD + MOVE + SHARE in one message (SHARE reuses exactly who ADD/MOVE "
-    "just touched):\n"
-    "Add Kripa Trivedi to Parachute Jasmine Oil, move her to Follow Up, "
-    "share the casting call with her\n\n"
-    "IMPORTANT NOTES:\n"
-    "• Only commas separate lists — the comma never splits a real name, "
-    "and a project name that itself contains \"and\" (e.g. Vaseline (Film 1 "
-    "and Film 4)) is still treated as one project.\n"
-    "• Extra or uneven spacing, and small typos in the word \"add\" itself "
-    "(addd, ad) or natural phrasing (add ... in/for/under ...) all work — "
-    "no need to type it exactly.\n"
-    "• In a chained command, her/him/both/them refers to whoever ADD just "
-    "touched in THAT message — never a name from an earlier, unrelated "
-    "command.\n"
-    "• If a talent or project name matches more than one record, I list "
-    "them numbered and ask which one you mean — reply with the number and "
-    "the original command continues, it doesn't need to be retyped.\n"
-    "• Before anything is added, I show exactly what will happen and wait "
-    "for your approval — nothing is added until you reply 1 (or \"and "
-    "confirm\" to skip the approval step).\n"
-    "• Adding someone already in that pipeline reports it instead of "
-    "creating a duplicate entry.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "2. MOVE\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: moves talent(s) already in a pipeline to a different "
-    "stage.\n\n"
-    "HOW TO WRITE IT: Move [talent] to [stage] in [project]\n\n"
-    "EXAMPLES:\n"
-    "Move Kripa Trivedi to Follow Up in Parachute Jasmine Oil\n"
-    "Move Kripa Trivedi,Siddhi Bankhele to Shortlisted in Project A\n\n"
-    "IMPORTANT NOTES: also understands shortlist, select, reject, hold, "
-    "restore, not available, not interested, and every existing stage "
-    "name. Shows a preview and waits for approval, same as ADD.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "3. SHARE (as part of ADD + MOVE)\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: as the last step of a chained ADD + MOVE command, "
-    "shares the casting call with whoever was just added and moved — "
-    "one confirmed workflow.\n\n"
-    "EXAMPLE:\n"
-    "Add Kripa Trivedi to Parachute Jasmine Oil, move her to Follow Up, "
-    "share the casting call with her\n\n"
-    "IMPORTANT NOTES: a standalone SHARE command (one that isn't chained "
-    "after ADD/MOVE) is NOT handled in this group — send it in the "
-    "Talentgram WhatsApp Agent group instead.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "4. SEND\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: forwards a talent's own marked WhatsApp audition "
-    "media (Takes → Introduction → Form → Pictures → ☑️) to a casting "
-    "WhatsApp group.\n\n"
-    "HOW TO WRITE IT: Send [talent] for [project]\n\n"
-    "EXAMPLES:\n"
-    "Send Kripa Trivedi for Parachute Jasmine Oil\n"
-    "Send Kripa Trivedi,Siddhi Bankhele for Parachute Jasmine Oil\n\n"
-    "IMPORTANT NOTES: ALWAYS shows the exact form first and needs an "
-    "explicit approval — nothing is ever sent automatically. Reply:\n"
-    "1 → Approve\n"
-    "2 → Edit a field\n"
-    "3 → Cancel\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "5. UPLOAD\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: pulls a talent's @Gunwanti-marked WhatsApp media "
-    "(takes/intro/photos) into their Talentgram submission, for the "
-    "app's own review pages. Different from SEND — this never touches "
-    "WhatsApp, and SEND never touches this.\n\n"
-    "HOW TO WRITE IT: Upload [talent]'s marked media for [project]\n\n"
-    "EXAMPLES:\n"
-    "Upload Kripa Trivedi's marked media for Parachute Jasmine Oil\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "6. TESTED\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: checks a talent's current pipeline stage for a "
-    "project.\n\n"
-    "HOW TO WRITE IT: Tested [talent] for [project]\n\n"
-    "EXAMPLES:\n"
-    "Tested Kripa Trivedi for Parachute Jasmine Oil\n"
-    "Has Kripa Trivedi tested for Parachute Jasmine Oil\n"
-    "Tested Kripa Trivedi,Siddhi Bankhele for Project A,Project B\n\n"
-    "IMPORTANT NOTES: answers with the ACTUAL current stage (e.g. "
-    "Shortlisted) — not just yes/no. Runs immediately, no approval "
-    "needed (it doesn't change anything).\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "7. SHOW\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: looks up ongoing projects, a project's pipeline, or "
-    "which projects a talent is in.\n\n"
-    "HOW TO WRITE IT: Show [projects / a project's pipeline / talent's projects]\n\n"
-    "EXAMPLES:\n"
-    "Show ongoing projects\n"
-    "Show projects of Kripa Trivedi\n"
-    "Show projects of Kripa Trivedi,Siddhi Bankhele\n"
-    "Show the Follow Up pipeline of Parachute Jasmine Oil\n\n"
-    "IMPORTANT NOTES: runs immediately, no approval needed.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "8. UNDO\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: reverses the last pipeline move, within 5 minutes — "
-    "including the move half of a combined Add+Move.\n\n"
-    "HOW TO WRITE IT: Undo\n\n"
-    "IMPORTANT NOTES: never undoes a SEND or SHARE — those are outbound "
-    "WhatsApp messages, not pipeline changes.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "9. HELP\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "WHAT IT DOES: shows this manual.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "MULTIPLE TALENTS / MULTIPLE PROJECTS\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "Comma-separate multiple talents (Kripa Trivedi,Siddhi Bankhele) or "
-    "multiple projects (Project A,Project B) — I understand them as "
-    "lists. Naming both means every combination:\n\n"
-    "Add Kripa Trivedi,Siddhi Bankhele to Project A,Project B\n\n"
-    "means Kripa→A, Kripa→B, Siddhi→A, Siddhi→B — one talent is never "
-    "added twice to the same project.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "MULTIPLE COMMANDS IN ONE MESSAGE\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "ADD, MOVE, SHARE, and SEND can be chained in one message — each "
-    "runs in the order you wrote it:\n\n"
-    "Add Kripa Trivedi to Parachute Jasmine Oil, move her to Follow Up, "
-    "share the casting call with her\n\n"
-    "Add A,B to Project 1,Project 2, move both to Follow Up, send both "
-    "the casting calls\n\n"
-    "SEND inside a combined command still shows its own separate form "
-    "and needs its own explicit approval — never bundled into the rest. "
-    "Finish with \"and confirm\" to skip the approval step on everything "
-    "else (SEND's own approval is never skipped).\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "\"BOTH\" / \"HER\" / \"HIM\" / \"THEM\"\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "In a combined command, an unnamed talent (her/him/both/them) means "
-    "whoever the earlier steps in THAT SAME message just touched. \"Both\"/"
-    "\"them\" mean everyone touched so far; \"her\"/\"him\" mean exactly one "
-    "— if more than one talent could be meant, I'll ask rather than guess.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "CONFIRMATION\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "Before anything changes, I show exactly what will happen and wait:\n\n"
-    "Reply:\n"
-    "1 → Approve\n"
-    "2 → Edit\n"
-    "3 → Cancel\n\n"
-    "On Edit, I'll ask specifically what you want to change about THAT "
-    "pending action — no need to repeat the whole command.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "WHEN SOMETHING IS AMBIGUOUS\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "If a talent or project name matches more than one real record, "
-    "I'll show numbered options and ask you to pick — I never guess on "
-    "a close spelling match. Once you answer, I continue the original "
-    "command automatically.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "WHEN AN ERROR OCCURS\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "I'll tell you what I understood, what's missing or wrong, and "
-    "exactly what to send next — nothing is ever changed or sent when "
-    "something goes wrong.\n\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    "GENERAL\n"
-    "━━━━━━━━━━━━━━━━━━\n\n"
-    "• Spaces around commas are ignored\n"
-    "• Minor spelling mistakes are tolerated, including in command words "
-    "(e.g. \"mover\" for \"move\")\n"
-    "• Talent search (e.g. \"Find actors in Mumbai\") and picking from a "
-    "list (Select 1,3,5) still work too"
-)
+# HELP_TEXT removed (Production fix, 2026-09-06) — casting-agent no
+# longer has a real command manual; CASTING_AGENT.help_text is now
+# CASTING_REDIRECT_MESSAGE (see the "Talentgram Scouting Agent
+# consolidation" block above). The full master manual now lives on
+# whatsapp_campaign_agent.py's CAMPAIGN_AGENT instead.
 
 CASTING_AGENT = AgentDefinition(
     agent_id=AGENT_ID,
     name="Talentgram Casting Pipeline",
     module="casting_pipeline",
-    # SHARE_REROUTE_INTENT, not SHARE_INTENT — standalone SHARE is now
-    # owned exclusively by the Talentgram WhatsApp Agent group (see the
-    # "SHARE ownership/routing" block above SHARE_REROUTE_INTENT's own
-    # definition). The approved compound ADD -> MOVE -> SHARE workflow is
-    # unaffected — it never goes through this registration at all.
-    intents=[QUERY_INTENT, MOVE_INTENT, ADD_INTENT, UPLOAD_INTENT, SEND_INTENT, SHARE_REROUTE_INTENT, UNDO_INTENT],
-    resolve_bare_reply=_resolve_bare_reply,
-    # Concurrent Task Engine (2026-08-05) — casting-agent is the first (and
-    # so far only) agent to opt into independently-addressable, concurrent
-    # WhatsApp-reply-routable operations. CRM does not set this, so it is
-    # completely unaffected.
+    # Talentgram Scouting Agent consolidation (Production fix, 2026-09-06)
+    # — CASTING_REDIRECT_INTENT only; every real command (ADD, MOVE,
+    # SHARE, SEND, UPLOAD, QUERY/SHOW/TESTED, UNDO, and the approved
+    # compound ADD -> MOVE -> SHARE workflow) now lives exclusively on
+    # whatsapp_campaign_agent.py's CAMPAIGN_AGENT. No resolve_bare_reply
+    # either — there is never any real pending state on this agent to
+    # resume against anymore.
+    intents=[CASTING_REDIRECT_INTENT],
+    # Concurrent Task Engine (2026-08-05) — harmless to leave on: the
+    # single redirect intent above is auto_confirm and never creates a
+    # task, so nothing here actually exercises it any more.
     supports_concurrent_tasks=True,
-    help_text=HELP_TEXT,
+    # Talentgram Scouting Agent consolidation — "help"/"menu"/"commands"
+    # in this group must ALSO show the redirect, not the old manual, so
+    # this group never again presents itself as an active command
+    # interface (Section 9/Test 8 of the consolidation spec).
+    help_text=CASTING_REDIRECT_MESSAGE,
 )
 
 

@@ -181,7 +181,7 @@ async def test_each_agent_has_distinct_help_text():
     assert "2. SHARE" in CAMPAIGN_HELP_TEXT
     assert "3. SEND" in CAMPAIGN_HELP_TEXT
     assert "Add Anusha Sharma to Hinge" in CAMPAIGN_HELP_TEXT
-    assert "Share the casting call for Hinge with Anusha Sharma" in CAMPAIGN_HELP_TEXT
+    assert "Share casting call for Hinge with Anusha Sharma" in CAMPAIGN_HELP_TEXT
     assert "Send Anusha Sharma's audition video to Raj" in CAMPAIGN_HELP_TEXT
     # Old Interface Deprecation (2026-08-30) — the hyphen grammar
     # ("Action - Who - What - Where") is no longer advertised; HELP shows

@@ -29,7 +29,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import time
 import uuid
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
@@ -62,7 +64,7 @@ from routers.talents import _build_talent_query, _LIST_PROJECTION, _enrich_list
 # that module already imports FROM this one (_fetch_ongoing_projects etc.),
 # so importing it back here would be circular; it's imported locally,
 # inside the one function that needs it, instead (see _flush_group_send).
-from routers.whatsapp import BatchIn, SourceParams, create_batch
+from routers.whatsapp import BatchIn, ManualContact, SourceParams, create_batch, resolve_recipients_engine
 
 from agents.models import (
     AgentDefinition,
@@ -3668,7 +3670,7 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
                 summary_lines += [f"✗ Share — {step.get('raw_text', '')}", "", share_res.error or "Could not resolve this step.", ""]
                 continue
             try:
-                body_lines, total_queued = await _run_share_sends(share_res)
+                body_lines, total_queued, _plan_share_batch_ids = await _run_share_sends(share_res)
             except Exception:
                 logger.exception("plan share step send failed raw_text=%r", step.get("raw_text"))
                 summary_lines += [f"✗ Share {share_res.template_label}", "", "Something went wrong sending this.", ""]
@@ -5208,6 +5210,7 @@ _SHARE_LEGACY_MARKER = "__share_legacy_hyphen__"
 _SHARE_MISSING_QUOTES_MARKER = "__share_missing_quotes__"
 _SHARE_STAGE_MARKER_PREFIX = "__share_stage__:"
 _SHARE_STAGE_UNKNOWN_PREFIX = "__share_stage_unknown__:"
+_SHARE_NEAR_MISS_MARKER = "__share_near_miss__"
 
 
 def _share_split_for_clause(text: str) -> Tuple[str, str]:
@@ -5432,12 +5435,25 @@ def _validate_share_text(raw: str) -> ValidationResult:
     return ValidationResult(ok=True, value=(raw or "").strip())
 
 
+# SHARE Production Readiness (2026-09-08) — the ONE source of truth for
+# SHARE's own canonical syntax examples: HELP_TEXT's own SHARE section
+# (whatsapp_campaign_agent.py, imported from here) renders EXACTLY this
+# text, and every SHARE instructional error below points at it too —
+# never a second, independently hand-typed manual that can drift out of
+# sync with what HELP actually says.
+SHARE_HELP_EXAMPLES = (
+    "Share casting call for Hinge with Anusha Sharma\n"
+    "Share casting call for Hinge, L'Oreal with Anusha Sharma, Riya Sharma\n"
+    "Share casting call to Ask To Test in Hinge\n"
+    'Share "Your custom message" with Anusha Sharma\n'
+    'Share "Your custom message" to Ask To Test in Hinge'
+)
+
 SHARE_PROJECT_FIELD = FieldSpec(
     key="project_query", label="Project(s)",
     question=(
         "SHARE needs a template and a talent or pipeline stage.\n\n"
-        "Try:\nShare Casting Call with Anusha Sharma\n\n"
-        "or:\nShare Casting Call for Hinge to Follow Up"
+        f"Try:\n{SHARE_HELP_EXAMPLES}"
     ),
     # NOT required at the FieldSpec level (Part 1/3's own canonical
     # examples, "Share Casting Call with Anusha Sharma", never name a
@@ -5452,8 +5468,7 @@ SHARE_RECIPIENT_FIELD = FieldSpec(
     key="recipient_query", label="Recipient(s)",
     question=(
         "SHARE needs a talent or pipeline stage.\n\n"
-        "Try:\nShare Casting Call with Anusha Sharma\n\n"
-        "or:\nShare Casting Call for Hinge to Follow Up"
+        f"Try:\n{SHARE_HELP_EXAMPLES}"
     ),
     validate=_validate_share_text, aliases=["to", "recipient", "recipients", "talent"],
 )
@@ -5497,11 +5512,17 @@ class _ShareResolution:
 
 _SHARE_LEGACY_REDIRECT = (
     'Please use the new SHARE format.\n\n'
-    'Example:\nShare Casting Call for Hinge with Anusha Sharma'
+    f'Try:\n{SHARE_HELP_EXAMPLES}'
 )
 _SHARE_MISSING_QUOTES_ERROR = (
     "Please put the custom message inside quotation marks.\n\n"
-    'Example:\nShare custom message "Please confirm your availability." with Anusha Sharma'
+    f'Try:\n{SHARE_HELP_EXAMPLES}'
+)
+_SHARE_NEAR_MISS_GUIDANCE = (
+    "I understood this as a SHARE command, but I'm missing the "
+    "recipient/project details.\n\n"
+    f"Try:\n{SHARE_HELP_EXAMPLES}\n\n"
+    "Nothing has been sent."
 )
 
 
@@ -5566,13 +5587,14 @@ async def _resolve_share(collected: dict) -> _ShareResolution:
         return _ShareResolution(ok=False, error=_SHARE_LEGACY_REDIRECT)
     if project_query == _SHARE_MISSING_QUOTES_MARKER or recipient_query == _SHARE_MISSING_QUOTES_MARKER:
         return _ShareResolution(ok=False, error=_SHARE_MISSING_QUOTES_ERROR)
+    if project_query == _SHARE_NEAR_MISS_MARKER or recipient_query == _SHARE_NEAR_MISS_MARKER:
+        return _ShareResolution(ok=False, error=_SHARE_NEAR_MISS_GUIDANCE)
 
     if not recipient_query:
         return _ShareResolution(
             ok=False, error=(
                 "SHARE needs a talent or pipeline stage.\n\n"
-                "Try:\nShare Casting Call with Anusha Sharma\n\n"
-                "or:\nShare Casting Call for Hinge to Follow Up"
+                f"Try:\n{SHARE_HELP_EXAMPLES}"
             ),
         )
 
@@ -5610,8 +5632,7 @@ async def _resolve_share(collected: dict) -> _ShareResolution:
                 ok=False,
                 error=(
                     "I couldn't find that template.\n\n"
-                    "Please send the saved template name, for example:\n"
-                    "Share Casting Call with Anusha Sharma"
+                    f"Try:\n{SHARE_HELP_EXAMPLES}"
                 ),
             )
         if len(templates) == 1:
@@ -5958,11 +5979,86 @@ async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
         )
         return _format_share_pipeline_check(matrix)
 
+    # Recipient Preview (Production fix, 2026-09-08) — the actual
+    # recipient set is only known by resolving it, and if it turns out
+    # to be EMPTY (a stage/pipeline with no one currently in it, or a
+    # named talent with neither a WhatsApp group nor a phone on file)
+    # there is nothing to confirm at all — never show a confirmation
+    # card with zero real recipients (Part 4's explicit "Do not create a
+    # fake recipient").
+    by_project = await _resolve_share_recipients(resolved)
+    if not any(by_project.values()):
+        projects_desc = " / ".join(resolved.project_labels)
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+        await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+        if resolved.is_pipeline_target or resolved.is_stage_target:
+            stage_desc = (
+                nlu.stage_label(resolved.target_stage) if resolved.is_stage_target
+                else "the pipeline"
+            )
+            return (
+                f"No talents are currently in {stage_desc} for {projects_desc}.\n\n"
+                "Nothing has been sent.\n\n"
+                "You can change the project/stage or cancel."
+            )
+        return (
+            "None of the named talent(s) have a WhatsApp group or phone "
+            "number on file, so there's nothing to send to.\n\n"
+            "Nothing has been sent."
+        )
+
     await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
-    return _build_share_confirmation_preview(resolved)
+    return await _build_share_confirmation_preview(resolved)
 
 
-def _build_share_confirmation_preview(resolved: "_ShareResolution") -> str:
+def _delivery_method_label(destination_type: str) -> str:
+    """Display label for a resolved recipient's ACTUAL delivery
+    mechanism — the same distinction routers/whatsapp.py's own
+    _resolve_destination already makes ("group" = the talent's own
+    WhatsApp group, "number" = their phone number), never a guess."""
+    if destination_type == "group":
+        return "WhatsApp Group"
+    if destination_type == "number":
+        return "Phone Number"
+    return "Unknown"
+
+
+async def _resolve_share_recipients(resolved: "_ShareResolution") -> Dict[str, List[Dict[str, str]]]:
+    """Resolves the EXACT recipient list (name + real delivery method)
+    for every project this SHARE will touch — reuses the SAME
+    resolve_recipients_engine _run_share_sends' own create_batch call
+    resolves through, so the confirmation preview can never show a
+    different audience than what actually gets sent to. Returns
+    {project_id: [{"name":..., "destination_type":..., "destination":...}, ...]}."""
+    stages = [resolved.target_stage] if resolved.is_stage_target else list(PIPELINE_STAGE_ORDER)
+    out: Dict[str, List[Dict[str, str]]] = {}
+    for pid in resolved.project_ids:
+        if resolved.is_pipeline_target or resolved.is_stage_target:
+            params = SourceParams(project_id=pid, pipeline_stages=stages)
+        else:
+            project_talent_ids = (
+                resolved.pair_talent_ids.get(pid, []) if resolved.pair_talent_ids is not None
+                else resolved.talent_ids
+            )
+            params = SourceParams(project_id=pid, pipeline_stages=stages, talent_ids=project_talent_ids)
+        res = await resolve_recipients_engine("PROJECT", params)
+        out[pid] = res["recipients"]
+    return out
+
+
+def _format_recipient_block(recipients: List[Dict[str, str]]) -> List[str]:
+    """Numbered "1. Name — Delivery Method" lines for one project's
+    resolved recipient list — the ONE rendering used everywhere a
+    recipient list is shown (single-project, multi-project, and the
+    two-stage edit preview), so the audience the admin sees is always
+    exactly what create_batch will actually resolve at send time."""
+    return [
+        f"{i}. {r['name']} — {_delivery_method_label(r['destination_type'])}"
+        for i, r in enumerate(recipients, start=1)
+    ]
+
+
+async def _build_share_confirmation_preview(resolved: "_ShareResolution") -> str:
     """The actual "You are about to SHARE:" preview for an already-
     resolved, already pipeline-checked SHARE — factored out of
     _build_share_confirmation so Pipeline Check Option 2 (Production fix,
@@ -5970,74 +6066,69 @@ def _build_share_confirmation_preview(resolved: "_ShareResolution") -> str:
     narrowed to only the pairs already in a pipeline, without duplicating
     this formatting a second time.
 
-    Confirmation Card Quality (Part 11) — the single-project shape stays
-    compact (Content/Project/Recipients/Messages); 2+ projects switch to
-    one block per project plus a running total, matching the exact
-    formats specified. Never duplicated numbering/steps — this is a
-    flat, single-operation preview, not a multi-step plan card."""
-    lines = ["You are about to SHARE:", "", "Template:", resolved.template_label, ""]
+    Recipient Preview (Production fix, 2026-09-08) — ALWAYS shows the
+    real, resolved recipient names with their actual delivery method
+    (WhatsApp Group vs Phone Number), for a named-talent target AND a
+    stage/whole-pipeline target alike — "Recipients: everyone in Ask To
+    Test" is never shown on its own; the admin must be able to review
+    the exact audience before approving. 2+ projects get one labeled
+    block per project (never a single flattened list that hides which
+    project each recipient belongs to), plus a running total."""
+    by_project = await _resolve_share_recipients(resolved)
     is_multi_project = len(resolved.project_ids) > 1
-    if resolved.is_pipeline_target or resolved.is_stage_target:
-        recipients_desc = (
-            f"everyone in {nlu.stage_label(resolved.target_stage)}"
-            if resolved.is_stage_target else "everyone currently in the pipeline"
-        )
-        if is_multi_project:
-            for plabel in resolved.project_labels:
-                lines += [f"Project: {plabel}", f"Recipients: {recipients_desc}", ""]
-            lines += ["Reply:", "1 → Approve", "2 → Edit", "3 → Cancel"]
-        else:
-            lines += [
-                "Project:", resolved.project_labels[0], "",
-                # NOT str.capitalize() — that lowercases the rest of the
-                # string too, turning "everyone in Follow Up" into
-                # "Everyone in follow up" and mangling the stage's own
-                # proper-cased label. Just upper-case the leading letter.
-                "Recipients:", recipients_desc[:1].upper() + recipients_desc[1:], "",
-                "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel",
-            ]
+    lines = ["You are about to SHARE:", "", "Template:", resolved.template_label, ""]
+
+    if resolved.is_stage_target:
+        pipeline_desc = nlu.stage_label(resolved.target_stage)
+    elif resolved.is_pipeline_target:
+        pipeline_desc = "Everyone currently in the pipeline"
     else:
-        # Pipeline-Check Option 2 — a restricted resolution can send a
-        # DIFFERENT talent subset per project; every other SHARE keeps
-        # showing the same full talent_labels list for every project,
-        # exactly the pre-existing behaviour.
-        labels_by_id = dict(zip(resolved.talent_ids, resolved.talent_labels))
+        pipeline_desc = None
 
-        def _names_for(pid: str) -> List[str]:
-            if resolved.pair_talent_ids is None:
-                return resolved.talent_labels
-            return [labels_by_id.get(tid, tid) for tid in resolved.pair_talent_ids.get(pid, [])]
-
-        if is_multi_project:
-            total = 0
-            for pid, plabel in zip(resolved.project_ids, resolved.project_labels):
-                names = _names_for(pid)
-                lines += [f"Project: {plabel}", f"Recipients: {', '.join(names)}",
-                          f"Messages: {len(names)}", ""]
-                total += len(names)
-            lines += ["Total:", f"{total} WhatsApp message{'' if total == 1 else 's'}", "",
-                      "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel"]
-        else:
-            names = _names_for(resolved.project_ids[0])
-            lines += ["Project:", resolved.project_labels[0], "", "Recipients:"]
-            lines += [f"{i}. {t}" for i, t in enumerate(names, start=1)]
-            lines += ["", f"Messages:\n{len(names)}", "", "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel"]
+    if is_multi_project:
+        if pipeline_desc:
+            lines += ["Pipeline:", pipeline_desc, ""]
+        total = 0
+        for pid, plabel in zip(resolved.project_ids, resolved.project_labels):
+            names = by_project.get(pid) or []
+            lines.append(f"{plabel} — Recipients ({len(names)}):")
+            lines += _format_recipient_block(names) if names else ["(none)"]
+            lines.append("")
+            total += len(names)
+        lines += [
+            "Total recipients:", str(total), "",
+            "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel",
+        ]
+    else:
+        pid = resolved.project_ids[0]
+        names = by_project.get(pid) or []
+        lines += ["Project:", resolved.project_labels[0], ""]
+        if pipeline_desc:
+            lines += ["Pipeline:", pipeline_desc, ""]
+        lines.append(f"Recipients ({len(names)}):")
+        lines += _format_recipient_block(names) if names else ["(none)"]
+        lines += ["", "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel"]
     return "\n".join(lines)
 
 
-async def _run_share_sends(resolved: "_ShareResolution") -> Tuple[List[str], int]:
+async def _run_share_sends(resolved: "_ShareResolution") -> Tuple[List[str], int, List[str]]:
     """The actual WhatsApp send loop for an already-resolved SHARE —
     factored out of _share_executor so the Compound Actions plan engine's
     "casting.share" step (_execute_plan) can reuse the EXACT same send
-    logic instead of a second copy. Returns (body_lines, total_queued);
-    the caller wraps these in whatever header/footer its own context
-    needs (a standalone "Shared." message vs. one line item inside a
-    combined plan summary)."""
+    logic instead of a second copy. Returns (body_lines, total_queued,
+    batch_ids); the caller wraps body_lines/total_queued in whatever
+    header/footer its own context needs (a standalone "Shared." message
+    vs. one line item inside a combined plan summary), and batch_ids
+    (Production fix, 2026-09-08) lets a caller that wants the REAL
+    delivery outcome later (see _watch_and_report_share_delivery) know
+    which whatsapp_jobs rows to poll — every job created here already
+    carries `batch_id`, this just surfaces the ids themselves."""
     from agents.modules import whatsapp_campaign_agent as wa
     admin = await wa._service_admin()
 
     body_lines: List[str] = []
     total_queued = 0
+    batch_ids: List[str] = []
     stages = [resolved.target_stage] if resolved.is_stage_target else list(PIPELINE_STAGE_ORDER)
     for pid, plabel in zip(resolved.project_ids, resolved.project_labels):
         body_lines.append("")
@@ -6097,7 +6188,113 @@ async def _run_share_sends(resolved: "_ShareResolution") -> Tuple[List[str], int
                         "or no phone/WhatsApp group on file — not sent"
                     )
         total_queued += len(jobs)
-    return body_lines, total_queued
+        if jobs:
+            batch_ids.append(result["batch"]["id"])
+    return body_lines, total_queued, batch_ids
+
+
+# Final Delivery Result (Production fix, 2026-09-08) — the real WhatsApp
+# worker processes queued jobs asynchronously, on its OWN schedule (real
+# rate-limited sends, tens of seconds to minutes for several recipients)
+# — completely independent of this HTTP request/response cycle.
+# "Queued" is never "Sent". _watch_and_report_share_delivery polls
+# whatsapp_jobs' own status field — the ONLY place the real worker ever
+# writes "sent"/"failed" (whatsapp-worker/worker.py) — until every job
+# for this SHARE reaches a terminal state (or the bounded wait runs
+# out), then reports the ACTUAL outcome back into the group that ran
+# the command, reusing create_batch's own Custom Message mechanism (a
+# MANUAL contact routed by group name — the exact same "group-or-phone"
+# routing every other send already uses) — never a second WhatsApp-send
+# mechanism, and never a fabricated "delivered" status the underlying
+# infrastructure can't actually establish (the worker's own "sent"
+# means "the send operation succeeded, unverified" — reported as
+# "Successfully sent", never "Delivered").
+# Overridable via env — production never sets these (defaults: 5s poll,
+# 10-minute bound, generous for real per-recipient send delays); the
+# test suite sets both very low (see test_casting_agent.py's own env
+# setup) so a SHARE-approval test's fire-and-forget watcher resolves in
+# under a second instead of leaving a live 10-minute background task
+# running for the rest of the (shared-event-loop) test session.
+_SHARE_DELIVERY_POLL_INTERVAL_SEC = float(os.environ.get("SHARE_DELIVERY_POLL_INTERVAL_SEC", "5"))
+_SHARE_DELIVERY_MAX_WAIT_SEC = float(os.environ.get("SHARE_DELIVERY_MAX_WAIT_SEC", "600"))
+
+
+async def _watch_and_report_share_delivery(
+    *, batch_ids: List[str], group_name: str, project_label: str, content_label: str,
+) -> None:
+    """Fire-and-forget background task (see _share_executor's own
+    asyncio.create_task call) — never awaited by the request/response
+    cycle that queued the sends. A process restart mid-wait loses this
+    in-memory task silently; a known, accepted trade-off (the actual
+    sends are already queued and completely unaffected either way —
+    only this SUMMARY message would be missed), rather than building
+    full DB-backed watcher persistence/recovery for it."""
+    from agents.modules import whatsapp_campaign_agent as wa
+
+    deadline = time.monotonic() + _SHARE_DELIVERY_MAX_WAIT_SEC
+    jobs: List[dict] = []
+    while True:
+        jobs = await db.whatsapp_jobs.find(
+            {"batch_id": {"$in": batch_ids}},
+            {"_id": 0, "talent_name": 1, "status": 1, "error_message": 1, "destination_type": 1},
+        ).to_list(2000)
+        if jobs and all(j.get("status") in ("sent", "failed") for j in jobs):
+            break
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(_SHARE_DELIVERY_POLL_INTERVAL_SEC)
+
+    succeeded = [j for j in jobs if j.get("status") == "sent"]
+    failed = [j for j in jobs if j.get("status") == "failed"]
+    still_pending = [j for j in jobs if j.get("status") not in ("sent", "failed")]
+    total = len(jobs)
+
+    lines = [
+        "SHARE COMPLETE", "", f"Project: {project_label}", f"Content: {content_label}",
+        f"{total} recipient{'' if total == 1 else 's'}", "",
+        f"✓ Successfully sent: {len(succeeded)}",
+        f"✕ Failed: {len(failed)}",
+    ]
+    if still_pending:
+        lines.append(f"… Still in progress: {len(still_pending)} (taking longer than expected)")
+    lines.append("")
+    if failed:
+        lines.append("Failed:")
+        for j in failed:
+            reason = (j.get("error_message") or "delivery failed").strip()
+            lines.append(f"• {j.get('talent_name') or '?'} — {reason}")
+        lines.append("")
+        if succeeded:
+            lines.append(
+                f"The {len(succeeded)} successful message{'' if len(succeeded) == 1 else 's'} "
+                f"{'was' if len(succeeded) == 1 else 'were'} not resent."
+            )
+    elif not still_pending:
+        lines.append("All messages were delivered successfully.")
+    report_text = "\n".join(lines).rstrip()
+
+    admin = await wa._service_admin()
+    custom_template = await wa._fetch_custom_template()
+    if not custom_template:
+        logger.error(
+            "share delivery report: no custom-message template configured — "
+            "dropping report for group=%r", group_name,
+        )
+        return
+    try:
+        await create_batch(
+            BatchIn(
+                source_type="MANUAL",
+                source_params=SourceParams(contacts=[
+                    ManualContact(name="Talentgram Scouting Agent", phone="", whatsapp_group_name=group_name),
+                ]),
+                template_id=custom_template["id"], is_dry_run=False,
+                variable_data={"message": report_text},
+            ),
+            admin=admin,
+        )
+    except Exception:
+        logger.exception("share delivery report: failed to queue report for group=%r", group_name)
 
 
 async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
@@ -6105,12 +6302,25 @@ async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if not resolved.ok:
         return ExecResult(ok=False, error="share_resolution_failed", message=resolved.error)
 
-    body_lines, total_queued = await _run_share_sends(resolved)
+    body_lines, total_queued, batch_ids = await _run_share_sends(resolved)
+
+    if batch_ids:
+        # Fire-and-forget — see _watch_and_report_share_delivery's own
+        # docstring. Never awaited here: the admin's "1 -> Approve" reply
+        # must return immediately, exactly like every other SHARE
+        # approval — the real result follows later, as its own message.
+        asyncio.create_task(_watch_and_report_share_delivery(
+            batch_ids=batch_ids, group_name=ctx.group_name,
+            project_label=" / ".join(resolved.project_labels),
+            content_label=resolved.template_label,
+        ))
 
     header = ["Shared.", "", f"Content: {resolved.template_label}"]
     footer = ["", f"{total_queued} WhatsApp message{'' if total_queued == 1 else 's'} queued."]
+    if batch_ids:
+        footer.append("I'll report back with the delivery result shortly.")
     return ExecResult(
-        ok=True, message="\n".join(header + body_lines + footer),
+        ok=True, message="\n".join(header + body_lines + footer).rstrip(),
         data={"queued": total_queued},
     )
 
@@ -6146,52 +6356,61 @@ async def _share_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional
 
 
 async def _build_share_edit_prompt(collected: dict, ctx: ExecContext) -> str:
-    """Guided Edit Prompts — connects "2" to the SPECIFIC pending share,
-    including the RESOLVED template name (reusing _resolve_share, exactly
-    what _build_share_confirmation already called) rather than just
-    echoing back the raw hint text. Falls back to the raw collected text
-    if resolution itself is what's currently failing (e.g. an ambiguous
-    project) — still better than a blank/generic prompt.
-
-    Restructured into a two-stage NUMBERED menu (SHARE Production
-    Readiness, 2026-09-07) — mirrors the SAME two-clearly-separate-sub-
-    states pattern the compound-plan editor already established
-    (_build_plan_edit_prompt/_plan_aware_parse_edits_async): from the
-    CONFIRMATION card, 1/2/3 always mean Approve/Edit/Cancel; only
-    INSIDE this menu — a completely separate turn/state — is a bare
-    number reinterpreted as "which field to edit", so "3"/"4" here can
-    never collide with the confirmation card's own numbers. The OLD
-    free-text "You can say: • Change the template..." bullet list is
-    gone; natural-language instructions in that exact shape are still
-    recognized directly (see _share_parse_edits_async) and take priority
-    over this menu, so nothing that used to work stops working."""
+    """Guided Edit Prompts (Recipient List UX, 2026-09-08) — connects "2"
+    to the SPECIFIC pending share by showing the ACTUAL numbered
+    recipient list (reusing _resolve_share/resolved.talent_labels,
+    exactly what the confirmation card just showed) so "Remove 2" and
+    "Share only with 1,3" refer to something the admin can already see,
+    with no numbered "which field" sub-menu to learn first — every edit
+    is one plain instruction (a verb + its argument), so a bare digit
+    never means two different things depending on state. Falls back to
+    the raw collected text if resolution itself is what's currently
+    failing (e.g. an ambiguous project) — still better than a blank/
+    generic prompt."""
     resolved = await _resolve_share(collected)
-    if resolved.ok:
-        project_desc = ", ".join(resolved.project_labels)
-        if resolved.is_stage_target:
-            recipient_desc = f"everyone in {nlu.stage_label(resolved.target_stage)}"
-        elif resolved.is_pipeline_target:
-            recipient_desc = "everyone in the pipeline"
-        else:
-            recipient_desc = ", ".join(resolved.talent_labels)
-        template_desc = resolved.template_label
-    else:
+    is_custom = collected.get("custom_message") is not None
+    message_word = "message" if is_custom else "template"
+
+    if not resolved.ok:
         project_desc = (collected.get("project_query") or "").strip()
         recipient_desc = (collected.get("recipient_query") or "").strip()
         template_desc = (collected.get("template_query") or "").strip() or "the saved template"
+        current = f'Share "{template_desc}" for {project_desc or "?"} with {recipient_desc or "?"}.'
+        return "\n".join([
+            "EDITING SHARE", "", "Current:", current, "",
+            "What would you like to change?", "",
+            "• Change project", f"• Change {message_word}", "• Cancel",
+            "", "Nothing will be sent until you confirm.",
+        ])
 
-    current = f'Share "{template_desc}" for {project_desc or "?"} with {recipient_desc or "?"}.'
-    message_label = "Message" if collected.get("custom_message") is not None else "Template"
-    return "\n".join([
-        "EDITING YOUR SHARE", "", "Current:", current, "",
-        "What would you like to edit?", "",
-        "1 → Projects",
-        "2 → Recipients",
-        f"3 → {message_label}",
-        "4 → Cancel",
-        "", "Reply with the number.",
-        "", "Nothing will be sent until you confirm.",
-    ])
+    is_recipient_editable = not (resolved.is_pipeline_target or resolved.is_stage_target)
+    lines = ["EDITING SHARE", "", f"Content: {resolved.template_label}", ""]
+    if is_recipient_editable:
+        lines.append("Current recipients:")
+        lines.append("")
+        lines += [f"{i}. {t}" for i, t in enumerate(resolved.talent_labels, start=1)]
+        lines.append("")
+    else:
+        by_project = await _resolve_share_recipients(resolved)
+        total = sum(len(v) for v in by_project.values())
+        stage_desc = (
+            nlu.stage_label(resolved.target_stage) if resolved.is_stage_target
+            else "the pipeline"
+        )
+        lines += [f"Current recipients: everyone in {stage_desc} ({total} total)", ""]
+
+    lines.append("What would you like to change?")
+    lines.append("")
+    if is_recipient_editable:
+        lines += [
+            "• Remove 2",
+            "• Remove Riya Sharma",
+            "• Remove 2,4",
+            "• Share only with 1,3",
+        ]
+    lines += ["• Change project", f"• Change {message_word}", "• Cancel"]
+    lines += ["", "Nothing will be sent until you confirm."]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -6219,16 +6438,38 @@ _SHARE_EDIT_ADD_RE = re.compile(
 )
 _SHARE_EDIT_MESSAGE_RE = re.compile(r"^\s*change\s+(?:the\s+)?message\s+to\s*[:\-]?\s*(.+)$", re.IGNORECASE | re.DOTALL)
 
+# Recipient List UX (Production fix, 2026-09-08) — "Remove 2" / "Remove
+# 2,4" / "Share only with 1,3" refer to the POSITIONS shown in the
+# "Current recipients:" list _build_share_edit_prompt just displayed —
+# checked BEFORE the name-based _SHARE_EDIT_REMOVE_RE above, or "Remove
+# 2" would be misread as "remove a talent literally named '2'".
+_SHARE_EDIT_REMOVE_NUMBERS_RE = re.compile(r"^\s*remove\s+(\d+(?:\s*,\s*\d+)*)\s*$", re.IGNORECASE)
+_SHARE_EDIT_KEEP_ONLY_RE = re.compile(
+    r"^\s*(?:share\s+only\s+with|keep\s+only(?:\s+with)?)\s+(\d+(?:\s*,\s*\d+)*)\s*$", re.IGNORECASE,
+)
+# Bare "Change project" / "Change message" (no "to X" — the admin wants
+# to be ASKED, not to type the value inline) — reuses sub-state 2 of the
+# SAME _SHARE_EDIT_FIELD_KEY mechanism the "to X" forms skip straight
+# past.
+_SHARE_EDIT_BARE_PROJECT_RE = re.compile(r"^\s*change\s+(?:the\s+)?project\s*$", re.IGNORECASE)
+_SHARE_EDIT_BARE_MESSAGE_RE = re.compile(r"^\s*change\s+(?:the\s+)?(?:template|message)\s*$", re.IGNORECASE)
 
 _SHARE_EDIT_FIELD_KEY = "_share_edit_field"
+_SHARE_EDIT_PROJECT_PROMPT = "Which project(s) should this SHARE use?\n\nExample: Hinge, LOREAL"
 
-_SHARE_EDIT_FIELD_PROMPTS = {
-    "projects": "Which project(s) should this SHARE use?\n\nExample: Hinge, LOREAL",
-    "recipients": (
-        "Who should receive it? A talent, multiple talents, or a pipeline stage.\n\n"
-        "Example: Anusha Sharma, Riya Sharma\nor: everyone in Follow Up"
-    ),
-}
+
+def _share_parse_recipient_numbers(raw: str, count: int) -> Optional[List[int]]:
+    """"2" / "2,4" / "2, 4" -> validated 1-based positions, all within
+    [1, count] — None (never a partial/clamped result) if anything in
+    the list doesn't parse or is out of range, so a typo'd number is
+    always reported rather than silently ignored."""
+    try:
+        nums = [int(p.strip()) for p in raw.split(",") if p.strip()]
+    except ValueError:
+        return None
+    if not nums or any(n < 1 or n > count for n in nums):
+        return None
+    return nums
 
 
 async def _share_parse_edits_async(
@@ -6243,10 +6484,38 @@ async def _share_parse_edits_async(
 
     is_custom = collected.get("custom_message") is not None
 
-    # Natural-language edits ALWAYS take priority over the numbered menu
-    # below — a returning admin who already knows the free-text phrasing
-    # is never forced through it. Each success clears _SHARE_EDIT_FIELD_
-    # KEY so a stale menu-selection can never misinterpret a later turn.
+    # Natural-language edits ALWAYS take priority — every one of these
+    # is a single plain instruction (a verb + its argument), never a
+    # numbered sub-menu to navigate first. Each success clears
+    # _SHARE_EDIT_FIELD_KEY so a stale "awaiting a value" state can
+    # never misinterpret a later, unrelated turn.
+    for numbered_re, keep in ((_SHARE_EDIT_REMOVE_NUMBERS_RE, False), (_SHARE_EDIT_KEEP_ONLY_RE, True)):
+        m = numbered_re.match(stripped)
+        if not m:
+            continue
+        resolved = await _resolve_share(collected)
+        current_names = (
+            list(resolved.talent_labels)
+            if resolved.ok and not (resolved.is_pipeline_target or resolved.is_stage_target)
+            else []
+        )
+        if not current_names:
+            break
+        positions = _share_parse_recipient_numbers(m.group(1), len(current_names))
+        if positions is None:
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                f"I couldn't match that to the recipient list (1-{len(current_names)})."
+            )}
+        if keep:
+            new_names = [t for i, t in enumerate(current_names, start=1) if i in positions]
+        else:
+            new_names = [t for i, t in enumerate(current_names, start=1) if i not in positions]
+        if not new_names:
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                "Can't remove every recipient — change the talent instead, or CANCEL."
+            )}
+        return {"recipient_query": ",".join(new_names), _SHARE_EDIT_FIELD_KEY: ""}
+
     m = _SHARE_EDIT_MESSAGE_RE.match(stripped)
     if m and is_custom:
         return {"custom_message": m.group(1).strip(), _SHARE_EDIT_FIELD_KEY: ""}
@@ -6287,67 +6556,54 @@ async def _share_parse_edits_async(
             if add_m:
                 return {"recipient_query": ",".join(current_names + [add_m.group(1).strip()]), _SHARE_EDIT_FIELD_KEY: ""}
 
-    # Two-stage numbered menu (SHARE Production Readiness, 2026-09-07) —
-    # mirrors _plan_aware_parse_edits_async's own two-sub-state pattern.
-    # Only reached once none of the natural-language shapes above
-    # matched, and ONLY when a real entity disambiguation (an ambiguous
-    # talent/project/template — resolved by _move_parse_edits_async
-    # below, unchanged) isn't already pending; a bare "1" while such a
-    # clarification is showing must still pick FROM THAT LIST, never be
-    # reinterpreted as "1 -> edit Projects".
+    # Bare "Change project" / "Change message" (no value inline) — asks,
+    # via sub-state 2 of _SHARE_EDIT_FIELD_KEY below, exactly like the
+    # equivalent "to X" forms above skip straight past.
+    if _SHARE_EDIT_BARE_PROJECT_RE.match(stripped):
+        new_collected = dict(collected)
+        new_collected[_SHARE_EDIT_FIELD_KEY] = "projects"
+        await conversation.update_conversation(
+            ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing",
+        )
+        return {PLAN_STEP_EDIT_ERROR_FIELD.key: _SHARE_EDIT_PROJECT_PROMPT}
+
+    if _SHARE_EDIT_BARE_MESSAGE_RE.match(stripped):
+        new_collected = dict(collected)
+        new_collected[_SHARE_EDIT_FIELD_KEY] = "message"
+        await conversation.update_conversation(
+            ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing",
+        )
+        prompt = (
+            'What should the new message be?\n\n'
+            'Send it in quotation marks, for example:\n'
+            '"Hi! You have been shortlisted for Hinge."'
+        ) if is_custom else "Which template should I use?\n\nExample: Casting Call"
+        return {PLAN_STEP_EDIT_ERROR_FIELD.key: prompt}
+
+    # Sub-state 2 of _SHARE_EDIT_FIELD_KEY: "EDITING ONE FIELD" — a bare
+    # "Change project"/"Change message" above just asked for a value;
+    # this turn's reply IS that value. Skipped entirely while a real
+    # entity disambiguation (ambiguous talent/project/template —
+    # resolved by _move_parse_edits_async below, unchanged) is pending,
+    # so a clarification reply is never swallowed here instead.
     session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
-    if not (pending and pending.get("options")):
-        edit_field = (collected.get(_SHARE_EDIT_FIELD_KEY) or "").strip()
-
-        if not edit_field:
-            # Sub-state 1: SELECTING WHAT TO EDIT ("EDITING YOUR SHARE —
-            # 1 -> Projects / 2 -> Recipients / 3 -> Message or Template /
-            # 4 -> Cancel" was just shown).
-            if stripped == "4":
-                message = await _cancel_plan_edit(ctx)
-                return {PLAN_STEP_EDIT_ERROR_FIELD.key: message}
-            field_by_choice = {"1": "projects", "2": "recipients", "3": "message"}
-            if stripped in field_by_choice:
-                field_name = field_by_choice[stripped]
-                new_collected = dict(collected)
-                new_collected[_SHARE_EDIT_FIELD_KEY] = field_name
-                await conversation.update_conversation(
-                    ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing",
-                )
-                if field_name == "message":
-                    prompt = (
-                        'What should the new message be?\n\n'
-                        'Send it in quotation marks, for example:\n'
+    edit_field = (collected.get(_SHARE_EDIT_FIELD_KEY) or "").strip()
+    if edit_field and stripped and not (pending and pending.get("options")):
+        if edit_field == "projects":
+            return {"project_query": stripped, _SHARE_EDIT_FIELD_KEY: ""}
+        if edit_field == "message":
+            if is_custom:
+                from agents.modules import whatsapp_campaign_agent as wa
+                span = wa._find_quote_span(stripped)
+                if not span:
+                    return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                        'Please put the new message in quotation marks, for example:\n'
                         '"Hi! You have been shortlisted for Hinge."'
-                    ) if is_custom else "Which template should I use?\n\nExample: Casting Call"
-                else:
-                    prompt = _SHARE_EDIT_FIELD_PROMPTS[field_name]
-                return {PLAN_STEP_EDIT_ERROR_FIELD.key: prompt}
-            if stripped:
-                return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
-                    "I didn't understand that.\n\nReply with 1, 2, 3, or 4."
-                )}
-        else:
-            # Sub-state 2: EDITING ONE FIELD — the reply IS the new value
-            # for whichever field was just chosen.
-            if stripped:
-                if edit_field == "projects":
-                    return {"project_query": stripped, _SHARE_EDIT_FIELD_KEY: ""}
-                if edit_field == "recipients":
-                    return {"recipient_query": stripped, _SHARE_EDIT_FIELD_KEY: ""}
-                if edit_field == "message":
-                    if is_custom:
-                        from agents.modules import whatsapp_campaign_agent as wa
-                        span = wa._find_quote_span(stripped)
-                        if not span:
-                            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
-                                'Please put the new message in quotation marks, for example:\n'
-                                '"Hi! You have been shortlisted for Hinge."'
-                            )}
-                        _open_start, open_end, close_start, _close_end = span
-                        return {"custom_message": stripped[open_end:close_start], _SHARE_EDIT_FIELD_KEY: ""}
-                    return {"template_query": stripped, _SHARE_EDIT_FIELD_KEY: ""}
+                    )}
+                _open_start, open_end, close_start, _close_end = span
+                return {"custom_message": stripped[open_end:close_start], _SHARE_EDIT_FIELD_KEY: ""}
+            return {"template_query": stripped, _SHARE_EDIT_FIELD_KEY: ""}
 
     return await _move_parse_edits_async(text, collected, fields, ctx)
 
@@ -6369,8 +6625,12 @@ async def _share_editing_claims_reply(
     none of them returns False, so a genuinely unrelated fresh command
     still restarts normally, exactly as before this hook existed.
 
-    Two-Stage Numbered Editing (2026-09-07) — while _SHARE_EDIT_FIELD_KEY
-    is set (sub-state 2, "EDITING ONE FIELD"), ANY non-empty reply is
+    Recipient List UX (2026-09-08) — "Share only with 1,3" starts with
+    SHARE's own trigger word "share", so it needs the same claim;
+    "Remove 2"/bare "Change project"/"Change message" never collide
+    with any trigger word on their own, but are listed anyway for
+    clarity and to stay future-proof. While _SHARE_EDIT_FIELD_KEY is set
+    (sub-state 2, "EDITING ONE FIELD"), ANY non-empty reply is
     meaningful: it's read as the raw new value for whichever field was
     just chosen, which could itself coincidentally start with a trigger
     word ("Add Anusha Sharma" as a new recipient) that must never be
@@ -6384,8 +6644,6 @@ async def _share_editing_claims_reply(
         return True
     if (collected.get(_SHARE_EDIT_FIELD_KEY) or "").strip():
         return True
-    if stripped in ("1", "2", "3", "4"):
-        return True
     return bool(
         _SHARE_EDIT_MESSAGE_RE.match(stripped)
         or _SHARE_EDIT_PROJECT_RE.match(stripped)
@@ -6393,6 +6651,10 @@ async def _share_editing_claims_reply(
         or _SHARE_EDIT_TALENT_TO_RE.match(stripped)
         or _SHARE_EDIT_REMOVE_RE.match(stripped)
         or _SHARE_EDIT_ADD_RE.match(stripped)
+        or _SHARE_EDIT_REMOVE_NUMBERS_RE.match(stripped)
+        or _SHARE_EDIT_KEEP_ONLY_RE.match(stripped)
+        or _SHARE_EDIT_BARE_PROJECT_RE.match(stripped)
+        or _SHARE_EDIT_BARE_MESSAGE_RE.match(stripped)
     )
 
 
@@ -6473,7 +6735,7 @@ async def _share_handle_confirming_reply(
             await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
             return action_line + full.error
         await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
-        return action_line + _build_share_confirmation_preview(full)
+        return action_line + await _build_share_confirmation_preview(full)
 
     if stripped == "2":
         await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
@@ -6495,7 +6757,7 @@ async def _share_handle_confirming_reply(
         restricted = await _resolve_share(new_collected)
         if not restricted.ok:
             return restricted.error
-        preview = _build_share_confirmation_preview(restricted)
+        preview = await _build_share_confirmation_preview(restricted)
         if missing:
             skip_lines = "\n".join(f"• {row.talent_label} — {row.project_label}" for row in missing)
             preview = f"Skipping (not in pipeline):\n{skip_lines}\n\n{preview}"
@@ -7611,7 +7873,46 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
         if nlu.extract_talent_search_refinement(stripped):
             return QUERY_INTENT, {"query_text": _TALENT_SEARCH_REFINE_MARKER + stripped}
 
+    # Near-Miss SHARE Guidance (Production fix, 2026-09-08) — the LAST
+    # resort, only ever consulted once nothing in the whole registry
+    # recognized this message at all (normal trigger detection requires
+    # "share"/"send"/etc. to be the FIRST word, possibly with a
+    # recognized one-edit-away typo — "pls share the casting call..." or
+    # "can you share..." defeats that outright). Without this, such a
+    # message was silently dropped as "unrelated chatter, ignore" —
+    # total silence, never even "I didn't understand." _looks_like_
+    # share_attempt is deliberately narrow (see its own docstring) so
+    # ordinary chatter is never swept up here.
+    if _looks_like_share_attempt(stripped):
+        return SHARE_INTENT, {
+            "project_query": _SHARE_NEAR_MISS_MARKER,
+            "recipient_query": _SHARE_NEAR_MISS_MARKER,
+        }
+
     return None
+
+
+_SHARE_NEAR_MISS_WORD_RE = re.compile(r"\bshare\b", re.IGNORECASE)
+_SHARE_NEAR_MISS_SEND_RE = re.compile(r"\b(?:send|sending|forward|forwarding)\b", re.IGNORECASE)
+
+
+def _looks_like_share_attempt(text: str) -> bool:
+    """"share" appearing ANYWHERE in the message (not just as the
+    leading word) is decisive on its own — it's never how ordinary
+    group chatter is phrased. "send"/"forward"/their -ing forms are far
+    too generic to mean the same on their own (normal chatter uses them
+    constantly), so they only count together with an explicit SHARE
+    content word (template/casting call/custom message/campaign/
+    communication) or a quoted string — enough to say "this looks like
+    an attempted SHARE, here's the syntax", never enough to guess which
+    content was actually meant."""
+    if not text:
+        return False
+    if _SHARE_NEAR_MISS_WORD_RE.search(text):
+        return True
+    if _SHARE_NEAR_MISS_SEND_RE.search(text):
+        return bool(_SHARE_CONTENT_SIGNAL_RE.search(text)) or '"' in text
+    return False
 
 
 # HELP_TEXT removed (Production fix, 2026-09-06) — casting-agent no

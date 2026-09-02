@@ -5079,7 +5079,12 @@ def _extract_share_or_send_fields(text: str) -> Dict[str, str]:
     parsing, delegating to the existing, UNCHANGED _extract_share_fields
     only once content genuinely means SHARE."""
     raw_text, auto_confirm = nlu.strip_and_confirm(text or "")
-    trigger, remainder = nlu._strip_leading_trigger(raw_text, SHARE_OR_SEND_TRIGGERS)
+    # preserve_whitespace=True — a custom message's own line breaks must
+    # survive the "share {remainder}" reconstruction below, all the way
+    # to _extract_share_fields' own quote-span detection; classification
+    # itself is unaffected either way (every _classify_share_send_target
+    # check is a \\b/\\s-based regex, already whitespace-run-tolerant).
+    trigger, remainder = nlu._strip_leading_trigger(raw_text, SHARE_OR_SEND_TRIGGERS, preserve_whitespace=True)
     remainder = (remainder or "").strip()
     if not remainder:
         return {}
@@ -5224,10 +5229,18 @@ def _share_split_target(before: str, after: str) -> Tuple[str, str]:
     Campaign Agent's own custom-message search order: the quoted message
     can come before OR after the recipient clause). `before`/`after` are
     identical to the whole remainder itself when there's no quoted span
-    (`after=""`), so this same helper serves saved-template mode too."""
+    (`after=""`), so this same helper serves saved-template mode too.
+
+    When the match is found in `after` (Production fix, 2026-09-07 — a
+    custom message's own "for <project>" clause, e.g. SHARE "message"
+    for Hinge to Nikita, lives in `after` too, BEFORE the "to" match —
+    the returned head must include that text, not just `before`, or
+    _share_split_for_clause never gets a chance to find it and the
+    project silently vanishes)."""
     m = _SHARE_TO_RECIPIENT_RE.search(after)
     if m:
-        return before, m.group(1).strip(" .!?")
+        head = f"{before} {after[:m.start()]}".strip() if before else after[:m.start()].strip()
+        return head, m.group(1).strip(" .!?")
     m = _SHARE_TO_RECIPIENT_RE.search(before)
     if m:
         return before[:m.start()].strip(), m.group(1).strip(" .!?")
@@ -5261,6 +5274,36 @@ def _share_classify_target(target_raw: str) -> Dict[str, str]:
     return {"recipient_query": stripped}
 
 
+# SHARE Production Readiness (Production fix, 2026-09-07) — "<stage> in
+# <project>" grammar ("SHARE casting call for shortlisted in Hinge",
+# "SHARE casting call to shortlisted in Hinge"). Without this, the
+# generic "for <project>"/"to <talent>" splitters greedily swallow the
+# WHOLE "shortlisted in Hinge" phrase as a single project/recipient
+# name, since neither "for" nor "to"/"with" appears a second time to
+# separate the stage from the project. Only reinterpreted when the part
+# before " in " actually resolves to a REAL pipeline stage via the SAME
+# nlu.match_stage_phrase every other stage reference already goes
+# through — a project whose own name happens to contain the word "in"
+# ("Live in Concert") passes through completely unchanged, since no
+# real stage named "Live" exists to match.
+_SHARE_STAGE_IN_PROJECT_RE = re.compile(r"^(.*?)\s+\bin\b\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def _share_try_split_stage_in_project(phrase: str) -> Tuple[str, str]:
+    """(stage_candidate, project_candidate) if `phrase` is really "<stage>
+    in <project>"; ("", phrase) unchanged otherwise — never a guess."""
+    m = _SHARE_STAGE_IN_PROJECT_RE.match(phrase)
+    if not m:
+        return "", phrase
+    stage_candidate, project_candidate = m.group(1).strip(), m.group(2).strip()
+    if not stage_candidate or not project_candidate:
+        return "", phrase
+    stage_match = nlu.match_stage_phrase(stage_candidate, list(PIPELINE_STAGE_ORDER))
+    if not stage_match.key:
+        return "", phrase
+    return stage_candidate, project_candidate
+
+
 def _extract_share_fields(text: str) -> Dict[str, str]:
     """The one canonical SHARE grammar: "SHARE <template-or-'custom
     message \"...\"'> [for <project(s)>] (to|with) <talent(s)|stage>",
@@ -5275,38 +5318,70 @@ def _extract_share_fields(text: str) -> Dict[str, str]:
     # extraction (see nlu.strip_and_confirm's docstring), so it never ends
     # up glued onto the recipient clause below.
     raw_text, auto_confirm = nlu.strip_and_confirm(text or "")
-    _, remainder = nlu._strip_leading_trigger(raw_text, SHARE_TRIGGERS)
+    # preserve_whitespace=True — a custom message's own line breaks must
+    # survive all the way to quote-span detection below; see
+    # nlu._strip_leading_trigger's own docstring on this parameter.
+    _, remainder = nlu._strip_leading_trigger(raw_text, SHARE_TRIGGERS, preserve_whitespace=True)
     remainder = (remainder or "").strip()
     if not remainder:
         return {}
 
     out: Dict[str, str] = {}
 
-    if _SHARE_CUSTOM_MESSAGE_RE.match(remainder):
+    # Local import — see the module-level comment above _resolve_share on
+    # why this isn't a top-level import.
+    from agents.modules import whatsapp_campaign_agent as wa
+
+    # Custom Message mode (Production fix, 2026-09-07 — SHARE Production
+    # Readiness) — a BARE quoted string right after "SHARE" (Part 3's own
+    # primary example, "SHARE "Hi! You've been shortlisted..." to Nikita
+    # Tiwari", never says the words "custom message" at all) is now
+    # detected the SAME way the top-level SHARE/SEND router already
+    # decides content: the presence of a matching quote pair, full stop —
+    # not a required literal "(the) custom message" prefix phrase. That
+    # old, narrower prefix requirement silently mis-parsed every bare-
+    # quote SHARE as a template lookup (a "for"/"to" word appearing
+    # INSIDE the quoted message was even being read as real command
+    # syntax — exactly what "CRITICAL CUSTOM MESSAGE RULE" forbids). The
+    # explicit "(the) custom message" phrase is still recognized and
+    # stripped as an OPTIONAL, backward-compatible prefix; saying it
+    # WITHOUT a quote following is still the same explicit, instructional
+    # "put it in quotes" error as before (never silently falls through to
+    # template parsing once "custom message" was said outright).
+    explicit_custom_prefix = bool(_SHARE_CUSTOM_MESSAGE_RE.match(remainder))
+    after_phrase = _SHARE_CUSTOM_MESSAGE_RE.sub("", remainder, count=1) if explicit_custom_prefix else remainder
+    span = wa._find_quote_span(after_phrase)
+
+    if explicit_custom_prefix and not span:
+        out = {"project_query": _SHARE_MISSING_QUOTES_MARKER, "recipient_query": _SHARE_MISSING_QUOTES_MARKER}
+        if auto_confirm:
+            out[AUTO_CONFIRM_FIELD.key] = "1"
+        return out
+
+    if span:
         # Custom Message mode — reuses the Campaign Agent's own quote-span
         # finder VERBATIM: FIRST-to-LAST quote character, everything
         # between is one opaque payload (commas/hyphens/colons/newlines/
         # embedded quotes never tokenized), matching Part 3's exact
-        # requirement. Local import — see the module-level comment above
-        # _resolve_share on why this isn't a top-level import.
-        from agents.modules import whatsapp_campaign_agent as wa
-
-        after_phrase = _SHARE_CUSTOM_MESSAGE_RE.sub("", remainder, count=1)
-        span = wa._find_quote_span(after_phrase)
-        if not span:
-            out = {"project_query": _SHARE_MISSING_QUOTES_MARKER, "recipient_query": _SHARE_MISSING_QUOTES_MARKER}
-            if auto_confirm:
-                out[AUTO_CONFIRM_FIELD.key] = "1"
-            return out
+        # requirement.
         open_start, open_end, close_start, close_end = span
         message = after_phrase[open_end:close_start]
         before, after = after_phrase[:open_start], after_phrase[close_end:]
         _head, target_raw = _share_split_target(before, after)
         _head, project_from_head = _share_split_for_clause(_head)
         target_raw, project_from_target = _share_split_for_clause(target_raw)
+        project_query = project_from_target or project_from_head
+        if not target_raw and project_query:
+            stage_candidate, project_query = _share_try_split_stage_in_project(project_query)
+            if stage_candidate:
+                target_raw = stage_candidate
+        elif not project_query and target_raw:
+            stage_candidate, reinterpreted = _share_try_split_stage_in_project(target_raw)
+            if stage_candidate:
+                target_raw, project_query = stage_candidate, reinterpreted
         out = {
             "custom_message": message,
-            "project_query": project_from_target or project_from_head,
+            "project_query": project_query,
         }
         out.update(_share_classify_target(target_raw))
         if auto_confirm:
@@ -5329,6 +5404,14 @@ def _extract_share_fields(text: str) -> Dict[str, str]:
     project_query = project_from_target or project_from_head
     if _SHARE_PROJECT_FILLER_ONLY_RE.match(project_query):
         project_query = ""
+    if not target_raw and project_query:
+        stage_candidate, project_query = _share_try_split_stage_in_project(project_query)
+        if stage_candidate:
+            target_raw = stage_candidate
+    elif not project_query and target_raw:
+        stage_candidate, reinterpreted = _share_try_split_stage_in_project(target_raw)
+        if stage_candidate:
+            target_raw, project_query = stage_candidate, reinterpreted
 
     template_phrase = _SHARE_LEADING_FILLER_RE.sub("", head.strip()).strip(" ,")
     out = {"project_query": project_query}
@@ -5784,25 +5867,25 @@ async def _share_pipeline_matrix(resolved: "_ShareResolution") -> List[_SharePai
 
 def _format_share_pipeline_check(matrix: List[_SharePairCheck]) -> str:
     """The structured Pipeline Check message (Production fix, 2026-09-04;
-    adjusted 2026-09-05 for the standalone-SHARE routing move) — replaces
-    the old single-pair-only "X is not currently in the Y pipeline"
-    message AND the old multi-pair "list + Reply CANCEL" dead end with
-    ONE format that always shows the full cross-product picture and
-    always offers a real, numbered decision (never just an error).
+    restored to 3 options 2026-09-07 — SHARE Production Readiness) —
+    replaces the old single-pair-only "X is not currently in the Y
+    pipeline" message AND the old multi-pair "list + Reply CANCEL" dead
+    end with ONE format that always shows the full cross-product picture
+    and always offers a real, numbered decision (never just an error).
 
-    No "Add + Move, then Share" auto-handoff option here: standalone
-    SHARE now runs ONLY in the Talentgram WhatsApp Agent group (see
-    SHARE_INTENT's registration on CAMPAIGN_AGENT below), which has no
-    ADD/MOVE intents of its own — Casting Pipeline ownership of ADD/MOVE
-    is deliberate and must stay exclusive (Section 1 of the routing
-    fix). A cross-agent conversation handoff isn't something this
-    platform supports (conversation state is scoped to whichever agent
-    owns the group a reply arrives in), so instead of silently failing,
-    this points the admin at the right group directly."""
+    Option 1 ("Add + Move, then Share") was dropped for one session
+    (2026-09-05) when standalone SHARE briefly ran on an agent with no
+    ADD/MOVE intents of its own, making a same-agent hand-off
+    impossible. The Talentgram Scouting Agent consolidation put ADD/
+    MOVE/SHARE back on the SAME agent, so it's restored here — executed
+    directly through the exact same add_talents_to_pipeline/
+    bulk_move_by_talent_ids primitives ADD_INTENT/MOVE_INTENT's own
+    executors already call (see _share_handle_confirming_reply's "1"
+    branch), never a second/duplicate implementation."""
     missing = [r for r in matrix if not r.in_pipeline]
-    lines = ["Pipeline check", ""]
+    lines = ["PIPELINE CHECK", ""]
     for row in matrix:
-        mark = "✓" if row.in_pipeline else "❌"
+        mark = "✓" if row.in_pipeline else "✕"
         lines.append(f"{mark} {row.talent_label} — {row.project_label}")
     lines.append("")
 
@@ -5823,13 +5906,11 @@ def _format_share_pipeline_check(matrix: List[_SharePairCheck]) -> str:
         lines.append("Some of the named talent(s) are not currently in these project pipelines.")
 
     lines += [
-        "", "To add them, use the Talentgram Casting Pipeline group "
-        "(e.g. \"Add Nikita Tiwari to Hinge, move her to Follow Up\"), "
-        "then resend this SHARE command.",
         "", "What would you like to do?", "",
-        "1 → Share only for project(s) where they are already in the pipeline",
-        "2 → Cancel",
-        "", "Nothing has been sent yet.",
+        "1 → Add the missing talent(s), move them to Follow Up, then share",
+        "2 → Share only where they are already in the pipeline",
+        "3 → Cancel",
+        "", "Reply with the number.", "", "Nothing has been sent yet.",
     ]
     return "\n".join(lines)
 
@@ -6070,7 +6151,20 @@ async def _build_share_edit_prompt(collected: dict, ctx: ExecContext) -> str:
     what _build_share_confirmation already called) rather than just
     echoing back the raw hint text. Falls back to the raw collected text
     if resolution itself is what's currently failing (e.g. an ambiguous
-    project) — still better than a blank/generic prompt."""
+    project) — still better than a blank/generic prompt.
+
+    Restructured into a two-stage NUMBERED menu (SHARE Production
+    Readiness, 2026-09-07) — mirrors the SAME two-clearly-separate-sub-
+    states pattern the compound-plan editor already established
+    (_build_plan_edit_prompt/_plan_aware_parse_edits_async): from the
+    CONFIRMATION card, 1/2/3 always mean Approve/Edit/Cancel; only
+    INSIDE this menu — a completely separate turn/state — is a bare
+    number reinterpreted as "which field to edit", so "3"/"4" here can
+    never collide with the confirmation card's own numbers. The OLD
+    free-text "You can say: • Change the template..." bullet list is
+    gone; natural-language instructions in that exact shape are still
+    recognized directly (see _share_parse_edits_async) and take priority
+    over this menu, so nothing that used to work stops working."""
     resolved = await _resolve_share(collected)
     if resolved.ok:
         project_desc = ", ".join(resolved.project_labels)
@@ -6087,20 +6181,17 @@ async def _build_share_edit_prompt(collected: dict, ctx: ExecContext) -> str:
         template_desc = (collected.get("template_query") or "").strip() or "the saved template"
 
     current = f'Share "{template_desc}" for {project_desc or "?"} with {recipient_desc or "?"}.'
-    lines = [
-        "EDITING SHARE", "", "Current:", current, "",
-        "What would you like to change?", "",
-        "You can say:",
-        "• Change the template",
-        "• Change the project",
-        "• Change the talent",
-        "• Add another talent",
-        "• Remove a talent",
-    ]
-    if collected.get("custom_message") is not None:
-        lines.append("• Change the message")
-    lines += ["• Cancel", "", "Nothing will be sent until you confirm."]
-    return "\n".join(lines)
+    message_label = "Message" if collected.get("custom_message") is not None else "Template"
+    return "\n".join([
+        "EDITING YOUR SHARE", "", "Current:", current, "",
+        "What would you like to edit?", "",
+        "1 → Projects",
+        "2 → Recipients",
+        f"3 → {message_label}",
+        "4 → Cancel",
+        "", "Reply with the number.",
+        "", "Nothing will be sent until you confirm.",
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -6129,6 +6220,17 @@ _SHARE_EDIT_ADD_RE = re.compile(
 _SHARE_EDIT_MESSAGE_RE = re.compile(r"^\s*change\s+(?:the\s+)?message\s+to\s*[:\-]?\s*(.+)$", re.IGNORECASE | re.DOTALL)
 
 
+_SHARE_EDIT_FIELD_KEY = "_share_edit_field"
+
+_SHARE_EDIT_FIELD_PROMPTS = {
+    "projects": "Which project(s) should this SHARE use?\n\nExample: Hinge, LOREAL",
+    "recipients": (
+        "Who should receive it? A talent, multiple talents, or a pipeline stage.\n\n"
+        "Example: Anusha Sharma, Riya Sharma\nor: everyone in Follow Up"
+    ),
+}
+
+
 async def _share_parse_edits_async(
     text: str, collected: Dict[str, str], fields: List[FieldSpec], ctx: ExecContext,
 ) -> Dict[str, str]:
@@ -6141,21 +6243,25 @@ async def _share_parse_edits_async(
 
     is_custom = collected.get("custom_message") is not None
 
+    # Natural-language edits ALWAYS take priority over the numbered menu
+    # below — a returning admin who already knows the free-text phrasing
+    # is never forced through it. Each success clears _SHARE_EDIT_FIELD_
+    # KEY so a stale menu-selection can never misinterpret a later turn.
     m = _SHARE_EDIT_MESSAGE_RE.match(stripped)
     if m and is_custom:
-        return {"custom_message": m.group(1).strip()}
+        return {"custom_message": m.group(1).strip(), _SHARE_EDIT_FIELD_KEY: ""}
 
     m = _SHARE_EDIT_PROJECT_RE.match(stripped)
     if m:
-        return {"project_query": m.group(1).strip()}
+        return {"project_query": m.group(1).strip(), _SHARE_EDIT_FIELD_KEY: ""}
 
     m = _SHARE_EDIT_TEMPLATE_RE.match(stripped)
     if m and not is_custom:
-        return {"template_query": m.group(1).strip()}
+        return {"template_query": m.group(1).strip(), _SHARE_EDIT_FIELD_KEY: ""}
 
     m = _SHARE_EDIT_TALENT_TO_RE.match(stripped)
     if m:
-        return {"recipient_query": m.group(1).strip()}
+        return {"recipient_query": m.group(1).strip(), _SHARE_EDIT_FIELD_KEY: ""}
 
     m = _SHARE_EDIT_REMOVE_RE.match(stripped) or _SHARE_EDIT_ADD_RE.match(stripped)
     if m:
@@ -6176,10 +6282,72 @@ async def _share_parse_edits_async(
                     return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
                         "Can't remove the only recipient — change the talent instead, or CANCEL."
                     )}
-                return {"recipient_query": ",".join(remaining)}
+                return {"recipient_query": ",".join(remaining), _SHARE_EDIT_FIELD_KEY: ""}
             add_m = _SHARE_EDIT_ADD_RE.match(stripped)
             if add_m:
-                return {"recipient_query": ",".join(current_names + [add_m.group(1).strip()])}
+                return {"recipient_query": ",".join(current_names + [add_m.group(1).strip()]), _SHARE_EDIT_FIELD_KEY: ""}
+
+    # Two-stage numbered menu (SHARE Production Readiness, 2026-09-07) —
+    # mirrors _plan_aware_parse_edits_async's own two-sub-state pattern.
+    # Only reached once none of the natural-language shapes above
+    # matched, and ONLY when a real entity disambiguation (an ambiguous
+    # talent/project/template — resolved by _move_parse_edits_async
+    # below, unchanged) isn't already pending; a bare "1" while such a
+    # clarification is showing must still pick FROM THAT LIST, never be
+    # reinterpreted as "1 -> edit Projects".
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
+    pending = (session or {}).get("pending_disambiguation")
+    if not (pending and pending.get("options")):
+        edit_field = (collected.get(_SHARE_EDIT_FIELD_KEY) or "").strip()
+
+        if not edit_field:
+            # Sub-state 1: SELECTING WHAT TO EDIT ("EDITING YOUR SHARE —
+            # 1 -> Projects / 2 -> Recipients / 3 -> Message or Template /
+            # 4 -> Cancel" was just shown).
+            if stripped == "4":
+                message = await _cancel_plan_edit(ctx)
+                return {PLAN_STEP_EDIT_ERROR_FIELD.key: message}
+            field_by_choice = {"1": "projects", "2": "recipients", "3": "message"}
+            if stripped in field_by_choice:
+                field_name = field_by_choice[stripped]
+                new_collected = dict(collected)
+                new_collected[_SHARE_EDIT_FIELD_KEY] = field_name
+                await conversation.update_conversation(
+                    ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing",
+                )
+                if field_name == "message":
+                    prompt = (
+                        'What should the new message be?\n\n'
+                        'Send it in quotation marks, for example:\n'
+                        '"Hi! You have been shortlisted for Hinge."'
+                    ) if is_custom else "Which template should I use?\n\nExample: Casting Call"
+                else:
+                    prompt = _SHARE_EDIT_FIELD_PROMPTS[field_name]
+                return {PLAN_STEP_EDIT_ERROR_FIELD.key: prompt}
+            if stripped:
+                return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                    "I didn't understand that.\n\nReply with 1, 2, 3, or 4."
+                )}
+        else:
+            # Sub-state 2: EDITING ONE FIELD — the reply IS the new value
+            # for whichever field was just chosen.
+            if stripped:
+                if edit_field == "projects":
+                    return {"project_query": stripped, _SHARE_EDIT_FIELD_KEY: ""}
+                if edit_field == "recipients":
+                    return {"recipient_query": stripped, _SHARE_EDIT_FIELD_KEY: ""}
+                if edit_field == "message":
+                    if is_custom:
+                        from agents.modules import whatsapp_campaign_agent as wa
+                        span = wa._find_quote_span(stripped)
+                        if not span:
+                            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                                'Please put the new message in quotation marks, for example:\n'
+                                '"Hi! You have been shortlisted for Hinge."'
+                            )}
+                        _open_start, open_end, close_start, _close_end = span
+                        return {"custom_message": stripped[open_end:close_start], _SHARE_EDIT_FIELD_KEY: ""}
+                    return {"template_query": stripped, _SHARE_EDIT_FIELD_KEY: ""}
 
     return await _move_parse_edits_async(text, collected, fields, ctx)
 
@@ -6199,13 +6367,27 @@ async def _share_editing_claims_reply(
     side-effect-free pattern matching against the SAME instruction shapes
     _share_parse_edits_async actually understands — a message matching
     none of them returns False, so a genuinely unrelated fresh command
-    still restarts normally, exactly as before this hook existed."""
+    still restarts normally, exactly as before this hook existed.
+
+    Two-Stage Numbered Editing (2026-09-07) — while _SHARE_EDIT_FIELD_KEY
+    is set (sub-state 2, "EDITING ONE FIELD"), ANY non-empty reply is
+    meaningful: it's read as the raw new value for whichever field was
+    just chosen, which could itself coincidentally start with a trigger
+    word ("Add Anusha Sharma" as a new recipient) that must never be
+    treated as a brand-new command mid-edit — mirrors
+    _plan_step_editing_claims_reply's identical "while a project
+    clarification is pending, ANY non-empty reply is meaningful" rule."""
     stripped = (text or "").strip()
     if not stripped:
         return False
+    if _EDIT_CANCEL_RE.match(stripped):
+        return True
+    if (collected.get(_SHARE_EDIT_FIELD_KEY) or "").strip():
+        return True
+    if stripped in ("1", "2", "3", "4"):
+        return True
     return bool(
-        _EDIT_CANCEL_RE.match(stripped)
-        or _SHARE_EDIT_MESSAGE_RE.match(stripped)
+        _SHARE_EDIT_MESSAGE_RE.match(stripped)
         or _SHARE_EDIT_PROJECT_RE.match(stripped)
         or _SHARE_EDIT_TEMPLATE_RE.match(stripped)
         or _SHARE_EDIT_TALENT_TO_RE.match(stripped)
@@ -6221,17 +6403,16 @@ async def _share_handle_confirming_reply(
     a SHARE conversation sits in "confirming", but only ever ACTS when
     session.pending_disambiguation.kind == "share_pipeline_check" (set by
     _build_share_confirmation's Pipeline Check gate, Production fix
-    2026-09-04; renumbered to 2 options 2026-09-05 — see
-    _format_share_pipeline_check's own docstring on why the old "Add +
-    Move, then Share" auto-handoff option was dropped when standalone
-    SHARE moved to a group with no ADD/MOVE intents of its own). 1/2
-    here mean Share-only-valid-pairs / Cancel — a completely different
-    decision from the ordinary confirmation card's own "1 -> Approve"
-    (approving THIS card would try to send pairs that aren't in the
-    pipeline yet) — so it must be intercepted before the generic parser
-    reaches it. Returns None for every other case (no pending gate at
-    all), leaving the ordinary 1/2/3 Approve/Edit/Cancel behaviour of
-    every other SHARE confirmation completely unchanged."""
+    2026-09-04; restored to 3 options 2026-09-07 — see
+    _format_share_pipeline_check's own docstring on why "Add + Move,
+    then Share" is back). 1/2/3 here mean Add+Move+Share / Share-only-
+    valid-pairs / Cancel — a completely different decision from the
+    ordinary confirmation card's own "1 -> Approve" (approving THIS card
+    would try to send pairs that aren't in the pipeline yet) — so it
+    must be intercepted before the generic parser reaches it. Returns
+    None for every other case (no pending gate at all), leaving the
+    ordinary 1/2/3 Approve/Edit/Cancel behaviour of every other SHARE
+    confirmation completely unchanged."""
     session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
     if not pending:
@@ -6258,6 +6439,43 @@ async def _share_handle_confirming_reply(
     valid = [row for row in matrix if row.in_pipeline]
 
     if stripped == "1":
+        # Add the missing talent(s), move them to Follow Up, then share —
+        # executed through the EXACT SAME add_talents_to_pipeline/
+        # bulk_move_by_talent_ids primitives ADD_INTENT/MOVE_INTENT's own
+        # executors call (routers/casting_pipeline.py), never a second/
+        # duplicate implementation. Cleared immediately so a duplicate
+        # "1" replay lands on the ordinary Approve/Edit/Cancel parser for
+        # the SHARE preview shown below instead of re-running this branch
+        # — this add+move step itself can never re-fire twice.
+        await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+        action_line = ""
+        if missing:
+            missing_by_project: Dict[str, List[str]] = {}
+            for row in missing:
+                missing_by_project.setdefault(row.project_id, []).append(row.talent_id)
+            added_total = 0
+            moved_total = 0
+            for pid, tids in missing_by_project.items():
+                # Idempotent by construction — `tids` here are ONLY the
+                # pairs the fresh matrix above just confirmed are missing,
+                # so this can never touch (let alone demote the stage of)
+                # an already-existing pipeline row for a DIFFERENT pair.
+                add_result = await add_talents_to_pipeline(pid, tids, "ask_to_test")
+                added_total += add_result.get("added", 0)
+                move_result = await bulk_move_by_talent_ids(pid, tids, "follow_up")
+                moved_total += move_result.get("moved", 0)
+            action_line = (
+                f"Added {added_total} talent{'' if added_total == 1 else 's'} to the "
+                f"pipeline and moved to Follow Up.\n\n"
+            )
+        full = await _resolve_share(collected)
+        if not full.ok:
+            await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+            return action_line + full.error
+        await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
+        return action_line + _build_share_confirmation_preview(full)
+
+    if stripped == "2":
         await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         if not valid:
             await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
@@ -6283,7 +6501,7 @@ async def _share_handle_confirming_reply(
             preview = f"Skipping (not in pipeline):\n{skip_lines}\n\n{preview}"
         return preview
 
-    if stripped == "2" or parse_confirmation_reply(stripped) == "cancel":
+    if stripped == "3" or parse_confirmation_reply(stripped) == "cancel":
         await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return "CANCELLED\n\nNothing from the pending SHARE action was executed or sent."
@@ -6306,6 +6524,19 @@ SHARE_PAIR_RESTRICTION_FIELD = FieldSpec(
     validate=_validate_hidden, required=False,
 )
 
+# Two-Stage Numbered Editing (SHARE Production Readiness, 2026-09-07) — a
+# hidden field, same pattern as SHARE_PAIR_RESTRICTION_FIELD above:
+# registered as a REAL field (not just a raw collected[] key) purely so
+# a successful edit can CLEAR it via the normal edits-dict merge in
+# agents/dispatcher.py's _collect_or_advance (see PLAN_EDIT_STEP_FIELD's
+# own docstring on this exact mechanism). Without this, a resolved
+# "editing recipients" choice would leak into the NEXT "2 -> Edit"
+# cycle's own top-level menu.
+SHARE_EDIT_FIELD_FIELD = FieldSpec(
+    key=_SHARE_EDIT_FIELD_KEY, label="Share Edit Field", question="",
+    validate=_validate_hidden, required=False,
+)
+
 
 SHARE_INTENT = IntentDefinition(
     intent_id="casting.share",
@@ -6318,7 +6549,7 @@ SHARE_INTENT = IntentDefinition(
     fields=[
         SHARE_PROJECT_FIELD, SHARE_RECIPIENT_FIELD, SHARE_TEMPLATE_FIELD, SHARE_CUSTOM_MESSAGE_FIELD,
         SHARE_PAIR_RESTRICTION_FIELD, SHARE_ROUTE_FIELD, SHARE_RAW_REMAINDER_FIELD,
-        AUTO_CONFIRM_FIELD, PLAN_STEP_EDIT_ERROR_FIELD,
+        SHARE_EDIT_FIELD_FIELD, AUTO_CONFIRM_FIELD, PLAN_STEP_EDIT_ERROR_FIELD,
     ],
     executor=_share_executor,
     extract_fields=_extract_share_or_send_fields,

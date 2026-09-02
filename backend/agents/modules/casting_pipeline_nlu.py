@@ -1274,8 +1274,23 @@ _TO_STAGE_RE = re.compile(r"^(.*?)\b(?:to|into)\b\s+(.+)$", re.IGNORECASE | re.D
 _PROJECT_IN_MOVE_RE = re.compile(r"\b(?:in|for)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
 
-def _strip_leading_trigger(text: str, triggers: List[str]) -> "tuple[Optional[str], str]":
+def _strip_leading_trigger(
+    text: str, triggers: List[str], preserve_whitespace: bool = False,
+) -> "tuple[Optional[str], str]":
+    """preserve_whitespace=True (SHARE Production Readiness, 2026-09-07) —
+    matching is completely unaffected (still resolved against the same
+    whitespace-collapsed view, so a trigger followed by a line break is
+    recognized exactly like one followed by a single space would be) —
+    only what's SLICED OFF as the remainder differs: the ORIGINAL text's
+    own internal whitespace (line breaks, repeated spaces) stays intact
+    instead of being collapsed to single spaces. Needed so a SHARE
+    custom message's own line breaks survive being found and extracted,
+    before quote-span detection ever runs on the remainder. Every
+    existing call site (default False, unchanged in every way) is
+    completely unaffected — same behavior as before this parameter
+    existed."""
     working = " ".join(text.strip().split())
+    preserved = text.strip()
     lowered = working.lower()
     best = None  # (len, trigger, remainder)
     for trig in triggers:
@@ -1294,7 +1309,10 @@ def _strip_leading_trigger(text: str, triggers: List[str]) -> "tuple[Optional[st
             # followed by "-" is never how normal English continues.
             or lowered.startswith(t + "-")
         ):
-            cand = (len(t), t, working[len(trig):].lstrip(" :-"))
+            if preserve_whitespace:
+                cand = (len(t), t, re.sub(r"^[\s:\-]+", "", preserved[len(trig):]))
+            else:
+                cand = (len(t), t, working[len(trig):].lstrip(" :-"))
         else:
             continue
         if best is None or cand[0] > best[0]:
@@ -1318,8 +1336,10 @@ def _strip_leading_trigger(text: str, triggers: List[str]) -> "tuple[Optional[st
             and parser._one_edit_away(candidate, trig.lower().strip())
         ]
         if len(typo_hits) == 1:
+            if preserve_whitespace:
+                return typo_hits[0], re.sub(r"^[\s:\-]+", "", preserved[len(candidate):])
             return typo_hits[0], working[len(candidate):].lstrip(" :-")
-    return None, working
+    return None, (preserved if preserve_whitespace else working)
 
 
 def extract_move_fields(text: str, stage_order: List[str]) -> Dict[str, str]:

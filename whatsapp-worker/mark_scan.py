@@ -529,17 +529,19 @@ async def _dump_window(
 
 
 async def _run_resolve_recipient(page, req: Dict[str, Any]) -> Dict[str, Any]:
-    """SHARE Instagram recipient resolution (Production fix, 2026-09-10)
+    """SHARE Instagram recipient resolution (Production fix, 2026-09-02)
     — searches WhatsApp's OWN live sidebar for req["query"] (sender.
-    search_whatsapp_chats), then, ONLY if that search settled on exactly
-    one result, best-effort classifies it as a group or a 1:1 contact
-    (sender.classify_chat_type) — never for a whole ambiguous list, and
-    never allowed to fail the resolution (a classification error just
-    means "type" comes back None, and the backend shows a generic label
-    instead of guessing). Returns {"candidates": [{"name", "type"}],
-    "error"} — candidates=[] with error=None is a real, honest "WhatsApp
-    has nothing matching this", never conflated with an infrastructure
-    failure."""
+    search_whatsapp_chats), then best-effort classifies the ONE row that
+    will actually be used as a group or a 1:1 contact (sender.
+    classify_chat_type): either the sole result, or the sole
+    case/whitespace-insensitive exact title match among several looser
+    results (mirrors the backend's own "exact match wins" rule) — never
+    for a whole ambiguous list with no clear winner, and never allowed to
+    fail the resolution (a classification error just means "type" comes
+    back None, and the backend shows a generic label instead of
+    guessing). Returns {"candidates": [{"name", "type"}], "error"} —
+    candidates=[] with error=None is a real, honest "WhatsApp has nothing
+    matching this", never conflated with an infrastructure failure."""
     query = (req.get("query") or "").strip()
     if not query:
         return {"candidates": [], "error": "empty recipient query"}
@@ -547,12 +549,26 @@ async def _run_resolve_recipient(page, req: Dict[str, Any]) -> Dict[str, Any]:
     if result.get("error"):
         return {"candidates": [], "error": result["error"]}
     candidates = result.get("candidates") or []
+    # Mirror the backend's own "exact match wins" rule (Part 8): when
+    # WhatsApp's sidebar returns several loosely-matching rows but exactly
+    # one of them is a case/whitespace-insensitive exact title match for
+    # the query, that row IS the final answer the backend will pick —
+    # classify it here too, not just the len==1 case, otherwise the
+    # single most common real-world shape (one exact hit buried among
+    # several unrelated "contains this text" rows, e.g. "Heena Talentgram"
+    # among a dozen other "... x Talentgram ..." groups) always came back
+    # with type=None and fell to a generic "WhatsApp chat" label.
+    target = None
     if len(candidates) == 1:
-        chat_type = await sender.classify_chat_type(page, candidates[0]["name"])
-        candidates[0]["type"] = chat_type
+        target = candidates[0]
     else:
-        for c in candidates:
-            c["type"] = None
+        exact = [c for c in candidates if (c.get("name") or "").strip().lower() == query.lower()]
+        if len(exact) == 1:
+            target = exact[0]
+    for c in candidates:
+        c["type"] = None
+    if target is not None:
+        target["type"] = await sender.classify_chat_type(page, target["name"])
     return {"candidates": candidates, "error": None}
 
 

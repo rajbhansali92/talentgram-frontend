@@ -260,8 +260,24 @@ def _report_send_result(
 
 
 async def _process_scan_done() -> bool:
+    # mode != "resolve_recipient" (2026-09-03 — real production race found
+    # via live verification): this collection is also used by
+    # casting_pipeline.py's SHARE Instagram recipient resolver
+    # (_search_whatsapp_live), which polls the SAME status values
+    # (scan_done/scan_failed) directly via find_one, with no claim. Without
+    # this exclusion, THIS loop's find_one_and_update wins the race often
+    # enough in practice to matter — it has no "talent_id"/"project_id"/etc.
+    # for a resolve_recipient doc, throws inside the try/except below, and
+    # leaves the doc stranded in "orchestrating_scan" forever (no reaper
+    # covers that status), while the resolver's own poller waits out its
+    # full timeout and silently falls back to the CRM/talent tier. Confirmed
+    # live: "Rising Sun x Talentgram Agency" landed in "orchestrating_scan"
+    # and never resolved until this exclusion was added.
     doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one_and_update(
-        {"status": {"$in": [media_assignment.SCAN_STATUS_DONE, media_assignment.SCAN_STATUS_FAILED]}},
+        {
+            "status": {"$in": [media_assignment.SCAN_STATUS_DONE, media_assignment.SCAN_STATUS_FAILED]},
+            "mode": {"$ne": "resolve_recipient"},
+        },
         {"$set": {"status": "orchestrating_scan", "updated_at": _now()}},
         sort=[("updated_at", 1)],
         return_document=True,
@@ -700,7 +716,11 @@ async def _reap_stuck_claims() -> None:
         {"status": "processing", "claimed_at": {"$lt": cutoff_dt}}
     ).to_list(50)
     for doc in stuck:
-        is_scan = doc.get("mode") == "scan"
+        # "resolve_recipient" (2026-09-03) is also a scan-phase mode — its
+        # claim starts life as SCAN_STATUS_PENDING and, if orphaned, must be
+        # reaped to SCAN_STATUS_FAILED/scan_error the same as "scan", never
+        # mistaken for a download-phase claim.
+        is_scan = doc.get("mode") in ("scan", "resolve_recipient")
         next_status = media_assignment.SCAN_STATUS_FAILED if is_scan else media_assignment.DOWNLOAD_STATUS_FAILED
         error_field = "scan_error" if is_scan else "download_error"
         error_msg = f"worker claim orphaned — stuck in 'processing' for over {STUCK_CLAIM_TIMEOUT_S}s, reaped by backend orchestrator"

@@ -833,6 +833,36 @@ async def test_orchestrator_scan_done_ambiguous_marks_finished_with_report():
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
 
 
+async def test_orchestrator_never_claims_resolve_recipient_scan_requests():
+    """Real production race (2026-09-03): casting_pipeline.py's SHARE
+    Instagram recipient resolver (_search_whatsapp_live) also writes
+    mode="resolve_recipient" docs into this SAME collection and polls
+    them for scan_done/scan_failed directly (no claim, just find_one).
+    Before this exclusion, this orchestrator's find_one_and_update won
+    that race often enough in practice to matter, stomped the doc's
+    status to "orchestrating_scan", then threw on doc["talent_id"]
+    (which a resolve_recipient doc never has) — stranding it forever and
+    forcing the resolver to silently time out and fall back to the CRM/
+    talent tier. Confirmed live against production: "Rising Sun x
+    Talentgram Agency" landed in "orchestrating_scan" and never resolved
+    until the mode exclusion was added below."""
+    req_id = str(uuid.uuid4())
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "resolve_recipient", "status": ma.SCAN_STATUS_DONE,
+        "query": "Heena Talentgram",
+        "candidates": [{"name": "Heena Talentgram", "type": "group"}],
+        "created_at": _now(), "updated_at": _now(),
+    })
+    try:
+        did_work = await orch._process_scan_done()
+        assert did_work is False
+        untouched = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert untouched["status"] == ma.SCAN_STATUS_DONE
+        assert untouched["candidates"] == [{"name": "Heena Talentgram", "type": "group"}]
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
 async def test_orchestrator_scan_done_unresolved_mark_finished_with_report():
     tag = uuid.uuid4().hex[:6]
     project_id, project_label = f"p-{tag}", f"Google {tag}"

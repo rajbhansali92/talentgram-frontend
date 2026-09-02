@@ -153,11 +153,21 @@ async def _seed_templates() -> None:
                 "We'd love to have you for *{{project_name}}*!\n\n"
                 "📅 Shoot Dates: {{shoot_dates}}\n"
                 "💰 Budget: {{budget}}\n\n"
-                "To proceed, please confirm your availability and submit your details here:\n"
+                "*SUBMIT FORM*\n"
+                "Please confirm your availability and complete the form here:\n"
                 "{{submission_link}}\n\n"
-                "— Team Talentgram 🎬"
+                "*VIEW SCRIPT / AUDITION MATERIAL*\n"
+                "Script, reference video/audio and other audition material:\n"
+                "{{audition_material_link}}\n\n"
+                "Important:\n"
+                "• Please complete the application form on the app.\n"
+                "• Your application will only be reviewed once the form is completed.\n\n"
+                "— Team Talentgram Agency"
             ),
-            "variables": ["talent_name", "project_name", "shoot_dates", "budget", "submission_link"],
+            "variables": [
+                "talent_name", "project_name", "shoot_dates", "budget",
+                "submission_link", "audition_material_link",
+            ],
             "media_type": "none",
             "media_url": None,
             "media_cloudinary_id": None,
@@ -466,6 +476,7 @@ VARIABLE_CATALOG = [
         {"key": "budget", "label": "Budget"},
         {"key": "location", "label": "Location"},
         {"key": "submission_link", "label": "Submission link"},
+        {"key": "audition_material_link", "label": "Audition material link"},
     ]},
     {"category": "Sender", "variables": [
         {"key": "sender_name", "label": "Sender name"},
@@ -793,6 +804,13 @@ def _project_variables(project: Dict[str, Any]) -> Dict[str, str]:
         "shoot_dates": (project.get("shoot_dates") or "").strip(),
         "budget": budget,
         "submission_link": f"https://submit.talentgramagency.com/submit/{slug}" if slug else "",
+        # 2026-08-31 — same submit page, `?material=1` deep-links it straight
+        # to the existing "View Audition Material" modal on load (see
+        # SubmissionPage.jsx's materialParam effect) instead of the talent
+        # having to notice/tap a button after the page renders. Reuses the
+        # exact same MaterialModal/hasAuditionMaterial the button already
+        # renders from — no second viewer, no new route.
+        "audition_material_link": f"https://submit.talentgramagency.com/submit/{slug}?material=1" if slug else "",
     }
 
 
@@ -802,7 +820,7 @@ def _project_variables(project: Dict[str, Any]) -> Dict[str, str]:
 AUTO_RECIPIENT_VARS = ["talent_name", "full_name", "first_name", "phone"]
 AUTO_SENDER_VARS = ["sender_name", "sender_email"]
 AUTO_SYSTEM_VARS = ["current_date", "current_time"]
-AUTO_PROJECT_VARS = ["project_name", "shoot_dates", "budget", "submission_link"]
+AUTO_PROJECT_VARS = ["project_name", "shoot_dates", "budget", "submission_link", "audition_material_link"]
 
 
 # ===========================================================================

@@ -2904,6 +2904,26 @@ function SubmissionPage() {
         focusRequirementItem(target);
     }, [focusParam, isSubmitted, editMode, loading, resumePending, experience.readinessModel, focusRequirementItem]);
 
+    // WhatsApp project-message deep link (2026-08-31) — "?material=1" opens
+    // the SAME Audition Material modal the "View Audition Material" button
+    // already opens (setShowMaterial), automatically on load instead of
+    // requiring a tap first. The WhatsApp Casting Call template's second
+    // link points here so a talent lands directly on the brief. No new
+    // viewer, no new state — reuses showMaterial/MaterialModal unchanged.
+    // Guarded the same way focusParam's own jump effects are (ref-once,
+    // waits for the project fetch to finish) so it can never fire twice or
+    // race project loading; absent this param, page load is unaffected.
+    const materialParam = useMemo(
+        () => (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("material") : null),
+        [],
+    );
+    const materialDeepLinkDoneRef = useRef(false);
+    useEffect(() => {
+        if (!materialParam || materialDeepLinkDoneRef.current || loading || !project) return;
+        materialDeepLinkDoneRef.current = true;
+        setShowMaterial(true);
+    }, [materialParam, loading, project]);
+
     // ---------------------------------------------------------------
     if (loading) {
         return (

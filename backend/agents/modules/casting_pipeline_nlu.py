@@ -343,7 +343,16 @@ FORCE_GLOBAL_MARKER = "__force_global__"
 # referent, for both mid-clarification corrections
 # and cross-command follow-ups.
 PRONOUN_LAST_MARKER = "__last_referenced_talent__"
-_PRONOUN_WORDS = {"him", "her", "them", "this one", "that one", "this", "that", "both"}
+# Combined ADD/MOVE/SHARE fix (2026-09-10, Part 2) — "she"/"that talent"/
+# "the talent" added alongside the existing pronoun vocabulary (the
+# master spec's own explicit list: "her/she/them/him/that talent/the
+# talent") — purely additive, same PRONOUN_LAST_MARKER resolution every
+# existing pronoun word already gets, never a second continuation
+# mechanism.
+_PRONOUN_WORDS = {
+    "him", "her", "she", "them", "this one", "that one", "this", "that", "both",
+    "that talent", "the talent",
+}
 
 # Phase 2 (Talent Selection & Add to Project, 2026-08-10) — "select" is
 # already a live casting.move trigger ("Select Priya to Approved" is a real

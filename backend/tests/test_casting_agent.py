@@ -10755,7 +10755,7 @@ async def test_ig_share_one_talent_to_person():
         assert "You are about to SHARE Instagram links:" in r.reply, r.reply
         assert f"1 - Anusha Sharma {tag} - https://instagram.com/anusha.official" in r.reply, r.reply
         assert f"Raj Recipient {tag}" in r.reply
-        assert "WhatsApp: 919990000101" in r.reply, r.reply
+        assert "WhatsApp contact" in r.reply and "919990000101" in r.reply, r.reply
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="1",
@@ -11453,6 +11453,422 @@ async def test_ig_share_template_and_custom_message_unaffected():
         )
         assert "you are about to share instagram links" not in (r2.reply or "").lower(), r2.reply
         assert r2.handled, r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+# ---------------------------------------------------------------------------
+# COMBINED FIX — SHARE Instagram recipient + compound regression
+# (Production fix, 2026-09-10)
+# ---------------------------------------------------------------------------
+
+async def test_ig_share_recipient_whatsapp_group_name_tier():
+    """Issue 1 — a recipient reference shaped like this platform's own
+    "<Name> X Talentgram [Agency]" WhatsApp-group naming convention must
+    resolve via the talent's GROUP name, never a weak/wrong guess against
+    her own NAME field, and never fall through to CRM."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    heena = await _seed_talent(
+        f"Heena Varde {tag}", whatsapp_group_name=f"Heena Varde {tag} X Talentgram",
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Heena {tag} Talentgram",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert "WhatsApp group" in r.reply, r.reply
+        assert "couldn't find" not in r.reply.lower(), r.reply
+        assert "CRM contact" not in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, heena])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_recipient_exact_group_name_not_shadowed_by_crm():
+    """Issue 1 — a recipient given as the group's EXACT full name (e.g.
+    "Rising Sun x Talentgram Agency") must resolve directly, never fall
+    through every tier to the generic "couldn't find as a CRM contact"
+    dead end."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    rising = await _seed_talent(
+        f"Rising Sun Talent {tag}", whatsapp_group_name=f"Rising Sun {tag} x Talentgram Agency",
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Rising Sun {tag} x Talentgram Agency",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert "WhatsApp group" in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, rising])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_recipient_whatsapp_before_crm():
+    """Issue 1 — a talent's own name/group must resolve BEFORE CRM is
+    ever tried, even when a same-named CRM contact also exists."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    raj_talent = await _seed_talent(f"Raj Duplicate {tag}", phone="919990000201")
+    crm_id = await _seed_crm_client_cp(f"Raj Duplicate {tag}", "919990000202")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Raj Duplicate {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        # The talent's own number, not the CRM contact's.
+        assert "919990000201" in r.reply, r.reply
+        assert "919990000202" not in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup_crm_clients_cp([crm_id])
+        await _cleanup(phone, talent_ids=[anusha, raj_talent])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_recipient_confirmation_three_line_contact_format():
+    """Confirmation shows "Recipient: <name> / WhatsApp contact / <number>"
+    for a resolved named contact, per the combined-fix spec's exact
+    format (distinct from a bare-number or group recipient)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000203")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Raj Recipient {tag}\nWhatsApp contact\n919990000203" in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, raj])
+        await _restore_share_config(original)
+
+
+async def test_compound_add_move_share_survives_stale_instagram_conversation():
+    """Issue 2 — THE reported regression, reproduced exactly: a prior,
+    unrelated SHARE Instagram command left dangling in "editing" step
+    (its recipient couldn't be found) must never swallow a completely
+    fresh, comma-chained "Add X to Y, move her to Z, share the casting
+    call with her" as an edit instruction for itself."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    try:
+        stale = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to TotallyUnknownRecipientXYZ",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert stale.handled
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Anusha Sharma {tag} to {label}, move her to follow up, share the casting call with her",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in r.reply.lower(), r.reply
+        assert "1. Add Anusha Sharma" in r.reply
+        assert "2. Move Anusha Sharma" in r.reply
+        assert "3. Share Casting Call" in r.reply
+        assert "couldn't find" not in r.reply.lower(), r.reply
+
+        approved = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "completed" in approved.reply.lower(), approved.reply
+        row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert row is not None and row["stage"] == "follow_up", approved.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_compound_add_move_regression_exact_reported_text():
+    """Issue 2 — the exact reported ADD -> MOVE two-step case (no SHARE
+    clause), also preceded by a stale standalone-SHARE (template mode,
+    not Instagram) editing turn — confirms the fix generalizes beyond
+    Instagram specifically, per the master prompt's own "fix the
+    underlying architecture, not a special case" mandate."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"Anusha Sharma {tag}")
+    try:
+        stale = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share nonexistent template with Totally Unknown Person Xyz {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert stale.handled
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Anusha Sharma {tag} to {label}, move her to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in r.reply.lower(), r.reply
+        assert "1. Add Anusha Sharma" in r.reply
+        assert "2. Move Anusha Sharma" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_compound_pronoun_continuation_the_talent():
+    """#12 — "the talent" is also a valid pronoun-style continuation."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"Anusha Sharma {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Anusha Sharma {tag} to {label}, move the talent to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in r.reply.lower(), r.reply
+        assert "1. Add Anusha Sharma" in r.reply and "2. Move Anusha Sharma" in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_compound_pronoun_continuation_share_only():
+    """#12 — ADD then SHARE with "her" (no MOVE in between)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"Anusha Sharma {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Anusha Sharma {tag} to {label}, share the casting call with her",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in r.reply.lower(), r.reply
+        assert "1. Add Anusha Sharma" in r.reply and "2. Share Casting Call" in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_compound_pronoun_continuation_three_step_alternate_stage():
+    """#12 — three-step plan with a DIFFERENT target stage ("shortlisted")
+    still resolves the pronoun correctly through all three steps."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"Anusha Sharma {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Add Anusha Sharma {tag} to {label}, move her to shortlisted, "
+                "share the casting call with her"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in r.reply.lower(), r.reply
+        assert "Shortlisted" in r.reply
+        assert "1. Add Anusha Sharma" in r.reply and "2. Move Anusha Sharma" in r.reply and "3. Share Casting Call" in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_compound_multi_talent_add_still_works():
+    """#13 — comma-separated multi-talent ADD is unaffected."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a = await _seed_talent(f"Anusha Sharma {tag}")
+    b = await _seed_talent(f"Riya Sharma {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Anusha Sharma {tag}, Riya Sharma {tag} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to add" in r.reply.lower(), r.reply
+        assert f"Anusha Sharma {tag}" in r.reply and f"Riya Sharma {tag}" in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b])
+        await _restore_share_config(original)
+
+
+async def test_compound_multi_talent_move_still_works():
+    """#13 — comma-separated multi-talent MOVE is unaffected."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a = await _seed_talent(f"Anusha Sharma {tag}")
+    b = await _seed_talent(f"Riya Sharma {tag}")
+    await _seed_pipeline_row(project_id, a, "ask_to_test")
+    await _seed_pipeline_row(project_id, b, "ask_to_test")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Move Anusha Sharma {tag}, Riya Sharma {tag} to Follow Up in {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to move" in r.reply.lower(), r.reply
+        assert f"Anusha Sharma {tag}" in r.reply and f"Riya Sharma {tag}" in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b])
+        await _restore_share_config(original)
+
+
+async def test_compound_ambiguous_talent_still_works_after_regression_fix():
+    """#15 — ambiguous-talent handling (Task 4's own priority fix) still
+    works correctly after the comma-guard change — the guard only blocks
+    a STALE, unrelated pending state from claiming immunity; it must
+    never block the plan's OWN legitimate ambiguity-resolution flow."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a = await _seed_talent(f"Ria Nalavade {tag}")
+    b = await _seed_talent(f"Jiyaa Amin {tag}")
+    c = await _seed_talent(f"Saniya Amin {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Ria Amin {tag} to {label}, move her to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in r2.reply.lower(), r2.reply
+        assert f"Jiyaa Amin {tag}" in r2.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b, c])
+        await _restore_share_config(original)
+
+
+async def test_compound_cancel_and_edit_still_work_after_regression_fix():
+    """#15 — normal cancel/edit on a compound plan confirmation still
+    work correctly after the comma-guard change."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"PGI {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"Anusha Sharma {tag}")
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Anusha Sharma {tag} to {label}, move her to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "which step would you like to edit?" in edit.reply.lower(), edit.reply
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="CANCEL",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "cancelled" in cancel.reply.lower(), cancel.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)

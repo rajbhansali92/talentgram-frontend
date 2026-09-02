@@ -3210,6 +3210,30 @@ _EDIT_CANCEL_RE = re.compile(
     r"^\s*(?:cancel(?:\s+(?:this|editing))?|stop(?:\s+(?:this|editing))?)\s*[.!?]*\s*$", re.IGNORECASE
 )
 
+
+def _looks_like_fresh_compound_command(text: str) -> bool:
+    """Combined ADD/MOVE/SHARE Regression fix (Production fix,
+    2026-09-10) — a genuine reply to a pending disambiguation/free-text-
+    retry question is, by this whole platform's own committed grammar
+    (comma is the ONE structural separator — see e.g. SHARE_HELP_
+    EXAMPLES, Part 4/16 of the SHARE Instagram spec), always a SHORT
+    answer: a bare number, a talent/recipient name, a phone number —
+    never a comma-separated, multi-clause command. A `claims_editing_
+    reply` hook must never grant a stale pending_disambiguation immunity
+    from a fresh trigger over a message shaped like this — the exact
+    reported production regression: an unrelated, still-open SHARE
+    Instagram "recipient not found" turn (pending_disambiguation.kind==
+    "free_text_retry") swallowed a completely new, comma-chained "Add
+    Anusha Sharma to PGI, move her to follow up, share the casting call
+    with her" instead of letting it restart as its own fresh ADD
+    command — the SAME class of hole in ANY claims_editing_reply hook
+    that grants immunity purely from a pending kind, so this is the one
+    shared check both that hook and _plan_step_editing_claims_reply's
+    equivalent branch use, rather than a hand-rolled fix in just one of
+    them."""
+    return "," in (text or "")
+
+
 # Ambiguity-Before-Confirmation Priority (2026-09-09) — internal-only
 # instruction sentinels _apply_plan_step_edit_instruction recognizes for
 # resolving an UNRESOLVED (ambiguous) step's talent/project — built
@@ -3844,7 +3868,10 @@ async def _plan_step_editing_claims_reply(
     # command mid-clarification.
     session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
-    if pending and pending.get("kind") in ("plan_missing_project", "plan_ambiguous_entity"):
+    if (
+        pending and pending.get("kind") in ("plan_missing_project", "plan_ambiguous_entity")
+        and not _looks_like_fresh_compound_command(stripped)
+    ):
         return True
     if _PLAN_STEP_NUMBER_RE.match(stripped) or _EDIT_CANCEL_RE.match(stripped):
         return True
@@ -6951,17 +6978,36 @@ async def _share_editing_claims_reply(
         # generic checks below don't recognize.
         session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
         pending = (session or {}).get("pending_disambiguation")
-        if pending and pending.get("kind") in ("talent", "instagram_recipient", "free_text_retry"):
+        if (
+            pending and pending.get("kind") in ("talent", "instagram_recipient", "free_text_retry")
+            and not _looks_like_fresh_compound_command(stripped)
+        ):
             return True
         if _SHARE_INSTAGRAM_EDIT_RECIPIENT_RE.match(stripped):
             return True
+    # Combined ADD/MOVE/SHARE Regression fix (2026-09-10) — _SHARE_EDIT_
+    # ADD_RE/_SHARE_EDIT_REMOVE_RE both capture an OPEN-ENDED "the rest
+    # of the message" as a talent/recipient name ("Add <name>", "Remove
+    # <name>") — exactly the shape that swallowed a genuinely fresh,
+    # comma-chained "Add Anusha Sharma to PGI, move her to follow up,
+    # share the casting call with her" as if it were "add this one long,
+    # garbled name" to an unrelated, stale SHARE still sitting in
+    # "editing" (the reported production regression). Every OTHER check
+    # here either requires a specific literal prefix phrase ("change ...
+    # to", "share it with") that a fresh compound command never
+    # coincidentally matches, or (the two NUMBER-only checks) legitimately
+    # allows a comma of its own ("Remove 2,4") — so only these two get
+    # gated by the SAME "not a fresh compound command" rule Instagram's
+    # own pending-disambiguation check above already uses.
+    if (
+        _SHARE_EDIT_REMOVE_RE.match(stripped) or _SHARE_EDIT_ADD_RE.match(stripped)
+    ) and not _looks_like_fresh_compound_command(stripped):
+        return True
     return bool(
         _SHARE_EDIT_MESSAGE_RE.match(stripped)
         or _SHARE_EDIT_PROJECT_RE.match(stripped)
         or _SHARE_EDIT_TEMPLATE_RE.match(stripped)
         or _SHARE_EDIT_TALENT_TO_RE.match(stripped)
-        or _SHARE_EDIT_REMOVE_RE.match(stripped)
-        or _SHARE_EDIT_ADD_RE.match(stripped)
         or _SHARE_EDIT_REMOVE_NUMBERS_RE.match(stripped)
         or _SHARE_EDIT_KEEP_ONLY_RE.match(stripped)
         or _SHARE_EDIT_BARE_PROJECT_RE.match(stripped)
@@ -7351,46 +7397,153 @@ async def _resolve_share_instagram_talents(
 _SHARE_INSTAGRAM_GROUP_SUFFIX_RE = re.compile(r"\s*(?:whatsapp\s+)?group\s*$", re.IGNORECASE)
 
 
+async def _fetch_talent_whatsapp_groups() -> List[Dict[str, str]]:
+    """Every talent with a non-empty whatsapp_group_name — id/name/group
+    — the candidate pool for a direct WhatsApp GROUP NAME reference
+    (Production fix, 2026-09-10, Part 4's "WhatsApp group lookup" tier).
+    A DIFFERENT field from the talent's own name: real WhatsApp groups on
+    this platform are overwhelmingly named "<Talent Name> X Talentgram
+    [Agency]" (354 of them at last count), a pattern an admin naturally
+    echoes back loosely ("Heena Talentgram", missing the "Varde"/"X"/
+    "Agency" words) — a reference the talent-NAME tier below has no
+    reason to ever recognize, since it isn't her name."""
+    docs = await db.talents.find(
+        {"whatsapp_group_name": {"$nin": [None, ""]}},
+        {"_id": 0, "id": 1, "name": 1, "whatsapp_group_name": 1},
+    ).to_list(5000)
+    return docs
+
+
 async def _resolve_instagram_recipient(query: str):
-    """Wraps whatsapp_campaign_agent's OWN dedicated single-recipient
-    resolver (_resolve_recipient_only — phone / CRM contact / saved
-    contact list / saved group list / named talent, in that priority
-    order) — the SAME "existing WhatsApp recipient/group lookup
-    mechanism" every other recipient resolution in this codebase already
-    reuses, never a second lookup engine (Part 4's own requirement).
-    Adds exactly ONE more fallback tier (Part 4's "project-associated
-    WhatsApp group", e.g. "Hinge group") that _resolve_recipient_only
-    itself deliberately never tries (its own docstring: "never calls any
-    project matcher") — tried ONLY after every one of ITS OWN tiers has
-    already failed, so a real CRM contact/saved group/talent confusingly
-    named after a project is never shadowed by this."""
+    """SHARE Instagram's own recipient resolver — WhatsApp-first, per
+    Part 10/11's explicit priority order (Production fix, 2026-09-10):
+
+        phone -> WhatsApp contact (talent's own name) ->
+        WhatsApp group (talent's own whatsapp_group_name) ->
+        project's own WhatsApp casting group ->
+        existing saved-recipient mechanisms (CRM contact / saved
+        contact list / saved group list) as a LAST-resort fallback.
+
+    Reuses the EXACT SAME underlying primitives every other WhatsApp
+    recipient lookup on this platform already uses — name_match.
+    tiered_name_match (the one shared small-collection matcher),
+    whatsapp_campaign_agent's own _resolve_talent_names (the same
+    talent-disambiguation/safety-gate machinery ADD/MOVE/Instagram-
+    subject resolution already go through, called here with the SAME
+    strict_ambiguous_safety_gate=True its own recipient-fallback tier
+    already uses — "Heena Talentgram" weakly overlapping "Heena Varde"
+    on one shared token is correctly REJECTED, never silently guessed),
+    and _resolve_recipient_only itself for the CRM/saved-list fallback
+    tier — composed in a different, feature-appropriate ORDER rather
+    than a second lookup engine. The prior version delegated the WHOLE
+    chain to _resolve_recipient_only first (CRM before any WhatsApp
+    check, and no whatsapp_group_name tier at all) — see this function's
+    own git history for the exact production bug that fixed."""
     from agents.modules import whatsapp_campaign_agent as wa
+    from agents import disambiguation, name_match
 
-    target = await wa._resolve_recipient_only(query)
-    if target.ok or target.ambiguous:
-        return target
+    q = (query or "").strip()
+    if not q:
+        return wa._RecipientTarget(ok=False, error="Who should this go to?")
 
-    bare = _SHARE_INSTAGRAM_GROUP_SUFFIX_RE.sub("", query).strip()
-    if not bare:
-        return target
-    projects = await _fetch_ongoing_projects()
-    with request_scope.stage("fuzzy"):
-        match = nlu.resolve_project_by_name(bare, projects)
-    if not match.project:
-        return target
-    project_doc = await db.projects.find_one(
-        {"id": match.project["id"]}, {"_id": 0, "whatsapp_casting_group_name": 1},
+    # 1. Explicit phone number.
+    if wa._PHONE_RE.match(q):
+        phone = wa._normalize_phone(q)
+        if phone:
+            return wa._RecipientTarget(
+                ok=True, source_type="MANUAL",
+                source_params=SourceParams(contacts=[ManualContact(name="", phone=phone)]),
+                display_label=phone,
+            )
+        return wa._RecipientTarget(ok=False, error=f'"{q}" doesn\'t look like a valid phone number.')
+
+    # 2. WhatsApp contact lookup — a named talent's own identity, the
+    # SAME talent-name resolution/safety-gate _resolve_recipient_only's
+    # own talent-fallback tier already uses (never a second copy).
+    talents = await wa._resolve_talent_names(
+        q,
+        single_ambiguous_field_key=SHARE_INSTAGRAM_RECIPIENT_FIELD.key,
+        multi_pick_field_key=wa._PENDING_MULTI_RECIPIENT_PICK_KEY,
+        multi_fragments_key=wa._PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY,
+        multi_index_key=wa._PENDING_MULTI_RECIPIENT_INDEX_KEY,
+        strict_ambiguous_safety_gate=True,
     )
-    group_name = ((project_doc or {}).get("whatsapp_casting_group_name") or "").strip()
-    if not group_name:
-        return target
-    return wa._RecipientTarget(
-        ok=True, source_type="MANUAL",
-        source_params=SourceParams(contacts=[
-            ManualContact(name=match.project["label"], phone="", whatsapp_group_name=group_name),
-        ]),
-        display_label=match.project["label"],
-    )
+    if talents.ambiguous:
+        return wa._RecipientTarget(ok=False, ambiguous=talents.ambiguous)
+    if talents.ok:
+        contacts, no_contact_info = await wa._build_manual_contacts(
+            list(zip(talents.talent_ids, talents.talent_labels))
+        )
+        if contacts:
+            return wa._RecipientTarget(
+                ok=True, source_type="MANUAL",
+                source_params=SourceParams(contacts=contacts),
+                display_label=", ".join(talents.talent_labels),
+            )
+        return wa._RecipientTarget(
+            ok=False,
+            error=f'{" and ".join(no_contact_info)} — no phone number or WhatsApp group on file.',
+        )
+
+    # 3. WhatsApp group lookup — the query directly against every
+    # talent's own registered WhatsApp GROUP name.
+    group_candidates = await _fetch_talent_whatsapp_groups()
+    if group_candidates:
+        gmatch = name_match.tiered_name_match(
+            q, group_candidates, lambda t: t.get("whatsapp_group_name") or "",
+            id_fn=lambda t: t["id"], what="WhatsApp group",
+        )
+        if gmatch.item:
+            label = gmatch.item.get("name") or gmatch.item["whatsapp_group_name"]
+            return wa._RecipientTarget(
+                ok=True, source_type="MANUAL",
+                source_params=SourceParams(contacts=[
+                    ManualContact(
+                        name=label, phone="",
+                        whatsapp_group_name=gmatch.item["whatsapp_group_name"],
+                        talent_id=gmatch.item["id"],
+                    ),
+                ]),
+                display_label=label,
+            )
+        if gmatch.ambiguous:
+            return wa._RecipientTarget(
+                ok=False,
+                ambiguous=wa.AmbiguousEntity(
+                    entity_type="talent", field_key=SHARE_INSTAGRAM_RECIPIENT_FIELD.key,
+                    candidates=[
+                        disambiguation.Candidate(id=c.get("id") or "", label=c["label"])
+                        for c in gmatch.ambiguous
+                    ],
+                ),
+            )
+
+    # 4. Project's own WhatsApp casting group (Part 4's "project-
+    # associated WhatsApp group", e.g. "Hinge group").
+    bare = _SHARE_INSTAGRAM_GROUP_SUFFIX_RE.sub("", q).strip()
+    if bare:
+        projects = await _fetch_ongoing_projects()
+        with request_scope.stage("fuzzy"):
+            match = nlu.resolve_project_by_name(bare, projects)
+        if match.project:
+            project_doc = await db.projects.find_one(
+                {"id": match.project["id"]}, {"_id": 0, "whatsapp_casting_group_name": 1},
+            )
+            group_name = ((project_doc or {}).get("whatsapp_casting_group_name") or "").strip()
+            if group_name:
+                return wa._RecipientTarget(
+                    ok=True, source_type="MANUAL",
+                    source_params=SourceParams(contacts=[
+                        ManualContact(name=match.project["label"], phone="", whatsapp_group_name=group_name),
+                    ]),
+                    display_label=match.project["label"],
+                )
+
+    # 5. Fallback — existing saved recipient mechanisms (CRM contact,
+    # saved contact list, saved group list), via the SAME dedicated
+    # resolver every other recipient lookup already uses, tried LAST
+    # (Part 10's own "CRM should only be a fallback").
+    return await wa._resolve_recipient_only(q)
 
 
 async def _resolve_share_instagram(collected: dict) -> _InstagramShareResolution:
@@ -7508,22 +7661,25 @@ def _format_instagram_share_body(resolved: "_InstagramShareResolution") -> str:
     return "\n".join(lines)
 
 
-def _instagram_recipient_method_line(resolved: "_InstagramShareResolution") -> str:
-    """Part 8's own three exact shapes: a raw phone-number recipient
-    shows "WhatsApp number" (the number itself is already the Recipient:
-    line, no need to repeat it); a WhatsApp GROUP shows "WhatsApp
-    group"; a NAMED person (CRM contact/talent) resolved to a number
-    shows "WhatsApp: <the actual number>" so the admin can verify it's
-    really them. Never a guess — reads directly off resolve_recipients_
-    engine's own destination_type/destination, the same real routing
-    decision the send itself will use."""
+def _instagram_recipient_lines(resolved: "_InstagramShareResolution") -> List[str]:
+    """Combined-fix Part 6/8's exact shapes — the lines that follow
+    "Recipient:\\n<name>" in the confirmation card, so the admin sees
+    EXACTLY where the message will go, never an abstract category. A
+    WhatsApp GROUP shows "WhatsApp group" alone; a NAMED contact (talent/
+    CRM) resolved to a number shows "WhatsApp contact" THEN the actual
+    number on its own line, so it's verifiable at a glance; a bare typed
+    phone number (nothing else known about the recipient) shows
+    "WhatsApp number" alone — the number is already the Recipient: line
+    itself, so it's never repeated. Never a guess — reads directly off
+    resolve_recipients_engine's own destination_type/destination, the
+    SAME real routing decision the send itself will use."""
     if resolved.recipient_destination_type == "group":
-        return "WhatsApp group"
+        return ["WhatsApp group"]
     if resolved.recipient_destination_type == "number":
         if resolved.recipient_label == resolved.recipient_destination:
-            return "WhatsApp number"
-        return f"WhatsApp: {resolved.recipient_destination}"
-    return "Unknown"
+            return ["WhatsApp number"]
+        return ["WhatsApp contact", resolved.recipient_destination]
+    return ["Unknown"]
 
 
 async def _build_share_instagram_confirmation(collected: dict, ctx: ExecContext) -> str:
@@ -7541,7 +7697,7 @@ async def _build_share_instagram_confirmation(collected: dict, ctx: ExecContext)
     await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
     lines = [
         "You are about to SHARE Instagram links:", "",
-        "Recipient:", resolved.recipient_label, _instagram_recipient_method_line(resolved), "",
+        "Recipient:", resolved.recipient_label, *_instagram_recipient_lines(resolved), "",
         "Instagram links:", "",
         _format_instagram_share_body(resolved), "",
         "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel", "",

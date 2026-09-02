@@ -19,6 +19,16 @@ it correctly, not to re-test the engine itself.
 import os
 os.environ["JWT_SECRET"] = "dummy"
 os.environ["MONGO_URL"] = os.environ.get("TEST_MONGO_URL", "mongodb://localhost:27017")
+# SHARE Instagram's real-WhatsApp recipient resolution (Production fix,
+# 2026-09-10) polls whatsapp_scan_requests for the worker's response; no
+# real worker runs during tests, so the OLD Instagram Profile Send tests
+# in this file (which now route through the SAME new resolver, since
+# they go through the full dispatcher) would otherwise wait the full
+# default 20s per turn before falling back. Set BEFORE the agents
+# modules import, since these are read once as module-level constants —
+# same reasoning as test_casting_agent.py's own identical override.
+os.environ.setdefault("RECIPIENT_SEARCH_POLL_INTERVAL_SEC", "0.05")
+os.environ.setdefault("RECIPIENT_SEARCH_MAX_WAIT_SEC", "1.5")
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

@@ -1023,6 +1023,136 @@ def test_open_group_chat_exact_matching_unaffected():
 
 
 # ---------------------------------------------------------------------------
+# search_whatsapp_chats / classify_chat_type (SHARE Instagram real
+# recipient resolution, Production fix, 2026-09-10) — the search-only
+# variant of _open_group_chat's own steps 1-5: reuses the SAME lower-
+# level helpers (_collect_search_candidates, _read_search_value), so
+# these tests isolate ONLY the new function's own orchestration (never
+# clicking, always resetting to neutral, returning every real result
+# verbatim) exactly like the _open_group_chat tests above isolate ITS
+# bounded-retry/verification logic.
+# ---------------------------------------------------------------------------
+def test_search_whatsapp_chats_returns_every_real_result_deduped():
+    page = _FakeGroupPage()
+    row_a, row_b = _FakeGroupCandidateLocator(), _FakeGroupCandidateLocator()
+
+    async def _fake_collect(page):
+        return "sel", [
+            _fake_candidate("Heena Talentgram", row_a),
+            _fake_candidate("Heena Talentgram", row_a),  # duplicate row, same title
+            _fake_candidate("Heena Varde", row_b),
+        ]
+
+    async def _fake_read_value(page, sel):
+        return True, "Heena Talentgram"
+
+    orig_collect, orig_read = sender._collect_search_candidates, sender._read_search_value
+    sender._collect_search_candidates, sender._read_search_value = _fake_collect, _fake_read_value
+    try:
+        result = run(sender.search_whatsapp_chats(page, "Heena Talentgram"))
+    finally:
+        sender._collect_search_candidates, sender._read_search_value = orig_collect, orig_read
+
+    assert result["error"] is None, result
+    names = [c["name"] for c in result["candidates"]]
+    assert names == ["Heena Talentgram", "Heena Varde"], names  # deduped, never clicked
+    assert row_a.click_count == 0 and row_b.click_count == 0
+
+
+def test_search_whatsapp_chats_genuinely_empty_is_not_an_error():
+    page = _FakeGroupPage()
+
+    async def _fake_collect(page):
+        return None, []
+
+    async def _fake_read_value(page, sel):
+        return True, "Zzzargled Nonexistent"
+
+    orig_collect, orig_read = sender._collect_search_candidates, sender._read_search_value
+    sender._collect_search_candidates, sender._read_search_value = _fake_collect, _fake_read_value
+    try:
+        result = run(sender.search_whatsapp_chats(page, "Zzzargled Nonexistent"))
+    finally:
+        sender._collect_search_candidates, sender._read_search_value = orig_collect, orig_read
+
+    assert result == {"candidates": [], "error": None}, result
+
+
+def test_search_whatsapp_chats_missing_search_box_is_an_infra_error():
+    """No sidebar search box resolvable at all -> a real infrastructure
+    error, distinct from "WhatsApp genuinely has nothing matching"."""
+    class _NoSearchBoxPage(_FakeGroupPage):
+        def locator(self, sel):
+            if sel == sender.ALL_FILTER_SELECTOR:
+                return self.all_filter
+            return _FakeLocatorAlwaysAbsent()
+
+    class _FakeLocatorAlwaysAbsent:
+        first = None
+        async def count(self):
+            return 0
+
+    page = _NoSearchBoxPage()
+    result = run(sender.search_whatsapp_chats(page, "Anyone"))
+    assert result["candidates"] == []
+    assert result["error"], result
+
+
+def test_classify_chat_type_group_when_participants_found():
+    page = _FakeGroupPage()
+
+    async def _fake_open(page, name):
+        return "OPENED"
+
+    async def _fake_participants(page, name):
+        return [{"raw_text": "Alice", "phone": None}, {"raw_text": "Bob", "phone": None}]
+
+    orig_open, orig_participants = sender._open_group_chat, sender.get_group_participants
+    sender._open_group_chat, sender.get_group_participants = _fake_open, _fake_participants
+    try:
+        result = run(sender.classify_chat_type(page, "Some Group"))
+    finally:
+        sender._open_group_chat, sender.get_group_participants = orig_open, orig_participants
+
+    assert result == "group", result
+
+
+def test_classify_chat_type_contact_when_no_participants():
+    page = _FakeGroupPage()
+
+    async def _fake_open(page, name):
+        return "OPENED"
+
+    async def _fake_participants(page, name):
+        return None  # Group Info never populated -> not a group
+
+    orig_open, orig_participants = sender._open_group_chat, sender.get_group_participants
+    sender._open_group_chat, sender.get_group_participants = _fake_open, _fake_participants
+    try:
+        result = run(sender.classify_chat_type(page, "Some Contact"))
+    finally:
+        sender._open_group_chat, sender.get_group_participants = orig_open, orig_participants
+
+    assert result == "contact", result
+
+
+def test_classify_chat_type_none_when_chat_never_opens():
+    page = _FakeGroupPage()
+
+    async def _fake_open(page, name):
+        return "NOT_FOUND"
+
+    orig_open = sender._open_group_chat
+    sender._open_group_chat = _fake_open
+    try:
+        result = run(sender.classify_chat_type(page, "Whoever"))
+    finally:
+        sender._open_group_chat = orig_open
+
+    assert result is None, result
+
+
+# ---------------------------------------------------------------------------
 # _ensure_all_filter_selected / _open_group_chat all-filter reset
 # (2026-08-25) — root-caused via LIVE worker log correlation (not a new
 # diagnostic dispatch): a real batch-send job's own _open_group_chat call

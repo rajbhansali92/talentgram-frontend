@@ -7351,6 +7351,13 @@ class _InstagramShareResolution:
     recipient_destination: str = ""
     recipient_source_type: str = ""
     recipient_source_params: Optional[SourceParams] = None
+    # "group" | "contact" | None (worker couldn't determine, or the
+    # recipient wasn't resolved via live WhatsApp search at all — a
+    # phone number or a project's own casting group, both already
+    # unambiguous). SEPARATE from recipient_destination_type — see
+    # _resolve_instagram_recipient's own docstring for why the two must
+    # never be conflated.
+    recipient_chat_type: Optional[str] = None
 
 
 async def _resolve_share_instagram_talents(
@@ -7397,56 +7404,103 @@ async def _resolve_share_instagram_talents(
 _SHARE_INSTAGRAM_GROUP_SUFFIX_RE = re.compile(r"\s*(?:whatsapp\s+)?group\s*$", re.IGNORECASE)
 
 
-async def _fetch_talent_whatsapp_groups() -> List[Dict[str, str]]:
-    """Every talent with a non-empty whatsapp_group_name — id/name/group
-    — the candidate pool for a direct WhatsApp GROUP NAME reference
-    (Production fix, 2026-09-10, Part 4's "WhatsApp group lookup" tier).
-    A DIFFERENT field from the talent's own name: real WhatsApp groups on
-    this platform are overwhelmingly named "<Talent Name> X Talentgram
-    [Agency]" (354 of them at last count), a pattern an admin naturally
-    echoes back loosely ("Heena Talentgram", missing the "Varde"/"X"/
-    "Agency" words) — a reference the talent-NAME tier below has no
-    reason to ever recognize, since it isn't her name."""
-    docs = await db.talents.find(
-        {"whatsapp_group_name": {"$nin": [None, ""]}},
-        {"_id": 0, "id": 1, "name": 1, "whatsapp_group_name": 1},
-    ).to_list(5000)
-    return docs
+# Real WhatsApp Recipient Resolution (Production fix, 2026-09-10) — the
+# PREVIOUS fix's "WhatsApp group lookup" tier still matched the recipient
+# text against the TALENTGRAM TALENT DATABASE's own whatsapp_group_name
+# field (via name_match.tiered_name_match) — i.e. it was STILL treating
+# an application record as the source of truth for "does this WhatsApp
+# destination exist", exactly the bug it was meant to fix. "Heena
+# Talentgram" fuzzy-matched seven unrelated "<Name> X Talentgram" talent
+# groups on nothing but a shared "talentgram" substring.
+#
+# The recipient in "SHARE Instagram link of <talent(s)> to <recipient>"
+# is a WhatsApp destination, full stop — it must be resolved against the
+# ACTUAL WhatsApp Web account the worker drives, never a database
+# standing in for it. That live lookup can only happen where the live
+# WhatsApp session actually lives: the whatsapp-worker process. This
+# reuses the EXACT SAME backend<->worker transport the media-assignment
+# mark/scan/download/send workflow already uses (agents/modules/
+# media_assignment.py's whatsapp_scan_requests collection, its claim/
+# report-result endpoints, its "pending -> processing -> done|failed"
+# lifecycle) with one more `mode` value ("resolve_recipient") — never a
+# second collection, never a second wire protocol. The worker's own side
+# (whatsapp-worker/sender.py's search_whatsapp_chats/classify_chat_type,
+# whatsapp-worker/mark_scan.py's _run_resolve_recipient) reuses the SAME
+# already-hardened sidebar-search primitives _open_group_chat relies on
+# for real sends — no new selectors, no guessed DOM.
+_RECIPIENT_SEARCH_POLL_INTERVAL_SEC = float(os.environ.get("RECIPIENT_SEARCH_POLL_INTERVAL_SEC", "0.5"))
+_RECIPIENT_SEARCH_MAX_WAIT_SEC = float(os.environ.get("RECIPIENT_SEARCH_MAX_WAIT_SEC", "20"))
 
 
-async def _resolve_instagram_recipient(query: str):
+async def _search_whatsapp_live(query: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Creates a whatsapp_scan_requests doc (mode="resolve_recipient")
+    and polls it for the worker's response. Returns (candidates, error)
+    — error is set ONLY for an infrastructure failure (no worker claimed
+    it within the wait bound, or the worker itself reported one); a
+    query that genuinely matches nothing in WhatsApp returns ([], None),
+    identical to a real empty WhatsApp search. The request doc is always
+    deleted afterward — whatsapp_scan_requests carries no TTL of its
+    own, and this collection's OTHER (media-assignment) consumers must
+    never see a stray "resolve_recipient" doc left behind."""
+    from agents.modules import media_assignment
+
+    req_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    await db[media_assignment.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "resolve_recipient",
+        "status": media_assignment.SCAN_STATUS_PENDING,
+        "query": query, "created_at": now,
+    })
+    deadline = time.monotonic() + _RECIPIENT_SEARCH_MAX_WAIT_SEC
+    try:
+        while True:
+            doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
+                {"id": req_id}, {"_id": 0, "status": 1, "candidates": 1, "scan_error": 1},
+            )
+            status = (doc or {}).get("status")
+            if status == media_assignment.SCAN_STATUS_DONE:
+                return (doc.get("candidates") or []), None
+            if status == media_assignment.SCAN_STATUS_FAILED:
+                return [], (doc.get("scan_error") or "The WhatsApp search failed.")
+            if time.monotonic() >= deadline:
+                return [], (
+                    "Couldn't verify that recipient on WhatsApp right now "
+                    "(the WhatsApp worker didn't respond in time)."
+                )
+            await asyncio.sleep(_RECIPIENT_SEARCH_POLL_INTERVAL_SEC)
+    finally:
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+async def _resolve_instagram_recipient(query: str) -> Tuple[Any, Optional[str]]:
     """SHARE Instagram's own recipient resolver — WhatsApp-first, per
-    Part 10/11's explicit priority order (Production fix, 2026-09-10):
+    Part 1's explicit priority order:
 
-        phone -> WhatsApp contact (talent's own name) ->
-        WhatsApp group (talent's own whatsapp_group_name) ->
-        project's own WhatsApp casting group ->
+        phone -> REAL live WhatsApp search (contact or group) ->
+        project's own explicitly-configured WhatsApp casting group ->
         existing saved-recipient mechanisms (CRM contact / saved
-        contact list / saved group list) as a LAST-resort fallback.
+        contact/group list) as a LAST-resort assist, never the primary
+        source of truth for "does this WhatsApp destination exist".
 
-    Reuses the EXACT SAME underlying primitives every other WhatsApp
-    recipient lookup on this platform already uses — name_match.
-    tiered_name_match (the one shared small-collection matcher),
-    whatsapp_campaign_agent's own _resolve_talent_names (the same
-    talent-disambiguation/safety-gate machinery ADD/MOVE/Instagram-
-    subject resolution already go through, called here with the SAME
-    strict_ambiguous_safety_gate=True its own recipient-fallback tier
-    already uses — "Heena Talentgram" weakly overlapping "Heena Varde"
-    on one shared token is correctly REJECTED, never silently guessed),
-    and _resolve_recipient_only itself for the CRM/saved-list fallback
-    tier — composed in a different, feature-appropriate ORDER rather
-    than a second lookup engine. The prior version delegated the WHOLE
-    chain to _resolve_recipient_only first (CRM before any WhatsApp
-    check, and no whatsapp_group_name tier at all) — see this function's
-    own git history for the exact production bug that fixed."""
+    Returns (wa._RecipientTarget, chat_type) — chat_type is "group" |
+    "contact" | None (worker couldn't determine, or the target wasn't
+    resolved via live search at all), kept SEPARATE from
+    resolve_recipients_engine's own destination_type ("group"|"number"
+    — a ROUTING distinction only: whatsapp_group_name-populated vs
+    phone-populated, which is "group" for EVERY name-searched chat
+    whether it's actually a WhatsApp group or a 1:1 contact). The
+    confirmation card uses chat_type for its own "WhatsApp group" /
+    "WhatsApp contact" label; destination_type still decides HOW the
+    real send is routed, unchanged."""
     from agents.modules import whatsapp_campaign_agent as wa
-    from agents import disambiguation, name_match
+    from agents import disambiguation
 
     q = (query or "").strip()
     if not q:
-        return wa._RecipientTarget(ok=False, error="Who should this go to?")
+        return wa._RecipientTarget(ok=False, error="Who should this go to?"), None
 
-    # 1. Explicit phone number.
+    # 1. Explicit phone number — no WhatsApp lookup needed, the number
+    # itself IS the destination.
     if wa._PHONE_RE.match(q):
         phone = wa._normalize_phone(q)
         if phone:
@@ -7454,72 +7508,52 @@ async def _resolve_instagram_recipient(query: str):
                 ok=True, source_type="MANUAL",
                 source_params=SourceParams(contacts=[ManualContact(name="", phone=phone)]),
                 display_label=phone,
-            )
-        return wa._RecipientTarget(ok=False, error=f'"{q}" doesn\'t look like a valid phone number.')
+            ), None
+        return wa._RecipientTarget(ok=False, error=f'"{q}" doesn\'t look like a valid phone number.'), None
 
-    # 2. WhatsApp contact lookup — a named talent's own identity, the
-    # SAME talent-name resolution/safety-gate _resolve_recipient_only's
-    # own talent-fallback tier already uses (never a second copy).
-    talents = await wa._resolve_talent_names(
-        q,
-        single_ambiguous_field_key=SHARE_INSTAGRAM_RECIPIENT_FIELD.key,
-        multi_pick_field_key=wa._PENDING_MULTI_RECIPIENT_PICK_KEY,
-        multi_fragments_key=wa._PENDING_MULTI_RECIPIENT_FRAGMENTS_KEY,
-        multi_index_key=wa._PENDING_MULTI_RECIPIENT_INDEX_KEY,
-        strict_ambiguous_safety_gate=True,
-    )
-    if talents.ambiguous:
-        return wa._RecipientTarget(ok=False, ambiguous=talents.ambiguous)
-    if talents.ok:
-        contacts, no_contact_info = await wa._build_manual_contacts(
-            list(zip(talents.talent_ids, talents.talent_labels))
-        )
-        if contacts:
-            return wa._RecipientTarget(
-                ok=True, source_type="MANUAL",
-                source_params=SourceParams(contacts=contacts),
-                display_label=", ".join(talents.talent_labels),
-            )
-        return wa._RecipientTarget(
-            ok=False,
-            error=f'{" and ".join(no_contact_info)} — no phone number or WhatsApp group on file.',
-        )
-
-    # 3. WhatsApp group lookup — the query directly against every
-    # talent's own registered WhatsApp GROUP name.
-    group_candidates = await _fetch_talent_whatsapp_groups()
-    if group_candidates:
-        gmatch = name_match.tiered_name_match(
-            q, group_candidates, lambda t: t.get("whatsapp_group_name") or "",
-            id_fn=lambda t: t["id"], what="WhatsApp group",
-        )
-        if gmatch.item:
-            label = gmatch.item.get("name") or gmatch.item["whatsapp_group_name"]
+    # 2. The real WhatsApp search — see _search_whatsapp_live's own
+    # docstring for the backend<->worker round trip. "Exact match wins"
+    # (Part 8): a case/whitespace-insensitive exact title match among
+    # WhatsApp's own results is used directly even when other looser
+    # results also came back; otherwise 2+ results are a genuine
+    # ambiguity (Part 9) and exactly 1 result is used as-is (WhatsApp's
+    # own search already did its own matching — no second fuzzy pass on
+    # top of it).
+    candidates, search_error = await _search_whatsapp_live(q)
+    if candidates:
+        chosen = None
+        if len(candidates) == 1:
+            chosen = candidates[0]
+        else:
+            exact = [c for c in candidates if (c.get("name") or "").strip().lower() == q.lower()]
+            if len(exact) == 1:
+                chosen = exact[0]
+        if chosen:
+            name = chosen.get("name") or q
+            chat_type = chosen.get("type")
             return wa._RecipientTarget(
                 ok=True, source_type="MANUAL",
                 source_params=SourceParams(contacts=[
-                    ManualContact(
-                        name=label, phone="",
-                        whatsapp_group_name=gmatch.item["whatsapp_group_name"],
-                        talent_id=gmatch.item["id"],
-                    ),
+                    ManualContact(name=name, phone="", whatsapp_group_name=name),
                 ]),
-                display_label=label,
-            )
-        if gmatch.ambiguous:
-            return wa._RecipientTarget(
-                ok=False,
-                ambiguous=wa.AmbiguousEntity(
-                    entity_type="talent", field_key=SHARE_INSTAGRAM_RECIPIENT_FIELD.key,
-                    candidates=[
-                        disambiguation.Candidate(id=c.get("id") or "", label=c["label"])
-                        for c in gmatch.ambiguous
-                    ],
-                ),
-            )
+                display_label=name,
+            ), chat_type
+        # 2+ plausible WhatsApp results, no clear exact winner — a
+        # genuine ambiguity, shown with WhatsApp's own real names (Part
+        # 9), never internal database matching details.
+        options = [{"label": c.get("name") or "", "value": c.get("name") or ""} for c in candidates]
+        return wa._RecipientTarget(
+            ok=False,
+            ambiguous=wa.AmbiguousEntity(
+                entity_type="talent", field_key=SHARE_INSTAGRAM_RECIPIENT_FIELD.key,
+                candidates=[disambiguation.Candidate(id=o["value"], label=o["label"]) for o in options],
+            ),
+        ), None
 
-    # 4. Project's own WhatsApp casting group (Part 4's "project-
-    # associated WhatsApp group", e.g. "Hinge group").
+    # 3. Project's own WhatsApp casting group (Part 6.D's "project-
+    # associated WhatsApp group", e.g. "Hinge group") — an EXPLICIT
+    # project -> WhatsApp-group mapping stored on the project record
+    # itself, never derived from a talent's name.
     bare = _SHARE_INSTAGRAM_GROUP_SUFFIX_RE.sub("", q).strip()
     if bare:
         projects = await _fetch_ongoing_projects()
@@ -7537,13 +7571,24 @@ async def _resolve_instagram_recipient(query: str):
                         ManualContact(name=match.project["label"], phone="", whatsapp_group_name=group_name),
                     ]),
                     display_label=match.project["label"],
-                )
+                ), "group"
 
-    # 5. Fallback — existing saved recipient mechanisms (CRM contact,
-    # saved contact list, saved group list), via the SAME dedicated
-    # resolver every other recipient lookup already uses, tried LAST
-    # (Part 10's own "CRM should only be a fallback").
-    return await wa._resolve_recipient_only(q)
+    # 4. Fallback ONLY — existing saved recipient mechanisms (CRM
+    # contact, saved contact list, saved group list, and that resolver's
+    # OWN last-resort talent-name tier), via the SAME dedicated resolver
+    # every other recipient lookup already uses. Reached only once the
+    # real WhatsApp search has ALREADY come back with nothing (Part 2:
+    # "the application database may be used to assist only... never
+    # replace the actual WhatsApp lookup") — an infrastructure failure
+    # (search_error set) still falls through here rather than dead-
+    # ending immediately, since a saved CRM/list match is still a
+    # legitimate way to reach someone even when live search couldn't be
+    # verified this turn. This fallback's OWN error (e.g. "couldn't find
+    # X as a CRM contact, saved list, talent, or phone number") is always
+    # the one shown — more specific and more useful than a bare "the
+    # search timed out" would be, and the fallback already ran either way.
+    target = await wa._resolve_recipient_only(q)
+    return target, None
 
 
 async def _resolve_share_instagram(collected: dict) -> _InstagramShareResolution:
@@ -7601,7 +7646,7 @@ async def _resolve_share_instagram(collected: dict) -> _InstagramShareResolution
             )
         return _InstagramShareResolution(ok=False, error=msg)
 
-    target = await _resolve_instagram_recipient(recipient_query)
+    target, chat_type = await _resolve_instagram_recipient(recipient_query)
     if target.ambiguous:
         options = [{"label": c.label, "value": c.label} for c in target.ambiguous.candidates]
         opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
@@ -7643,6 +7688,7 @@ async def _resolve_share_instagram(collected: dict) -> _InstagramShareResolution
         recipient_destination_type=rec.get("destination_type") or "",
         recipient_destination=rec.get("destination") or "",
         recipient_source_type=target.source_type, recipient_source_params=target.source_params,
+        recipient_chat_type=chat_type,
     )
 
 
@@ -7662,23 +7708,30 @@ def _format_instagram_share_body(resolved: "_InstagramShareResolution") -> str:
 
 
 def _instagram_recipient_lines(resolved: "_InstagramShareResolution") -> List[str]:
-    """Combined-fix Part 6/8's exact shapes — the lines that follow
-    "Recipient:\\n<name>" in the confirmation card, so the admin sees
-    EXACTLY where the message will go, never an abstract category. A
-    WhatsApp GROUP shows "WhatsApp group" alone; a NAMED contact (talent/
-    CRM) resolved to a number shows "WhatsApp contact" THEN the actual
-    number on its own line, so it's verifiable at a glance; a bare typed
-    phone number (nothing else known about the recipient) shows
-    "WhatsApp number" alone — the number is already the Recipient: line
-    itself, so it's never repeated. Never a guess — reads directly off
-    resolve_recipients_engine's own destination_type/destination, the
-    SAME real routing decision the send itself will use."""
-    if resolved.recipient_destination_type == "group":
+    """The lines that follow "Recipient:\\n<name>" in the confirmation
+    card, so the admin sees EXACTLY where the message will go. A bare
+    typed phone number shows "WhatsApp number" alone (the number is
+    already the Recipient: line itself, never repeated). Everything else
+    was resolved via the real live WhatsApp search (or an explicit
+    project casting-group mapping) — recipient_chat_type is THAT real
+    classification ("group"/"contact", from the worker's own live
+    lookup, never guessed from a database), shown as "WhatsApp group" or
+    "WhatsApp contact" (+ a CRM-fallback phone number, when one is
+    known); "WhatsApp chat" is the honest fallback for the rare case the
+    worker couldn't determine which it was — never a fabricated guess
+    between the two."""
+    if resolved.recipient_destination_type == "number" and resolved.recipient_label == resolved.recipient_destination:
+        return ["WhatsApp number"]
+    if resolved.recipient_chat_type == "group":
         return ["WhatsApp group"]
-    if resolved.recipient_destination_type == "number":
-        if resolved.recipient_label == resolved.recipient_destination:
-            return ["WhatsApp number"]
+    if resolved.recipient_chat_type == "contact":
+        if resolved.recipient_destination_type == "number" and resolved.recipient_destination:
+            return ["WhatsApp contact", resolved.recipient_destination]
+        return ["WhatsApp contact"]
+    if resolved.recipient_destination_type == "number" and resolved.recipient_destination:
         return ["WhatsApp contact", resolved.recipient_destination]
+    if resolved.recipient_destination_type == "group":
+        return ["WhatsApp chat"]
     return ["Unknown"]
 
 

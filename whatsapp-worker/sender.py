@@ -1731,6 +1731,125 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     return "OPENED"
 
 
+async def search_whatsapp_chats(page: Page, query: str) -> Dict[str, Any]:
+    """SHARE Instagram recipient resolution (Production fix, 2026-09-10)
+    — a SEARCH-ONLY variant of _open_group_chat's own steps 1-5 (reset ->
+    all-filter -> focus sidebar search -> clear -> type -> bounded-poll
+    candidate collection): returns EVERY visible result row's title,
+    verbatim, from WhatsApp's OWN live sidebar search — never clicks/
+    opens anything, and always resets back to a neutral chat-list state
+    before returning (steady state for whichever OTHER worker duty runs
+    next). This is the boundary the backend's recipient resolver was
+    missing: previously it matched a typed recipient against the
+    Talentgram talent database's OWN whatsapp_group_name field (a
+    completely different, unrelated source of truth) instead of ever
+    asking WhatsApp itself. Every primitive reused here (SEARCH_BOX_
+    SELECTORS, the focus/clear/type/read-back dance, _collect_search_
+    candidates' bounded retry) is the EXACT same, already-hardened code
+    _open_group_chat relies on for real sends — no new selectors, no
+    second search implementation.
+
+    Returns {"candidates": [{"name": str}], "error": str|None}. `error`
+    is set only for an infrastructure failure (search box not found,
+    focus never landed in the sidebar, etc.) — a query that legitimately
+    matches nothing returns candidates=[] with error=None, exactly like
+    a real empty WhatsApp search."""
+    try:
+        await _reset_to_chat_list(page)
+        await _ensure_all_filter_selected(page)
+        if not await dismiss_blocking_dialogs(page, "recipient-search"):
+            return {"candidates": [], "error": "a dialog was blocking the WhatsApp search box"}
+
+        search_sel = None
+        for sel in SEARCH_BOX_SELECTORS:
+            try:
+                loc = page.locator(sel)
+                if await loc.count() and await loc.first.is_visible():
+                    search_sel = sel
+                    break
+            except Exception:
+                continue
+        if not search_sel:
+            return {"candidates": [], "error": "no sidebar search box found"}
+
+        try:
+            await page.click(search_sel, timeout=5_000)
+            await asyncio.sleep(0.2)
+        except Exception as exc:
+            return {"candidates": [], "error": f"search click failed: {exc}"}
+        focus = await _focus_report(page)
+        if not focus.get("in_side") or focus.get("in_main"):
+            try:
+                await page.click(search_sel, timeout=5_000)
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+            focus = await _focus_report(page)
+            if not focus.get("in_side") or focus.get("in_main"):
+                return {"candidates": [], "error": "focus never landed in the sidebar search box"}
+
+        try:
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(0.4)
+            await page.type(search_sel, query, delay=40)
+            await asyncio.sleep(1.2)
+        except Exception as exc:
+            return {"candidates": [], "error": f"typing the search query failed: {exc}"}
+
+        result_sel, candidates = await _collect_search_candidates(page)
+        for _ in range(MAX_CANDIDATE_COLLECT_ATTEMPTS - 1):
+            if candidates:
+                break
+            await asyncio.sleep(CANDIDATE_COLLECT_RETRY_DELAY_S)
+            result_sel, candidates = await _collect_search_candidates(page)
+        logger.info(
+            "sender: RECIPIENT-SEARCH query=%r result_selector=%s candidates=%s",
+            query, result_sel, [c["title"] for c in candidates],
+        )
+        seen = set()
+        out = []
+        for c in candidates:
+            if c["title"] in seen:
+                continue
+            seen.add(c["title"])
+            out.append({"name": c["title"]})
+        return {"candidates": out, "error": None}
+    finally:
+        # Always leave the sidebar neutral — the inbound listener and any
+        # queued send job run against the SAME page/session right after.
+        await _reset_to_chat_list(page)
+
+
+async def classify_chat_type(page: Page, chat_name: str) -> Optional[str]:
+    """Best-effort "group" | "contact" | None (couldn't determine) for
+    ONE already-resolved chat name — reuses _open_group_chat (exact-match
+    required, so safe to call with a name search_whatsapp_chats just
+    verified exists) to open it, then the SAME proven get_group_
+    participants used for group_members security-mode checks: a
+    populated participant list means it's a group; an empty/absent one
+    means it's a 1:1 contact. Called for the SINGLE final recipient only
+    (never per-candidate during an ambiguity listing — opening every
+    candidate to classify it would be far too slow/risky for a live
+    session), and never allowed to fail the resolution itself — any
+    error here just means the confirmation shows a generic "WhatsApp
+    chat" label instead of the more specific one."""
+    try:
+        outcome = await _open_group_chat(page, chat_name)
+        if outcome != "OPENED":
+            return None
+        participants = await get_group_participants(page, chat_name)
+        return "group" if participants else "contact"
+    except Exception as exc:
+        logger.info("sender: classify_chat_type error for %r (advisory): %s", chat_name, exc)
+        return None
+    finally:
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+
 async def send_whatsapp_message(
     page: Page,
     destination_type: str,  # "group" | "number"

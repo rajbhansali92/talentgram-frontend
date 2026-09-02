@@ -528,6 +528,34 @@ async def _dump_window(
     return [merged[i] for i in order[:max_messages]]
 
 
+async def _run_resolve_recipient(page, req: Dict[str, Any]) -> Dict[str, Any]:
+    """SHARE Instagram recipient resolution (Production fix, 2026-09-10)
+    — searches WhatsApp's OWN live sidebar for req["query"] (sender.
+    search_whatsapp_chats), then, ONLY if that search settled on exactly
+    one result, best-effort classifies it as a group or a 1:1 contact
+    (sender.classify_chat_type) — never for a whole ambiguous list, and
+    never allowed to fail the resolution (a classification error just
+    means "type" comes back None, and the backend shows a generic label
+    instead of guessing). Returns {"candidates": [{"name", "type"}],
+    "error"} — candidates=[] with error=None is a real, honest "WhatsApp
+    has nothing matching this", never conflated with an infrastructure
+    failure."""
+    query = (req.get("query") or "").strip()
+    if not query:
+        return {"candidates": [], "error": "empty recipient query"}
+    result = await sender.search_whatsapp_chats(page, query)
+    if result.get("error"):
+        return {"candidates": [], "error": result["error"]}
+    candidates = result.get("candidates") or []
+    if len(candidates) == 1:
+        chat_type = await sender.classify_chat_type(page, candidates[0]["name"])
+        candidates[0]["type"] = chat_type
+    else:
+        for c in candidates:
+            c["type"] = None
+    return {"candidates": candidates, "error": None}
+
+
 async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
     group_name = req["group_name"]
     max_messages = req.get("max_messages") or MAX_MESSAGES_SCANNED_DEFAULT
@@ -7561,6 +7589,26 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                     },
                                     headers=_auth_headers(), timeout=30.0,
                                 )
+                            elif req.get("mode") == "resolve_recipient":
+                                # SHARE Instagram recipient resolution
+                                # (Production fix, 2026-09-10) — reuses
+                                # this SAME claim/report round trip
+                                # (scan-result endpoint, "pending_scan"
+                                # status the claim query already looks
+                                # for) rather than a second wire protocol.
+                                # See sender.search_whatsapp_chats/
+                                # classify_chat_type for what actually
+                                # runs against the live page.
+                                result = await asyncio.wait_for(
+                                    _run_resolve_recipient(page, req), timeout=45.0,
+                                )
+                                await http.post(
+                                    f"{BASE}/scan-requests/{req['id']}/scan-result",
+                                    json={
+                                        "candidates": result.get("candidates", []), "error": result.get("error"),
+                                    },
+                                    headers=_auth_headers(), timeout=30.0,
+                                )
                             elif req.get("mode") == "download":
                                 # Outer safety net only — normal completion
                                 # happens well inside this via each video
@@ -7618,7 +7666,7 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                         raise
                     except Exception as exc:
                         logger.exception("mark_scan: claimed request %r failed/hung — reporting failure so it isn't stuck", req.get("id"))
-                        endpoint = "scan-result" if req.get("mode") == "scan" else "download-result"
+                        endpoint = "scan-result" if req.get("mode") in ("scan", "resolve_recipient") else "download-result"
                         body = (
                             {"candidates": [], "error": f"worker exception: {exc}"} if endpoint == "scan-result"
                             else {"results": [], "error": f"worker exception: {exc}"}

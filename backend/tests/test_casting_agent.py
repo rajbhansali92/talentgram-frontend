@@ -12,6 +12,15 @@ os.environ["MONGO_URL"] = os.environ.get("TEST_MONGO_URL", "mongodb://localhost:
 # are imported, since these are read once as module-level constants.
 os.environ.setdefault("SHARE_DELIVERY_POLL_INTERVAL_SEC", "0.2")
 os.environ.setdefault("SHARE_DELIVERY_MAX_WAIT_SEC", "1")
+# SHARE Instagram's real-WhatsApp recipient resolution (Production fix,
+# 2026-09-10) polls whatsapp_scan_requests for the worker's response —
+# no real worker runs during tests, so a test that deliberately wants a
+# "worker never responded" timeout needs that bound short, and a test
+# that simulates a worker response (see _simulate_recipient_search_worker
+# below) needs a fast poll interval so it doesn't wait the full 0.2s per
+# cycle. Same "set before the agents modules import" reasoning as above.
+os.environ.setdefault("RECIPIENT_SEARCH_POLL_INTERVAL_SEC", "0.05")
+os.environ.setdefault("RECIPIENT_SEARCH_MAX_WAIT_SEC", "1.5")
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -210,6 +219,42 @@ async def _cleanup(phone: str, project_ids=(), talent_ids=()) -> None:
     # and a few hundred leaked docs from repeated regression runs is enough
     # to make operation_id collisions non-negligible.
     await db.whatsapp_agent_tasks.delete_many({"agent_id": AGENT_ID, "phone": phone})
+
+
+# SHARE Instagram real-WhatsApp recipient resolution (Production fix,
+# 2026-09-10) — test-level stand-in for the whatsapp-worker process.
+# _resolve_instagram_recipient creates a whatsapp_scan_requests doc
+# (mode="resolve_recipient", status=pending_scan) and POLLS it; no real
+# worker runs in tests, so this claims that SAME doc the real worker
+# would (matching claim_scan_request's own query/sort) and writes back a
+# deterministic result — exercising the real backend<->worker BOUNDARY
+# and wire shape (this is genuinely what a worker's HTTP report would
+# write), never mocking _resolve_instagram_recipient itself.
+async def _simulate_recipient_search_worker(
+    query: str, candidates: list, *, error: str = None, timeout: float = 3.0,
+) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        doc = await db[_ma.SCAN_REQUESTS_COLLECTION].find_one(
+            {"mode": "resolve_recipient", "status": _ma.SCAN_STATUS_PENDING, "query": query},
+        )
+        if doc:
+            status = _ma.SCAN_STATUS_FAILED if error else _ma.SCAN_STATUS_DONE
+            await db[_ma.SCAN_REQUESTS_COLLECTION].update_one(
+                {"id": doc["id"]},
+                {"$set": {"status": status, "candidates": candidates, "scan_error": error}},
+            )
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"no pending resolve_recipient scan request appeared for query={query!r}")
+
+
+def _with_simulated_recipient_search(query: str, candidates: list, *, error: str = None):
+    """Launches _simulate_recipient_search_worker as a background task —
+    call this immediately before the handle_inbound_message turn that
+    will create the scan request, then await the returned task after (or
+    just let it finish; it's a no-op once resolved)."""
+    return asyncio.create_task(_simulate_recipient_search_worker(query, candidates, error=error))
 
 
 _DUPLICATE_ORDINAL_RE = re.compile(r"^\d+\.\s*\d+\.\s")
@@ -10812,57 +10857,72 @@ async def test_ig_share_multiple_talents_to_person():
 
 
 async def test_ig_share_one_talent_to_whatsapp_group():
-    """#3 — recipient is a WhatsApp group (a talent's own group)."""
+    """#3 — recipient is a WhatsApp group, resolved via the REAL
+    WhatsApp-search boundary (a simulated worker response standing in
+    for the live whatsapp-worker — see _simulate_recipient_search_worker)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
-    group_recipient = await _seed_talent(
-        f"GroupRecipient {tag}", whatsapp_group_name=f"Real WA Group {tag}",
-    )
+    real_group_name = f"Real WA Group {tag}"
     try:
+        worker = _with_simulated_recipient_search(
+            f"{real_group_name} chat", [{"name": real_group_name, "type": "group"}],
+        )
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"Share Instagram link of Anusha Sharma {tag} to GroupRecipient {tag}",
+            text=f"Share Instagram link of Anusha Sharma {tag} to {real_group_name} chat",
             sender_name="Raj", sender_is_group_member=True,
         )
+        await worker
         assert "You are about to SHARE Instagram links:" in r.reply, r.reply
         assert "WhatsApp group" in r.reply, r.reply
+        assert real_group_name in r.reply, r.reply
 
+        # Approval re-resolves the recipient fresh (never trusting the
+        # cached confirmation-time result) — a SECOND simulated worker
+        # response for the SAME query.
+        worker2 = _with_simulated_recipient_search(
+            f"{real_group_name} chat", [{"name": real_group_name, "type": "group"}],
+        )
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="1",
             sender_name="Raj", sender_is_group_member=True,
         )
+        await worker2
         assert "Shared." in r2.reply, r2.reply
         job = await db.whatsapp_jobs.find_one(
-            {"destination": f"Real WA Group {tag}"}, sort=[("created_at", -1)],
+            {"destination": real_group_name}, sort=[("created_at", -1)],
         )
         assert job is not None
         assert job["destination_type"] == "group"
     finally:
-        await db.whatsapp_jobs.delete_many({"destination": f"Real WA Group {tag}"})
-        await _cleanup(phone, talent_ids=[anusha, group_recipient])
+        await db.whatsapp_jobs.delete_many({"destination": real_group_name})
+        await _cleanup(phone, talent_ids=[anusha])
         await _restore_share_config(original)
 
 
 async def test_ig_share_multiple_talents_to_whatsapp_group():
-    """#4 — multiple talents, recipient is a WhatsApp group."""
+    """#4 — multiple talents, recipient is a WhatsApp group (real search,
+    simulated worker response)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
     riya = await _seed_talent(f"Riya Sharma {tag}", instagram_handle="riya.sharma")
-    group_recipient = await _seed_talent(
-        f"GroupRecipient {tag}", whatsapp_group_name=f"Real WA Group {tag}",
-    )
+    real_group_name = f"Real WA Group {tag}"
     try:
+        worker = _with_simulated_recipient_search(
+            f"{real_group_name} chat", [{"name": real_group_name, "type": "group"}],
+        )
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"Share Instagram links of Anusha Sharma {tag}, Riya Sharma {tag} to GroupRecipient {tag}",
+            text=f"Share Instagram links of Anusha Sharma {tag}, Riya Sharma {tag} to {real_group_name} chat",
             sender_name="Raj", sender_is_group_member=True,
         )
+        await worker
         assert "You are about to SHARE Instagram links:" in r.reply, r.reply
         assert "WhatsApp group" in r.reply, r.reply
         assert f"1 - Anusha Sharma {tag}" in r.reply and f"2 - Riya Sharma {tag}" in r.reply
@@ -10872,8 +10932,8 @@ async def test_ig_share_multiple_talents_to_whatsapp_group():
             sender_name="Raj", sender_is_group_member=True,
         )
     finally:
-        await db.whatsapp_jobs.delete_many({"destination": f"Real WA Group {tag}"})
-        await _cleanup(phone, talent_ids=[anusha, riya, group_recipient])
+        await db.whatsapp_jobs.delete_many({"destination": real_group_name})
+        await _cleanup(phone, talent_ids=[anusha, riya])
         await _restore_share_config(original)
 
 
@@ -11463,89 +11523,109 @@ async def test_ig_share_template_and_custom_message_unaffected():
 # (Production fix, 2026-09-10)
 # ---------------------------------------------------------------------------
 
-async def test_ig_share_recipient_whatsapp_group_name_tier():
-    """Issue 1 — a recipient reference shaped like this platform's own
-    "<Name> X Talentgram [Agency]" WhatsApp-group naming convention must
-    resolve via the talent's GROUP name, never a weak/wrong guess against
-    her own NAME field, and never fall through to CRM."""
+async def test_ig_share_recipient_heena_talentgram_never_matches_talent_groups():
+    """Issue (2026-09-10) — THE exact reported regression: "Heena
+    Talentgram" must resolve through the REAL WhatsApp search (a
+    simulated worker response standing in for the live worker), never
+    by fuzzy-matching the talent DATABASE's own whatsapp_group_name
+    field. Seeds several UNRELATED talents whose real WhatsApp groups
+    all share the "X Talentgram" suffix (mirroring the exact production
+    report — "Enrica X Talentgram", "Eashna X Talentgram", "Doha X
+    Talentgram", etc.) — the test fails if the resolver ever surfaces
+    ANY of them instead of going through the live search boundary."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
-    heena = await _seed_talent(
-        f"Heena Varde {tag}", whatsapp_group_name=f"Heena Varde {tag} X Talentgram",
-    )
+    decoys = []
+    for name in ("Enrica", "Eashna", "Doha", "Ruhanee", "Sonya"):
+        decoys.append(await _seed_talent(f"{name} {tag}", whatsapp_group_name=f"{name} {tag} X Talentgram"))
     try:
+        worker = _with_simulated_recipient_search(
+            f"Heena {tag} Talentgram",
+            [{"name": f"Heena {tag} Talentgram", "type": "contact"}],
+        )
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=f"Share Instagram link of Anusha Sharma {tag} to Heena {tag} Talentgram",
             sender_name="Raj", sender_is_group_member=True,
         )
+        await worker
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert f"Heena {tag} Talentgram" in r.reply, r.reply
+        assert "WhatsApp contact" in r.reply, r.reply
+        for name in ("Enrica", "Eashna", "Doha", "Ruhanee", "Sonya"):
+            assert f"{name} {tag} X Talentgram" not in r.reply, (name, r.reply)
+        assert "I found multiple WhatsApp matches" not in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha] + decoys)
+        await _restore_share_config(original)
+
+
+async def test_ig_share_recipient_exact_whatsapp_group_via_live_search():
+    """Recipient given as an exact WhatsApp group name (e.g. "Rising Sun
+    x Talentgram Agency") resolves via the real search boundary, never
+    the generic "couldn't find as a CRM contact" dead end."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    recipient_name = f"Rising Sun {tag} x Talentgram Agency"
+    try:
+        worker = _with_simulated_recipient_search(
+            recipient_name, [{"name": recipient_name, "type": "group"}],
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to {recipient_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
         assert "You are about to SHARE Instagram links:" in r.reply, r.reply
         assert "WhatsApp group" in r.reply, r.reply
+        assert recipient_name in r.reply, r.reply
         assert "couldn't find" not in r.reply.lower(), r.reply
-        assert "CRM contact" not in r.reply, r.reply
 
         await handle_inbound_message(
             group_name=group, sender_phone=phone, text="3",
             sender_name="Raj", sender_is_group_member=True,
         )
     finally:
-        await _cleanup(phone, talent_ids=[anusha, heena])
+        await _cleanup(phone, talent_ids=[anusha])
         await _restore_share_config(original)
 
 
-async def test_ig_share_recipient_exact_group_name_not_shadowed_by_crm():
-    """Issue 1 — a recipient given as the group's EXACT full name (e.g.
-    "Rising Sun x Talentgram Agency") must resolve directly, never fall
-    through every tier to the generic "couldn't find as a CRM contact"
-    dead end."""
+async def test_ig_share_recipient_live_search_wins_over_crm():
+    """The real WhatsApp search takes priority over the CRM/saved-list
+    fallback, even when a same-named CRM contact also exists — Part 10's
+    "WhatsApp-first" mandate."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
     tag = uuid.uuid4().hex[:6]
     anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
-    rising = await _seed_talent(
-        f"Rising Sun Talent {tag}", whatsapp_group_name=f"Rising Sun {tag} x Talentgram Agency",
-    )
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Instagram link of Anusha Sharma {tag} to Rising Sun {tag} x Talentgram Agency",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
-        assert "WhatsApp group" in r.reply, r.reply
-
-        await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="3",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-    finally:
-        await _cleanup(phone, talent_ids=[anusha, rising])
-        await _restore_share_config(original)
-
-
-async def test_ig_share_recipient_whatsapp_before_crm():
-    """Issue 1 — a talent's own name/group must resolve BEFORE CRM is
-    ever tried, even when a same-named CRM contact also exists."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
-    raj_talent = await _seed_talent(f"Raj Duplicate {tag}", phone="919990000201")
     crm_id = await _seed_crm_client_cp(f"Raj Duplicate {tag}", "919990000202")
+    recipient_name = f"Raj Duplicate {tag}"
     try:
+        worker = _with_simulated_recipient_search(
+            recipient_name, [{"name": recipient_name, "type": "contact"}],
+        )
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            text=f"Share Instagram link of Anusha Sharma {tag} to Raj Duplicate {tag}",
+            text=f"Share Instagram link of Anusha Sharma {tag} to {recipient_name}",
             sender_name="Raj", sender_is_group_member=True,
         )
+        await worker
         assert "You are about to SHARE Instagram links:" in r.reply, r.reply
-        # The talent's own number, not the CRM contact's.
-        assert "919990000201" in r.reply, r.reply
+        assert "WhatsApp contact" in r.reply, r.reply
+        # Resolved via the LIVE search result, never the CRM contact's number.
         assert "919990000202" not in r.reply, r.reply
 
         await handle_inbound_message(
@@ -11554,7 +11634,39 @@ async def test_ig_share_recipient_whatsapp_before_crm():
         )
     finally:
         await _cleanup_crm_clients_cp([crm_id])
-        await _cleanup(phone, talent_ids=[anusha, raj_talent])
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_recipient_falls_back_to_crm_when_worker_unavailable():
+    """When the WhatsApp worker doesn't respond at all (no simulated
+    response — realistic "worker offline" scenario), the CRM/saved-list
+    fallback still resolves a genuinely saved contact, per Part 2's own
+    "the application database may assist... never replace the actual
+    WhatsApp lookup" — an infrastructure failure degrades gracefully
+    rather than dead-ending outright."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    crm_id = await _seed_crm_client_cp(f"OfflineFallback {tag}", "919990000210")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to OfflineFallback {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert "919990000210" in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup_crm_clients_cp([crm_id])
+        await _cleanup(phone, talent_ids=[anusha])
         await _restore_share_config(original)
 
 

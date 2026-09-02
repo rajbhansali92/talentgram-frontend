@@ -2667,9 +2667,9 @@ async def _resolve_one_plan_segment(
             sub_fields["project_query"] = project_text
         session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
         if intent_id == "casting.add":
-            resolved, err, _dis = await _resolve_add_selection(sub_fields, session)
+            resolved, err, dis = await _resolve_add_selection(sub_fields, session)
         else:
-            resolved, err, _dis = await _resolve_move_selection(sub_fields, session)
+            resolved, err, dis = await _resolve_move_selection(sub_fields, session)
         if resolved is not None:
             if len(resolved.talent_ids) == 1:
                 last_resolved_single = resolved
@@ -2684,6 +2684,20 @@ async def _resolve_one_plan_segment(
             "intent_id": intent_id, "raw_text": raw_text,
             "label": (resolved.project_label if resolved else (project_text or raw_text)),
             "resolved": resolved, "error": err,
+            # Ambiguity-Before-Confirmation Priority (Production fix,
+            # 2026-09-09) — previously discarded (_dis); now propagated
+            # so _build_plan_ambiguity_clarification can intercept BEFORE
+            # the generic "You are about to run this plan" card ever
+            # offers Approve/Edit/Cancel over an unresolved ambiguity.
+            # orig_talent_selector/orig_project_query/orig_target_stage
+            # are the EXACT values this same resolution attempt just
+            # used, so resolving the ambiguity later can rebuild this
+            # step's raw_text without re-parsing it a second time (and
+            # possibly differently).
+            "disambiguation": dis,
+            "orig_talent_selector": talent_text,
+            "orig_project_query": sub_fields.get("project_query"),
+            "orig_target_stage": sub_fields.get("target_stage") if intent_id == "casting.move" else None,
         })
     if last_resolved_single is not None:
         # Updates session.last_talent_id — a LATER step in the SAME plan
@@ -2841,7 +2855,7 @@ async def _resolve_plan_steps_for_display(
             resolved_steps.append({
                 "intent_id": "casting.share", "raw_text": step.get("raw_text") or "",
                 "label": None, "resolved": None, "error": None, "share_resolution": share_res,
-                "_raw_step_index": raw_step_index,
+                "_raw_step_index": raw_step_index, "group": group,
             })
             continue
         if step.get("intent_id") == "casting.send":
@@ -2849,12 +2863,13 @@ async def _resolve_plan_steps_for_display(
             resolved_steps.append({
                 "intent_id": "casting.send", "raw_text": step.get("raw_text") or "",
                 "label": None, "resolved": None, "error": None, "send_fields": send_fields,
-                "_raw_step_index": raw_step_index,
+                "_raw_step_index": raw_step_index, "group": group,
             })
             continue
         resolved = await _resolve_one_plan_step(step, ctx, touched_pairs, plan_resolved_flag)
         for rs in resolved:
             rs["_raw_step_index"] = raw_step_index
+            rs["group"] = group
         resolved_steps.extend(resolved)
         if step.get("send_template"):
             for rs in resolved:
@@ -2955,6 +2970,110 @@ def _format_project_choice(
     return "\n".join(lines), options
 
 
+# Ambiguity-Before-Confirmation Priority (Production fix, 2026-09-09) —
+# reported production bug: "Add Ria Amin to Skoda Film 1, Move her to
+# Follow Up" with an ambiguous "Ria Amin" was shown INLINE inside the
+# full "You are about to run this plan" card ("1. Add Ria Amin... — I
+# found multiple matching talents."), with Approve/Edit/Cancel offered
+# right underneath it — so replying "4" (a valid disambiguation-list
+# index that isn't 1/2/3) fell through to the generic confirmation
+# parser's own "Reply 1 to Approve, 2 to Edit, or 3 to Cancel", and a
+# typed full name wasn't understood at all. Root cause:
+# _resolve_one_plan_segment already computed the real disambiguation
+# payload (identical to the one the single-action ADD/MOVE flow already
+# handles correctly) but discarded it, keeping only the flattened error
+# STRING. Fixed by propagating that payload (see _resolve_one_plan_
+# segment's own "disambiguation" key) and intercepting here — mirrors
+# _build_plan_missing_project_clarification's EXACT pattern (same
+# pending_disambiguation + _PLAN_EDIT_STEP_KEY + "editing" sub-state
+# machinery, one more `kind` value) rather than a second mechanism.
+def _find_first_plan_ambiguity(
+    resolved_steps: List[Dict[str, Any]],
+) -> Optional[Tuple[int, Dict[str, Any]]]:
+    """(1-based step index, disambiguation dict) for the FIRST unresolved
+    ADD/MOVE step carrying a real disambiguation payload, in plan order
+    — never a later step's ambiguity before an earlier one is resolved
+    (Part 8's "resolve sequentially": each resolution rebuilds that one
+    step and re-resolves the WHOLE plan fresh, which naturally surfaces
+    the next ambiguity, if any, on the following turn). None when no
+    step has one — falls through to the ordinary plan confirmation/
+    missing-project flow, completely unchanged.
+
+    Scoped to a SINGLE-group plan only (every step sharing the same
+    blank-line-separated command group — see split_actions_grouped's
+    docstring) — a genuinely chained command ("Add X to Y, move her to
+    Z") is exactly this shape, and is what every reported case of this
+    bug actually looks like. A plan spanning MULTIPLE independent groups
+    ("Move A to X\n\nMove B to (missing project)") is a different,
+    pre-existing feature (Independent Multi-Move) whose own contract is
+    "run/report each command on its own, a failure in one never blocks
+    showing or approving the rest" — regression-tested by
+    test_independent_multi_move_partial_failure_summary. Blocking the
+    WHOLE card on one independent command's unrelated failure would
+    break that contract, so this returns None for a multi-group plan and
+    lets the existing inline-error-in-card rendering handle it exactly
+    as before this feature existed."""
+    groups = {rs.get("group", 0) for rs in resolved_steps}
+    if len(groups) > 1:
+        return None
+    for i, rs in enumerate(resolved_steps, start=1):
+        if rs.get("resolved") is not None:
+            continue
+        if rs["intent_id"] not in ("casting.add", "casting.move"):
+            continue
+        dis = rs.get("disambiguation")
+        if dis:
+            return i, dis
+    return None
+
+
+async def _build_plan_ambiguity_clarification(
+    resolved_steps: List[Dict[str, Any]], ctx: ExecContext, collected: dict,
+) -> Optional[str]:
+    """Returns the ambiguity-only clarification text (never the full plan
+    card) when the FIRST unresolved step is a real talent/project
+    ambiguity — None otherwise. Sets the SAME "editing" sub-state
+    _build_plan_missing_project_clarification already uses, so the very
+    next reply (a number OR a typed name — Part 5) resumes THIS pending
+    plan via _plan_aware_parse_edits_async's existing step-2 handling,
+    never a fresh unrelated command."""
+    found = _find_first_plan_ambiguity(resolved_steps)
+    if found is None:
+        return None
+    step_index, dis = found
+    rs = resolved_steps[step_index - 1]
+    options = dis.get("options") or []
+    # error_text (from nlu.format_numbered_options, unmodified) already
+    # ends with its own "Reply with the number." — only add what it
+    # doesn't already say, never a duplicated footer.
+    error_text = (rs.get("error") or "").strip()
+
+    if options:
+        text = f"{error_text} Or type the full name.\n\nNothing has been added, moved, or shared yet."
+    else:
+        # free_text_retry (Part 5's "doesn't exist" case) — no numbered
+        # list to show; still takes priority over the plan card, per the
+        # same "the current question owns the reply" rule.
+        text = (
+            f"{error_text}\n\nPlease type the full name, or reply CANCEL.\n\n"
+            "Nothing has been added, moved, or shared yet."
+        )
+
+    await session_context.update_session(
+        ctx.agent_id, ctx.sender_phone,
+        pending_disambiguation={
+            "kind": "plan_ambiguous_entity", "field_key": _PLAN_EDIT_STEP_KEY,
+            "options": options, "entity_kind": dis.get("kind"),
+        },
+    )
+    new_collected = dict(collected)
+    new_collected[_PLAN_EDIT_STEP_KEY] = str(step_index)
+    await conversation.update_conversation(
+        ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing",
+    )
+    return text
+
+
 async def _build_plan_missing_project_clarification(
     resolved_steps: List[Dict[str, Any]], ctx: ExecContext, collected: dict,
 ) -> Optional[str]:
@@ -3006,6 +3125,13 @@ async def _build_plan_missing_project_clarification(
 
 async def _build_plan_confirmation(collected: dict, ctx: ExecContext) -> str:
     resolved_steps, preview_send_lines = await _resolve_plan_steps_for_display(collected, ctx)
+    # Checked FIRST — an unresolved talent/project ambiguity must own the
+    # reply before the plan is ever offered for Approve/Edit/Cancel; see
+    # _build_plan_ambiguity_clarification's own docstring for the exact
+    # production bug this fixes.
+    ambiguity_clarification = await _build_plan_ambiguity_clarification(resolved_steps, ctx, collected)
+    if ambiguity_clarification is not None:
+        return ambiguity_clarification
     missing_project_clarification = await _build_plan_missing_project_clarification(resolved_steps, ctx, collected)
     if missing_project_clarification is not None:
         return missing_project_clarification
@@ -3073,9 +3199,26 @@ async def _build_plan_edit_prompt(collected: dict, ctx: ExecContext) -> str:
 # ---------------------------------------------------------------------------
 _PLAN_EDIT_STEP_KEY = "_plan_edit_step"
 
+# "cancel"/"cancel this"/"cancel editing"/"stop"/"stop this"/"stop
+# editing" — Part 9 (Ambiguity-Before-Confirmation Priority, 2026-09-09)
+# explicitly requires a bare "stop"/"cancel this" to work DURING
+# ambiguity resolution too, not just the pre-existing "cancel"/"cancel
+# editing"/"stop editing". Purely additive (more phrasings recognized,
+# never fewer) — shared verbatim by the plan editor AND standalone
+# SHARE's own editing flow below, so both benefit identically.
 _EDIT_CANCEL_RE = re.compile(
-    r"^\s*(?:cancel(?:\s+editing)?|stop\s+editing)\s*[.!?]*\s*$", re.IGNORECASE
+    r"^\s*(?:cancel(?:\s+(?:this|editing))?|stop(?:\s+(?:this|editing))?)\s*[.!?]*\s*$", re.IGNORECASE
 )
+
+# Ambiguity-Before-Confirmation Priority (2026-09-09) — internal-only
+# instruction sentinels _apply_plan_step_edit_instruction recognizes for
+# resolving an UNRESOLVED (ambiguous) step's talent/project — built
+# exclusively by _plan_aware_parse_edits_async itself (never typed by an
+# admin), so there's no risk of colliding with the free-text instruction
+# vocabulary (_EDIT_PROJECT_RE etc.), which only ever applies to an
+# ALREADY-resolved step.
+_PLAN_RESOLVE_TALENT_PREFIX = "__plan_resolve_talent__:"
+_PLAN_RESOLVE_PROJECT_PREFIX = "__plan_resolve_project__:"
 _EDITING_CANCELLED_MESSAGE = "Editing cancelled. Nothing has been executed."
 
 
@@ -3091,6 +3234,35 @@ async def _cancel_plan_edit(ctx: ExecContext) -> str:
     await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
     await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
     return _EDITING_CANCELLED_MESSAGE
+
+
+def _carry_forward_ambiguity_options(
+    old_pending: Optional[Dict[str, Any]], disambiguation: Dict[str, Any], err: str,
+) -> Tuple[Dict[str, Any], str]:
+    """Single-action ADD/MOVE counterpart to the compound-plan ambiguity
+    flow's "type the full name" retry (Part 5): when a typed name doesn't
+    match anything, _resolve_add_selection/_resolve_move_selection return
+    a fresh "free_text_retry" disambiguation with NO options — correct in
+    isolation, but if that retry followed an already-shown NUMBERED
+    ambiguity list, dropping the old options meant a subsequent, perfectly
+    valid "2" could no longer resolve anything (nlu.parse_talent_selector
+    treats a bare digit as an ordinal shortcut, which Add/Move reject
+    outright — the exact reported "Please name who to add..." bug).
+    Carries the ORIGINAL list forward so the number still works, per the
+    spec's "choose one of the options above or type the full name.\""""
+    old_pending = old_pending or {}
+    if (
+        disambiguation.get("kind") == "free_text_retry"
+        and not disambiguation.get("options")
+        and old_pending.get("kind") in ("talent", "project")
+        and old_pending.get("options")
+        and old_pending.get("field_key") == disambiguation.get("field_key")
+    ):
+        merged = dict(disambiguation)
+        merged["kind"] = old_pending["kind"]
+        merged["options"] = old_pending["options"]
+        return merged, f"{err}\n\nPlease choose one of the options above, or type the full name."
+    return disambiguation, err
 
 
 def _validate_plan_step_edit_error(raw: str) -> ValidationResult:
@@ -3326,20 +3498,47 @@ async def _apply_plan_step_edit_instruction(
 
         r = rs.get("resolved")
         if r is None:
-            # The ONE edit ever allowed against an unresolved step: filling
-            # in an ADD step's genuinely missing project (Guided ADD-
-            # Missing-Project Resume, 2026-09-02) — reached via
-            # _plan_aware_parse_edits_async wrapping the user's numbered/
-            # free-text reply into this exact instruction shape. Every
-            # other unresolved-step case (ambiguous talent, talent not
-            # found, etc.) has its own existing clarification flow and
-            # still can't be edited this way.
-            m = _EDIT_PROJECT_RE.match(stripped)
-            if intent_id == "casting.add" and m and rs.get("error") == _ADD_MISSING_PROJECT_ERROR:
-                original_raw = (steps[raw_i].get("raw_text") or "").strip()
-                new_raw_text = f"{original_raw} to {m.group(1).strip()}"
+            # Ambiguity-Before-Confirmation Priority (Part 5/6, 2026-09-09)
+            # — resolving an ambiguous talent/project (via
+            # _PLAN_RESOLVE_TALENT_PREFIX/_PLAN_RESOLVE_PROJECT_PREFIX,
+            # built exclusively by _plan_aware_parse_edits_async's own
+            # "plan_ambiguous_entity" branch) rewrites ONLY the affected
+            # piece of this step's raw_text, reusing the SAME
+            # orig_talent_selector/orig_project_query/orig_target_stage
+            # this exact resolution attempt already extracted — never a
+            # second parse of the text that could disagree with it.
+            if stripped.startswith(_PLAN_RESOLVE_TALENT_PREFIX):
+                chosen = stripped[len(_PLAN_RESOLVE_TALENT_PREFIX):]
+                project_text = rs.get("orig_project_query") or ""
+                if intent_id == "casting.add":
+                    new_raw_text = _rebuild_add_raw_text([chosen], project_text)
+                else:
+                    stage_raw = rs.get("orig_target_stage") or ""
+                    stage_display = nlu.stage_label(stage_raw) if stage_raw in PIPELINE_STAGES else stage_raw
+                    new_raw_text = _rebuild_move_raw_text([chosen], stage_display, project_text or None)
+            elif stripped.startswith(_PLAN_RESOLVE_PROJECT_PREFIX):
+                chosen = stripped[len(_PLAN_RESOLVE_PROJECT_PREFIX):]
+                talent_text = rs.get("orig_talent_selector") or ""
+                talent_names = nlu.split_multi_names(talent_text) or [talent_text]
+                if intent_id == "casting.add":
+                    new_raw_text = _rebuild_add_raw_text(talent_names, chosen)
+                else:
+                    stage_raw = rs.get("orig_target_stage") or ""
+                    stage_display = nlu.stage_label(stage_raw) if stage_raw in PIPELINE_STAGES else stage_raw
+                    new_raw_text = _rebuild_move_raw_text(talent_names, stage_display, chosen)
             else:
-                return None, rs.get("error") or "This step hasn't resolved yet — nothing to edit."
+                # The ONE OTHER edit allowed against an unresolved step:
+                # filling in an ADD step's genuinely missing project
+                # (Guided ADD-Missing-Project Resume, 2026-09-02) —
+                # reached via _plan_aware_parse_edits_async wrapping the
+                # user's numbered/free-text reply into this exact
+                # instruction shape.
+                m = _EDIT_PROJECT_RE.match(stripped)
+                if intent_id == "casting.add" and m and rs.get("error") == _ADD_MISSING_PROJECT_ERROR:
+                    original_raw = (steps[raw_i].get("raw_text") or "").strip()
+                    new_raw_text = f"{original_raw} to {m.group(1).strip()}"
+                else:
+                    return None, rs.get("error") or "This step hasn't resolved yet — nothing to edit."
 
         # Preserving-the-project edits (stage-only, narrowing) must stay
         # implicit ("Move X to Y", no "in <project>") when this step's
@@ -3566,6 +3765,42 @@ async def _plan_aware_parse_edits_async(
         instruction = f"change the project to {project_text}"
         await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
 
+    elif pending and pending.get("kind") == "plan_ambiguous_entity":
+        # Ambiguity-Before-Confirmation Priority (Part 3/4/5, 2026-09-09)
+        # — the number/name the admin just sent resolves THIS specific
+        # pending ambiguity, never the plan's own Approve/Edit/Cancel.
+        entity_kind = pending.get("entity_kind")
+        options = pending.get("options") or []
+        idx = nlu.resolve_option_reply(stripped, options) if options else None
+        if idx is not None:
+            # A valid numbered pick — options[idx-1]["value"] is either
+            # the RESOLVED_TALENT_MARKER-encoded id (talent) or the exact
+            # project label (project); either way this guarantees the
+            # SAME entity the admin just saw at that number, never a
+            # fresh (and possibly different) fuzzy re-match.
+            chosen_value = options[idx - 1]["value"]
+            await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+        elif options and stripped.isdigit():
+            # Part 4 — an out-of-range NUMBER is handled LOCALLY: re-show
+            # the SAME numbered list, stay in the SAME state, never fall
+            # through to "treat this as a typed name" (a bare digit is
+            # never a talent/project name) and never the generic plan-
+            # confirmation error.
+            noun = "talents" if entity_kind == "talent" else "projects"
+            opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                f"Please choose one of the listed {noun}:\n\n{opts_text}\n\n"
+                f"Reply with the number, or type the full name."
+            )}
+        else:
+            # Part 5 — a typed name, either instead of a numbered pick or
+            # answering a free_text_retry ("couldn't find a match")
+            # prompt that had no options at all.
+            chosen_value = stripped
+            await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+        prefix = _PLAN_RESOLVE_TALENT_PREFIX if entity_kind == "talent" else _PLAN_RESOLVE_PROJECT_PREFIX
+        instruction = prefix + chosen_value
+
     new_plan_json, err = await _apply_plan_step_edit_instruction(collected, ctx, step_index, instruction)
     if err:
         return {PLAN_STEP_EDIT_ERROR_FIELD.key: err}
@@ -3602,10 +3837,14 @@ async def _plan_step_editing_claims_reply(
     # Guided Project Selection — while a project clarification is
     # pending, ANY non-empty reply is meaningful (a number, "MORE", or
     # the project's own name/query, which could itself start with a
-    # trigger word by pure coincidence).
+    # trigger word by pure coincidence). Ambiguity-Before-Confirmation
+    # Priority (2026-09-09) — identical reasoning for a pending talent/
+    # project ambiguity: a typed full name ("Add" happens to start a
+    # real surname, e.g. "Addison") must never be mistaken for a fresh
+    # command mid-clarification.
     session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
     pending = (session or {}).get("pending_disambiguation")
-    if pending and pending.get("kind") == "plan_missing_project":
+    if pending and pending.get("kind") in ("plan_missing_project", "plan_ambiguous_entity"):
         return True
     if _PLAN_STEP_NUMBER_RE.match(stripped) or _EDIT_CANCEL_RE.match(stripped):
         return True
@@ -3886,6 +4125,9 @@ async def _build_move_confirmation(collected: dict, ctx: ExecContext) -> str:
             # overrides the "confirming" step the generic engine has
             # already committed to for this turn — there is nothing to
             # approve/edit/cancel yet, so 1/2/3 semantics would be wrong.
+            disambiguation, err = _carry_forward_ambiguity_options(
+                (session or {}).get("pending_disambiguation"), disambiguation, err
+            )
             await session_context.update_session(
                 ctx.agent_id, ctx.sender_phone, pending_disambiguation=disambiguation
             )
@@ -4079,6 +4321,19 @@ async def _move_parse_edits_async(
     pending = (session or {}).get("pending_disambiguation")
     stripped = (text or "").strip()
 
+    # Ambiguity-Before-Confirmation Priority (2026-09-09) — single-action
+    # ADD/MOVE counterpart to _plan_aware_parse_edits_async's identical
+    # top-of-function check: CANCEL/STOP is unambiguous during ANY
+    # "editing" turn (a pending disambiguation or a plain free-text edit
+    # prompt) and must never be swallowed by the option-number resolver
+    # below or misread as a literal retry value for whichever field is
+    # unclear (the exact production bug: "cancel" during a talent
+    # ambiguity used to fall through to "treat this as a typed name",
+    # producing "No matching talent found." instead of cancelling).
+    if _EDIT_CANCEL_RE.match(stripped):
+        message = await _cancel_plan_edit(ctx)
+        return {PLAN_STEP_EDIT_ERROR_FIELD.key: message}
+
     if pending:
         kind = pending.get("kind")
         field_key = pending.get("field_key")
@@ -4098,6 +4353,20 @@ async def _move_parse_edits_async(
             if idx is not None:
                 await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
                 return {field_key: options[idx - 1]["value"]}
+            if kind in ("talent", "project") and stripped.isdigit():
+                # Invalid Numbers Handled Locally (2026-09-09) — an
+                # out-of-range digit ("99" against a 2-option list) is
+                # never a talent/project name; re-show the SAME numbered
+                # list rather than falling through to "treat this as a
+                # typed name/query" (which used to re-resolve "99" as a
+                # literal project query and fail with a confusing "I
+                # couldn't find a project matching '99'.").
+                noun = "talents" if kind == "talent" else "projects"
+                opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
+                return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                    f"Please choose one of the listed {noun}:\n\n{opts_text}\n\n"
+                    f"Reply with the number, or type the full name."
+                )}
             if kind == "talent":
                 # Multi-pick fallback ("1 and 3", "Thakur and Singh") —
                 # ONLY for a talent-selector field (the only field shape
@@ -4555,6 +4824,9 @@ async def _build_add_confirmation(collected: dict, ctx: ExecContext) -> str:
 
     if err:
         if disambiguation:
+            disambiguation, err = _carry_forward_ambiguity_options(
+                (session or {}).get("pending_disambiguation"), disambiguation, err
+            )
             await session_context.update_session(
                 ctx.agent_id, ctx.sender_phone, pending_disambiguation=disambiguation
             )

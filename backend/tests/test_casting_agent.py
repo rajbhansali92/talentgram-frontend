@@ -10276,3 +10276,427 @@ async def test_p0_typo_mover_end_to_end():
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
+
+
+# ---------------------------------------------------------------------------
+# Ambiguity-Before-Confirmation Priority (Production fix, 2026-09-09)
+#
+# Reported production bug: "Add Ria Amin to Skoda Film 1, Move her to
+# Follow Up" with an ambiguous "Ria Amin" showed the ambiguity INLINE
+# inside the full "You are about to run this plan" card, with Approve/
+# Edit/Cancel offered right underneath it — replying "4" (a valid
+# disambiguation-list index) fell through to the generic confirmation
+# parser's "Reply 1 to Approve, 2 to Edit, or 3 to Cancel", and a typed
+# full name wasn't understood at all. See casting_pipeline.py's
+# _find_first_plan_ambiguity/_build_plan_ambiguity_clarification for the
+# fix, and _carry_forward_ambiguity_options/_move_parse_edits_async's new
+# top-of-function CANCEL check for the single-action ADD/MOVE
+# counterpart (the SAME priority bug, one level down, surfaced by this
+# same investigation).
+# ---------------------------------------------------------------------------
+
+async def _seed_three_amins(tag: str):
+    """Ria Nalavade / Jiyaa Amin / Saniya Amin — three talents that all
+    fuzzy-match "Ria Amin", the exact reported ambiguity set."""
+    a = await _seed_talent(f"Ria Nalavade {tag}")
+    b = await _seed_talent(f"Jiyaa Amin {tag}")
+    c = await _seed_talent(f"Saniya Amin {tag}")
+    return a, b, c
+
+
+async def test_most_important_regression_add_move_ambiguity_then_number():
+    """THE reported production bug, reproduced verbatim: "Add Ria Amin to
+    <project>, Move her to Follow Up" → ambiguity shown → "4" (invalid)
+    must return the AMBIGUITY retry, never "Reply 1 to Approve, 2 to
+    Edit, or 3 to Cancel" → "2" must resolve the talent and resume the
+    ORIGINAL compound command, landing on the real plan confirmation."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"Skoda Film 1 {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a, b, c = await _seed_three_amins(tag)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Ria Amin {tag} to {label}, Move her to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+        assert "you are about to run this plan" not in r.reply.lower(), r.reply
+        assert "approve" not in r.reply.lower(), r.reply
+
+        invalid = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="4",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "reply 1 to approve" not in invalid.reply.lower(), invalid.reply
+        assert "please choose one of the listed talents" in invalid.reply.lower(), invalid.reply
+
+        picked = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in picked.reply.lower(), picked.reply
+        assert f"Jiyaa Amin {tag}" in picked.reply, picked.reply
+        assert "1 → approve" in picked.reply.lower(), picked.reply
+
+        approved = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "completed" in approved.reply.lower(), approved.reply
+        row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": b})
+        assert row is not None and row["stage"] == "follow_up", (approved.reply, row)
+        assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": a}) is None
+        assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": c}) is None
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b, c])
+        await _restore_share_config(original)
+
+
+async def test_ambiguous_talent_full_name_selection():
+    """#2 — typing the resolved talent's actual name instead of a number
+    works identically to picking that number."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"NameSel Proj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a, b, c = await _seed_three_amins(tag)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Ria Amin {tag} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"Saniya Amin {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to add" in r2.reply.lower(), r2.reply
+        assert f"Saniya Amin {tag}" in r2.reply, r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b, c])
+        await _restore_share_config(original)
+
+
+async def test_cancel_during_talent_ambiguity_single_action():
+    """#4 — bare CANCEL during a single-action (non-compound) ADD's talent
+    ambiguity cancels the whole pending command, never "No matching
+    talent found." (the single-action counterpart of the compound-plan
+    bug — same root class, found via the same investigation)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"CancelSA Proj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a, b, c = await _seed_three_amins(tag)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Ria Amin {tag} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+
+        cancelled = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="cancel",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "cancelled" in cancelled.reply.lower(), cancelled.reply
+        assert "no matching talent" not in cancelled.reply.lower(), cancelled.reply
+
+        conv = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": phone})
+        assert conv is None or conv.get("intent_id") is None, conv
+        assert await db.casting_pipeline.count_documents({"project_id": project_id}) == 0
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b, c])
+        await _restore_share_config(original)
+
+
+async def test_cancel_during_compound_plan_ambiguity():
+    """#4/#9 (compound-plan shape) — "stop this" cancels a pending
+    ADD+MOVE plan while its first step's talent ambiguity is still
+    unresolved, and a later stray "2" is never misread as an old pick."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"StopThis Proj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a, b, c = await _seed_three_amins(tag)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Ria Amin {tag} to {label}, move her to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+
+        cancelled = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="stop this",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "cancelled" in cancelled.reply.lower(), cancelled.reply
+
+        stray = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" not in (stray.reply or "").lower(), stray.reply
+        assert await db.casting_pipeline.count_documents({"project_id": project_id}) == 0
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b, c])
+        await _restore_share_config(original)
+
+
+async def test_ambiguous_talent_then_add_move_share_compound():
+    """#5/#6 — the reported ambiguity, but chained into a 3-step
+    ADD+MOVE+SHARE compound: resolving the talent rebuilds ALL three
+    steps against the SAME chosen talent, not just the first."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_send_project(
+        f"AMS Compound {tag}", whatsapp_casting_group_name="Talentgram Casting Test",
+    )
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a = await _seed_send_talent(f"Ria Nalavade {tag}", whatsapp_group_name=f"RiaN {tag} x Talentgram")
+    b = await _seed_send_talent(f"Jiyaa Amin {tag}", whatsapp_group_name=f"JiyaaA {tag} x Talentgram")
+    c = await _seed_send_talent(f"Saniya Amin {tag}", whatsapp_group_name=f"SaniyaA {tag} x Talentgram")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Ria Amin {tag} to {label}, move her to follow up, share the casting call with her",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+
+        picked = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in picked.reply.lower(), picked.reply
+        assert f"Saniya Amin {tag}" in picked.reply, picked.reply
+        assert picked.reply.lower().count("saniya amin") >= 1
+
+        cancelled = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "cancelled" in cancelled.reply.lower(), cancelled.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b, c])
+        await _restore_share_config(original)
+
+
+async def test_ambiguous_project_numbered_and_out_of_range():
+    """#7/#3 (project shape) — a compound plan's ambiguous project is
+    resolved the same way an ambiguous talent is: an out-of-range number
+    is handled locally, a valid one resolves and shows the real plan."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(brand_name=f"Skoda Film 1 {tag}")
+    p2 = await _seed_project(brand_name=f"Skoda Something Else {tag}")
+    talent_id = await _seed_talent(f"ProjAmbig Talent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add ProjAmbig Talent {tag} to Skoda {tag}, move to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple projects" in r.reply.lower(), r.reply
+        assert "multiple matching talents" not in r.reply.lower(), r.reply
+
+        invalid = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="99",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "please choose one of the listed projects" in invalid.reply.lower(), invalid.reply
+
+        picked = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in picked.reply.lower(), picked.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_confirmation_numbers_inactive_until_ambiguity_resolved():
+    """#10 — while the ambiguity clarification is showing, "1" must NEVER
+    be read as Approve (there is nothing to approve yet); it must be
+    read as picking option 1 from the ambiguity list."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"NumGate Proj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a, b, c = await _seed_three_amins(tag)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Ria Amin {tag} to {label}, move her to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+
+        one = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        # "1" picks Ria Nalavade (option 1), NOT "Approve" — the plan
+        # can't have executed (Ria Nalavade was never actually ambiguous
+        # data to add) and the reply must show the REBUILT plan, not a
+        # completion receipt.
+        assert "you are about to run this plan" in one.reply.lower(), one.reply
+        assert "completed" not in one.reply.lower(), one.reply
+        assert await db.casting_pipeline.count_documents({"project_id": project_id}) == 0
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b, c])
+        await _restore_share_config(original)
+
+
+async def test_no_stale_ambiguity_context_after_successful_execution():
+    """#11/#13 — once a plan executes after ambiguity resolution, a LATER,
+    completely unrelated fresh command must never be affected by the
+    now-cleared ambiguity/edit state."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    other_tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"StaleCtx Proj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    a, b, c = await _seed_three_amins(tag)
+    # Deliberately a DIFFERENT random tag from the ambiguous trio's — a
+    # shared tag substring is itself enough of a fuzzy-match token to
+    # make an otherwise-unrelated name cross-match them (a seeding
+    # artifact, not a real production ambiguity).
+    other_talent = await _seed_talent(f"Unrelated Talent {other_tag}")
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Ria Amin {tag} to {label}, move her to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+
+        fresh = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Unrelated Talent {other_tag} to {label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to add" in fresh.reply.lower(), fresh.reply
+        assert f"Unrelated Talent {other_tag}" in fresh.reply, fresh.reply
+        approve = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "done" in approve.reply.lower(), approve.reply
+        row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": other_talent})
+        assert row is not None, approve.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b, c, other_talent])
+        await _restore_share_config(original)
+
+
+async def test_existing_normal_plan_confirmation_and_two_stage_edit_unaffected():
+    """#14/#15 — a compound plan with NO ambiguity at all still shows the
+    normal confirmation directly, and the existing two-stage "2 -> Edit"
+    step-selector flow is completely unaffected by this fix."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"NoAmbig Proj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"Solo Talent {tag}")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Add Solo Talent {tag} to {label}, move to follow up",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in r.reply.lower(), r.reply
+        assert "multiple matching talents" not in r.reply.lower(), r.reply
+
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "which step would you like to edit?" in edit.reply.lower(), edit.reply
+
+        cancel = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="CANCEL",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "cancelled" in cancel.reply.lower(), cancel.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_independent_multi_command_ambiguity_not_blocked_by_plan_priority():
+    """Regression guard for the fix's own scope boundary: an "Independent
+    Multi-Move" message (blank-line-separated, unrelated commands) must
+    keep showing its combined card with per-step errors inline even when
+    one of its independent commands has an unresolved ambiguity — the
+    Ambiguity-Before-Confirmation Priority fix only ever applies WITHIN
+    one chained/dependent command, never across independent ones (see
+    _find_first_plan_ambiguity's single-group scoping)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    solo_tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"IndepAmbig Proj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    # A DIFFERENT random tag from the ambiguous trio's — see
+    # test_no_stale_ambiguity_context_after_successful_execution's
+    # comment for why a shared tag substring would otherwise make this
+    # solo talent cross-match them too.
+    talent_id = await _seed_talent(f"IndepAmbig Solo {solo_tag}")
+    a, b, c = await _seed_three_amins(tag)
+    try:
+        text = (
+            f"Add IndepAmbig Solo {solo_tag} to {label}\n\n"
+            f"Add Ria Amin {tag} to {label}"
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=text,
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to run this plan" in r.reply.lower(), r.reply
+        assert "multiple matching talents" in r.reply.lower(), r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id, a, b, c])
+        await _restore_share_config(original)

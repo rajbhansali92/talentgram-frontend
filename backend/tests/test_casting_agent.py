@@ -115,7 +115,9 @@ async def _restore_share_config(original):
     return await _restore_config(original, agent_id=SHARE_AGENT_ID)
 
 
-async def _seed_project(status: str = "ongoing", brand_name: str = None) -> str:
+async def _seed_project(
+    status: str = "ongoing", brand_name: str = None, whatsapp_casting_group_name: str = "",
+) -> str:
     pid = f"test-cp-proj-{uuid.uuid4().hex[:8]}"
     await db.projects.insert_one({
         "id": pid,
@@ -124,15 +126,19 @@ async def _seed_project(status: str = "ongoing", brand_name: str = None) -> str:
         "slug": pid,
         "materials": [],
         "created_at": _now(),
+        "whatsapp_casting_group_name": whatsapp_casting_group_name,
     })
     return pid
 
 
-async def _seed_talent(name: str, phone: str = "", whatsapp_group_name: str = "") -> str:
+async def _seed_talent(
+    name: str, phone: str = "", whatsapp_group_name: str = "", instagram_handle: str = "",
+) -> str:
     tid = f"test-cp-tal-{uuid.uuid4().hex[:8]}"
     await db.talents.insert_one({
         "id": tid, "name": name, "tags": [], "notes": "",
         "phone": phone or None, "whatsapp_group_name": whatsapp_group_name,
+        "instagram_handle": instagram_handle or None,
     })
     return tid
 
@@ -10699,4 +10705,754 @@ async def test_independent_multi_command_ambiguity_not_blocked_by_plan_priority(
         assert "multiple matching talents" in r.reply.lower(), r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id, a, b, c])
+        await _restore_share_config(original)
+
+
+# ---------------------------------------------------------------------------
+# SHARE Instagram Link (Production fix, 2026-09-09)
+#
+# "Share Instagram link of <talent(s)> to <recipient>" — a new content
+# type INSIDE the existing SHARE engine (SHARE_ROUTE_FIELD=="instagram"),
+# never a second intent. See casting_pipeline.py's own section comment
+# above SHARE_INSTAGRAM_HELP_EXAMPLES for the full design writeup.
+# Supersedes the OLD "Instagram Profile Send" mode in whatsapp_campaign_
+# agent.py (send_mode=="instagram") — that mode's own reachability was
+# exclusively the "instagram" hand-off route, now redirected here; its
+# code is left in place, untouched, unreachable through normal dispatch.
+# ---------------------------------------------------------------------------
+
+async def _seed_crm_client_cp(name: str, phone: str) -> str:
+    from bson import ObjectId
+    oid = ObjectId()
+    await db.clients.insert_one({
+        "_id": oid, "name": name, "phone_number": phone, "contact_type": "Casting Director",
+        "archived": False, "deleted": False, "created_at": _now(),
+    })
+    return str(oid)
+
+
+async def _cleanup_crm_clients_cp(client_ids) -> None:
+    from bson import ObjectId
+    oids = [ObjectId(c) for c in client_ids]
+    await db.clients.delete_many({"_id": {"$in": oids}})
+
+
+async def test_ig_share_one_talent_to_person():
+    """#1 — one talent, recipient is a named person (resolved via the
+    shared WhatsApp recipient lookup, not assumed)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000101")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert f"1 - Anusha Sharma {tag} - https://instagram.com/anusha.official" in r.reply, r.reply
+        assert f"Raj Recipient {tag}" in r.reply
+        assert "WhatsApp: 919990000101" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Shared." in r2.reply, r2.reply
+        job = await db.whatsapp_jobs.find_one({"destination": "919990000101"}, sort=[("created_at", -1)])
+        assert job is not None
+        assert job["message_body"] == f"1 - Anusha Sharma {tag} - https://instagram.com/anusha.official"
+    finally:
+        await db.whatsapp_jobs.delete_many({"destination": "919990000101"})
+        await _cleanup(phone, talent_ids=[anusha, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_multiple_talents_to_person():
+    """#2 — multiple talents, comma-separated, one recipient; the
+    numbered list has a blank line between every entry both in the
+    confirmation AND the real outgoing message."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    riya = await _seed_talent(f"Riya Sharma {tag}", instagram_handle="riya.sharma")
+    pooja = await _seed_talent(f"Pooja Mehta {tag}", instagram_handle="pooja.mehta")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000102")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Share Instagram links of Anusha Sharma {tag}, Riya Sharma {tag}, "
+                f"Pooja Mehta {tag} to Raj Recipient {tag}"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        for i, name in enumerate((f"Anusha Sharma {tag}", f"Riya Sharma {tag}", f"Pooja Mehta {tag}"), start=1):
+            assert f"{i} - {name} -" in r.reply, r.reply
+        assert "\n\n2 -" in r.reply and "\n\n3 -" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Shared." in r2.reply, r2.reply
+        job = await db.whatsapp_jobs.find_one({"destination": "919990000102"}, sort=[("created_at", -1)])
+        assert job is not None
+        assert "\n\n2 -" in job["message_body"] and "\n\n3 -" in job["message_body"]
+    finally:
+        await db.whatsapp_jobs.delete_many({"destination": "919990000102"})
+        await _cleanup(phone, talent_ids=[anusha, riya, pooja, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_one_talent_to_whatsapp_group():
+    """#3 — recipient is a WhatsApp group (a talent's own group)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    group_recipient = await _seed_talent(
+        f"GroupRecipient {tag}", whatsapp_group_name=f"Real WA Group {tag}",
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to GroupRecipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert "WhatsApp group" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Shared." in r2.reply, r2.reply
+        job = await db.whatsapp_jobs.find_one(
+            {"destination": f"Real WA Group {tag}"}, sort=[("created_at", -1)],
+        )
+        assert job is not None
+        assert job["destination_type"] == "group"
+    finally:
+        await db.whatsapp_jobs.delete_many({"destination": f"Real WA Group {tag}"})
+        await _cleanup(phone, talent_ids=[anusha, group_recipient])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_multiple_talents_to_whatsapp_group():
+    """#4 — multiple talents, recipient is a WhatsApp group."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    riya = await _seed_talent(f"Riya Sharma {tag}", instagram_handle="riya.sharma")
+    group_recipient = await _seed_talent(
+        f"GroupRecipient {tag}", whatsapp_group_name=f"Real WA Group {tag}",
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram links of Anusha Sharma {tag}, Riya Sharma {tag} to GroupRecipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert "WhatsApp group" in r.reply, r.reply
+        assert f"1 - Anusha Sharma {tag}" in r.reply and f"2 - Riya Sharma {tag}" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await db.whatsapp_jobs.delete_many({"destination": f"Real WA Group {tag}"})
+        await _cleanup(phone, talent_ids=[anusha, riya, group_recipient])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_one_talent_to_phone_number():
+    """#5 — recipient given as a raw WhatsApp number, normalized through
+    the existing phone-number handling."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram links of Anusha Sharma {tag} to +919876543210",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert "WhatsApp number" in r.reply, r.reply
+        assert "+919876543210" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_minor_spelling_and_random_spacing():
+    """#6/#7 — a minor spelling mistake in the TALENT name and random
+    extra spacing around the command are both tolerated (the existing
+    fuzzy talent matcher + whitespace-tolerant parsing, unchanged)."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    # Deliberately DIFFERENT tags for talent vs recipient — a shared tag
+    # substring is itself enough of a fuzzy-match signal to make a
+    # misspelled query cross-match the OTHER seeded talent too (a test-
+    # data artifact, not a real production ambiguity).
+    tag = uuid.uuid4().hex[:6]
+    raj_tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    raj = await _seed_talent(f"Raj Recipient {raj_tag}", phone="919990000105")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"  Share   Instagram  link   of   Anusha Sharam {tag}   to   Raj Recipient {raj_tag}  ",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert f"Anusha Sharma {tag}" in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_instagram_vs_insta_wording():
+    """#8 — "Instagram" and "Insta" are interchangeable."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000106")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Insta link of Anusha Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_ambiguous_talent():
+    """#9 — an ambiguous talent name uses the existing talent
+    disambiguation system and resumes the original command afterward,
+    never losing the recipient."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    a = await _seed_talent(f"Ria Nalavade {tag}")
+    b = await _seed_talent(f"Jiyaa Amin {tag}", instagram_handle="jiyaa.official")
+    c = await _seed_talent(f"Saniya Amin {tag}")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000107")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Ria Amin {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple matching talents" in r.reply, r.reply
+        assert f"1 → Ria Nalavade {tag}" in r.reply and f"2 → Jiyaa Amin {tag}" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r2.reply, r2.reply
+        assert f"Jiyaa Amin {tag}" in r2.reply
+        assert f"Raj Recipient {tag}" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[a, b, c, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_ambiguous_recipient():
+    """#10 — an ambiguous recipient asks a simple numbered clarification
+    and resumes afterward, matching the spec's own worked example."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    c1 = await _seed_crm_client_cp(f"Raj Mehta {tag}", "919990000108")
+    c2 = await _seed_crm_client_cp(f"Raj Kapoor {tag}", "919990000109")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Raj {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "I found multiple WhatsApp matches" in r.reply, r.reply
+        assert f"Raj Mehta {tag}" in r.reply and f"Raj Kapoor {tag}" in r.reply
+        assert "Which one did you mean?" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r2.reply, r2.reply
+        assert f"Raj Mehta {tag}" in r2.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup_crm_clients_cp([c1, c2])
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_recipient_not_found():
+    """#11 — a genuinely unresolvable recipient gives a clear error,
+    never a silent failure."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to TotallyUnknownRecipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and r.reply, r.reply
+        assert "you are about to share instagram links" not in r.reply.lower(), r.reply
+    finally:
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_talent_not_found():
+    """#12 — a genuinely unresolvable talent gives a clear error, never
+    a silent failure or a broken send."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000110")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of TotallyUnknownTalent {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled and r.reply, r.reply
+        assert "you are about to share instagram links" not in r.reply.lower(), r.reply
+    finally:
+        await _cleanup(phone, talent_ids=[raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_missing_instagram_url():
+    """#13 — a talent with no Instagram link on file blocks the ENTIRE
+    send with an instructional error; nothing is sent for anyone."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}")  # no instagram_handle
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000111")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"I couldn't find an Instagram link for Anusha Sharma {tag}." in r.reply, r.reply
+        assert "Nothing has been sent." in r.reply, r.reply
+        job = await db.whatsapp_jobs.find_one({"destination": "919990000111"})
+        assert job is None
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_confirmation_shows_every_talent_and_recipient():
+    """#14 — the confirmation card shows the FULL list (never abbreviated
+    to "N talents") and the actual resolved recipient, per the spec's
+    own exact format."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    riya = await _seed_talent(f"Riya Sharma {tag}", instagram_handle="riya.sharma")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000112")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram links of Anusha Sharma {tag}, Riya Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "talents" not in r.reply.lower().split("instagram links:")[0], (
+            "must not abbreviate to '2 talents'"
+        )
+        assert "https://instagram.com/anusha.official" in r.reply
+        assert "https://instagram.com/riya.sharma" in r.reply
+        assert f"Raj Recipient {tag}" in r.reply
+        assert "1 → Approve" in r.reply and "2 → Edit" in r.reply and "3 → Cancel" in r.reply
+        assert "Nothing has been sent yet." in r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, riya, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_edit_flow_remove_one_talent():
+    """#15/#16 — replying "2" enters a clear edit state, and "remove
+    <name>" removes exactly that talent, keeping the rest."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    riya = await _seed_talent(f"Riya Sharma {tag}", instagram_handle="riya.sharma")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000113")
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram links of Anusha Sharma {tag}, Riya Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        edit = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "EDITING SHARE INSTAGRAM LINKS" in edit.reply, edit.reply
+        assert f"1 - Anusha Sharma {tag}" in edit.reply and f"2 - Riya Sharma {tag}" in edit.reply
+        assert "Nothing will be sent until you confirm." in edit.reply
+
+        removed = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=f"remove Riya Sharma {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert f"Riya Sharma {tag}" not in removed.reply
+        assert f"Anusha Sharma {tag}" in removed.reply
+        assert "You are about to SHARE Instagram links:" in removed.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, riya, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_edit_flow_change_recipient():
+    """#17 — "change the recipient to X" during editing swaps the
+    recipient and re-shows the full confirmation."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000114")
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        changed = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="change the recipient to +919876500000",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in changed.reply, changed.reply
+        assert "+919876500000" in changed.reply
+        assert "WhatsApp number" in changed.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_cancel_before_send():
+    """#18/#12(safety) — CANCEL at the confirmation stage sends nothing
+    at all."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000115")
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "cancelled" in r2.reply.lower(), r2.reply
+        job = await db.whatsapp_jobs.find_one({"destination": "919990000115"})
+        assert job is None
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_approval_sends_exactly_once():
+    """#19 — approving sends exactly one WhatsApp job to the one
+    recipient, never duplicated, never one per talent."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    riya = await _seed_talent(f"Riya Sharma {tag}", instagram_handle="riya.sharma")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000116")
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram links of Anusha Sharma {tag}, Riya Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        jobs = await db.whatsapp_jobs.find({"destination": "919990000116"}).to_list(10)
+        assert len(jobs) == 1, "exactly one combined message, never one per talent"
+    finally:
+        await db.whatsapp_jobs.delete_many({"destination": "919990000116"})
+        await _cleanup(phone, talent_ids=[anusha, riya, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_final_report_success_and_failure_counts():
+    """#20 — the final delivery report's counts come from the ACTUAL
+    whatsapp_jobs terminal status, not from "queued", for both the
+    success and failure case."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    riya = await _seed_talent(f"Riya Sharma {tag}", instagram_handle="riya.sharma")
+    group_recipient = await _seed_talent(
+        f"GroupRecipient {tag}", whatsapp_group_name=f"Real WA Group {tag}",
+    )
+    phones_used = []
+    try:
+        p1 = _phone(); phones_used.append(p1)
+        await handle_inbound_message(
+            group_name=group, sender_phone=p1,
+            text=f"Share Instagram links of Anusha Sharma {tag}, Riya Sharma {tag} to GroupRecipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone=p1, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        job = await db.whatsapp_jobs.find_one(
+            {"destination": f"Real WA Group {tag}"}, sort=[("created_at", -1)],
+        )
+        assert job is not None
+        await db.whatsapp_jobs.update_one({"id": job["id"]}, {"$set": {"status": "sent"}})
+        await asyncio.sleep(0.6)
+        report = await db.whatsapp_jobs.find_one(
+            {"destination": group, "message_body": {"$regex": "SHARE COMPLETE"}},
+            sort=[("created_at", -1)],
+        )
+        assert report is not None, "delivery report was not posted"
+        body = report["message_body"]
+        assert f"GroupRecipient {tag}" in body
+        assert "Successfully sent: 2" in body and "Failed: 0" in body
+        assert f"1 - Anusha Sharma {tag}" in body and f"2 - Riya Sharma {tag}" in body
+
+        p2 = _phone(); phones_used.append(p2)
+        await handle_inbound_message(
+            group_name=group, sender_phone=p2,
+            text=f"Share Instagram link of Anusha Sharma {tag} to GroupRecipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone=p2, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        job2 = await db.whatsapp_jobs.find_one(
+            {"destination": f"Real WA Group {tag}"}, sort=[("created_at", -1)],
+        )
+        assert job2 is not None and job2["id"] != job["id"]
+        await db.whatsapp_jobs.update_one(
+            {"id": job2["id"]}, {"$set": {"status": "failed", "error_message": "Group not found"}},
+        )
+        await asyncio.sleep(0.6)
+        report2 = await db.whatsapp_jobs.find_one(
+            {"destination": group, "message_body": {"$regex": "Failed: 1"}},
+            sort=[("created_at", -1)],
+        )
+        assert report2 is not None, "failure delivery report was not posted"
+        body2 = report2["message_body"]
+        assert "Successfully sent: 0" in body2
+        assert "Reason: Group not found" in body2
+    finally:
+        await db.whatsapp_jobs.delete_many({
+            "destination": {"$in": [f"Real WA Group {tag}", group]},
+        })
+        await _cleanup(phones_used[0], talent_ids=[anusha, riya, group_recipient])
+        for p in phones_used[1:]:
+            await _cleanup(p, talent_ids=[])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_url_with_punctuation_preserved():
+    """#21 — an Instagram URL is never split/modified because of the
+    punctuation inside it."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    riya = await _seed_talent(f"Riya Sharma {tag}", instagram_handle="https://instagram.com/riya_sharma?hl=en")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000117")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Riya Sharma {tag} to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "https://instagram.com/riya_sharma?hl=en" in r.reply, r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[riya, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_old_instagram_triggers_dont_steal_command():
+    """#22 — the OLD Instagram Profile Send phrasing ("send X's instagram
+    to Y") now flows through this SAME canonical engine instead of a
+    competing handler — verified by checking the NEW confirmation format
+    is what actually shows, not the old "INSTAGRAM PROFILE" header."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    raj = await _seed_talent(f"Raj Recipient {tag}", phone="919990000118")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send Anusha Sharma {tag}'s instagram to Raj Recipient {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert "INSTAGRAM PROFILE" not in r.reply
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha, raj])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_send_media_unaffected():
+    """#23 — SEND (audition/media forwarding) is completely unaffected
+    by the new Instagram content_type; the classifier still routes a
+    genuine media-forwarding phrase to casting.send's own hand-off."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_send_project(
+        f"SendUnaffected {tag}", whatsapp_casting_group_name="Talentgram Casting Test",
+    )
+    talent_id = await _seed_send_talent(
+        f"SendUnaffected Talent {tag}", whatsapp_group_name=f"SendUnaffected {tag} x Talentgram",
+        email=f"sendunaffected.{tag}@example.com",
+    )
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Send SendUnaffected Talent {tag}'s audition video to Raj",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to share instagram links" not in (r.reply or "").lower(), r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_template_and_custom_message_unaffected():
+    """#24 — SHARE's own template and custom-message content types are
+    completely unaffected by the new Instagram content_type — both still
+    resolve exactly as before."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(brand_name=f"IGUnaffectedProj {tag}")
+    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
+    talent_id = await _seed_talent(f"IGUnaffected Talent {tag}", phone="919990000119")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share casting call for {label} with IGUnaffected Talent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to share instagram links" not in (r.reply or "").lower(), r.reply
+        assert r.handled, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f'Share "Hi there, this is a custom message" with IGUnaffected Talent {tag}',
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "you are about to share instagram links" not in (r2.reply or "").lower(), r2.reply
+        assert r2.handled, r2.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)

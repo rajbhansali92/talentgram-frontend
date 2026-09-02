@@ -4353,7 +4353,7 @@ async def _move_parse_edits_async(
             if idx is not None:
                 await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
                 return {field_key: options[idx - 1]["value"]}
-            if kind in ("talent", "project") and stripped.isdigit():
+            if kind in ("talent", "project", "instagram_recipient") and stripped.isdigit():
                 # Invalid Numbers Handled Locally (2026-09-09) — an
                 # out-of-range digit ("99" against a 2-option list) is
                 # never a talent/project name; re-show the SAME numbered
@@ -4361,7 +4361,7 @@ async def _move_parse_edits_async(
                 # typed name/query" (which used to re-resolve "99" as a
                 # literal project query and fail with a confusing "I
                 # couldn't find a project matching '99'.").
-                noun = "talents" if kind == "talent" else "projects"
+                noun = {"talent": "talents", "instagram_recipient": "WhatsApp matches"}.get(kind, "projects")
                 opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
                 return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
                     f"Please choose one of the listed {noun}:\n\n{opts_text}\n\n"
@@ -5375,6 +5375,22 @@ def _extract_share_or_send_fields(text: str) -> Dict[str, str]:
         # custom message right after the verb) broke outright.
         normalized = f"share {remainder}" + (" and confirm" if auto_confirm else "")
         return _extract_share_fields(normalized)
+    if route == "instagram":
+        # SHARE Instagram Link (Production fix, 2026-09-09) — the new
+        # canonical content_type, handled natively inside this SAME
+        # engine (never a hand-off — see _extract_share_instagram_fields
+        # and _build_share_instagram_confirmation).
+        out = _extract_share_instagram_fields(remainder)
+        out[SHARE_ROUTE_FIELD.key] = "instagram"
+        # SHARE_RECIPIENT_FIELD (recipient_query) is still a REQUIRED
+        # field on SHARE_INTENT for the "share"/plain-template content
+        # type — a non-empty placeholder here (never shown/used for this
+        # route) keeps the generic dispatcher's own missing-required-
+        # field check from intercepting before build_confirmation runs.
+        out.setdefault("recipient_query", remainder)
+        if auto_confirm:
+            out[AUTO_CONFIRM_FIELD.key] = "1"
+        return out
     out = {
         SHARE_ROUTE_FIELD.key: route,
         SHARE_RAW_REMAINDER_FIELD.key: remainder,
@@ -5389,25 +5405,26 @@ def _extract_share_or_send_fields(text: str) -> Dict[str, str]:
     return out
 
 
-async def _handoff_share_route(route: str, collected: dict, ctx: ExecContext) -> str:
-    """Hands off a "send"/"instagram"-classified SHARE trigger to the
+async def _handoff_share_route(collected: dict, ctx: ExecContext) -> str:
+    """Hands off a "send"-classified SHARE trigger to casting.send, the
     EXISTING, unchanged engine that actually owns it, via a fresh
     conversation for that intent — the SAME hand-off pattern the
     Pipeline Check gate's own Option 1 already established. Never
-    invents new resolution logic; both target functions are called
-    completely unmodified."""
+    invents new resolution logic; the target function is called
+    completely unmodified.
+
+    SHARE Instagram Link (Production fix, 2026-09-09) — previously also
+    handled route=="instagram" by handing off to whatsapp_campaign_
+    agent.send_requirement's OWN Instagram Profile Send mode. That mode's
+    ENTIRE reachability was exclusively THIS hand-off (SEND_REQUIREMENT_
+    INTENT.triggers=[] — never directly triggerable), so now that
+    _build_share_confirmation intercepts route=="instagram" itself (see
+    _build_share_instagram_confirmation, the new canonical
+    implementation), that branch is unreachable and has been removed —
+    the single remaining caller of this function only ever passes route
+    "send" (see _build_share_confirmation and
+    _handle_share_send_ambiguous_reply)."""
     raw_remainder = collected.get(SHARE_RAW_REMAINDER_FIELD.key) or ""
-    if route == "instagram":
-        from agents.modules import whatsapp_campaign_agent as wa
-        ig_fields = wa.extract_send_requirement_fields(f"send {raw_remainder}")
-        await conversation.start_conversation(
-            agent_id=ctx.agent_id, phone=ctx.sender_phone,
-            group_name=ctx.group_name, intent_id="whatsapp_campaign.send_requirement",
-            collected=ig_fields,
-        )
-        await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
-        return await wa._build_send_requirement_confirmation(ig_fields, ctx)
-    # route == "send"
     send_fields = _extract_send_fields(f"send {raw_remainder}")
     await conversation.start_conversation(
         agent_id=ctx.agent_id, phone=ctx.sender_phone,
@@ -5437,7 +5454,7 @@ async def _handle_share_send_ambiguous_reply(
     if stripped == "2":
         await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         return await _handoff_share_route(
-            "send", {SHARE_RAW_REMAINDER_FIELD.key: raw_remainder}, ctx,
+            {SHARE_RAW_REMAINDER_FIELD.key: raw_remainder}, ctx,
         )
     if parse_confirmation_reply(stripped) == "cancel":
         await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
@@ -6228,8 +6245,10 @@ async def _build_share_confirmation(collected: dict, ctx: ExecContext) -> str:
             "2 → Send audition/media\n\n"
             "Reply with 1 or 2."
         )
-    if route in ("instagram", "send"):
-        return await _handoff_share_route(route, collected, ctx)
+    if route == "instagram":
+        return await _build_share_instagram_confirmation(collected, ctx)
+    if route == "send":
+        return await _handoff_share_route(collected, ctx)
 
     resolved = await _resolve_share(collected)
     if not resolved.ok:
@@ -6570,6 +6589,8 @@ async def _watch_and_report_share_delivery(
 
 
 async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    if collected.get(SHARE_ROUTE_FIELD.key) == "instagram":
+        return await _share_instagram_executor(collected, ctx)
     resolved = await _resolve_share(collected)
     if not resolved.ok:
         return ExecResult(ok=False, error="share_resolution_failed", message=resolved.error)
@@ -6639,6 +6660,8 @@ async def _build_share_edit_prompt(collected: dict, ctx: ExecContext) -> str:
     the raw collected text if resolution itself is what's currently
     failing (e.g. an ambiguous project) — still better than a blank/
     generic prompt."""
+    if collected.get(SHARE_ROUTE_FIELD.key) == "instagram":
+        return await _build_share_instagram_edit_prompt(collected, ctx)
     resolved = await _resolve_share(collected)
     is_custom = collected.get("custom_message") is not None
     message_word = "message" if is_custom else "template"
@@ -6753,6 +6776,9 @@ async def _share_parse_edits_async(
         await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return {PLAN_STEP_EDIT_ERROR_FIELD.key: _EDITING_CANCELLED_MESSAGE}
+
+    if collected.get(SHARE_ROUTE_FIELD.key) == "instagram":
+        return await _share_instagram_parse_edits_async(text, collected, ctx)
 
     is_custom = collected.get("custom_message") is not None
 
@@ -6916,6 +6942,19 @@ async def _share_editing_claims_reply(
         return True
     if (collected.get(_SHARE_EDIT_FIELD_KEY) or "").strip():
         return True
+    if collected.get(SHARE_ROUTE_FIELD.key) == "instagram":
+        # SHARE Instagram Link (Production fix, 2026-09-09) — the SAME
+        # collision, scoped to this content_type: a pending talent/
+        # recipient ambiguity owns the very next reply (a typed name
+        # could itself start with a trigger word, e.g. "Addison"), and
+        # "change the recipient to X" is its own instruction shape the
+        # generic checks below don't recognize.
+        session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
+        pending = (session or {}).get("pending_disambiguation")
+        if pending and pending.get("kind") in ("talent", "instagram_recipient", "free_text_retry"):
+            return True
+        if _SHARE_INSTAGRAM_EDIT_RECIPIENT_RE.match(stripped):
+            return True
     return bool(
         _SHARE_EDIT_MESSAGE_RE.match(stripped)
         or _SHARE_EDIT_PROJECT_RE.match(stripped)
@@ -7072,6 +7111,680 @@ SHARE_EDIT_FIELD_FIELD = FieldSpec(
 )
 
 
+# ---------------------------------------------------------------------------
+# SHARE Instagram Link (Production fix, 2026-09-09) — "Share Instagram
+# link of <talent(s)> to <recipient>": shares one or more talents' own
+# Instagram links with ONE WhatsApp recipient (a person/group/number, or
+# a project's own WhatsApp casting group — resolved through the SAME
+# recipient/group lookup mechanism every other WhatsApp send in this
+# codebase already reuses, never a second lookup engine). A new
+# content_type INSIDE the existing SHARE engine (one more SHARE_ROUTE_
+# FIELD value, "instagram"), never a separate intent — see
+# _extract_share_or_send_fields/_build_share_confirmation's own routing.
+#
+# Supersedes the OLD "Instagram Profile Send" mode (whatsapp_campaign_
+# agent.py's send_mode=="instagram" — _extract_instagram_fields/
+# _resolve_instagram_target/_format_instagram_send_body). That mode's
+# ENTIRE reachability was exclusively the "instagram" classification
+# route via _handoff_share_route (SEND_REQUIREMENT_INTENT.triggers=[] —
+# never directly triggerable on its own), so redirecting that one
+# hand-off point to THIS implementation (see _build_share_confirmation)
+# makes the old mode fully unreachable through normal dispatch — never a
+# second, competing handler. The old code itself is left in place,
+# untouched (its own still-passing unit tests exercise it directly, not
+# through dispatch), rather than risking collateral damage to send_
+# requirement's shared machinery (_resolve_recipient_only, _build_
+# manual_contacts, _talent_instagram_by_id, etc.) this feature also
+# reuses.
+# ---------------------------------------------------------------------------
+
+SHARE_INSTAGRAM_HELP_EXAMPLES = (
+    "Share Instagram link of Anusha Sharma to Raj\n"
+    "Share Insta link of Anusha Sharma, Riya Sharma to Raj\n"
+    "Share Instagram links of Anusha Sharma, Riya Sharma to Talentgram Production\n"
+    "Share Instagram link of Anusha Sharma to +919876543210"
+)
+_SHARE_INSTAGRAM_SINGLE_EXAMPLE = SHARE_INSTAGRAM_HELP_EXAMPLES.splitlines()[0]
+_SHARE_INSTAGRAM_MULTI_EXAMPLE = "Share Instagram link of Anusha Sharma, Riya Sharma to Raj"
+
+# Near-Miss/Incomplete SHARE Instagram Guidance — the ONE source of truth
+# every instructional error below points at (never a second, separately
+# hand-typed set of examples — Part 14's own requirement).
+_SHARE_INSTAGRAM_NEAR_MISS_GUIDANCE = (
+    f"To share an Instagram link, try:\n\n{_SHARE_INSTAGRAM_SINGLE_EXAMPLE}\n\n"
+    f"For multiple talents:\n\n{_SHARE_INSTAGRAM_MULTI_EXAMPLE}"
+)
+# Internal-only sentinel (never typed by an admin) — set by
+# _extract_share_instagram_fields when NEITHER a talent nor a recipient
+# could be parsed out of the message at all, so _resolve_share_instagram
+# can show the fuller near-miss guidance above instead of either
+# individual field's own narrower "still need X" question.
+_SHARE_INSTAGRAM_UNPARSEABLE_MARKER = "__share_instagram_unparseable__"
+
+SHARE_INSTAGRAM_TALENTS_FIELD_QUESTION = (
+    "I still need the talent name.\n\n"
+    f"Try:\n\n{_SHARE_INSTAGRAM_SINGLE_EXAMPLE}"
+)
+SHARE_INSTAGRAM_RECIPIENT_FIELD_QUESTION = (
+    "I found the talent, but I still need the WhatsApp recipient.\n\n"
+    f"Try:\n\n{_SHARE_INSTAGRAM_SINGLE_EXAMPLE}"
+)
+# required=False at the FieldSpec level, deliberately — these fields
+# only ever EXIST in `collected` for the "instagram" route; SHARE_INTENT
+# is shared by every OTHER route too (share/send/ambiguous), and the
+# generic dispatcher's next_missing_field check has no notion of "only
+# required for THIS route" — a required=True here would incorrectly
+# block every plain "Share <template> with <talent>" command on a field
+# it never even sets. The "still need X" guidance below is instead
+# raised explicitly by _resolve_share_instagram itself, reached only
+# once route=="instagram" is already known.
+SHARE_INSTAGRAM_TALENTS_FIELD = FieldSpec(
+    key="instagram_talents_query", label="Talent(s)", question=SHARE_INSTAGRAM_TALENTS_FIELD_QUESTION,
+    validate=_validate_share_text, required=False, aliases=["talent", "talents"],
+)
+SHARE_INSTAGRAM_RECIPIENT_FIELD = FieldSpec(
+    key="instagram_recipient_query", label="Recipient", question=SHARE_INSTAGRAM_RECIPIENT_FIELD_QUESTION,
+    validate=_validate_share_text, required=False, aliases=["to", "recipient"],
+)
+
+# Tolerant of "Instagram"/"Insta"/"IG", "link"/"links"/"profile"/
+# "profiles", and an "of"/"for" connector — Part 2's own natural-
+# language-tolerance requirement. Anchored at the START of `remainder`
+# (the trigger word "share"/"send"/etc. is already stripped by the time
+# this runs) since every canonical example puts it there; a leading
+# filler word ("the Instagram of...") is stripped first, below.
+_SHARE_INSTAGRAM_CONNECTOR_RE = re.compile(
+    r"^\s*(?:insta(?:gram)?|ig)\b\s*(?:link|links|profile|profiles)?\s*(?:of|for)\s+(?P<rest>.+)$",
+    re.IGNORECASE,
+)
+# Bare form, no "of"/"for" connector ("Instagram Riya to Raj") — tried
+# only once the connector shape above doesn't match.
+_SHARE_INSTAGRAM_BARE_RE = re.compile(
+    r"^\s*(?:insta(?:gram)?|ig)\b\s*(?:link|links|profile|profiles)?\s*[-:]?\s*(?P<rest>.+)$",
+    re.IGNORECASE,
+)
+# Possessive shape ("Anusha Sharma's Instagram", "Anusha Sharma's
+# Instagram profile with Raj") — the ONE phrasing HELP has documented
+# since before this feature existed; preserved so nothing that used to
+# work stops working, now flowing through this SAME canonical engine
+# instead of the old one.
+_SHARE_INSTAGRAM_POSSESSIVE_RE = re.compile(
+    r"^(?P<talents>.+?)(?:'s|s')\s+(?:insta(?:gram)?|ig)\b\s*(?:link|links|profile|profiles)?\s*"
+    r"(?:(?:to|with)\s+(?P<recipient>.+))?\s*$",
+    re.IGNORECASE,
+)
+# Splits "<talent(s)> to|with <recipient>" — lazy on the talent side so
+# the FIRST "to"/"with" is the split point (talent names don't
+# legitimately contain either word on their own).
+_SHARE_INSTAGRAM_TO_SPLIT_RE = re.compile(r"^(?P<talents>.+?)\s+(?:to|with)\s+(?P<recipient>.+)$", re.IGNORECASE)
+
+
+def _extract_share_instagram_fields(remainder: str) -> Dict[str, str]:
+    """Parses the Instagram-content-type grammar out of a SHARE/SEND
+    remainder already known to contain an Instagram signal
+    (_classify_share_send_target's own "instagram" route) — tolerant of
+    Instagram/Insta/IG, link(s)/profile(s), an of/for connector, the
+    legacy hyphen grammar, and the possessive "X's Instagram" shape.
+    Returns whichever of instagram_talents_query/instagram_recipient_
+    query it could find (never both empty and never a partial guess) —
+    a genuinely missing one is handled by that FIELD's own required+
+    question (Part 15's "still need X" guidance), and the doubly-empty
+    case sets _SHARE_INSTAGRAM_UNPARSEABLE_MARKER on both so
+    _resolve_share_instagram shows the fuller near-miss guidance
+    instead."""
+    remainder = _SHARE_LEADING_FILLER_RE.sub("", (remainder or "").strip()).strip()
+    if not remainder:
+        return {
+            SHARE_INSTAGRAM_TALENTS_FIELD.key: _SHARE_INSTAGRAM_UNPARSEABLE_MARKER,
+            SHARE_INSTAGRAM_RECIPIENT_FIELD.key: _SHARE_INSTAGRAM_UNPARSEABLE_MARKER,
+        }
+
+    talents_text = ""
+    recipient_text = ""
+
+    poss_m = _SHARE_INSTAGRAM_POSSESSIVE_RE.match(remainder)
+    if poss_m:
+        talents_text = poss_m.group("talents").strip()
+        recipient_text = (poss_m.group("recipient") or "").strip()
+    else:
+        lead_m = _SHARE_INSTAGRAM_CONNECTOR_RE.match(remainder) or _SHARE_INSTAGRAM_BARE_RE.match(remainder)
+        rest = lead_m.group("rest").strip() if lead_m else remainder
+        hyph = nlu._split_hyphen_fields(rest, 2)
+        if hyph:
+            talents_text = (hyph[0] or "").strip()
+            recipient_text = (hyph[1] or "").strip()
+        else:
+            split_m = _SHARE_INSTAGRAM_TO_SPLIT_RE.match(rest)
+            if split_m:
+                talents_text = split_m.group("talents").strip()
+                recipient_text = split_m.group("recipient").strip()
+            else:
+                # "Instagram link to Raj" — the talent name was omitted
+                # entirely, leaving a bare "to X"/"with X" clause (never
+                # matched by _SHARE_INSTAGRAM_TO_SPLIT_RE's own lazy
+                # talents group, which requires 1+ chars BEFORE "to").
+                # Recognized as "recipient present, talent missing" —
+                # Part 15's own worked example — rather than swallowing
+                # the whole "to Raj" text as a nonsensical talent name.
+                leading_to_m = re.match(r"^\s*(?:to|with)\s+(.+)$", rest, re.IGNORECASE)
+                if leading_to_m:
+                    recipient_text = leading_to_m.group(1).strip()
+                else:
+                    talents_text = rest.strip()
+
+    talents_text = talents_text.strip(" ,")
+    recipient_text = recipient_text.strip(" ,")
+
+    if not talents_text and not recipient_text:
+        return {
+            SHARE_INSTAGRAM_TALENTS_FIELD.key: _SHARE_INSTAGRAM_UNPARSEABLE_MARKER,
+            SHARE_INSTAGRAM_RECIPIENT_FIELD.key: _SHARE_INSTAGRAM_UNPARSEABLE_MARKER,
+        }
+
+    out: Dict[str, str] = {}
+    if talents_text:
+        out[SHARE_INSTAGRAM_TALENTS_FIELD.key] = talents_text
+    if recipient_text:
+        out[SHARE_INSTAGRAM_RECIPIENT_FIELD.key] = recipient_text
+    return out
+
+
+@dataclass
+class _InstagramShareResolution:
+    ok: bool
+    error: Optional[str] = None
+    disambiguation: Optional[Dict[str, Any]] = None
+    talent_ids: List[str] = dataclass_field(default_factory=list)
+    talent_labels: List[str] = dataclass_field(default_factory=list)
+    # Aligned index-for-index with talent_ids/talent_labels — a talent
+    # missing an Instagram link is always caught before this point (see
+    # _resolve_share_instagram), so every entry here is a real URL.
+    instagram_urls: List[str] = dataclass_field(default_factory=list)
+    recipient_label: str = ""
+    recipient_destination_type: str = ""  # "group" | "number"
+    recipient_destination: str = ""
+    recipient_source_type: str = ""
+    recipient_source_params: Optional[SourceParams] = None
+
+
+async def _resolve_share_instagram_talents(
+    talents_query: str,
+) -> Tuple[List[str], List[str], Optional[str], Optional[Dict[str, Any]]]:
+    """(talent_ids, talent_labels, error, disambiguation) — the EXACT
+    same talent-selector grammar/resolution ADD/MOVE/standalone-SHARE's
+    own talent-target already use (nlu.parse_talent_selector +
+    resolve_against_candidates against the SAME global candidate pool),
+    reused verbatim so a name resolves identically everywhere in this
+    codebase (Part 6's own "use the existing talent disambiguation
+    system" requirement). disambiguation, when set, is the SAME
+    {"kind": "talent", ...RESOLVED_TALENT_MARKER-encoded options...}
+    shape the Ambiguity-Before-Confirmation Priority fix's
+    _move_parse_edits_async already knows how to resume — the admin's
+    next numbered/typed-name reply Just Works, no new resume code."""
+    selector = nlu.parse_talent_selector(talents_query)
+    if not selector.ok:
+        return [], [], selector.error, None
+    candidates = await _fetch_all_talent_candidates()
+    with request_scope.stage("fuzzy"):
+        resolved = nlu.resolve_against_candidates(selector, candidates)
+    if not resolved.ok:
+        if resolved.ambiguous_candidates:
+            options = [
+                {"id": c.id, "label": c.label, "value": f"{nlu.RESOLVED_TALENT_MARKER}{c.id}|{c.label}"}
+                for c in resolved.ambiguous_candidates
+            ]
+            opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
+            msg = (
+                f'I found multiple matching talents for "{selector.name_query or talents_query}".\n\n'
+                f"{opts_text}\n\n"
+                "Reply with the number or type the talent's name."
+            )
+            return [], [], msg, {
+                "kind": "talent", "field_key": SHARE_INSTAGRAM_TALENTS_FIELD.key, "options": options,
+            }
+        return [], [], (resolved.error or "No matching talent found."), {
+            "kind": "free_text_retry", "field_key": SHARE_INSTAGRAM_TALENTS_FIELD.key, "options": [],
+        }
+    return resolved.talent_ids, resolved.talent_labels, None, None
+
+
+_SHARE_INSTAGRAM_GROUP_SUFFIX_RE = re.compile(r"\s*(?:whatsapp\s+)?group\s*$", re.IGNORECASE)
+
+
+async def _resolve_instagram_recipient(query: str):
+    """Wraps whatsapp_campaign_agent's OWN dedicated single-recipient
+    resolver (_resolve_recipient_only — phone / CRM contact / saved
+    contact list / saved group list / named talent, in that priority
+    order) — the SAME "existing WhatsApp recipient/group lookup
+    mechanism" every other recipient resolution in this codebase already
+    reuses, never a second lookup engine (Part 4's own requirement).
+    Adds exactly ONE more fallback tier (Part 4's "project-associated
+    WhatsApp group", e.g. "Hinge group") that _resolve_recipient_only
+    itself deliberately never tries (its own docstring: "never calls any
+    project matcher") — tried ONLY after every one of ITS OWN tiers has
+    already failed, so a real CRM contact/saved group/talent confusingly
+    named after a project is never shadowed by this."""
+    from agents.modules import whatsapp_campaign_agent as wa
+
+    target = await wa._resolve_recipient_only(query)
+    if target.ok or target.ambiguous:
+        return target
+
+    bare = _SHARE_INSTAGRAM_GROUP_SUFFIX_RE.sub("", query).strip()
+    if not bare:
+        return target
+    projects = await _fetch_ongoing_projects()
+    with request_scope.stage("fuzzy"):
+        match = nlu.resolve_project_by_name(bare, projects)
+    if not match.project:
+        return target
+    project_doc = await db.projects.find_one(
+        {"id": match.project["id"]}, {"_id": 0, "whatsapp_casting_group_name": 1},
+    )
+    group_name = ((project_doc or {}).get("whatsapp_casting_group_name") or "").strip()
+    if not group_name:
+        return target
+    return wa._RecipientTarget(
+        ok=True, source_type="MANUAL",
+        source_params=SourceParams(contacts=[
+            ManualContact(name=match.project["label"], phone="", whatsapp_group_name=group_name),
+        ]),
+        display_label=match.project["label"],
+    )
+
+
+async def _resolve_share_instagram(collected: dict) -> _InstagramShareResolution:
+    """The Instagram content_type's own resolve — mirrors _resolve_
+    share's shape (ok/error/disambiguation) but against fundamentally
+    different targets: talents are the CONTENT SOURCE (whose Instagram
+    link), never the recipient, and there is exactly ONE WhatsApp
+    recipient, resolved through _resolve_instagram_recipient above.
+    Never sends anything itself — pure resolution, reused by both the
+    confirmation card and the real executor (Part 12's own "resolve
+    everything, THEN show confirmation, THEN send" sequencing)."""
+    talents_query = (collected.get(SHARE_INSTAGRAM_TALENTS_FIELD.key) or "").strip()
+    recipient_query = (collected.get(SHARE_INSTAGRAM_RECIPIENT_FIELD.key) or "").strip()
+
+    if (
+        talents_query == _SHARE_INSTAGRAM_UNPARSEABLE_MARKER
+        or recipient_query == _SHARE_INSTAGRAM_UNPARSEABLE_MARKER
+    ):
+        return _InstagramShareResolution(ok=False, error=_SHARE_INSTAGRAM_NEAR_MISS_GUIDANCE)
+    if not talents_query:
+        return _InstagramShareResolution(ok=False, error=SHARE_INSTAGRAM_TALENTS_FIELD.question)
+    if not recipient_query:
+        return _InstagramShareResolution(ok=False, error=SHARE_INSTAGRAM_RECIPIENT_FIELD.question)
+
+    talent_ids, talent_labels, err, dis = await _resolve_share_instagram_talents(talents_query)
+    if err:
+        return _InstagramShareResolution(ok=False, error=err, disambiguation=dis)
+
+    from agents.modules import whatsapp_campaign_agent as wa
+    tmap = await wa._talent_instagram_by_id(talent_ids)
+    urls: List[str] = []
+    missing_labels: List[str] = []
+    for tid, label in zip(talent_ids, talent_labels):
+        url = _format_instagram_link((tmap.get(tid) or {}).get("instagram_handle"))
+        if url:
+            urls.append(url)
+        else:
+            missing_labels.append(label)
+    if missing_labels:
+        # Part 7 — the complete requested list must be valid before
+        # sending anything; never a partial send, never silently omitted.
+        if len(missing_labels) == 1:
+            msg = (
+                f"I couldn't find an Instagram link for {missing_labels[0]}.\n\n"
+                "Nothing has been sent.\n\n"
+                "Please update the talent's Instagram link first, then try:\n\n"
+                f"{_SHARE_INSTAGRAM_SINGLE_EXAMPLE}"
+            )
+        else:
+            bullets = "\n".join(f"• {name}" for name in missing_labels)
+            msg = (
+                f"I couldn't find Instagram links for:\n\n{bullets}\n\n"
+                "Nothing has been sent.\n\n"
+                "Please update their Instagram links first, then try again."
+            )
+        return _InstagramShareResolution(ok=False, error=msg)
+
+    target = await _resolve_instagram_recipient(recipient_query)
+    if target.ambiguous:
+        options = [{"label": c.label, "value": c.label} for c in target.ambiguous.candidates]
+        opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
+        msg = (
+            f'I found multiple WhatsApp matches for "{recipient_query}":\n\n'
+            f"{opts_text}\n\n"
+            "Which one did you mean?"
+        )
+        return _InstagramShareResolution(ok=False, error=msg, disambiguation={
+            "kind": "instagram_recipient", "field_key": SHARE_INSTAGRAM_RECIPIENT_FIELD.key, "options": options,
+        })
+    if not target.ok:
+        return _InstagramShareResolution(
+            ok=False,
+            error=target.error or f'I couldn\'t find a WhatsApp recipient matching "{recipient_query}".',
+            disambiguation={
+                "kind": "free_text_retry", "field_key": SHARE_INSTAGRAM_RECIPIENT_FIELD.key, "options": [],
+            },
+        )
+
+    # Part 5 — verify the recipient actually resolves through WhatsApp
+    # before ever showing a confirmation; never trust source_params
+    # alone. The SAME engine the real send itself resolves through.
+    res = await resolve_recipients_engine(target.source_type, target.source_params)
+    recipients = res.get("recipients") or []
+    if not recipients:
+        return _InstagramShareResolution(
+            ok=False,
+            error=(
+                f"{target.display_label} doesn't have a valid WhatsApp number or group on file, "
+                "so there's nothing to send to.\n\nNothing has been sent."
+            ),
+        )
+    rec = recipients[0]
+    return _InstagramShareResolution(
+        ok=True,
+        talent_ids=talent_ids, talent_labels=talent_labels, instagram_urls=urls,
+        recipient_label=rec.get("name") or target.display_label,
+        recipient_destination_type=rec.get("destination_type") or "",
+        recipient_destination=rec.get("destination") or "",
+        recipient_source_type=target.source_type, recipient_source_params=target.source_params,
+    )
+
+
+def _format_instagram_share_body(resolved: "_InstagramShareResolution") -> str:
+    """"1 - Name - URL" numbered lines with a BLANK line between every
+    entry — the exact structure both the confirmation preview (Part 3)
+    and the real outgoing WhatsApp message (Part 10) render identically,
+    so the admin approves exactly what gets sent, byte for byte. The
+    Instagram URL itself is never touched/reformatted here — already a
+    clean https://instagram.com/... string from _format_instagram_link."""
+    lines: List[str] = []
+    for i, (label, url) in enumerate(zip(resolved.talent_labels, resolved.instagram_urls), start=1):
+        if i > 1:
+            lines.append("")
+        lines.append(f"{i} - {label} - {url}")
+    return "\n".join(lines)
+
+
+def _instagram_recipient_method_line(resolved: "_InstagramShareResolution") -> str:
+    """Part 8's own three exact shapes: a raw phone-number recipient
+    shows "WhatsApp number" (the number itself is already the Recipient:
+    line, no need to repeat it); a WhatsApp GROUP shows "WhatsApp
+    group"; a NAMED person (CRM contact/talent) resolved to a number
+    shows "WhatsApp: <the actual number>" so the admin can verify it's
+    really them. Never a guess — reads directly off resolve_recipients_
+    engine's own destination_type/destination, the same real routing
+    decision the send itself will use."""
+    if resolved.recipient_destination_type == "group":
+        return "WhatsApp group"
+    if resolved.recipient_destination_type == "number":
+        if resolved.recipient_label == resolved.recipient_destination:
+            return "WhatsApp number"
+        return f"WhatsApp: {resolved.recipient_destination}"
+    return "Unknown"
+
+
+async def _build_share_instagram_confirmation(collected: dict, ctx: ExecContext) -> str:
+    resolved = await _resolve_share_instagram(collected)
+    if not resolved.ok:
+        if resolved.disambiguation:
+            await session_context.update_session(
+                ctx.agent_id, ctx.sender_phone, pending_disambiguation=resolved.disambiguation,
+            )
+            await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="editing")
+        else:
+            await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+        return resolved.error
+
+    await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+    lines = [
+        "You are about to SHARE Instagram links:", "",
+        "Recipient:", resolved.recipient_label, _instagram_recipient_method_line(resolved), "",
+        "Instagram links:", "",
+        _format_instagram_share_body(resolved), "",
+        "Reply:", "1 → Approve", "2 → Edit", "3 → Cancel", "",
+        "Nothing has been sent yet.",
+    ]
+    return "\n".join(lines)
+
+
+async def _build_share_instagram_edit_prompt(collected: dict, ctx: ExecContext) -> str:
+    resolved = await _resolve_share_instagram(collected)
+    if not resolved.ok:
+        talents_desc = (collected.get(SHARE_INSTAGRAM_TALENTS_FIELD.key) or "").strip() or "?"
+        recipient_desc = (collected.get(SHARE_INSTAGRAM_RECIPIENT_FIELD.key) or "").strip() or "?"
+        return "\n".join([
+            "EDITING SHARE INSTAGRAM LINKS", "",
+            f"Current talent(s): {talents_desc}",
+            f"Current recipient: {recipient_desc}", "",
+            "What would you like to change?", "",
+            "You can say:",
+            "• remove <name>", "• add <name>",
+            "• change the recipient to [name/group/number]",
+            "• cancel", "",
+            "Nothing will be sent until you confirm.",
+        ])
+    lines = ["EDITING SHARE INSTAGRAM LINKS", "", "Current:", ""]
+    lines += [
+        f"{i} - {label} - {url}"
+        for i, (label, url) in enumerate(zip(resolved.talent_labels, resolved.instagram_urls), start=1)
+    ]
+    lines += [
+        "", "Recipient:", resolved.recipient_label, "",
+        "What would you like to change?", "",
+        "You can say:",
+        "• remove <name>", "• add <name>",
+        "• change the recipient to [name/group/number]",
+        "• cancel", "",
+        "Nothing will be sent until you confirm.",
+    ]
+    return "\n".join(lines)
+
+
+_SHARE_INSTAGRAM_EDIT_RECIPIENT_RE = re.compile(
+    r"^\s*change\s+(?:the\s+)?recipient\s+to\s+(.+?)\s*$", re.IGNORECASE
+)
+
+
+async def _share_instagram_parse_edits_async(
+    text: str, collected: Dict[str, str], ctx: ExecContext,
+) -> Dict[str, str]:
+    """Instagram content_type's own "editing" sub-state reply parser —
+    called by _share_parse_edits_async once SHARE_ROUTE_FIELD=="instagram"
+    (CANCEL is already handled by that caller before this is ever
+    reached). A pending talent/recipient ambiguity ALWAYS owns the very
+    next reply first (Ambiguity-Before-Confirmation Priority), exactly
+    like every other pending_disambiguation in this codebase — reuses
+    _move_parse_edits_async's already-hardened generic resume (numbered
+    pick, out-of-range retry, typed-name fallback) rather than a new
+    resume implementation."""
+    stripped = (text or "").strip()
+
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
+    pending = (session or {}).get("pending_disambiguation")
+    if pending and pending.get("kind") in ("talent", "instagram_recipient", "free_text_retry"):
+        return await _move_parse_edits_async(
+            text, collected, [SHARE_INSTAGRAM_TALENTS_FIELD, SHARE_INSTAGRAM_RECIPIENT_FIELD], ctx,
+        )
+
+    m = _SHARE_INSTAGRAM_EDIT_RECIPIENT_RE.match(stripped)
+    if m:
+        return {SHARE_INSTAGRAM_RECIPIENT_FIELD.key: m.group(1).strip()}
+
+    for numbered_re, keep in ((_SHARE_EDIT_REMOVE_NUMBERS_RE, False), (_SHARE_EDIT_KEEP_ONLY_RE, True)):
+        m = numbered_re.match(stripped)
+        if not m:
+            continue
+        resolved = await _resolve_share_instagram(collected)
+        current_names = list(resolved.talent_labels) if resolved.ok else []
+        if not current_names:
+            break
+        positions = _share_parse_recipient_numbers(m.group(1), len(current_names))
+        if positions is None:
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                f"I couldn't match that to the talent list (1-{len(current_names)})."
+            )}
+        new_names = (
+            [t for i, t in enumerate(current_names, start=1) if i in positions] if keep
+            else [t for i, t in enumerate(current_names, start=1) if i not in positions]
+        )
+        if not new_names:
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                "Can't remove every talent — change the talent(s) instead, or CANCEL."
+            )}
+        return {SHARE_INSTAGRAM_TALENTS_FIELD.key: ",".join(new_names)}
+
+    m = _SHARE_EDIT_REMOVE_RE.match(stripped) or _SHARE_EDIT_ADD_RE.match(stripped)
+    if m:
+        resolved = await _resolve_share_instagram(collected)
+        current_names = list(resolved.talent_labels) if resolved.ok else []
+        if current_names:
+            remove_m = _SHARE_EDIT_REMOVE_RE.match(stripped)
+            if remove_m:
+                remove_name = remove_m.group(1).strip().lower()
+                remaining = [t for t in current_names if remove_name not in t.lower()]
+                if len(remaining) == len(current_names):
+                    return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                        f"Couldn't find {remove_m.group(1).strip()} among the talents."
+                    )}
+                if not remaining:
+                    return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                        "Can't remove the only talent — change the talent instead, or CANCEL."
+                    )}
+                return {SHARE_INSTAGRAM_TALENTS_FIELD.key: ",".join(remaining)}
+            add_m = _SHARE_EDIT_ADD_RE.match(stripped)
+            if add_m:
+                return {SHARE_INSTAGRAM_TALENTS_FIELD.key: ",".join(current_names + [add_m.group(1).strip()])}
+
+    return {}
+
+
+_SHARE_DELIVERY_INSTAGRAM_LABEL = "Instagram links"
+
+
+async def _watch_and_report_instagram_share_delivery(
+    *, batch_id: str, group_name: str, recipient_label: str, talent_labels: List[str],
+) -> None:
+    """Instagram content_type's own delivery-result watcher — same
+    fire-and-forget polling primitive as _watch_and_report_share_
+    delivery (the SAME env-overridable poll interval/bound), reporting
+    into the SAME group via the SAME create_batch Custom Message
+    mechanism, but with the numbered "Sent:"/"Failed:" report shape Part
+    11 specifies. Exactly one recipient means exactly one whatsapp_jobs
+    row for this batch — its single terminal status applies to every
+    talent's link in that one message (they were never separable sends
+    to begin with; see Part 10's single combined-message requirement)."""
+    from agents.modules import whatsapp_campaign_agent as wa
+
+    deadline = time.monotonic() + _SHARE_DELIVERY_MAX_WAIT_SEC
+    jobs: List[dict] = []
+    while True:
+        jobs = await db.whatsapp_jobs.find(
+            {"batch_id": batch_id}, {"_id": 0, "status": 1, "error_message": 1},
+        ).to_list(20)
+        if jobs and all(j.get("status") in ("sent", "failed") for j in jobs):
+            break
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(_SHARE_DELIVERY_POLL_INTERVAL_SEC)
+
+    job = jobs[0] if jobs else None
+    status = (job or {}).get("status")
+    total = len(talent_labels)
+    numbered = [f"{i} - {name}" for i, name in enumerate(talent_labels, start=1)]
+
+    lines = ["SHARE COMPLETE", "", "Recipient:", recipient_label, ""]
+    if status == "sent":
+        lines += [f"Successfully sent: {total}", "Failed: 0", "", "Sent:"] + numbered
+    elif status == "failed":
+        reason = ((job or {}).get("error_message") or "WhatsApp delivery failed.").strip()
+        lines += [
+            "Successfully sent: 0", f"Failed: {total}", "", "Failed:",
+        ] + numbered + [f"Reason: {reason}"]
+    else:
+        lines += [
+            "Successfully sent: 0", "Failed: 0", "",
+            "Still in progress — taking longer than expected. I'll follow up once it settles.",
+        ]
+    report_text = "\n".join(lines).rstrip()
+
+    admin = await wa._service_admin()
+    custom_template = await wa._fetch_custom_template()
+    if not custom_template:
+        logger.error(
+            "instagram share delivery report: no custom-message template configured — "
+            "dropping report for group=%r", group_name,
+        )
+        return
+    try:
+        await create_batch(
+            BatchIn(
+                source_type="MANUAL",
+                source_params=SourceParams(contacts=[
+                    ManualContact(name="Talentgram Scouting Agent", phone="", whatsapp_group_name=group_name),
+                ]),
+                template_id=custom_template["id"], is_dry_run=False,
+                variable_data={"message": report_text},
+            ),
+            admin=admin,
+        )
+    except Exception:
+        logger.exception(
+            "instagram share delivery report: failed to queue report for group=%r", group_name,
+        )
+
+
+async def _share_instagram_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    from agents.modules import whatsapp_campaign_agent as wa
+
+    resolved = await _resolve_share_instagram(collected)
+    if not resolved.ok:
+        return ExecResult(ok=False, error="share_instagram_resolution_failed", message=resolved.error)
+
+    admin = await wa._service_admin()
+    custom_template = await wa._fetch_custom_template()
+    if not custom_template:
+        return ExecResult(
+            ok=False, error="no_custom_template",
+            message="No custom-message template is configured yet — Instagram sharing needs one.",
+        )
+    body = _format_instagram_share_body(resolved)
+    try:
+        result = await create_batch(
+            BatchIn(
+                source_type=resolved.recipient_source_type, source_params=resolved.recipient_source_params,
+                template_id=custom_template["id"], is_dry_run=False,
+                variable_data={"message": body},
+            ),
+            admin=admin,
+        )
+    except HTTPException as exc:
+        return ExecResult(ok=False, error="whatsapp_send_failed", message=f"WhatsApp send failed ({exc.detail}).")
+
+    jobs = result["jobs"]
+    if not jobs:
+        return ExecResult(
+            ok=False, error="whatsapp_send_unresolved",
+            message=f"Could not queue the WhatsApp message to {resolved.recipient_label}.",
+        )
+    batch_id = result["batch"]["id"]
+    # Fire-and-forget — never awaited here; the admin's "1 -> Approve"
+    # reply returns immediately, exactly like every other SHARE
+    # approval, and the real delivery result follows as its own message.
+    asyncio.create_task(_watch_and_report_instagram_share_delivery(
+        batch_id=batch_id, group_name=ctx.group_name,
+        recipient_label=resolved.recipient_label, talent_labels=list(resolved.talent_labels),
+    ))
+    message = (
+        "Shared.\n\n"
+        f"Recipient: {resolved.recipient_label}\n\n"
+        "I'll report back with the delivery result shortly."
+    )
+    return ExecResult(ok=True, message=message, data={"queued": len(jobs)})
+
+
 SHARE_INTENT = IntentDefinition(
     intent_id="casting.share",
     # Send/Share Semantic Router (Production fix, 2026-09-06) — SHARE_INTENT
@@ -7084,6 +7797,7 @@ SHARE_INTENT = IntentDefinition(
         SHARE_PROJECT_FIELD, SHARE_RECIPIENT_FIELD, SHARE_TEMPLATE_FIELD, SHARE_CUSTOM_MESSAGE_FIELD,
         SHARE_PAIR_RESTRICTION_FIELD, SHARE_ROUTE_FIELD, SHARE_RAW_REMAINDER_FIELD,
         SHARE_EDIT_FIELD_FIELD, AUTO_CONFIRM_FIELD, PLAN_STEP_EDIT_ERROR_FIELD,
+        SHARE_INSTAGRAM_TALENTS_FIELD, SHARE_INSTAGRAM_RECIPIENT_FIELD,
     ],
     executor=_share_executor,
     extract_fields=_extract_share_or_send_fields,
@@ -8155,6 +8869,22 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
     # total silence, never even "I didn't understand." _looks_like_
     # share_attempt is deliberately narrow (see its own docstring) so
     # ordinary chatter is never swept up here.
+    # SHARE Instagram Link (Production fix, 2026-09-09) — a bare
+    # Instagram/Insta/IG mention with no "share"/"send" verb at all
+    # ("instagram Anusha to Raj") never matches _looks_like_share_
+    # attempt below (that check requires the word "share", or "send"
+    # together with a content signal) — the Instagram signal word is
+    # decisive on its own here too, exactly like "share" already is,
+    # routed straight into the canonical Instagram near-miss guidance
+    # (Part 14) rather than the generic SHARE one.
+    if _INSTAGRAM_SIGNAL_RE.search(stripped):
+        return SHARE_INTENT, {
+            SHARE_ROUTE_FIELD.key: "instagram",
+            "recipient_query": stripped,
+            SHARE_INSTAGRAM_TALENTS_FIELD.key: _SHARE_INSTAGRAM_UNPARSEABLE_MARKER,
+            SHARE_INSTAGRAM_RECIPIENT_FIELD.key: _SHARE_INSTAGRAM_UNPARSEABLE_MARKER,
+        }
+
     if _looks_like_share_attempt(stripped):
         return SHARE_INTENT, {
             "project_query": _SHARE_NEAR_MISS_MARKER,

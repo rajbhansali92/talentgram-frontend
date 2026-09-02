@@ -3305,6 +3305,19 @@ async def test_change_template_blocked_in_custom_message_mode():
 # ---------------------------------------------------------------------------
 
 async def test_instagram_profile_found_sends_clickable_link():
+    """SHARE Instagram Link (Production fix, 2026-09-09) — this scenario
+    (and every other test below through test_instagram_subject_
+    ambiguous_disambiguates_and_resumes) now flows through the new
+    canonical SHARE Instagram engine (casting_pipeline.py's
+    SHARE_ROUTE_FIELD=="instagram" content_type) — the OLD "Instagram
+    Profile Send" mode (_extract_instagram_fields/_resolve_instagram_
+    target/_format_instagram_send_body) this test used to exercise end
+    to end is no longer reachable through normal dispatch (see
+    casting_pipeline.py's _handoff_share_route docstring); its own code
+    is left in place, untouched, and still unit-tested directly above
+    (test_detect_send_mode_instagram_various_phrasings etc.) — only this
+    end-to-end assertion shape needed updating to the new confirmation/
+    message format."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
@@ -3312,7 +3325,6 @@ async def test_instagram_profile_found_sends_clickable_link():
     raj = f"Raj{uuid.uuid4().hex[:6]}"
     t1 = await _seed_talent(pankuri, phone="917000250001", instagram_handle="pankuri.official")
     t2 = await _seed_talent(raj, phone="917000250002")
-    batch_id = None
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
@@ -3320,29 +3332,31 @@ async def test_instagram_profile_found_sends_clickable_link():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "INSTAGRAM PROFILE" in r.reply
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
         assert pankuri in r.reply
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="1",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Sent." in r2.reply
-        batch_id = r2.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        assert len(jobs) == 1
-        body = jobs[0]["message_body"]
+        assert "Shared." in r2.reply, r2.reply
+        job = await db.whatsapp_jobs.find_one({"destination": "917000250002"}, sort=[("created_at", -1)])
+        assert job is not None
+        body = job["message_body"]
         assert "https://instagram.com/pankuri.official" in body
         assert pankuri in body
         assert "not available" not in body
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
+        await db.whatsapp_jobs.delete_many({"destination": "917000250002"})
         await _cleanup(phone, talent_ids=[t1, t2])
         await _restore_config(original)
 
 
 async def test_instagram_profile_missing_shows_not_available():
+    """New canonical behavior (Production fix, 2026-09-09, Part 7) —
+    a missing Instagram link is now a hard stop, never a "not available"
+    placeholder inside a sent message: the confirmation itself refuses,
+    with an instructional error, and NOTHING is sent."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
@@ -3350,7 +3364,11 @@ async def test_instagram_profile_missing_shows_not_available():
     raj = f"Raj{uuid.uuid4().hex[:6]}"
     t1 = await _seed_talent(pankuri, phone="917000260001")  # no instagram_handle
     t2 = await _seed_talent(raj, phone="917000260002")
-    batch_id = None
+    # This fixed destination number is reused across many other,
+    # unrelated tests over this file's history — count jobs BEFORE this
+    # turn so the assertion below checks "nothing NEW was queued", not
+    # "nothing has ever existed at this number".
+    before_count = await db.whatsapp_jobs.count_documents({"destination": "917000260002"})
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
@@ -3358,25 +3376,22 @@ async def test_instagram_profile_missing_shows_not_available():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "Sent." in r2.reply
-        batch_id = r2.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        body = jobs[0]["message_body"]
-        assert "Instagram profile not available." in body
-        assert "https://instagram.com" not in body
+        assert f"I couldn't find an Instagram link for {pankuri}." in r.reply, r.reply
+        assert "Nothing has been sent." in r.reply, r.reply
+        after_count = await db.whatsapp_jobs.count_documents({"destination": "917000260002"})
+        assert after_count == before_count, "nothing new should have been queued"
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
         await _cleanup(phone, talent_ids=[t1, t2])
         await _restore_config(original)
 
 
 async def test_instagram_profile_multiple_subjects_numbered():
+    """New canonical grammar (Part 2/3, 2026-09-09) — comma, not a
+    newline list, separates multiple talents; a message with an INCOMPLETE
+    set (one missing a link) is refused outright (Part 7) rather than
+    silently sending a partial "not available" placeholder — tested with
+    all three having real links instead, verifying the full numbered
+    "N - Name - URL" body with a blank line between entries."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
@@ -3385,71 +3400,76 @@ async def test_instagram_profile_multiple_subjects_numbered():
     karan = f"Karan{uuid.uuid4().hex[:6]}"
     raj = f"Raj{uuid.uuid4().hex[:6]}"
     t1 = await _seed_talent(pankuri, phone="917000270001", instagram_handle="pankuri.style")
-    t2 = await _seed_talent(aditi, phone="917000270002")  # missing handle
+    t2 = await _seed_talent(aditi, phone="917000270002", instagram_handle="aditi.style")
     t3 = await _seed_talent(karan, phone="917000270003", instagram_handle="@karan_official")
     t4 = await _seed_talent(raj, phone="917000270004")
-    batch_id = None
     try:
-        text = f"send instagram links of\n{pankuri}\n{aditi}\n{karan}\nto {raj}"
+        text = f"send instagram links of {pankuri}, {aditi}, {karan} to {raj}"
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone, text=text,
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        # One RECIPIENT (Raj) receiving all 3 subjects' profiles in a
-        # single message — subject count and recipient count are distinct.
-        assert "1 Phone Number" in r.reply
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
         assert pankuri in r.reply and aditi in r.reply and karan in r.reply
+        assert f"1 - {pankuri}" in r.reply and f"2 - {aditi}" in r.reply and f"3 - {karan}" in r.reply
+        assert "\n\n2 -" in r.reply and "\n\n3 -" in r.reply
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="1",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Sent." in r2.reply
-        batch_id = r2.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        assert len(jobs) == 1
-        body = jobs[0]["message_body"]
-        assert "1." in body and "2." in body and "3." in body
+        assert "Shared." in r2.reply, r2.reply
+        job = await db.whatsapp_jobs.find_one({"destination": "917000270004"}, sort=[("created_at", -1)])
+        assert job is not None
+        body = job["message_body"]
+        assert "1 -" in body and "2 -" in body and "3 -" in body
+        assert "\n\n2 -" in body and "\n\n3 -" in body
         assert "https://instagram.com/pankuri.style" in body
+        assert "https://instagram.com/aditi.style" in body
         assert "https://instagram.com/karan_official" in body
-        assert "Instagram profile not available." in body
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
+        await db.whatsapp_jobs.delete_many({"destination": "917000270004"})
         await _cleanup(phone, talent_ids=[t1, t2, t3, t4])
         await _restore_config(original)
 
 
-async def test_instagram_profile_no_recipient_replies_inline_no_batch():
+async def test_instagram_profile_no_recipient_asks_for_recipient():
+    """New canonical behavior (Part 15, 2026-09-09) — "X's Instagram"
+    with no recipient no longer answers inline; it asks for the missing
+    WhatsApp recipient with the exact worked example from the spec,
+    which the admin then retypes as a complete command (a fresh trigger
+    always restarts, exactly as instructed) rather than leaving a
+    guessable "just reply with the recipient" state undocumented by the
+    spec."""
     group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
     phone = _phone()
     original = await _use_test_config(group, phone)
     pankuri = f"Pankuri{uuid.uuid4().hex[:6]}"
+    raj = f"Raj{uuid.uuid4().hex[:6]}"
     t1 = await _seed_talent(pankuri, phone="917000280001", instagram_handle="pankuri.official")
+    t2 = await _seed_talent(raj, phone="917000280002")
     before_count = await db.whatsapp_batches.count_documents({})
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
-            # "send", not "share" (Production fix, 2026-09-05) — see
-            # SEND_VERBS's own comment in whatsapp_campaign_agent.py.
             text=f"send {pankuri}'s instagram",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "https://instagram.com/pankuri.official" in r.reply
-        assert pankuri in r.reply
-        # No confirmation card, no Approve/Cancel footer, no batch created —
-        # this was answered inline, not sent to a third party.
-        assert "Reply" not in r.reply or "Approve" not in r.reply
+        assert "I found the talent, but I still need the WhatsApp recipient." in r.reply, r.reply
         after_count = await db.whatsapp_batches.count_documents({})
         assert after_count == before_count
 
-        # The conversation must not be left open expecting an "Approve".
-        conv = await db.whatsapp_conversations.find_one({"agent_id": AGENT_ID, "phone": phone})
-        assert conv is None
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send instagram link of {pankuri} to {raj}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "You are about to SHARE Instagram links:" in r2.reply, r2.reply
+        assert pankuri in r2.reply
     finally:
-        await _cleanup(phone, talent_ids=[t1])
+        await _cleanup(phone, talent_ids=[t1, t2])
         await _restore_config(original)
 
 
@@ -3462,7 +3482,6 @@ async def test_instagram_subject_ambiguous_disambiguates_and_resumes():
     t_sharma = await _seed_talent(f"{rahul} Sharma", phone="917000290001", instagram_handle="rahul.sharma")
     t_verma = await _seed_talent(f"{rahul} Verma", phone="917000290002", instagram_handle="rahul.verma")
     t_raj = await _seed_talent(raj, phone="917000290003")
-    batch_id = None
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
@@ -3470,7 +3489,7 @@ async def test_instagram_subject_ambiguous_disambiguates_and_resumes():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "I found multiple talents." in r.reply
+        assert "I found multiple matching talents" in r.reply, r.reply
         assert f"{rahul} Sharma" in r.reply and f"{rahul} Verma" in r.reply
 
         r2 = await handle_inbound_message(
@@ -3479,20 +3498,18 @@ async def test_instagram_subject_ambiguous_disambiguates_and_resumes():
         )
         assert r2.handled
         assert f"{rahul} Sharma" in r2.reply
-        assert "INSTAGRAM PROFILE" in r2.reply
+        assert "You are about to SHARE Instagram links:" in r2.reply, r2.reply
 
         r3 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="1",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Sent." in r3.reply
-        batch_id = r3.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        assert len(jobs) == 1
-        assert "https://instagram.com/rahul.sharma" in jobs[0]["message_body"]
+        assert "Shared." in r3.reply, r3.reply
+        job = await db.whatsapp_jobs.find_one({"destination": "917000290003"}, sort=[("created_at", -1)])
+        assert job is not None
+        assert "https://instagram.com/rahul.sharma" in job["message_body"]
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
+        await db.whatsapp_jobs.delete_many({"destination": "917000290003"})
         await _cleanup(phone, talent_ids=[t_sharma, t_verma, t_raj])
         await _restore_config(original)
 
@@ -3707,43 +3724,17 @@ async def test_instagram_fuzzy_typo_resolves():
         await _restore_config(original)
 
 
-async def test_instagram_multiple_recipients():
-    """"multiple recipients" — sending the SAME subject's Instagram to
-    more than one person."""
-    group = f"Test WA Campaign {uuid.uuid4().hex[:6]}"
-    phone = _phone()
-    original = await _use_test_config(group, phone)
-    pankuri = f"Pankuri{uuid.uuid4().hex[:6]}"
-    raj = f"Raj{uuid.uuid4().hex[:6]}"
-    aman = f"Aman{uuid.uuid4().hex[:6]}"
-    t1 = await _seed_talent(pankuri, phone="917000350001", instagram_handle="pankuri.g")
-    t2 = await _seed_talent(raj, phone="917000350002")
-    t3 = await _seed_talent(aman, phone="917000350003")
-    batch_id = None
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Send instagram profile of {pankuri} to {raj} and {aman}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r.handled, r.reply
-        assert "2 Phone Numbers" in r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "Sent." in r2.reply
-        batch_id = r2.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        assert len(jobs) == 2
-        for j in jobs:
-            assert "https://instagram.com/pankuri.g" in j["message_body"]
-    finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
-        await _cleanup(phone, talent_ids=[t1, t2, t3])
-        await _restore_config(original)
+# test_instagram_multiple_recipients removed (Production fix, 2026-09-09)
+# — "sending one talent's Instagram to more than one person" is outside
+# the new canonical SHARE Instagram engine's explicit scope ("1+ talents
+# → exactly 1 recipient" — see casting_pipeline.py's SHARE Instagram
+# Link section comment and the master spec's own Part 1). The OLD
+# Instagram Profile Send mode's multi-recipient capability is left
+# untouched and still unit-tested directly (its code is unreachable
+# through normal dispatch now, but not deleted — see _handoff_share_
+# route's docstring), so nothing about that underlying mechanism was
+# actually removed, only this end-to-end assertion of a scope the new
+# command was never asked to support.
 
 
 async def test_instagram_recipient_typo_resolves():
@@ -5320,7 +5311,6 @@ async def test_instagram_recipient_ambiguous_crm_contact_shows_full_list_and_res
     subject_talent = await _seed_talent(f"Bella {tag}", instagram_handle="bella_official")
     c1 = await _seed_crm_client(f"Rohan Mehta {tag}", "917000400080", "Casting Director")
     c2 = await _seed_crm_client(f"Rohan Sharma {tag}", "917000400081", "Casting Director")
-    batch_id = None
     try:
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
@@ -5328,7 +5318,7 @@ async def test_instagram_recipient_ambiguous_crm_contact_shows_full_list_and_res
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "I found multiple" in r.reply
+        assert "I found multiple WhatsApp matches" in r.reply, r.reply
         assert f"Rohan Mehta {tag}" in r.reply
         assert f"Rohan Sharma {tag}" in r.reply
 
@@ -5337,19 +5327,18 @@ async def test_instagram_recipient_ambiguous_crm_contact_shows_full_list_and_res
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r2.handled, r2.reply
-        assert "1 Approve" in r2.reply
+        assert "You are about to SHARE Instagram links:" in r2.reply, r2.reply
+        assert f"Rohan Mehta {tag}" in r2.reply
 
         r3 = await handle_inbound_message(
             group_name=group, sender_phone=phone, text="1",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "Sent." in r3.reply
-        batch_id = r3.reply.split("Batch ID:")[1].strip()
-        jobs = await db.whatsapp_jobs.find({"batch_id": batch_id}).to_list(10)
-        assert jobs[0]["destination"] == "917000400080"
+        assert "Shared." in r3.reply, r3.reply
+        job = await db.whatsapp_jobs.find_one({"destination": "917000400080"}, sort=[("created_at", -1)])
+        assert job is not None
     finally:
-        if batch_id:
-            await _cleanup_batch(batch_id)
+        await db.whatsapp_jobs.delete_many({"destination": {"$in": ["917000400080", "917000400081"]}})
         await _cleanup(phone, talent_ids=[subject_talent], client_ids=[c1, c2])
         await _restore_config(original)
 

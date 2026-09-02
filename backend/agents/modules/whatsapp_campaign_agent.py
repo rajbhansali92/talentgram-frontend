@@ -101,6 +101,10 @@ from agents.modules.casting_pipeline import (
     # this SAME text, so HELP_TEXT below does too — never a second,
     # independently hand-typed manual that can drift out of sync.
     SHARE_HELP_EXAMPLES,
+    # SHARE Instagram Link (Production fix, 2026-09-09) — same single-
+    # source-of-truth pattern as SHARE_HELP_EXAMPLES above, for the
+    # Instagram content_type's own canonical examples.
+    SHARE_INSTAGRAM_HELP_EXAMPLES,
     # SHARE ownership/routing (Production fix, 2026-09-05) — the real,
     # already-production-ready SHARE implementation (templates, custom
     # messages, pipeline-stage targeting, ambiguity/edit/cancel, the
@@ -3854,10 +3858,10 @@ HELP_TEXT = (
     "in whatever order reads naturally.\n\n"
     "Examples:\n\n"
     f"{SHARE_HELP_EXAMPLES}\n\n"
-    "Also works with multiple projects and a custom message together, "
-    "and with Anusha Sharma's Instagram profile:\n"
-    "Share the template for Hinge, L'Oreal with Anusha Sharma, Riya Sharma\n"
-    "Share Anusha Sharma's Instagram profile with Raj\n\n"
+    "Also works with multiple projects and a custom message together:\n"
+    "Share the template for Hinge, L'Oreal with Anusha Sharma, Riya Sharma\n\n"
+    "To share a talent's own Instagram link instead of a template/"
+    "message, see \"SHARE INSTAGRAM LINK\" below.\n\n"
     "IMPORTANT NOTES:\n"
     "• Commas separate multiple projects/talents — only a comma OUTSIDE "
     "a quoted message has that meaning.\n"
@@ -3888,6 +3892,19 @@ HELP_TEXT = (
     "• If your SHARE command is missing something or I can't quite "
     "parse it, I'll point you back to these same examples rather than "
     "just saying I didn't understand.\n\n"
+    "SHARE INSTAGRAM LINK\n"
+    "────────────────────\n\n"
+    "WHAT IT DOES:\n"
+    "Shares the Instagram link of one or more talents with one WhatsApp "
+    "recipient.\n\n"
+    "HOW TO WRITE IT:\n"
+    "Share Instagram link of <talent(s)> to <recipient>\n\n"
+    "Examples:\n\n"
+    f"{SHARE_INSTAGRAM_HELP_EXAMPLES}\n\n"
+    "Multiple talents are separated with commas.\n\n"
+    "The recipient can be a WhatsApp name, WhatsApp group, "
+    "project-associated WhatsApp group, or WhatsApp number.\n\n"
+    "Nothing is sent until you approve the confirmation.\n\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "3. SEND\n"
     "━━━━━━━━━━━━━━━━━━\n\n"

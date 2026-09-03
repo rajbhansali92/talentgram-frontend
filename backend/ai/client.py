@@ -66,10 +66,15 @@ async def call_tool_json(
     """Single-shot structured extraction.
 
     Sends ``system`` + ``user`` and forces the model to answer by calling
-    one tool whose ``input_schema`` is ``input_schema``. Returns the tool
-    input dict — guaranteed to be a JSON object (schema validity is still
-    the caller's job; the model is strongly steered but the API only
-    guarantees well-formed JSON of the right shape when ``strict`` holds).
+    one tool (``tool_choice`` pinned to ``tool_name``). Returns the tool
+    input dict — always a JSON object; individual field validity is the
+    caller's job (``ai.casting_requirement.normalise_extraction`` /
+    ``ai.scout.normalise_criteria`` / ``ai.scout.assemble_result`` each
+    coerce, clamp, and drop bad values), so the request does NOT use
+    ``strict`` structured tool output: on the Messages API ``strict: true``
+    combined with a forced ``tool_choice`` is rejected 400
+    ``invalid_request_error``. Forced tool use alone still guarantees a
+    ``tool_use`` block whose input follows the schema.
     """
     client = _client()
     mdl = model or DEFAULT_MODEL
@@ -88,7 +93,6 @@ async def call_tool_json(
                 {
                     "name": tool_name,
                     "description": tool_description,
-                    "strict": True,
                     "input_schema": input_schema,
                 }
             ],
@@ -98,8 +102,16 @@ async def call_tool_json(
         # 401/403 → treat as an operator/config problem, not a bad-input problem.
         if exc.status_code in (401, 403):
             raise LLMUnavailable(f"LLM auth failed ({exc.status_code})") from exc
-        logger.warning("casting-desk LLM call failed: %s", exc)
-        raise LLMError(f"LLM call failed ({exc.status_code})") from exc
+        # Surface the provider's own error text (never contains the key) so a
+        # 4xx is diagnosable without shell access to the deploy logs.
+        detail = ""
+        try:
+            body = exc.response.json()
+            detail = (body.get("error") or {}).get("message") or ""
+        except Exception:
+            detail = (str(getattr(exc, "message", "")) or str(exc))[:300]
+        logger.warning("LLM call failed (%s): %s", exc.status_code, detail or exc)
+        raise LLMError(f"LLM call failed ({exc.status_code}): {detail}".rstrip(": ")) from exc
     except anthropic.APIConnectionError as exc:
         raise LLMError(f"LLM connection error: {exc}") from exc
     except anthropic.AnthropicError as exc:

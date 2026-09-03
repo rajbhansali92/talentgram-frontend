@@ -61,6 +61,84 @@ def _talent(tid, **f):
 
 
 # ===========================================================================
+# LLM request shape — the Anthropic-400 regression guard
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_call_tool_json_request_shape(monkeypatch):
+    """The Messages API rejects `strict: true` + a forced `tool_choice` with
+    400 invalid_request_error. This locks the request `call_tool_json` sends:
+    forced tool choice stays, the schema stays, `strict` must be ABSENT."""
+    from ai import client as llm
+
+    captured = {}
+
+    class _FakeMessages:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+            class _Block:
+                type = "tool_use"
+                name = kwargs["tool_choice"]["name"]
+                input = {"ok": True}
+
+            class _Resp:
+                content = [_Block()]
+                stop_reason = "tool_use"
+
+            return _Resp()
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(llm, "_client", lambda: _FakeClient())
+
+    out = await llm.call_tool_json(
+        system="sys", user="usr",
+        tool_name="emit_x", tool_description="desc",
+        input_schema={"type": "object", "additionalProperties": False, "properties": {}, "required": []},
+        model="claude-sonnet-5",
+    )
+    assert out == {"ok": True}
+
+    # forced tool choice is retained
+    assert captured["tool_choice"] == {"type": "tool", "name": "emit_x"}
+    tool = captured["tools"][0]
+    assert tool["name"] == "emit_x"
+    assert "input_schema" in tool and tool["input_schema"]["type"] == "object"
+    # the incompatible property must NOT be sent
+    assert "strict" not in tool
+    assert captured["model"] == "claude-sonnet-5"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_json_surfaces_provider_error_message(monkeypatch):
+    """A provider 4xx must carry its own message through so a bad request is
+    diagnosable without deploy-log access."""
+    import anthropic
+    import httpx2 as httpx
+    from ai import client as llm
+
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    resp = httpx.Response(400, request=req,
+                          json={"error": {"type": "invalid_request_error", "message": "some precise reason"}})
+    exc = anthropic.APIStatusError("bad request", response=resp, body=None)
+
+    class _FakeMessages:
+        async def create(self, **kwargs):
+            raise exc
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(llm, "_client", lambda: _FakeClient())
+    with pytest.raises(llm.LLMError) as ei:
+        await llm.call_tool_json(system="s", user="u", tool_name="t", tool_description="d",
+                                 input_schema={"type": "object", "additionalProperties": False, "properties": {}, "required": []})
+    assert "some precise reason" in str(ei.value)
+    assert "400" in str(ei.value)
+
+
+# ===========================================================================
 # Pure logic
 # ===========================================================================
 def test_candidate_query_gender_is_lenient_others_off_by_default():

@@ -9,6 +9,18 @@ resilience, idempotency, partial-failure resume, no pipeline-stage
 mutation, and independence from media_assignments/submission.media[].
 """
 import os
+# SEND's own pre-approval media preview (Production fix, 2026-09-03)
+# polls whatsapp_scan_requests for the worker's response — no real
+# worker runs during tests, so every confirmation-building test needs a
+# short bound rather than waiting out the 20s production default. Set
+# BEFORE the agents modules are imported, since these are read once as
+# module-level constants (same reasoning as test_casting_agent.py's own
+# RECIPIENT_SEARCH_* overrides — set redundantly here too, in case this
+# file is ever run standalone before that one has a chance to).
+os.environ.setdefault("SEND_PREVIEW_POLL_INTERVAL_SEC", "0.05")
+os.environ.setdefault("SEND_PREVIEW_MAX_WAIT_SEC", "1.5")
+
+import asyncio
 import sys
 import uuid
 
@@ -177,6 +189,270 @@ async def test_send_command_duplicate_talent_resolves_via_submission_email_not_n
 
 
 # ---------------------------------------------------------------------------
+# SEND Path B — WhatsApp phone-number source (master prompt Part 3/25.4):
+# a talent whose only WhatsApp presence is a direct number, no group. Both
+# sources must resolve to the same talent/project correctly; a talent with
+# NEITHER must refuse cleanly, never guess.
+# ---------------------------------------------------------------------------
+async def test_send_phone_source_used_when_no_group_configured():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Ahana PhoneSrc {tag}"
+    email = f"ahana.phonesrc.{tag}@example.com"
+    project_id = await _seed_project(f"Google PhoneSrc {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = f"test-ma-tal-{uuid.uuid4().hex[:8]}"
+    await db.talents.insert_one({
+        "id": talent_id, "name": name, "tags": [], "notes": "",
+        "phone": "919990000299", "whatsapp_group_name": "",  # NO group — phone-only source
+        "email": email, "normalized_email": email.strip().lower(),
+    })
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600022",
+            text=f"send - {name} - Google PhoneSrc {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "1 → Approve" in r.reply, r.reply
+        assert "Source:" in r.reply, r.reply
+        assert "919990000299 (WhatsApp number)" in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600022", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Approved" in r.reply, r.reply
+
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"project_id": project_id})
+        assert req is not None
+        assert req["talent_id"] == talent_id
+        assert req["source_type"] == "phone", req
+        assert req["group_name"] == "919990000299", req
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"project_id": project_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_group_source_still_wins_over_phone_when_both_configured():
+    """Group is checked first and wins whenever configured — phone is a
+    fallback, never a second, competing source of truth."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Ahana BothSrc {tag}"
+    email = f"ahana.bothsrc.{tag}@example.com"
+    project_id = await _seed_project(f"Google BothSrc {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = f"test-ma-tal-{uuid.uuid4().hex[:8]}"
+    await db.talents.insert_one({
+        "id": talent_id, "name": name, "tags": [], "notes": "",
+        "phone": "919990000298", "whatsapp_group_name": f"{name} x Talentgram",
+        "email": email, "normalized_email": email.strip().lower(),
+    })
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600023",
+            text=f"send - {name} - Google BothSrc {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert f"{name} x Talentgram (WhatsApp group)" in r.reply, r.reply
+        assert "919990000298" not in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600023", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"project_id": project_id})
+        assert req["source_type"] == "group", req
+        assert req["group_name"] == f"{name} x Talentgram", req
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"project_id": project_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_no_group_and_no_phone_refuses_cleanly():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Ahana NoSrc {tag}"
+    project_id = await _seed_project(f"Google NoSrc {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name="", email="")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600024",
+            text=f"send - {name} - Google NoSrc {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "1 → Approve" not in r.reply, r.reply
+        assert "no whatsapp group or phone number configured" in r.reply.lower(), r.reply
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+# ---------------------------------------------------------------------------
+# SEND confirmation media preview (master prompt Part 10/11): the admin
+# must see EXACTLY which marked media will be forwarded before approving —
+# never a bare count. Simulates the real worker's scan-result report AND
+# manually advances the backend orchestrator (no background loop runs
+# during tests), mirroring _process_scan_done's preview_only branch.
+# ---------------------------------------------------------------------------
+async def _simulate_send_preview_worker_and_orchestrator(talent_id: str, project_id: str, candidates: list, *, timeout: float = 3.0) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({
+            "talent_id": talent_id, "project_id": project_id,
+            "preview_only": True, "status": ma.SCAN_STATUS_PENDING,
+        })
+        if doc:
+            await db[ma.SCAN_REQUESTS_COLLECTION].update_one(
+                {"id": doc["id"]}, {"$set": {"candidates": candidates, "status": ma.SCAN_STATUS_DONE}},
+            )
+            processed = await orch._process_scan_done()
+            assert processed, "orchestrator did not pick up the simulated preview scan request"
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(
+        f"no pending preview scan request appeared for talent_id={talent_id!r} project_id={project_id!r}"
+    )
+
+
+def _with_simulated_send_preview(talent_id: str, project_id: str, candidates: list):
+    return asyncio.create_task(_simulate_send_preview_worker_and_orchestrator(talent_id, project_id, candidates))
+
+
+async def test_send_confirmation_shows_marked_media_individually_not_a_bare_count():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Ahana Preview {tag}"
+    email = f"ahana.preview.{tag}@example.com"
+    project_label = f"Google Preview {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        worker = _with_simulated_send_preview(talent_id, project_id, [
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="prev-take1"),
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} intro", source_message_id="prev-intro", media_type="video"),
+        ])
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600025",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert r.handled, r.reply
+        assert "Marked media:" in r.reply, r.reply
+        assert "1 - Take 1" in r.reply, r.reply
+        assert "2 - Introduction" in r.reply, r.reply
+        assert "3 media files" not in r.reply and "media files" not in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600025", text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_confirmation_no_marked_media_stops_before_approval():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Ahana NoMark {tag}"
+    email = f"ahana.nomark.{tag}@example.com"
+    project_label = f"Google NoMark {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        worker = _with_simulated_send_preview(talent_id, project_id, [])  # genuinely nothing marked
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600026",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert r.handled, r.reply
+        assert "1 → Approve" not in r.reply, r.reply
+        assert "no marked media" in r.reply.lower() or "no @gunwanti" in r.reply.lower(), r.reply
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_confirmation_preview_cached_across_edit_turn_no_second_scan():
+    """A form-field edit turn ("Age = 24") must NOT re-trigger a fresh
+    WhatsApp scan — the preview is cached on the SAME approval-draft row
+    (media_send.get_cached_send_preview) and reused, so an edit turn is
+    fast (DB-only), never a second multi-second scan round trip."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Ahana EditCache {tag}"
+    email = f"ahana.editcache.{tag}@example.com"
+    project_label = f"Google EditCache {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        worker = _with_simulated_send_preview(talent_id, project_id, [
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="cache-take1"),
+        ])
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600027",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert "1 - Take 1" in r.reply, r.reply
+
+        # Enter the edit state, then submit the field edit — no second
+        # scan_request should ever be created by either turn below — if
+        # one were, this find_one would race a NEW pending preview doc
+        # that nothing here services, and _build_send_confirmation would
+        # degrade to the "couldn't verify" note instead of showing the
+        # cached "1 - Take 1" line again.
+        r_edit_prompt = await handle_inbound_message(
+            group_name=group, sender_phone="917000600027", text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r_edit_prompt.handled, r_edit_prompt.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600027", text="Age = 24",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert "1 - Take 1" in r2.reply, r2.reply
+        assert "couldn't verify" not in r2.reply.lower(), r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600027", text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator-level tests — hand-inserted whatsapp_scan_requests docs,
 # exactly mirroring test_media_assignment.py's own orchestrator test style
 # (no real WhatsApp Worker needed).
@@ -271,6 +547,128 @@ async def test_send_orchestrator_project_isolation():
 
 
 # ---------------------------------------------------------------------------
+# Long-conversation backtest (master prompt Part 4/14/25.5): the correct
+# marked media must still be found no matter how much irrelevant traffic
+# — other people's marks, marks for other projects — sits around it. Never
+# rely on "latest", "last N", or scan-window position; identification is
+# by @Gunwanti-mention + project-text matching alone, independent of how
+# many OTHER candidates are in the list.
+# ---------------------------------------------------------------------------
+async def test_send_orchestrator_long_conversation_100_plus_irrelevant_marks_still_finds_correct_media():
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    other_project_id, other_project_label = f"p-other-{tag}", f"Google Bride Film {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+
+    # 120 decoys: some mention someone ELSE entirely (never Gunwanti —
+    # validate_candidates' own LID filter must exclude these), some
+    # mention Gunwanti but mark the OTHER project (the project-text
+    # filter must exclude these too) — genuinely irrelevant traffic, the
+    # exact shape a long, busy talent conversation produces.
+    decoys = []
+    for i in range(60):
+        decoys.append(_mark(
+            mention_lid=f"99999{i:05d}@lid", mark_text=f"mark {project_label} random {i}",
+            source_message_id=f"decoy-other-mention-{i}",
+        ))
+    for i in range(60):
+        decoys.append(_mark(
+            mention_lid=GUNWANTI_LID, mark_text=f"mark {other_project_label} random {i}",
+            source_message_id=f"decoy-other-project-{i}",
+        ))
+    assert len(decoys) == 120
+
+    genuine = [
+        _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="src-take1"),
+        _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} intro", source_message_id="src-intro", media_type="video"),
+    ]
+    # Interleaved, not appended at a convenient position — the genuine
+    # marks sit BOTH before and after decoys, proving position/order is
+    # never what identifies them.
+    candidates = decoys[:37] + [genuine[0]] + decoys[37:83] + [genuine[1]] + decoys[83:]
+    assert len(candidates) == 122
+
+    req_id = await _insert_send_scan_done(
+        talent_id=talent_id, talent_label=talent_label, project_id=project_id, project_label=project_label,
+        group_name=f"{talent_label} x Talentgram", destination_group=DESTINATION_GROUP,
+        candidates=candidates,
+    )
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing", "slug": project_id})
+    await db.projects.insert_one({"id": other_project_id, "brand_name": other_project_label, "status": "ongoing", "slug": other_project_id})
+    try:
+        assert await orch._process_scan_done()
+        mid = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert mid["mode"] == "send"
+        targets = {(t["media_role"], t["take_number"], t["source_message_id"]) for t in mid["send_targets"]}
+        assert targets == {("take", 1, "src-take1"), ("intro", None, "src-intro")}, targets
+        assert len(mid["send_targets"]) == 2, "exactly the 2 genuine marks among 120 decoys, nothing more"
+    finally:
+        await db.projects.delete_many({"id": {"$in": [project_id, other_project_id]}})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+# ---------------------------------------------------------------------------
+# Multi-project mark test (master prompt Part 15): the SAME talent has
+# marks for THREE different projects. SEND for each project independently
+# must select ONLY that project's own marked media — zero cross-project
+# contamination in either direction.
+# ---------------------------------------------------------------------------
+async def test_send_orchestrator_three_projects_same_talent_zero_cross_contamination():
+    tag = uuid.uuid4().hex[:6]
+    talent_id, talent_label = f"t-{tag}", f"Ahana {tag}"
+    projects = [
+        (f"p-a-{tag}", f"Google A {tag}"),
+        (f"p-b-{tag}", f"Google B {tag}"),
+        (f"p-c-{tag}", f"Google C {tag}"),
+    ]
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    for pid, label in projects:
+        await db.projects.insert_one({"id": pid, "brand_name": label, "status": "ongoing", "slug": pid})
+
+    # ALL three projects' marks exist in the SAME talent conversation —
+    # this is the whole point of the test: one shared candidate pool,
+    # three independent SEND requests, each must pick only its own.
+    all_marks = []
+    for pid, label in projects:
+        all_marks.append(_mark(
+            mention_lid=GUNWANTI_LID, mark_text=f"mark {label} take 1", source_message_id=f"src-{pid}-take1",
+        ))
+
+    req_ids = []
+    try:
+        for pid, label in projects:
+            req_id = await _insert_send_scan_done(
+                talent_id=talent_id, talent_label=talent_label, project_id=pid, project_label=label,
+                group_name=f"{talent_label} x Talentgram", destination_group=DESTINATION_GROUP,
+                candidates=list(all_marks),  # the FULL shared pool, every time
+            )
+            req_ids.append(req_id)
+
+        results = {}
+        for _ in range(len(projects)):
+            assert await orch._process_scan_done()
+        for req_id, (pid, label) in zip(req_ids, projects):
+            mid = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+            assert mid["mode"] == "send", (label, mid)
+            results[pid] = {t["source_message_id"] for t in mid["send_targets"]}
+
+        assert results[projects[0][0]] == {f"src-{projects[0][0]}-take1"}, results
+        assert results[projects[1][0]] == {f"src-{projects[1][0]}-take1"}, results
+        assert results[projects[2][0]] == {f"src-{projects[2][0]}-take1"}, results
+        # Explicit cross-contamination check: no project's targets contain
+        # ANY other project's source_message_id.
+        for pid, _ in projects:
+            others = {f"src-{other_pid}-take1" for other_pid, _ in projects if other_pid != pid}
+            assert not (results[pid] & others), (pid, results[pid], others)
+    finally:
+        await db.projects.delete_many({"id": {"$in": [p[0] for p in projects]}})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": req_ids}})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+# ---------------------------------------------------------------------------
 # 10: successful SEND is idempotent — a second scan with the same mark
 # already `sent` must report ALREADY SENT, never queue a re-send.
 # ---------------------------------------------------------------------------
@@ -312,6 +710,63 @@ async def test_send_orchestrator_idempotent_no_resend():
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
         await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
         await db[ms.COMPLETION_MARKERS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+# ---------------------------------------------------------------------------
+# Double-approval protection (master prompt Part 20/21): "Approve SEND
+# then immediately repeat SEND" — a second, independent "1" reply must
+# NEVER dispatch a second scan_request for the same operation. This is
+# the Concurrent Task Engine's own STATUS_EXECUTING transition
+# (agents/tasks.py / agents/dispatcher.py's _advance_task) — set BEFORE
+# the executor runs and the task cleared immediately after — exercised
+# here at the real dispatch level, not assumed.
+# ---------------------------------------------------------------------------
+async def test_send_repeated_approve_reply_never_creates_a_second_scan_request():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Ahana DoubleApprove {tag}"
+    email = f"ahana.doubleapprove.{tag}@example.com"
+    project_label = f"Google DoubleApprove {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600028",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "1 → Approve" in r.reply, r.reply
+
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600028", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Approved" in r1.reply, r1.reply
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"project_id": project_id}) == 1
+
+        # The SAME reply, sent again as a genuinely separate inbound
+        # message (the real-world "admin double-taps 1" / impatient
+        # resend scenario) — by the time this arrives, the task engine
+        # has already cleared the confirming task (STATUS_EXECUTING ->
+        # cleared once _send_executor returned), so this must be treated
+        # as "nothing pending", never as a second approval.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600028", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Approved" not in (r2.reply or ""), (
+            f"a second, independent '1' must never re-trigger the SEND executor: {r2.reply!r}"
+        )
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"project_id": project_id}) == 1, (
+            "exactly one scan_request must exist after two '1' replies — never a duplicate"
+        )
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"project_id": project_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 # ---------------------------------------------------------------------------
@@ -1288,7 +1743,7 @@ async def test_approval_lifecycle_test_a_no_send_approval_means_nothing_sent():
         assert r.handled, r.reply
         assert "SEND FORM PREVIEW" in r.reply, r.reply
         assert "Nothing Has Been Sent" in r.reply, r.reply
-        assert f"Destination: {DESTINATION_GROUP}" in r.reply, r.reply
+        assert f"Destination:\n{DESTINATION_GROUP}" in r.reply, r.reply
         # No reply to the preview yet -> ZERO outbound messages of any kind:
         # no scan request ever dispatched (mode never reaches "send"), and
         # none of SEND's own idempotency records exist either.

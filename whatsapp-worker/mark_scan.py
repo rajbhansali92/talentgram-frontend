@@ -572,11 +572,27 @@ async def _run_resolve_recipient(page, req: Dict[str, Any]) -> Dict[str, Any]:
     return {"candidates": candidates, "error": None}
 
 
+async def _open_source_chat(page, source_type: str, group_name: str) -> str:
+    """Dispatches to the SAME 'OPENED'/'NOT_FOUND'/'SEARCH_FAILED'
+    contract regardless of source — a named group/contact (sidebar
+    search) or a phone number (wa.me deep-link, SEND Path B, Production
+    fix 2026-09-03). `group_name` holds either a real group/contact name
+    or, when source_type=="phone", the phone digits — same field,
+    reused, never a second schema. Defaults to "group" so every existing
+    request in flight (which never carries source_type at all — UPLOAD
+    never sets it, and every pre-existing SEND request predates this
+    field) is completely unaffected."""
+    if source_type == "phone":
+        return await sender._open_chat_by_phone(page, group_name)
+    return await sender._open_group_chat(page, group_name)
+
+
 async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
     group_name = req["group_name"]
+    source_type = req.get("source_type") or "group"
     max_messages = req.get("max_messages") or MAX_MESSAGES_SCANNED_DEFAULT
 
-    status = await sender._open_group_chat(page, group_name)
+    status = await _open_source_chat(page, source_type, group_name)
     if status != "OPENED":
         return {"error": f"Could not open WhatsApp group {group_name!r} (status={status})"}
 
@@ -7355,15 +7371,21 @@ async def _ensure_forward_dialog_closed(page) -> bool:
     return not (dump or {}).get("dialogFound")
 
 
-async def _send_one_target_native_forward(page, group_name: str, target: Dict[str, Any], item_label: str = "") -> Dict[str, Any]:
+async def _send_one_target_native_forward(
+    page, group_name: str, target: Dict[str, Any], item_label: str = "", source_type: str = "group",
+) -> Dict[str, Any]:
     """One SEND item end-to-end via native Forward — NEVER downloads
     media. Opens the exact marked source (re-resolved by identity),
     ensures the real Forward control is available (bounded close/reopen
     for video), clicks Forward, selects the destination group by exact
     unique match, enters an optional caption, and clicks the real Send
     control. `item_label` (e.g. "3/6") is currently unused but kept for
-    parity with _run_send's per-item logging/timeout bookkeeping."""
-    status = await sender._open_group_chat(page, group_name)
+    parity with _run_send's per-item logging/timeout bookkeeping.
+
+    `source_type` ("group" | "phone", SEND Path B, Production fix
+    2026-09-03) — see _open_source_chat; `group_name` holds the phone
+    digits when source_type=="phone"."""
+    status = await _open_source_chat(page, source_type, group_name)
     if status != "OPENED":
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"source group not open (status={status})"}
 
@@ -7496,13 +7518,14 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
         form_insert_index = len(send_targets)
     form_message = req.get("form_message")
     group_name = req["group_name"]
+    source_type = req.get("source_type") or "group"
 
     results: List[Dict[str, Any]] = []
     form_send_result: Optional[Dict[str, Any]] = None
     marker_result: Optional[Dict[str, Any]] = None
 
     if send_targets:
-        status = await sender._open_group_chat(page, group_name)
+        status = await _open_source_chat(page, source_type, group_name)
         if status != "OPENED":
             return {
                 "error": f"Could not open WhatsApp source group {group_name!r} (status={status})",
@@ -7522,7 +7545,10 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
 
         item_label = f"{i + 1}/{len(send_targets)}"
         try:
-            result = await asyncio.wait_for(_send_one_target_native_forward(page, group_name, target, item_label), timeout=PER_ITEM_SEND_TIMEOUT)
+            result = await asyncio.wait_for(
+                _send_one_target_native_forward(page, group_name, target, item_label, source_type=source_type),
+                timeout=PER_ITEM_SEND_TIMEOUT,
+            )
         except asyncio.TimeoutError:
             result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"timed out after {PER_ITEM_SEND_TIMEOUT}s"}
         except Exception as exc:

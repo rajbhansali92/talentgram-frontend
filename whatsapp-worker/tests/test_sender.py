@@ -30,6 +30,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://x")
 
 import pytest  # noqa: E402
 
+import mark_scan  # noqa: E402
 import sender  # noqa: E402
 
 
@@ -1259,6 +1260,164 @@ def test_open_group_chat_all_filter_absent_is_harmless():
 class _NoCountLocator:
     async def count(self):
         return 0
+
+
+# ---------------------------------------------------------------------------
+# SEND Path B — _open_chat_by_phone (Production fix, 2026-09-03): a talent
+# whose only WhatsApp presence is a direct number, no group. Opens via the
+# SAME proven wa.me deep-link navigation send_whatsapp_message's own
+# destination_type=="number" branch already uses for outbound sends —
+# tested here at the control-flow level (goto/wait_for_selector/dialog
+# handling), mirroring how that existing branch has never needed a full
+# DOM simulation either: Playwright's own goto/wait_for_selector are
+# well-proven primitives, what matters is this function's OWN branching.
+# ---------------------------------------------------------------------------
+
+class _FakePhonePage:
+    def __init__(self, *, timeout_on_wait=False, invalid_number_dialog=False, goto_raises=False):
+        self.timeout_on_wait = timeout_on_wait
+        self.invalid_number_dialog = invalid_number_dialog
+        self.goto_raises = goto_raises
+        self.goto_calls = []
+        self.clicked_ok = False
+
+    async def goto(self, url, wait_until=None):
+        self.goto_calls.append(url)
+        if self.goto_raises:
+            raise RuntimeError("navigation failed")
+
+    async def wait_for_selector(self, selector, timeout=None):
+        if self.timeout_on_wait:
+            raise sender.PlaywrightTimeoutError("timed out")
+        return object()
+
+    async def is_visible(self, selector):
+        if not self.invalid_number_dialog:
+            return False
+        return "invalid" in selector.lower() or "popup-controls-ok" in selector
+
+    async def click(self, selector, timeout=None):
+        if selector == '[data-testid="popup-controls-ok"]':
+            self.clicked_ok = True
+
+
+@contextlib.contextmanager
+def _phone_open_fakes(*, dismiss_ok=True, chat_ready_raises=False, verify_ready=(True, True, False, "")):
+    orig_dismiss = sender.dismiss_blocking_dialogs
+    orig_ready = sender._wait_for_chat_ready
+    orig_verify = sender._verify_chat_open
+
+    async def fake_dismiss(page, context, max_dialogs=3):
+        return dismiss_ok
+
+    async def fake_ready(page):
+        if chat_ready_raises:
+            raise RuntimeError("chat never became ready")
+
+    async def fake_verify(page, expected_name=None):
+        return verify_ready
+
+    sender.dismiss_blocking_dialogs = fake_dismiss
+    sender._wait_for_chat_ready = fake_ready
+    sender._verify_chat_open = fake_verify
+    try:
+        yield
+    finally:
+        sender.dismiss_blocking_dialogs = orig_dismiss
+        sender._wait_for_chat_ready = orig_ready
+        sender._verify_chat_open = orig_verify
+
+
+def test_open_chat_by_phone_success_returns_opened():
+    page = _FakePhonePage()
+    with _phone_open_fakes():
+        result = run(sender._open_chat_by_phone(page, "+91 99900 00203"))
+    assert result == "OPENED", result
+    # Digits-only in the wa.me URL, punctuation/spacing stripped.
+    assert page.goto_calls == ["https://web.whatsapp.com/send?phone=919990000203"], page.goto_calls
+
+
+def test_open_chat_by_phone_no_digits_never_navigates():
+    page = _FakePhonePage()
+    with _phone_open_fakes():
+        result = run(sender._open_chat_by_phone(page, "not-a-number"))
+    assert result == "SEARCH_FAILED", result
+    assert page.goto_calls == [], "must never navigate with no digits to search"
+
+
+def test_open_chat_by_phone_navigation_failure_is_search_failed():
+    page = _FakePhonePage(goto_raises=True)
+    with _phone_open_fakes():
+        result = run(sender._open_chat_by_phone(page, "919990000203"))
+    assert result == "SEARCH_FAILED", result
+
+
+def test_open_chat_by_phone_invalid_number_dialog_is_not_found():
+    page = _FakePhonePage(timeout_on_wait=True, invalid_number_dialog=True)
+    with _phone_open_fakes():
+        result = run(sender._open_chat_by_phone(page, "919990000203"))
+    assert result == "NOT_FOUND", result
+    assert page.clicked_ok is True, "must dismiss the invalid-number dialog"
+
+
+def test_open_chat_by_phone_generic_timeout_is_search_failed_not_not_found():
+    """A plain timeout with NO recognized invalid-number dialog is
+    retryable (SEARCH_FAILED), never the terminal NOT_FOUND — mirrors
+    _open_group_chat's own SEARCH_FAILED/NOT_FOUND distinction."""
+    page = _FakePhonePage(timeout_on_wait=True, invalid_number_dialog=False)
+    with _phone_open_fakes():
+        result = run(sender._open_chat_by_phone(page, "919990000203"))
+    assert result == "SEARCH_FAILED", result
+
+
+def test_open_chat_by_phone_chat_never_ready_is_search_failed():
+    page = _FakePhonePage()
+    with _phone_open_fakes(chat_ready_raises=True):
+        result = run(sender._open_chat_by_phone(page, "919990000203"))
+    assert result == "SEARCH_FAILED", result
+
+
+def test_open_chat_by_phone_unverified_after_open_is_search_failed():
+    """Chat loads and becomes 'ready' but the post-navigation header
+    verification never confirms it — never claim OPENED without that
+    positive confirmation, matching _open_group_chat's own "refuse to
+    claim OPENED" contract."""
+    page = _FakePhonePage()
+    with _phone_open_fakes(verify_ready=(False, False, False, "")):
+        result = run(sender._open_chat_by_phone(page, "919990000203"))
+    assert result == "SEARCH_FAILED", result
+
+
+def test_open_source_chat_dispatches_phone_vs_group():
+    """mark_scan.py's _open_source_chat (SEND Path B dispatch) must call
+    the phone opener ONLY for source_type=='phone', and the ordinary
+    group opener for 'group' AND for anything else/missing — defaulting
+    safely to the pre-existing behavior."""
+    calls = []
+
+    async def fake_group(page, group_name):
+        calls.append(("group", group_name))
+        return "OPENED"
+
+    async def fake_phone(page, phone):
+        calls.append(("phone", phone))
+        return "OPENED"
+
+    orig_group, orig_phone = sender._open_group_chat, sender._open_chat_by_phone
+    sender._open_group_chat, sender._open_chat_by_phone = fake_group, fake_phone
+    try:
+        result_group = run(mark_scan._open_source_chat(None, "group", "Talentgram Casting Test"))
+        result_phone = run(mark_scan._open_source_chat(None, "phone", "919990000203"))
+        result_default = run(mark_scan._open_source_chat(None, "", "Talentgram Casting Test"))
+    finally:
+        sender._open_group_chat, sender._open_chat_by_phone = orig_group, orig_phone
+
+    assert result_group == result_phone == result_default == "OPENED"
+    assert calls == [
+        ("group", "Talentgram Casting Test"),
+        ("phone", "919990000203"),
+        ("group", "Talentgram Casting Test"),
+    ], calls
 
 
 if __name__ == "__main__":

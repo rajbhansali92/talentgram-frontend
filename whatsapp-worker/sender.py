@@ -1731,6 +1731,76 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     return "OPENED"
 
 
+async def _open_chat_by_phone(page: Page, phone: str) -> str:
+    """SEND Path B (Production fix, 2026-09-03) — opens a talent's 1:1
+    WhatsApp conversation by phone number for the mark-scan SOURCE side
+    (mark_scan.py's _run_scan and _send_one_target_native_forward),
+    reusing the SAME proven wa.me deep-link navigation
+    send_whatsapp_message's own destination_type=="number" branch
+    already uses for OUTBOUND sends — not a parallel reimplementation,
+    the identical URL/selector/error-dialog handling.
+
+    Returns the SAME 'OPENED' / 'NOT_FOUND' / 'SEARCH_FAILED' contract
+    _open_group_chat already returns, so every caller can dispatch on
+    source_type and treat either opener identically.
+
+    Deliberately NO fast path: _open_group_chat's own fast path is safe
+    because it verifies the ALREADY-open chat's header TITLE against the
+    requested group name; a phone number has no such title to check
+    against (the header shows the contact's own display name, not the
+    digits), so skipping navigation on the assumption "some chat is
+    already open" could silently operate on the WRONG 1:1 conversation.
+    Every call re-navigates — slightly slower, never ambiguous."""
+    digits = "".join(filter(str.isdigit, phone or ""))
+    if not digits:
+        logger.warning("sender: _open_chat_by_phone called with no digits in %r", phone)
+        return "SEARCH_FAILED"
+    wa_url = f"https://web.whatsapp.com/send?phone={digits}"
+    logger.info("sender: (mark-scan source) navigating to number link: %s", wa_url)
+    try:
+        await page.goto(wa_url, wait_until="domcontentloaded")
+    except Exception:
+        logger.exception("sender: navigation to %s failed", wa_url)
+        return "SEARCH_FAILED"
+    if not await dismiss_blocking_dialogs(page, "phone-chat-open"):
+        return "SEARCH_FAILED"
+    try:
+        await page.wait_for_selector(SEL["msg_box"], timeout=45_000)
+    except PlaywrightTimeoutError:
+        dialog_exists = (
+            await page.is_visible("text=Phone number shared via url is invalid")
+            or await page.is_visible("text=Invalid phone number")
+            or await page.is_visible('[data-testid="popup-controls-ok"]')
+        )
+        if dialog_exists:
+            # A real, recognized "this number doesn't exist on WhatsApp"
+            # signal — terminal (matches _open_group_chat's own NOT_FOUND
+            # contract for a genuinely-absent group), never retried as if
+            # it might just be slow.
+            try:
+                await page.click('[data-testid="popup-controls-ok"]', timeout=3_000)
+            except Exception:
+                pass
+            logger.warning("sender: phone number %r reported invalid by WhatsApp", digits)
+            return "NOT_FOUND"
+        logger.warning("sender: timed out waiting for chat to load via %s", wa_url)
+        return "SEARCH_FAILED"
+    try:
+        await _wait_for_chat_ready(page)
+    except Exception as exc:
+        logger.warning("sender: chat not ready after phone navigation: %s", exc)
+        return "SEARCH_FAILED"
+    try:
+        conversation_ready, hdr_found, _, _ = await _verify_chat_open(page, None)
+    except Exception as exc:
+        logger.info("sender: post-navigation verify error for phone chat (advisory): %s", exc)
+        conversation_ready, hdr_found = False, False
+    if not (conversation_ready and hdr_found):
+        logger.warning("sender: phone chat opened but never verified ready — refusing to claim OPENED")
+        return "SEARCH_FAILED"
+    return "OPENED"
+
+
 async def search_whatsapp_chats(page: Page, query: str) -> Dict[str, Any]:
     """SHARE Instagram recipient resolution (Production fix, 2026-09-10)
     — a SEARCH-ONLY variant of _open_group_chat's own steps 1-5 (reset ->

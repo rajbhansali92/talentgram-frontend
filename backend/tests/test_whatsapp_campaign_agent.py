@@ -29,6 +29,12 @@ os.environ["MONGO_URL"] = os.environ.get("TEST_MONGO_URL", "mongodb://localhost:
 # same reasoning as test_casting_agent.py's own identical override.
 os.environ.setdefault("RECIPIENT_SEARCH_POLL_INTERVAL_SEC", "0.05")
 os.environ.setdefault("RECIPIENT_SEARCH_MAX_WAIT_SEC", "1.5")
+# SEND's own pre-approval media preview (Production fix, 2026-09-03) —
+# same reasoning, so any SEND turn reached indirectly through this
+# file's full-dispatcher tests doesn't wait out the 20s production
+# default either.
+os.environ.setdefault("SEND_PREVIEW_POLL_INTERVAL_SEC", "0.05")
+os.environ.setdefault("SEND_PREVIEW_MAX_WAIT_SEC", "1.5")
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

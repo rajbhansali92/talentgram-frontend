@@ -27,7 +27,8 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from core import db, _submission_to_client_shape
 from agents.modules.media_assignment import (
@@ -122,7 +123,8 @@ async def create_send_scan_request(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str,
     group_name: str, destination_group: str,
     form_message: Optional[str] = None, submission_id: Optional[str] = None,
-    content_hash: Optional[str] = None,
+    content_hash: Optional[str] = None, source_type: str = "group",
+    preview_only: bool = False,
 ) -> str:
     """Same shape/lifecycle as media_assignment.create_scan_request — mode
     stays "scan" (the worker's scan logic is 100% shared/unchanged between
@@ -135,7 +137,27 @@ async def create_send_scan_request(
     orchestrator can attach it to the eventual mode="send" worker request
     — sent BEFORE any media forward, per the required ordering.
     `submission_id`/`content_hash` are carried through so the orchestrator
-    can mark the form_sends row sent/failed once the worker reports back."""
+    can mark the form_sends row sent/failed once the worker reports back.
+
+    `source_type` ("group" | "phone", SEND Path B — Production fix,
+    2026-09-03): a talent whose only WhatsApp presence is a direct
+    number, no group. `group_name` then holds the phone digits instead
+    of a group/contact name — same field, reused, never a second schema
+    — and the worker (mark_scan.py's _open_source_chat) opens it via the
+    proven wa.me deep-link instead of a sidebar-search. Defaults to
+    "group" so this is purely additive: every existing caller (this
+    function's own default, and every request the worker has ever
+    claimed) is completely unaffected.
+
+    `preview_only` (SEND confirmation media preview — Production fix,
+    2026-09-03): a READ-ONLY discovery pass casting_pipeline.py's
+    _preview_send_marks creates so the confirmation card can show WHICH
+    marked media will actually be forwarded, before the admin approves
+    anything. See services/media_assignment_worker.py's
+    _process_scan_done — a preview_only request finishes directly once
+    scanned, never proceeds to mode="download"/"send", and never writes
+    to media_assignments/media_sends. Defaults to False; every real send
+    (the only other caller of this function) is unaffected."""
     req_id = str(uuid.uuid4())
     await db[SCAN_REQUESTS_COLLECTION].insert_one({
         "id": req_id,
@@ -143,6 +165,8 @@ async def create_send_scan_request(
         "workflow": "send",
         "status": SCAN_STATUS_PENDING,
         "group_name": group_name,
+        "source_type": source_type,
+        "preview_only": preview_only,
         "destination_group": destination_group,
         "talent_id": talent_id,
         "talent_label": talent_label,
@@ -336,6 +360,83 @@ async def get_send_approval(talent_id: str, project_id: str, destination_group: 
     return await db[SEND_APPROVALS_COLLECTION].find_one(
         {"talent_id": talent_id, "project_id": project_id, "destination_group": destination_group},
         {"_id": 0},
+    )
+
+
+# SEND confirmation media-preview cache (Production fix, 2026-09-03) —
+# the pre-approval WhatsApp scan (casting_pipeline.py's
+# _preview_send_marks) is real WhatsApp latency, not a DB read; without
+# caching, EVERY edit turn ("Age = 24" re-rendering the confirmation
+# card) would re-trigger a fresh multi-second scan just to redraw a form
+# field that has nothing to do with marked media — a direct violation of
+# Part 22's speed requirement. Cached on the SAME SEND_APPROVALS_COLLECTION
+# row as the draft/approval itself (a separate, independently-$set field
+# group — see save_send_approval_draft's own docstring on why this is
+# safe: MongoDB's $set only touches the keys given, so this and that
+# function never clobber each other), reused only while that row is
+# still "pending" (never across an "approved"/"completed" boundary — a
+# fresh send must never silently inherit a past operation's media
+# discovery) and only within SEND_PREVIEW_CACHE_TTL_SEC of being
+# computed (an admin who leaves a draft open for a long time gets a
+# fresh scan on their next turn, not a possibly-stale one).
+SEND_PREVIEW_CACHE_TTL_SEC = 300
+
+
+async def get_cached_send_preview(
+    talent_id: str, project_id: str, destination_group: str,
+) -> Optional[Tuple[Optional[List[Dict[str, Any]]], Optional[str]]]:
+    """Returns (assignments, error) from a still-fresh cached preview, or
+    None if there is no usable cache (never scanned yet, the approval
+    has since moved past "pending", or the cache has aged out) — the
+    caller must then run a fresh scan itself. `error=None` with
+    assignments=[] is a valid, real cached result (genuinely no marked
+    media found), distinguished from "no cache at all" by this
+    function's own None return.
+
+    The TTL check is a query filter, not a Python-side datetime
+    subtraction — pymongo/motor hand back `preview_computed_at` as an
+    offset-NAIVE datetime even though _now() wrote it timezone-aware
+    (BSON dates carry no tzinfo; the driver's own representation, not a
+    real ambiguity), so subtracting it from a fresh aware _now() raises
+    TypeError. Letting MongoDB compare BSON-to-BSON sidesteps that
+    entirely — the same pattern services/media_assignment_worker.py's
+    own _reap_stuck_claims already uses for its claimed_at cutoff."""
+    cutoff = _now().timestamp() - SEND_PREVIEW_CACHE_TTL_SEC
+    cutoff_dt = datetime.fromtimestamp(cutoff, tz=timezone.utc)
+    doc = await db[SEND_APPROVALS_COLLECTION].find_one(
+        {
+            "talent_id": talent_id, "project_id": project_id, "destination_group": destination_group,
+            "status": SEND_APPROVAL_STATUS_PENDING,
+            "preview_computed_at": {"$exists": True, "$gte": cutoff_dt},
+        },
+        {"_id": 0, "preview_assignments": 1, "preview_error": 1},
+    )
+    if not doc:
+        return None
+    return doc.get("preview_assignments"), doc.get("preview_error")
+
+
+async def save_send_preview_cache(
+    talent_id: str, project_id: str, destination_group: str,
+    *, assignments: Optional[List[Dict[str, Any]]], error: Optional[str],
+) -> None:
+    """Upserts just the preview fields — safe to call before
+    save_send_approval_draft has ever created the row for this attempt
+    (a fresh "send" previews media before it has anything else to
+    persist)."""
+    await db[SEND_APPROVALS_COLLECTION].update_one(
+        {"talent_id": talent_id, "project_id": project_id, "destination_group": destination_group},
+        {
+            "$set": {
+                "preview_assignments": assignments, "preview_error": error,
+                "preview_computed_at": _now(),
+            },
+            "$setOnInsert": {
+                "talent_id": talent_id, "project_id": project_id, "destination_group": destination_group,
+                "created_at": _now(),
+            },
+        },
+        upsert=True,
     )
 
 

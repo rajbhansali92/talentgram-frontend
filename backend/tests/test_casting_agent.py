@@ -21,6 +21,10 @@ os.environ.setdefault("SHARE_DELIVERY_MAX_WAIT_SEC", "1")
 # cycle. Same "set before the agents modules import" reasoning as above.
 os.environ.setdefault("RECIPIENT_SEARCH_POLL_INTERVAL_SEC", "0.05")
 os.environ.setdefault("RECIPIENT_SEARCH_MAX_WAIT_SEC", "1.5")
+# SEND's own pre-approval media preview (Production fix, 2026-09-03) —
+# same reasoning as the recipient-search overrides just above.
+os.environ.setdefault("SEND_PREVIEW_POLL_INTERVAL_SEC", "0.05")
+os.environ.setdefault("SEND_PREVIEW_MAX_WAIT_SEC", "1.5")
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

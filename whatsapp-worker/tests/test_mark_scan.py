@@ -1996,7 +1996,7 @@ def main():
             calls.append(("open_group", group_name))
             return "OPENED"
 
-        async def _fake_forward(page, group_name, target, item_label=""):
+        async def _fake_forward(page, group_name, target, item_label="", source_type="group"):
             calls.append(("forward", target["source_message_id"]))
             result = forward_results.get(target["source_message_id"], {"ok": True})
             return {"source_message_id": target["source_message_id"], **result}

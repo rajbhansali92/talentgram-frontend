@@ -328,6 +328,38 @@ async def _process_scan_done() -> bool:
         talent_id=talent_id,
     )
 
+    if doc.get("preview_only"):
+        # SEND confirmation preview (Production fix, 2026-09-03) — a
+        # READ-ONLY discovery pass the SEND confirmation card triggers
+        # BEFORE the admin approves anything, so they see WHICH marked
+        # media will actually be forwarded (never "3 media files" — see
+        # casting_pipeline.py's _preview_send_marks / _build_send_
+        # confirmation). Deliberately bypasses _finish (which posts a
+        # report into the WhatsApp casting group) — a preview must never
+        # send anything anywhere. Also never touches media_assignments/
+        # media_sends (those record REAL marks tied to an actual upload/
+        # send; a preview re-triggered on every confirmation-card
+        # refresh must stay a pure read with zero side effects) and
+        # never proceeds to mode="download"/"send" — this is the SAME
+        # terminal-short-circuit shape doc.get("scan_probe") already
+        # uses above, for the identical reason (finish directly, no
+        # further transition).
+        preview_result = {
+            "ok": not (outcome.batch_failures or outcome.ambiguous or outcome.unresolved),
+            "assignments": outcome.assignments,
+            "ambiguous": outcome.ambiguous,
+            "unresolved": outcome.unresolved,
+            "batch_failures": outcome.batch_failures,
+        }
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": doc["id"]},
+            {"$set": {
+                "status": media_assignment.STATUS_FINISHED,
+                "preview_result": preview_result, "completed_at": _now(),
+            }},
+        )
+        return True
+
     if outcome.batch_failures:
         await _finish(doc["id"], _report_batch_failed(talent_label, project_label, outcome.batch_failures))
         return True

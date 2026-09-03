@@ -8434,6 +8434,91 @@ async def _resolve_freeform_talent_project(
     )
 
 
+_SEND_PREVIEW_POLL_INTERVAL_SEC = float(os.environ.get("SEND_PREVIEW_POLL_INTERVAL_SEC", "0.5"))
+# Matches the already-proven RECIPIENT_SEARCH_MAX_WAIT_SEC budget (20s) —
+# same reasoning: comfortably inside _INBOUND_DISPATCH_TIMEOUT_SEC's 35s
+# outer client budget (whatsapp-worker/inbound.py) alongside the rest of
+# this turn's fast, DB-only work.
+_SEND_PREVIEW_MAX_WAIT_SEC = float(os.environ.get("SEND_PREVIEW_MAX_WAIT_SEC", "20"))
+
+
+async def _preview_send_marks(
+    *, talent_id: str, talent_label: str, project_id: str, project_label: str,
+    group_name: str, source_type: str, destination_group: str,
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """SEND confirmation's own pre-approval media-identification pass
+    (Production fix, 2026-09-03 — Part 10/11's explicit "show the admin
+    exactly which marked media will be forwarded, never a bare count").
+    Creates a preview_only=True scan request — the SAME real WhatsApp
+    scan _send_one_pair's own execution-time scan performs (identical
+    worker path, identical validate_candidates call), but one that NEVER
+    writes to media_assignments/media_sends and NEVER proceeds to an
+    actual download/send (see services/media_assignment_worker.py's
+    _process_scan_done preview_only branch) — purely informational, safe
+    to re-trigger on every confirmation-card render (e.g. after an edit).
+
+    Returns (assignments, error):
+      - (list, None) — 0+ resolved marks; an empty list genuinely means
+        "no marked media found for this project" (the caller renders
+        that honestly, never as if it were a failure)
+      - (None, message) — the scan found a REAL problem (ambiguous mark,
+        unresolved mark, unresolvable batch) and SEND must stop, exactly
+        as the real execution-time scan would
+      - (None, None) — a timeout/infra failure; the confirmation still
+        shows Project/Talent/Source/Destination/Form, only the Marked
+        media line degrades to an honest "couldn't verify in time" note
+        (Part 22's speed requirement — this is a best-effort preview,
+        never a hard gate: the REAL scan at execution time is what's
+        authoritative and always re-verifies from scratch regardless of
+        what this preview did or didn't find)."""
+    from agents.modules import media_send
+
+    req_id = await media_send.create_send_scan_request(
+        talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        group_name=group_name, source_type=source_type,
+        destination_group=destination_group, preview_only=True,
+    )
+    deadline = time.monotonic() + _SEND_PREVIEW_MAX_WAIT_SEC
+    try:
+        while True:
+            doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
+                {"id": req_id}, {"_id": 0, "status": 1, "preview_result": 1, "scan_error": 1},
+            )
+            status = (doc or {}).get("status")
+            if status == media_assignment.STATUS_FINISHED:
+                result = (doc or {}).get("preview_result") or {}
+                if result.get("batch_failures"):
+                    names = "; ".join(
+                        (b.get("mark_text") or "").strip() for b in result["batch_failures"]
+                    )
+                    return None, (
+                        f"Some marked media couldn't be resolved to exact WhatsApp source "
+                        f"items: {names}. Re-check the mark and album, then retry."
+                    )
+                if result.get("ambiguous"):
+                    amb = result["ambiguous"]
+                    role, take = amb.get("media_role"), amb.get("take_number")
+                    slot = f"Take {take}" if role == "take" else (role or "media").capitalize()
+                    return None, (
+                        f"{project_label} {slot} has been marked twice, pointing to two "
+                        f"different source items — please resolve the duplicate mark before sending."
+                    )
+                if result.get("unresolved"):
+                    return None, (
+                        "Some marked media could not be matched to an exact WhatsApp source "
+                        "message — please re-check the mark."
+                    )
+                return result.get("assignments") or [], None
+            if status == media_assignment.SCAN_STATUS_FAILED:
+                return None, (doc.get("scan_error") or "The WhatsApp scan failed.")
+            if time.monotonic() >= deadline:
+                return None, None
+            await asyncio.sleep(_SEND_PREVIEW_POLL_INTERVAL_SEC)
+    finally:
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
 async def _resolve_send_target(
     collected: dict, *, destination_group_override: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[ExecResult]]:
@@ -8493,24 +8578,45 @@ async def _resolve_send_target(
     else:
         return None, ExecResult(ok=False, error="talent_not_found", message=err or "No matching talent found.")
 
-    # Step 3: the WhatsApp SOURCE group — identical to upload's step 3.
+    # Step 3: the WhatsApp SOURCE — a talent's own group (Path A, the
+    # original/primary mechanism) OR, when no group is configured, their
+    # direct WhatsApp number (Path B — Production fix, 2026-09-03: SEND
+    # must not assume every talent submits through a group; a talent
+    # whose only WhatsApp presence is a direct number previously hit a
+    # hard "no_whatsapp_group" refusal here even when their marked media
+    # genuinely lives in that 1:1 conversation). Group is checked FIRST
+    # and wins whenever configured — this is a fallback, never a second,
+    # competing source of truth: a talent with BOTH a group and a phone
+    # still resolves through the group exactly as before.
     candidate_docs = await db.talents.find(
-        {"id": {"$in": candidate_ids}}, {"_id": 0, "id": 1, "whatsapp_group_name": 1},
+        {"id": {"$in": candidate_ids}}, {"_id": 0, "id": 1, "whatsapp_group_name": 1, "phone": 1},
     ).to_list(20)
     group_names = {(d.get("whatsapp_group_name") or "").strip() for d in candidate_docs if (d.get("whatsapp_group_name") or "").strip()}
-    if not group_names:
-        return None, ExecResult(
-            ok=False, error="no_whatsapp_group",
-            message=f"{candidate_label} has no WhatsApp group configured — the mark-based "
-                    "send workflow requires one. Add it in Talentgram first.",
-        )
-    if len(group_names) > 1:
-        return None, ExecResult(
-            ok=False, error="ambiguous_whatsapp_group",
-            message=f"Multiple different WhatsApp groups are configured across talent records named "
-                    f"{candidate_label} — please resolve the duplicate talent records first.",
-        )
-    group_name = next(iter(group_names))
+    if group_names:
+        if len(group_names) > 1:
+            return None, ExecResult(
+                ok=False, error="ambiguous_whatsapp_group",
+                message=f"Multiple different WhatsApp groups are configured across talent records named "
+                        f"{candidate_label} — please resolve the duplicate talent records first.",
+            )
+        group_name = next(iter(group_names))
+        source_type = "group"
+    else:
+        phones = {(d.get("phone") or "").strip() for d in candidate_docs if (d.get("phone") or "").strip()}
+        if not phones:
+            return None, ExecResult(
+                ok=False, error="no_whatsapp_source",
+                message=f"{candidate_label} has no WhatsApp group or phone number configured — "
+                        "the mark-based send workflow requires one. Add it in Talentgram first.",
+            )
+        if len(phones) > 1:
+            return None, ExecResult(
+                ok=False, error="ambiguous_whatsapp_phone",
+                message=f"Multiple different phone numbers are configured across talent records named "
+                        f"{candidate_label} — please resolve the duplicate talent records first.",
+            )
+        group_name = next(iter(phones))
+        source_type = "phone"
 
     # Step 4: email-authoritative talent resolution — the EXACT SAME
     # function upload uses, unchanged. SEND never resolves its source
@@ -8581,7 +8687,7 @@ async def _resolve_send_target(
         "project": project, "project_doc": project_doc,
         "authoritative_talent_id": authoritative_talent_id,
         "authoritative_talent_label": authoritative_talent_label,
-        "group_name": group_name, "destination_group": destination_group,
+        "group_name": group_name, "source_type": source_type, "destination_group": destination_group,
         "submission": submission,
     }, None
 
@@ -8652,6 +8758,30 @@ def _send_selector_pairs(collected: dict) -> List[Tuple[str, str]]:
     return [(t, p) for t in talents for p in projects]
 
 
+# Matches _run_send's own real Takes -> Introduction -> Pictures ordering
+# (whatsapp-worker/mark_scan.py) and the backend orchestrator's identical
+# sort key — the preview must never show a different order than what
+# actually happens on approval.
+_SEND_ROLE_DISPLAY_ORDER = {"take": 0, "intro": 1, "photos": 2}
+
+
+def _format_marked_media_lines(assignments: List[Dict[str, Any]], project_label: str) -> List[str]:
+    """Numbered "1 - Take 1" / "2 - Introduction" lines for the SEND
+    confirmation card (Part 11 — never collapsed into a bare count)."""
+    ordered = sorted(
+        assignments,
+        key=lambda m: (
+            _SEND_ROLE_DISPLAY_ORDER.get(m.get("media_role"), 99),
+            m.get("take_number") is None,
+            m.get("take_number") or 0,
+        ),
+    )
+    return [
+        f"{i} - {media_assignment.submission_label(m.get('media_role'), m.get('take_number'))}"
+        for i, m in enumerate(ordered, start=1)
+    ]
+
+
 async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
     """Phase 2 (2026-08-26) — the required explicit approval step: renders
     the EXACT outgoing SEND form (Project Name/Name/Age/.../Budget, nothing
@@ -8675,8 +8805,68 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
         return err.message
 
     talent_id = target["authoritative_talent_id"]
-    project_id = target["project"]["id"]
+    talent_label = target["authoritative_talent_label"]
+    project = target["project"]
+    project_id = project["id"]
     destination_group = target["destination_group"]
+
+    # Pre-approval media identification (Part 10/11 — Production fix,
+    # 2026-09-03): a real WhatsApp scan, same as execution's own, so the
+    # admin sees WHICH marked media will actually be forwarded before
+    # approving anything — never just a bare count. A real problem
+    # (ambiguous/unresolved mark, nothing marked at all) stops the
+    # confirmation here, exactly as execution would fail anyway; a
+    # genuine timeout degrades to an honest note rather than blocking
+    # (see _preview_send_marks' own docstring) — the real execution-time
+    # scan is authoritative regardless.
+    #
+    # Cached (media_send.get_cached_send_preview) so an EDIT turn ("Age =
+    # 24") never re-triggers a fresh multi-second WhatsApp scan just to
+    # redraw a form field that has nothing to do with marked media — see
+    # that function's own docstring for the cache's exact validity rules
+    # (never crosses an approved/completed boundary, bounded TTL).
+    cached = await media_send.get_cached_send_preview(talent_id, project_id, destination_group)
+    if cached is not None:
+        assignments, marks_error = cached
+    else:
+        assignments, marks_error = await _preview_send_marks(
+            talent_id=talent_id, talent_label=talent_label,
+            project_id=project_id, project_label=project["label"],
+            group_name=target["group_name"], source_type=target.get("source_type") or "group",
+            destination_group=destination_group,
+        )
+        # A bare timeout (assignments=None, marks_error=None) is never
+        # cached — it's an infrastructure hiccup, not a stable result;
+        # caching it would "poison" every edit-turn re-render for the
+        # whole TTL window instead of letting the next turn simply retry.
+        if not (assignments is None and marks_error is None):
+            await media_send.save_send_preview_cache(
+                talent_id, project_id, destination_group, assignments=assignments, error=marks_error,
+            )
+    if marks_error is not None:
+        return (
+            f"SEND — Marked Media Problem\n\n"
+            f"Project: {project['label']}\nTalent: {talent_label}\n\n"
+            f"{marks_error}\n\nNothing has been sent."
+        )
+    if assignments is not None and not assignments:
+        return (
+            f"SEND — No Marked Media Found\n\n"
+            f"Project: {project['label']}\nTalent: {talent_label}\n\n"
+            f"No @Gunwanti + mark for {project['label']} was found in "
+            f"{talent_label}'s WhatsApp {'number' if target.get('source_type') == 'phone' else 'group'}. "
+            f"Nothing has been sent.\n\n"
+            f"Mark the media first, then retry."
+        )
+    marked_media_lines = (
+        _format_marked_media_lines(assignments, project["label"]) if assignments is not None
+        else ["Couldn't verify marked media within a reasonable time — approving will scan "
+              "fresh and report exactly what was found/sent."]
+    )
+    source_line = (
+        f"{target['group_name']} (WhatsApp number)" if target.get("source_type") == "phone"
+        else f"{target['group_name']} (WhatsApp group)"
+    )
 
     existing = await media_send.get_send_approval(talent_id, project_id, destination_group)
     if existing and existing.get("status") == media_send.SEND_APPROVAL_STATUS_APPROVED:
@@ -8700,18 +8890,23 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
         header = "SEND FORM PREVIEW — 🚫 Nothing Has Been Sent Yet"
         message = built["message"]
 
-    return (
-        f"{header}\n\n"
-        f"This is the EXACT form that will be sent. Nothing has gone out, and nothing "
-        f"will, until you explicitly approve below.\n\n"
-        f"Destination: {destination_group}\n\n"
-        f"{message}\n\n"
-        'Edit any field with e.g. "Age = 24" (one or more lines).\n\n'
-        "Reply:\n"
-        "1 → Approve (starts sending: Takes → Introduction → this form → Pictures → ☑️)\n"
-        "2 → Edit\n"
-        "3 → Cancel"
-    )
+    lines = [
+        f"{header}", "",
+        "Project:", project["label"], "",
+        "Talent:", talent_label, "",
+        "Source:", source_line, "",
+        "Marked media:", *marked_media_lines, "",
+        "Destination:", destination_group, "",
+        "Form:", message, "",
+        "This is the EXACT form that will be sent. Nothing has gone out, and nothing "
+        "will, until you explicitly approve below.", "",
+        'Edit any field with e.g. "Age = 24" (one or more lines).', "",
+        "Reply:",
+        "1 → Approve (starts sending: Takes → Introduction → this form → Pictures → ☑️)",
+        "2 → Edit",
+        "3 → Cancel",
+    ]
+    return "\n".join(lines)
 
 
 _EDIT_LINE_RE = re.compile(r"^\s*(.+?)\s*[:=]\s*(.*)$")
@@ -8862,6 +9057,7 @@ async def _send_one_pair(
         project_id=project["id"], project_label=project["label"],
         group_name=target["group_name"], destination_group=destination_group,
         form_message=form_message, submission_id=submission["id"], content_hash=form_built["content_hash"],
+        source_type=target.get("source_type") or "group",
     )
     return ExecResult(
         ok=True,

@@ -220,20 +220,29 @@ async def delete_project(pid: str, admin: dict = Depends(current_admin)):
     }
 
 
-@router.post("/projects/{pid}/material")
-async def add_material(
+async def attach_project_material(
     pid: str,
-    category: str = Form(...),
-    file: UploadFile = File(...),
-    admin: dict = Depends(current_team_or_admin),
-):
+    category: str,
+    data: bytes,
+    filename: Optional[str],
+    content_type: Optional[str],
+) -> Dict[str, Any]:
+    """Upload one material file to Cloudinary and push it onto
+    ``project.materials[]``. Single source of truth for the material
+    descriptor shape + folder layout + validation — shared by the
+    ``POST /projects/{pid}/material`` route (manual upload) and the AI
+    Casting Desk's Gate-1 project creation, so a material attached by the
+    AI is byte-for-byte identical to one a human uploads.
+
+    Returns the updated project document (``_id`` stripped).
+    """
     if category not in MATERIAL_CATEGORIES:
         raise HTTPException(400, "Invalid category (script|image|audio|video_file)")
     project = await db.projects.find_one({"id": pid})
     if not project:
         raise HTTPException(404, "Project not found")
 
-    content_type = file.content_type or "application/octet-stream"
+    content_type = content_type or "application/octet-stream"
     if category == "video_file" and not content_type.startswith("video/"):
         raise HTTPException(400, "Reference video must be a video file")
 
@@ -241,7 +250,6 @@ async def add_material(
     # Segregated folder for reference videos vs other materials
     subdir = "videos" if category == "video_file" else "materials"
     folder = f"{APP_NAME}/projects/{pid}/{subdir}"
-    data = await file.read()
 
     # Enforce size limit for reference videos (100 MB)
     if category == "video_file" and len(data) > MAX_VIDEO_FILE_BYTES:
@@ -251,7 +259,7 @@ async def add_material(
         )
 
     import os
-    _, ext = os.path.splitext(file.filename)
+    _, ext = os.path.splitext(filename or "")
     upload_public_id = f"{material_id}{ext.lower()}" if ext else material_id
 
     rt = "video" if category == "video_file" else "auto"
@@ -269,7 +277,7 @@ async def add_material(
         "public_id": result["public_id"],
         "resource_type": result["resource_type"],
         "content_type": content_type,
-        "original_filename": file.filename,
+        "original_filename": filename,
         "size": result.get("bytes") or len(data),
         "created_at": _now(),
         # Explicit scope — project material is bound to this project only
@@ -279,6 +287,19 @@ async def add_material(
     await db.projects.update_one({"id": pid}, {"$push": {"materials": material}})
     p = await db.projects.find_one({"id": pid}, {"_id": 0})
     return p
+
+
+@router.post("/projects/{pid}/material")
+async def add_material(
+    pid: str,
+    category: str = Form(...),
+    file: UploadFile = File(...),
+    admin: dict = Depends(current_team_or_admin),
+):
+    data = await file.read()
+    return await attach_project_material(
+        pid, category, data, file.filename, file.content_type
+    )
 
 
 @router.delete("/projects/{pid}/material/{mid}")

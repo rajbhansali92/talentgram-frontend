@@ -22,6 +22,7 @@ import {
   Cloud,
   MessageCircle,
   FileSpreadsheet,
+  Sparkles,
 } from "lucide-react";
 
 // ============================================================================
@@ -85,6 +86,7 @@ class LayoutErrorBoundary extends React.Component {
 export const NAV_ITEMS = {
   base: [
     { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true },
+    { to: "/admin/casting-desk", label: "AI Casting Desk", icon: Sparkles },
     { to: "/admin/talents", label: "Talents", icon: Users },
     { to: "/admin/applications", label: "Applications", icon: UserPlus },
     { to: "/admin/projects", label: "Projects", icon: Clapperboard },

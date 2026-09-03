@@ -22,6 +22,7 @@ import StorageDashboard from "@/pages/StorageDashboard";
 import WhatsAppEnginePage from "@/pages/WhatsAppEnginePage";
 import SubmissionDiagnostics from "@/pages/SubmissionDiagnostics";
 import ImportWizard from "@/pages/ImportWizard";
+import CastingDesk from "@/pages/CastingDesk";
 
 
 export default function AdminApp() {
@@ -38,6 +39,8 @@ export default function AdminApp() {
                     }
                 >
                     <Route index element={<Dashboard />} />
+                    <Route path="casting-desk" element={<CastingDesk />} />
+                    <Route path="casting-desk/:sessionId" element={<CastingDesk />} />
                     <Route path="talents" element={<TalentList />} />
                     <Route path="talents/new" element={<TalentEdit />} />
                     <Route path="talents/:id" element={<TalentEdit />} />

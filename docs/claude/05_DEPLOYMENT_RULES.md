@@ -165,6 +165,24 @@ On startup, the backend runs migrations:
 | `DIRECT_VIDEO_UPLOAD` | `"false"` | Feature flag: direct browser-to-Cloudinary video upload |
 | Cloudflare Stream / R2 credentials | -- | Optional; used for HLS video pipeline. See 04_MEDIA_RULES. |
 
+### AI Casting Desk — Gate 1 & Gate 2 (server-side only; never exposed to the frontend)
+The AI features degrade gracefully when unset: `/api/casting-desk/health` and `/api/ai-scout/health`
+report `llm_configured: false` (a boolean — the key itself is never returned), and the UI shows a
+"not configured" banner instead of running.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | -- | **Required for AI Casting Desk + AI Scout.** The only LLM credential. Set in the Railway backend service only. |
+| `CASTING_DESK_MODEL` | `claude-opus-5` | Model for the Gate-1 requirement parser. `claude-sonnet-5` is a cheaper choice for this workload. |
+| `AI_SCOUT_MODEL` | falls back to `CASTING_DESK_MODEL`'s default | Model for the Gate-2 Scout (criteria extraction + batched ranking). |
+| `CASTING_DESK_LLM_TIMEOUT_SEC` | `90` | Per-call wall-clock timeout (shared by both gates). |
+| `AI_SCOUT_MAX_CANDIDATES` | `300` | Candidate-pool cap before ranking. Bounds cost/latency as the roster grows. |
+| `AI_SCOUT_BATCH_SIZE` | `25` | Candidates per LLM ranking call. |
+| `OPENAI_API_KEY` | -- | Optional. Only enables Whisper transcription of Gate-1 audio briefs; unrelated to Scout. |
+
+Recommended production config: set `ANTHROPIC_API_KEY`; leave the rest at defaults unless cost tuning
+(then `CASTING_DESK_MODEL=claude-sonnet-5` + `AI_SCOUT_MODEL=claude-sonnet-5`).
+
 ## Railway Deployment (WhatsApp Worker)
 
 ### Configuration

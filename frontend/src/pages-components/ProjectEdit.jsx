@@ -8,6 +8,7 @@ import { generateSubmissionMessage } from "@/lib/whatsappShare";
 import MaterialModal from "@/components/MaterialModal";
 import BudgetLines from "@/components/BudgetLines";
 import ProjectPipeline from "@/pages-components/ProjectPipeline";
+import ProjectAIScout from "@/pages-components/ProjectAIScout";
 import {
     AVAILABILITY_OPTIONS,
     BUDGET_OPTIONS,
@@ -108,6 +109,7 @@ function TextField({ label, value, onChange, type = "text", disabled = false, ..
 
 const PROJECT_TABS = [
     { id: "details", label: "Project Details" },
+    { id: "scout", label: "AI Scout" },
     { id: "submissions", label: "Submission Review" },
     { id: "pipeline", label: "Casting Pipeline" },
 ];
@@ -2093,6 +2095,12 @@ export default function ProjectEdit() {
             )}
 
             {/* Casting Pipeline */}
+            {visitedTabs.has("scout") && isEdit && (
+                <div style={{ display: activeTab === "scout" ? "block" : "none" }} data-testid="project-tab-panel-scout">
+                    <ProjectAIScout projectId={id} project={project} />
+                </div>
+            )}
+
             {visitedTabs.has("pipeline") && isEdit && (
                 <div style={{ display: activeTab === "pipeline" ? "block" : "none" }} data-testid="project-tab-panel-pipeline">
                     <ProjectPipeline projectId={id} />

@@ -17,8 +17,10 @@ from notifications import ensure_indexes as ensure_notifications_indexes
 from request_context import generate_request_id, reset_request_id, set_request_id
 from routers import (
     agents_whatsapp,
+    ai_scout,
     applications,
     auth,
+    casting_desk,
     casting_pipeline,
     cloudinary_admin,
     drive_admin,
@@ -151,6 +153,8 @@ app.include_router(webhooks.router)
 app.include_router(cloudflare_stream.router)
 app.include_router(imports.router)
 app.include_router(agents_whatsapp.router)
+app.include_router(casting_desk.router)
+app.include_router(ai_scout.router)
 
 
 
@@ -562,6 +566,16 @@ async def on_startup():
             except Exception as _e:
                 logger.warning("casting_pipeline unique index: %s", _e)
 
+        async def _casting_desk_indexes():
+            try:
+                await db.casting_desk_sessions.create_index([("created_by", 1), ("updated_at", -1)])
+                await db.casting_desk_sessions.create_index([("project_id", 1)])
+                # AI Scout (Gate 2) — latest-run lookup + cache-by-criteria.
+                await db.ai_scout_runs.create_index([("project_id", 1), ("created_at", -1)])
+                await db.ai_scout_runs.create_index([("project_id", 1), ("criteria_hash", 1), ("created_at", -1)])
+            except Exception as _e:
+                logger.warning("casting_desk indexes: %s", _e)
+
         async def _workflow_indexes():
             try:
                 await db.workflow_tasks.create_index([("assignee_id", 1), ("status", 1)])
@@ -579,7 +593,7 @@ async def on_startup():
         await asyncio.gather(
             _client_states_index(), _otp_indexes(), _trusted_device_indexes(),
             _feedback_indexes(), _submission_diagnostics_indexes(), _clients_indexes(),
-            _casting_pipeline_index(), _workflow_indexes(),
+            _casting_pipeline_index(), _workflow_indexes(), _casting_desk_indexes(),
         )
 
         logger.info("Mongo indexes ready")

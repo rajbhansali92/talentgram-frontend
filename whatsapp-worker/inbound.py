@@ -635,6 +635,25 @@ async def _scan_group_for_new_messages(
     return new_messages, dom_detection_sec, message_extraction_sec
 
 
+# The backend's /inbound handler is synchronous end-to-end (routers/
+# agents_whatsapp.py awaits handle_inbound_message directly before
+# responding), and its own single slowest declared internal budget is
+# SHARE Instagram's live WhatsApp recipient search
+# (_RECIPIENT_SEARCH_MAX_WAIT_SEC, backend default 20s) — plus whatever
+# small amount of DB/CRM-fallback work follows it. This client-side
+# timeout must stay strictly ABOVE that inner worst case with real
+# margin, or a legitimately-slow-but-successful backend call gets killed
+# here before its response arrives — which is a second, independent way
+# to produce exactly the "message never marked processed, redetected and
+# redispatched from scratch" symptom the 2026-09-03 deadlock fix (see the
+# page_lock-scope comment in poll_once) was written to eliminate. 35s
+# gives ~15s of headroom over the backend's own 20s ceiling; every
+# faster command (ADD/MOVE/SEND, and now the deadlock-fixed SHARE
+# Instagram path, which typically resolves in a few seconds) is
+# unaffected since this is only ever a ceiling, never a floor.
+_INBOUND_DISPATCH_TIMEOUT_SEC = 35.0
+
+
 async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phone: str,
                          sender_name: Optional[str], text: str, message_id: str,
                          sender_is_group_member: Optional[bool] = None,
@@ -657,7 +676,7 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
                 "replied_to_message_id": replied_to_message_id,
                 "replied_quoted_text": replied_quoted_text,
             },
-            timeout=20.0,
+            timeout=_INBOUND_DISPATCH_TIMEOUT_SEC,
         )
         latency_ms = int((time.monotonic() - t0) * 1000)
         resp.raise_for_status()
@@ -999,6 +1018,13 @@ async def poll_once(
                     "per %.0fs per group)", group_name, _INVALID_GROUP_SKIP_LOG_INTERVAL_SEC,
                 )
             continue
+        # Scanning (page-touching: open the chat, read the tail) happens
+        # under page_lock, same as always. Dispatching to the backend and
+        # AWAITING its response must NOT happen under this lock — see the
+        # 2026-09-03 deadlock fix note above _post_inbound's ACK_THRESHOLD_SEC
+        # for the full story. This lock is only re-acquired below, briefly,
+        # for the two genuinely page-touching sends (the ack, the final
+        # reply) — never held across a backend network wait.
         async with session.page_lock:
             page = session.page
             if page is None:
@@ -1049,121 +1075,158 @@ async def poll_once(
             except Exception:
                 logger.exception("inbound: scan failed for group=%r", group_name)
                 continue
-            # DOM scan/parse cost for this cycle — same for every message
-            # found in it (one scan can surface 0+ new messages), included
-            # in each one's own TIMING line below so the backend/DOM split
-            # of end-to-end latency is visible without guessing.
+        # page_lock released here — everything below this point that needs
+        # the page re-acquires it explicitly, for exactly as long as that
+        # one send takes.
+        # DOM scan/parse cost for this cycle — same for every message
+        # found in it (one scan can surface 0+ new messages), included
+        # in each one's own TIMING line below so the backend/DOM split
+        # of end-to-end latency is visible without guessing.
 
-            for msg in new_messages:
-                phone = msg["sender_phone"]
-                if not phone:
-                    logger.warning(
-                        "inbound: could not determine sender phone for message_id=%r "
-                        "group=%r sender_name=%r sender_is_group_member=%r text=%r "
-                        "pre_plain_text=%r — declining to dispatch (fail closed: never "
-                        "guess a security-relevant identity). Marking seen so we do not "
-                        "retry it forever.",
-                        msg["message_id"], group_name, msg["sender_name"],
-                        msg["sender_is_group_member"], msg["text"][:80],
-                        msg["raw_pre_plain_text"],
-                    )
-                    try:
-                        await get_db().whatsapp_dispatch_failures.insert_one({
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "group_name": group_name,
-                            "message_id": msg["message_id"],
-                            "sender_name": msg["sender_name"],
-                            "sender_is_group_member": msg["sender_is_group_member"],
-                            "text": msg["text"],
-                            "raw_pre_plain_text": msg["raw_pre_plain_text"],
-                            "reason": "no_phone_resolved",
-                        })
-                    except Exception:
-                        logger.exception("inbound: failed to persist dispatch-failure record")
-                    await _mark_processed(msg["message_id"])
-                    continue
-
-                t_detected = time.monotonic()
-                await _update_worker_status(last_incoming_at=_now().isoformat())
-                logger.info(
-                    "inbound: dispatch started group=%r sender=%r message_id=%r",
-                    group_name, phone, msg["message_id"],
+        for msg in new_messages:
+            phone = msg["sender_phone"]
+            if not phone:
+                logger.warning(
+                    "inbound: could not determine sender phone for message_id=%r "
+                    "group=%r sender_name=%r sender_is_group_member=%r text=%r "
+                    "pre_plain_text=%r — declining to dispatch (fail closed: never "
+                    "guess a security-relevant identity). Marking seen so we do not "
+                    "retry it forever.",
+                    msg["message_id"], group_name, msg["sender_name"],
+                    msg["sender_is_group_member"], msg["text"][:80],
+                    msg["raw_pre_plain_text"],
                 )
-
-                reply_context = msg.get("reply_context") or {}
-                backend_task = asyncio.create_task(_post_inbound(
-                    http,
-                    group_name=group_name,
-                    sender_phone=phone,
-                    sender_name=msg["sender_name"],
-                    text=msg["text"],
-                    message_id=msg["message_id"],
-                    sender_is_group_member=msg["sender_is_group_member"],
-                    media_type=msg.get("media_type"),
-                    replied_to_message_id=reply_context.get("quotedMessageId"),
-                    replied_quoted_text=reply_context.get("quotedText"),
-                ))
-                done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
-                ack_sent_sec = None
-                if backend_task not in done:
-                    ack_elapsed, _ack_timing, _ack_message_id = await _send_reply(page, group_name, ACK_TEXT)
-                    ack_sent_sec = round(time.monotonic() - t_detected, 2)
-                    logger.info(
-                        "inbound: TIMING backend exceeded %.1fs — sent ack (took %.2fs) "
-                        "message_id=%r", ACK_THRESHOLD_SEC, ack_elapsed, msg["message_id"],
-                    )
-                result = await backend_task
-                t_backend_done = time.monotonic()
-
-                if result is None:
-                    # Backend call failed — do NOT mark as processed, so a
-                    # transient outage gets a chance to be retried on the
-                    # next poll (the message is still "new" in the DOM).
-                    continue
-
+                try:
+                    await get_db().whatsapp_dispatch_failures.insert_one({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "group_name": group_name,
+                        "message_id": msg["message_id"],
+                        "sender_name": msg["sender_name"],
+                        "sender_is_group_member": msg["sender_is_group_member"],
+                        "text": msg["text"],
+                        "raw_pre_plain_text": msg["raw_pre_plain_text"],
+                        "reason": "no_phone_resolved",
+                    })
+                except Exception:
+                    logger.exception("inbound: failed to persist dispatch-failure record")
                 await _mark_processed(msg["message_id"])
-                await _update_worker_status(last_processed_at=_now().isoformat())
+                continue
 
-                reply = result.get("reply")
-                operation_id = result.get("operation_id")
-                reply_elapsed = 0.0
-                send_timing: Dict[str, float] = {}
-                if reply:
-                    reply_elapsed, send_timing, sent_message_id = await _send_reply(page, group_name, reply)
-                    if sent_message_id:
-                        await _update_worker_status(last_reply_at=_now().isoformat())
+            t_detected = time.monotonic()
+            await _update_worker_status(last_incoming_at=_now().isoformat())
+            logger.info(
+                "inbound: dispatch started group=%r sender=%r message_id=%r",
+                group_name, phone, msg["message_id"],
+            )
+
+            reply_context = msg.get("reply_context") or {}
+            # NOT under page_lock (2026-09-03 deadlock fix): this is pure
+            # network I/O to the backend — no page access at all — so it
+            # must never hold the same lock a worker-mediated backend round
+            # trip (e.g. SHARE Instagram's live WhatsApp recipient search,
+            # serviced by mark_scan_loop in THIS SAME process/event loop)
+            # depends on to complete. Holding page_lock here was a
+            # deterministic self-deadlock: mark_scan_loop could never
+            # acquire the lock to service the request the backend was
+            # waiting on, so the backend always hit its own internal
+            # search timeout, and _post_inbound's httpx client (below)
+            # would then usually time out FIRST — leaving the message
+            # unmarked and causing it to be redetected and redispatched
+            # from scratch on every subsequent poll cycle (the repeating
+            # "Got it — processing..." with no final resolution seen in
+            # production for "Share Instagram link ... to Heena
+            # Talentgram"). See _post_inbound's own timeout for the other
+            # half of this fix.
+            backend_task = asyncio.create_task(_post_inbound(
+                http,
+                group_name=group_name,
+                sender_phone=phone,
+                sender_name=msg["sender_name"],
+                text=msg["text"],
+                message_id=msg["message_id"],
+                sender_is_group_member=msg["sender_is_group_member"],
+                media_type=msg.get("media_type"),
+                replied_to_message_id=reply_context.get("quotedMessageId"),
+                replied_quoted_text=reply_context.get("quotedText"),
+            ))
+            done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
+            ack_sent_sec = None
+            if backend_task not in done:
+                async with session.page_lock:
+                    ack_page = session.page
+                    if ack_page is not None:
+                        ack_elapsed, _ack_timing, _ack_message_id = await _send_reply(ack_page, group_name, ACK_TEXT)
+                        ack_sent_sec = round(time.monotonic() - t_detected, 2)
                         logger.info(
-                            "inbound: reply sent group=%r message_id=%r sent_message_id=%r",
-                            group_name, msg["message_id"], sent_message_id,
+                            "inbound: TIMING backend exceeded %.1fs — sent ack (took %.2fs) "
+                            "message_id=%r", ACK_THRESHOLD_SEC, ack_elapsed, msg["message_id"],
                         )
                     else:
                         logger.warning(
-                            "inbound: reply send failed group=%r message_id=%r",
-                            group_name, msg["message_id"],
+                            "inbound: no active page while trying to send ack for message_id=%r",
+                            msg["message_id"],
                         )
-                    # Concurrent Task Engine (2026-08-05) — operation_id is only
-                    # set when `reply` is a task's confirmation/clarification
-                    # card; report the WhatsApp message id it actually got so a
-                    # later reply-to-this-message can be routed back to it.
-                    if operation_id and sent_message_id:
-                        asyncio.create_task(_post_task_sent(
-                            http, agent_id="casting-agent",
-                            operation_id=operation_id, message_id=sent_message_id,
-                        ))
-                t_total = time.monotonic() - t_detected
-                logger.info(
-                    "inbound: TIMING message_id=%r dom_detection_sec=%.2f "
-                    "message_extraction_sec=%.2f backend_sec=%.2f reply_send_sec=%.2f "
-                    "reply_open_or_verify_chat=%.2f reply_composer_wait=%.2f reply_typing=%.2f "
-                    "reply_send_click=%.2f reply_delivery_verify=%.2f ack_sent_at_sec=%s "
-                    "total_sec=%.2f",
-                    msg["message_id"], dom_detection_sec, message_extraction_sec,
-                    t_backend_done - t_detected, reply_elapsed,
-                    send_timing.get("open_or_verify_chat", 0.0), send_timing.get("composer_wait", 0.0),
-                    send_timing.get("typing", 0.0), send_timing.get("send_click", 0.0),
-                    send_timing.get("delivery_verify", 0.0), ack_sent_sec, t_total,
-                )
-                _record_latency(t_total)
+            result = await backend_task
+            t_backend_done = time.monotonic()
+
+            if result is None:
+                # Backend call failed — do NOT mark as processed, so a
+                # transient outage gets a chance to be retried on the
+                # next poll (the message is still "new" in the DOM).
+                continue
+
+            await _mark_processed(msg["message_id"])
+            await _update_worker_status(last_processed_at=_now().isoformat())
+
+            reply = result.get("reply")
+            operation_id = result.get("operation_id")
+            reply_elapsed = 0.0
+            send_timing: Dict[str, float] = {}
+            sent_message_id: Optional[str] = None
+            if reply:
+                async with session.page_lock:
+                    reply_page = session.page
+                    if reply_page is not None:
+                        reply_elapsed, send_timing, sent_message_id = await _send_reply(reply_page, group_name, reply)
+                        if sent_message_id:
+                            await _update_worker_status(last_reply_at=_now().isoformat())
+                            logger.info(
+                                "inbound: reply sent group=%r message_id=%r sent_message_id=%r",
+                                group_name, msg["message_id"], sent_message_id,
+                            )
+                        else:
+                            logger.warning(
+                                "inbound: reply send failed group=%r message_id=%r",
+                                group_name, msg["message_id"],
+                            )
+                    else:
+                        logger.warning(
+                            "inbound: no active page while trying to send reply for message_id=%r",
+                            msg["message_id"],
+                        )
+                # Concurrent Task Engine (2026-08-05) — operation_id is only
+                # set when `reply` is a task's confirmation/clarification
+                # card; report the WhatsApp message id it actually got so a
+                # later reply-to-this-message can be routed back to it.
+                if operation_id and sent_message_id:
+                    asyncio.create_task(_post_task_sent(
+                        http, agent_id="casting-agent",
+                        operation_id=operation_id, message_id=sent_message_id,
+                    ))
+            t_total = time.monotonic() - t_detected
+            logger.info(
+                "inbound: TIMING message_id=%r dom_detection_sec=%.2f "
+                "message_extraction_sec=%.2f backend_sec=%.2f reply_send_sec=%.2f "
+                "reply_open_or_verify_chat=%.2f reply_composer_wait=%.2f reply_typing=%.2f "
+                "reply_send_click=%.2f reply_delivery_verify=%.2f ack_sent_at_sec=%s "
+                "total_sec=%.2f",
+                msg["message_id"], dom_detection_sec, message_extraction_sec,
+                t_backend_done - t_detected, reply_elapsed,
+                send_timing.get("open_or_verify_chat", 0.0), send_timing.get("composer_wait", 0.0),
+                send_timing.get("typing", 0.0), send_timing.get("send_click", 0.0),
+                send_timing.get("delivery_verify", 0.0), ack_sent_sec, t_total,
+            )
+            _record_latency(t_total)
 
 
 async def inbound_listener_loop(session) -> None:

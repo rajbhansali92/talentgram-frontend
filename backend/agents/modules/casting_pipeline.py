@@ -8625,96 +8625,122 @@ async def _resolve_send_target(
     project = match.project
 
     # Step 2: name resolution -> candidate set (never the authoritative
-    # destination by itself) — identical to upload's own step 2, PLUS
-    # SEND's own WhatsApp-identity tie-break on a false ambiguity before
-    # falling through to upload's shared behavior (see
-    # _narrow_send_ambiguous_talent_by_whatsapp_identity's docstring).
+    # destination by itself) — identical to upload's own step 2. No
+    # narrowing here — see Step 3's own docstring for why the WhatsApp-
+    # identity tie-break must never preempt the submission-based one.
     talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(talent_selector)
     if ambiguous:
-        narrowed = await _narrow_send_ambiguous_talent_by_whatsapp_identity(talent_selector, ambiguous)
-        if narrowed is not None:
-            candidate_ids = [narrowed.id]
-            candidate_label = narrowed.label
-        else:
-            candidate_ids = [c.id for c in ambiguous]
-            candidate_label = ambiguous[0].label
+        candidate_ids = [c.id for c in ambiguous]
+        candidate_label = ambiguous[0].label
     elif talent_id:
         candidate_ids = [talent_id]
         candidate_label = talent_label
     else:
         return None, ExecResult(ok=False, error="talent_not_found", message=err or "No matching talent found.")
 
-    # Step 3: the WhatsApp SOURCE — a talent's own group (Path A, the
-    # original/primary mechanism) OR, when no group is configured, their
-    # direct WhatsApp number (Path B — Production fix, 2026-09-03: SEND
-    # must not assume every talent submits through a group; a talent
-    # whose only WhatsApp presence is a direct number previously hit a
-    # hard "no_whatsapp_group" refusal here even when their marked media
-    # genuinely lives in that 1:1 conversation). Group is checked FIRST
-    # and wins whenever configured — this is a fallback, never a second,
-    # competing source of truth: a talent with BOTH a group and a phone
-    # still resolves through the group exactly as before.
-    candidate_docs = await db.talents.find(
-        {"id": {"$in": candidate_ids}}, {"_id": 0, "id": 1, "whatsapp_group_name": 1, "phone": 1},
-    ).to_list(20)
-    group_names = {(d.get("whatsapp_group_name") or "").strip() for d in candidate_docs if (d.get("whatsapp_group_name") or "").strip()}
-    if group_names:
-        if len(group_names) > 1:
-            return None, ExecResult(
-                ok=False, error="ambiguous_whatsapp_group",
-                message=f"Multiple different WhatsApp groups are configured across talent records named "
-                        f"{candidate_label} — please resolve the duplicate talent records first.",
-            )
-        group_name = next(iter(group_names))
-        source_type = "group"
-    else:
-        phones = {(d.get("phone") or "").strip() for d in candidate_docs if (d.get("phone") or "").strip()}
-        if not phones:
-            return None, ExecResult(
-                ok=False, error="no_whatsapp_source",
-                message=f"{candidate_label} has no WhatsApp group or phone number configured — "
-                        "the mark-based send workflow requires one. Add it in Talentgram first.",
-            )
-        if len(phones) > 1:
-            return None, ExecResult(
-                ok=False, error="ambiguous_whatsapp_phone",
-                message=f"Multiple different phone numbers are configured across talent records named "
-                        f"{candidate_label} — please resolve the duplicate talent records first.",
-            )
-        group_name = next(iter(phones))
-        source_type = "phone"
-
-    # Step 4: email-authoritative talent resolution — the EXACT SAME
-    # function upload uses, but ONLY when genuinely needed (Production
-    # fix, 2026-09-03). resolve_authoritative_talent_for_upload's whole
-    # purpose is disambiguating BETWEEN 2+ candidate talent records
-    # sharing a name, using each one's own submission email as the
-    # tie-breaker — which requires a submission to exist purely as a
-    # SIDE EFFECT of that disambiguation mechanism. When Step 2 (with
-    # the WhatsApp-identity narrowing above) already landed on exactly
-    # ONE unambiguous candidate, there is nothing left to disambiguate.
-    # Real production bug: "SEND Kripa Trivedi for PGI" — a single,
-    # unambiguous talent record, no duplicates at all — was refused with
-    # "No PGI submission was found... the mark-based UPLOAD workflow
-    # attaches media to an existing project submission" (an UPLOAD-
-    # specific constraint SEND doesn't share: UPLOAD's whole purpose is
-    # attaching media TO a submission, SEND's isn't), a full step before
-    # Step 6's own, genuinely-necessary submission check (needed for the
-    # FORM, not for talent identity) ever got a chance to report the
-    # real, specific problem.
+    # Step 3: AUTHORITATIVE TALENT resolution — WHICH duplicate record (if
+    # any) actually has THIS project's own submission — runs BEFORE the
+    # WhatsApp source lookup (Production fix, 2026-09-03: reordered after
+    # a real "Dia Malik" production bug this exact ordering caused — see
+    # below). resolve_authoritative_talent_for_upload is the EXACT SAME,
+    # unchanged, submission-email-based tie-break upload uses: given a
+    # project and the candidate set, find that project's OWN submission
+    # among them and re-derive the talent from its submitted email,
+    # never guessing, never picking by name.
+    #
+    # When there's only one candidate, there's nothing to disambiguate
+    # (Production fix, 2026-09-03 — "SEND Kripa Trivedi for PGI", a
+    # single unambiguous record with no submission at all, was blocked
+    # by this call's own submission requirement a full step before
+    # Step 6's genuinely-necessary submission check ever ran).
     if len(candidate_ids) == 1:
         authoritative_talent_id = candidate_ids[0]
         authoritative_talent_label = candidate_label
     else:
         auth = await media_assignment.resolve_authoritative_talent_for_upload(project["id"], candidate_ids)
-        if not auth.ok:
-            template = _UPLOAD_RESOLUTION_ERROR_MESSAGES.get(
-                auth.error, "Could not verify the send source for {talent_label} / {project_label} ({error})."
-            )
-            message = template.format(talent_label=candidate_label, project_label=project["label"], error=auth.error)
-            return None, ExecResult(ok=False, error=f"send_source_unresolved:{auth.error}", message=message)
-        authoritative_talent_id = auth.talent_id
-        authoritative_talent_label = auth.talent_label or candidate_label
+        if auth.ok:
+            authoritative_talent_id = auth.talent_id
+            authoritative_talent_label = auth.talent_label or candidate_label
+        else:
+            # SEND-only fallback (Production fix, 2026-09-03) — real
+            # production bug: "SEND Amme Trivedi for PGI" tied the real
+            # "Amme Triveddi" against "Kripa Trivedi", a completely
+            # unrelated person sharing only the surname token "Trivedi"
+            # — never a true duplicate-name collision, a fuzzy-matcher
+            # false positive. When NEITHER candidate has any submission
+            # for this project at all (no_submission_found — an
+            # unrelated false-ambiguity has no submission signal to
+            # fall back on), the candidate's own configured WhatsApp
+            # identity (group name or phone) is a real, deterministic
+            # signal a shared-surname token match can never produce for
+            # an unrelated person. Never attempted for a GENUINE
+            # multi-submission conflict (auth.error ==
+            # "ambiguous_submission" — two people who BOTH have this
+            # project's own submission — WhatsApp identity cannot
+            # safely override that).
+            narrowed = None
+            if auth.error != "ambiguous_submission":
+                narrowed = await _narrow_send_ambiguous_talent_by_whatsapp_identity(talent_selector, ambiguous or [])
+            if narrowed is not None:
+                authoritative_talent_id = narrowed.id
+                authoritative_talent_label = narrowed.label
+            else:
+                template = _UPLOAD_RESOLUTION_ERROR_MESSAGES.get(
+                    auth.error, "Could not verify the send source for {talent_label} / {project_label} ({error})."
+                )
+                message = template.format(talent_label=candidate_label, project_label=project["label"], error=auth.error)
+                return None, ExecResult(ok=False, error=f"send_source_unresolved:{auth.error}", message=message)
+
+    # Step 4: the WhatsApp SOURCE — a talent's own group (Path A, the
+    # original/primary mechanism) OR, when no group is configured, their
+    # direct WhatsApp number (Path B). PREFERS the now-resolved
+    # authoritative talent's OWN configured group/phone; only falls back
+    # to searching the FULL original candidate set (Production fix,
+    # 2026-09-03) when the authoritative record's own value is empty —
+    # the exact "Dia Malik" shape: her real Airtel Kick Boxing submission
+    # belongs to one duplicate talent record with NO WhatsApp group
+    # configured at all, while her actual marks live in the group
+    # configured on the OTHER duplicate record for the same real person
+    # (a known admin-manual-add -> talent-submits-own-email duplicate-
+    # record pattern this app documents elsewhere). Never a second,
+    # competing source of truth when the authoritative record DOES have
+    # its own group/phone — that one always wins outright, unchanged
+    # from before.
+    candidate_docs = await db.talents.find(
+        {"id": {"$in": candidate_ids}}, {"_id": 0, "id": 1, "whatsapp_group_name": 1, "phone": 1},
+    ).to_list(20)
+    by_id = {d["id"]: d for d in candidate_docs}
+    auth_group = ((by_id.get(authoritative_talent_id) or {}).get("whatsapp_group_name") or "").strip()
+    auth_phone = ((by_id.get(authoritative_talent_id) or {}).get("phone") or "").strip()
+    if auth_group:
+        group_name, source_type = auth_group, "group"
+    elif auth_phone:
+        group_name, source_type = auth_phone, "phone"
+    else:
+        group_names = {(d.get("whatsapp_group_name") or "").strip() for d in candidate_docs if (d.get("whatsapp_group_name") or "").strip()}
+        if group_names:
+            if len(group_names) > 1:
+                return None, ExecResult(
+                    ok=False, error="ambiguous_whatsapp_group",
+                    message=f"Multiple different WhatsApp groups are configured across talent records named "
+                            f"{candidate_label} — please resolve the duplicate talent records first.",
+                )
+            group_name, source_type = next(iter(group_names)), "group"
+        else:
+            phones = {(d.get("phone") or "").strip() for d in candidate_docs if (d.get("phone") or "").strip()}
+            if not phones:
+                return None, ExecResult(
+                    ok=False, error="no_whatsapp_source",
+                    message=f"{authoritative_talent_label} has no WhatsApp group or phone number configured — "
+                            "the mark-based send workflow requires one. Add it in Talentgram first.",
+                )
+            if len(phones) > 1:
+                return None, ExecResult(
+                    ok=False, error="ambiguous_whatsapp_phone",
+                    message=f"Multiple different phone numbers are configured across talent records named "
+                            f"{candidate_label} — please resolve the duplicate talent records first.",
+                )
+            group_name, source_type = next(iter(phones)), "phone"
 
     identity = await media_assignment.get_gunwanti_identity()
     if not identity or not identity.get("lid"):

@@ -325,6 +325,132 @@ async def test_send_single_unambiguous_talent_with_no_submission_gets_clear_diag
 
 
 # ---------------------------------------------------------------------------
+# Split-duplicate-record resolution (master prompt Parts A-I — real
+# production bug, 2026-09-03): "SEND Dia Malik for Airtel Kick Boxing"
+# reported "no submission" even though the admin's own Submission Review
+# screen showed a real PENDING submission for her. Root cause: TWO real
+# "Dia Malik" talent records exist (the known admin-manual-add ->
+# talent-submits-own-email duplicate-record pattern) — Record A has the
+# WhatsApp group configured but her OWN submission is for a DIFFERENT
+# project; Record B has NO WhatsApp group configured but holds the real
+# Airtel submission. The previous fix's WhatsApp-identity narrowing (Amme/
+# Kripa) ran at name-resolution time and picked Record A — preempting the
+# submission-based tie-break (resolve_authoritative_talent_for_upload)
+# before it ever got a chance to find Record B. Fixed by reordering:
+# submission-based authoritative resolution now runs FIRST, and the
+# WhatsApp source lookup PREFERS the resolved authoritative talent's own
+# group/phone, falling back to the full candidate set only when that one
+# is empty — exactly recovering Record A's group for Record B's
+# submission, since they're the same real person.
+# ---------------------------------------------------------------------------
+async def _seed_talent_raw(name, *, whatsapp_group_name="", phone=None, email="") -> str:
+    tid = f"test-ma-tal-{uuid.uuid4().hex[:8]}"
+    await db.talents.insert_one({
+        "id": tid, "name": name, "tags": [], "notes": "",
+        "phone": phone, "whatsapp_group_name": whatsapp_group_name,
+        "email": email or None, "normalized_email": (email or "").strip().lower() or None,
+    })
+    return tid
+
+
+async def test_send_split_duplicate_record_finds_submission_on_the_other_record():
+    """A/D: existing submission on a DIFFERENT duplicate record than the
+    one with the matching WhatsApp group -> SEND must still find it
+    (submission-based tie-break, not WhatsApp-identity alone), and the
+    source group must fall back to the OTHER record's own group (same
+    real person, split across two DB records) — the exact "Dia Malik"
+    reproduction."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Dia Malik {tag}"
+    project_label = f"Airtel Kick Boxing {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    # Record A: has the WhatsApp group, but her OWN submission (if any) is
+    # for an unrelated project — here, simply no submission at all.
+    record_a = await _seed_talent_raw(name, whatsapp_group_name=f"{name} x Talentgram Agency", email=f"a.{tag}@example.com")
+    # Record B: no WhatsApp group configured, but holds the REAL Airtel submission.
+    record_b = await _seed_talent_raw(name, whatsapp_group_name="", email=f"b.{tag}@example.com")
+    submission_id = await _seed_submission(project_id, record_b, f"b.{tag}@example.com", decision="pending")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        target, err = await cp._resolve_send_target({"talent_selector": name, "project_query": project_label})
+        assert err is None, (err.error, err.message) if err else None
+        assert target["authoritative_talent_id"] == record_b, (
+            f"must resolve to the record that ACTUALLY has this project's submission: {target}"
+        )
+        assert target["group_name"] == f"{name} x Talentgram Agency", (
+            f"source group must fall back to the OTHER record's configured group: {target}"
+        )
+        assert target["source_type"] == "group"
+    finally:
+        await _cleanup_send(talent_ids=[record_a, record_b], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_genuine_multi_submission_conflict_never_guessed_via_whatsapp_identity():
+    """A real conflict — TWO different duplicate records BOTH have their
+    own submission for the SAME requested project — must never be
+    silently resolved by WhatsApp identity; that signal is only a
+    fallback for "neither has a submission", never an override for a
+    genuine multi-submission ambiguity."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Conflict Person {tag}"
+    project_label = f"Conflict Project {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    record_a = await _seed_talent_raw(name, whatsapp_group_name=f"{name} x Talentgram Agency", email=f"a.{tag}@example.com")
+    record_b = await _seed_talent_raw(name, whatsapp_group_name="", email=f"b.{tag}@example.com")
+    sub_a = await _seed_submission(project_id, record_a, f"a.{tag}@example.com", decision="pending")
+    sub_b = await _seed_submission(project_id, record_b, f"b.{tag}@example.com", decision="pending")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        target, err = await cp._resolve_send_target({"talent_selector": name, "project_query": project_label})
+        assert target is None
+        assert err is not None
+        assert "ambiguous" in (err.error or "").lower(), err.error
+    finally:
+        await _cleanup_send(talent_ids=[record_a, record_b], project_ids=[project_id], submission_ids=[sub_a, sub_b])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_airtel_kick_boxing_end_to_end_finds_real_submission():
+    """C/D end to end: "SEND Dia Malik for Airtel Kick Boxing" — the
+    exact reported command — must reach a real confirmation (form data
+    present), never "no submission", when a genuine submission exists on
+    a split duplicate record."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Dia Malik {tag}"
+    project_label = f"Airtel Kick Boxing {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    record_a = await _seed_talent_raw(name, whatsapp_group_name=f"{name} x Talentgram Agency", email=f"a.{tag}@example.com")
+    record_b = await _seed_talent_raw(name, whatsapp_group_name="", email=f"b.{tag}@example.com")
+    submission_id = await _seed_submission(project_id, record_b, f"b.{tag}@example.com", decision="pending")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600031",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "no" not in r.reply.lower() or "submission" not in r.reply.lower() or "1 → Approve" in r.reply, r.reply
+        assert "1 → Approve" in r.reply, r.reply
+        assert f"{name} x Talentgram Agency" in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600031", text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup_send(talent_ids=[record_a, record_b], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+# ---------------------------------------------------------------------------
 # SEND Path B — WhatsApp phone-number source (master prompt Part 3/25.4):
 # a talent whose only WhatsApp presence is a direct number, no group. Both
 # sources must resolve to the same talent/project correctly; a talent with

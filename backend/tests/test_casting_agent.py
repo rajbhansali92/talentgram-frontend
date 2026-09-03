@@ -11697,6 +11697,213 @@ async def test_ig_share_recipient_confirmation_three_line_contact_format():
         await _restore_share_config(original)
 
 
+# ---------------------------------------------------------------------------
+# SOURCE-GROUP RECIPIENT LEAK (Production fix, 2026-09-03) — real
+# production regression: "Share Instagram link of Anusha Sharma to Heena
+# Talentgram", sent INSIDE "Talentgram Scouting Agent", produced a
+# confirmation card whose Recipient was "Talentgram Scouting Agent" — the
+# group the command itself arrived in, not the requested "Heena
+# Talentgram". Root cause: the live-WhatsApp-search tier's "exactly one
+# candidate -> trust it" branch had NO cross-check against the query at
+# all, so a WhatsApp search that (for whatever DOM/timing reason) came
+# back with only the current group as its single result was blindly
+# accepted. Fixed by refusing to auto-select a single WhatsApp result
+# that matches the inbound source group UNLESS the recipient text itself
+# also names that group.
+# ---------------------------------------------------------------------------
+
+async def test_ig_share_never_auto_selects_source_group_from_single_stray_result():
+    """THE exact reported bug, reproduced deterministically: the
+    simulated worker returns ONLY the inbound source group as its single
+    WhatsApp search result for a completely different requested
+    recipient — the confirmation must NOT show that group, and the
+    command must fall through to an honest "couldn't find" rather than
+    silently substituting the current chat."""
+    group = f"Talentgram Scouting Agent {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    try:
+        worker = _with_simulated_recipient_search(
+            f"Heena {tag} Talentgram",
+            [{"name": group, "type": "group"}],  # the stray/glitched WhatsApp result
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Heena {tag} Talentgram",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert group not in r.reply, (
+            f"the inbound source group must never appear as the resolved recipient "
+            f"merely because a stray WhatsApp result matched it: {r.reply!r}"
+        )
+        assert "You are about to SHARE" not in r.reply, (
+            "must not reach a confirmation card at all when the only WhatsApp "
+            f"result was an unrequested source-group leak: {r.reply!r}"
+        )
+        # Falls through to the CRM/talent fallback (Tier 4), which here
+        # correctly refuses to guess rather than finding anything —
+        # either phrasing is a safe, honest non-match; what matters is
+        # it's NEVER the source group and NEVER a silent confirmation.
+        assert (
+            "couldn't find" in r.reply.lower()
+            or "doesn't look like a real match" in r.reply.lower()
+        ), r.reply
+    finally:
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_explicitly_naming_source_group_still_works():
+    """The one legitimate exception: the user explicitly writes the
+    source group's own name as the recipient, from inside that very
+    group — must resolve normally, per the master prompt's own worked
+    example (test case 6)."""
+    group = f"Talentgram Scouting Agent {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    try:
+        worker = _with_simulated_recipient_search(
+            group, [{"name": group, "type": "group"}],
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to {group}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert group in r.reply, r.reply
+        assert "WhatsApp group" in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_merely_receiving_command_in_group_never_implies_it_as_recipient():
+    """Test case 7: receiving the command INSIDE "Talentgram Scouting
+    Agent" must never, by itself, make that group the recipient when a
+    different, legitimate WhatsApp destination was actually requested
+    and found."""
+    group = f"Talentgram Scouting Agent {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    recipient_name = f"Rising Sun {tag} x Talentgram Agency"
+    try:
+        worker = _with_simulated_recipient_search(
+            recipient_name, [{"name": recipient_name, "type": "group"}],
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to {recipient_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert recipient_name in r.reply, r.reply
+        assert group not in r.reply, (
+            f"the source group must not leak into the recipient line: {r.reply!r}"
+        )
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_source_group_still_shown_as_ambiguity_option_not_auto_picked():
+    """The safety rule is about AUTOMATIC selection, not about hiding a
+    genuine WhatsApp result — when the source group is one of several
+    loose matches (a real ambiguity, no single exact winner), it must
+    still appear in the numbered list so the user CAN explicitly choose
+    it, but must never be auto-picked."""
+    group = f"Talentgram Scouting Agent {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    other = f"Talentgram india {tag} x ANT"
+    try:
+        worker = _with_simulated_recipient_search(
+            f"Talentgram {tag}",
+            [{"name": group, "type": None}, {"name": other, "type": None}],
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to Talentgram {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert "I found multiple WhatsApp matches" in r.reply, r.reply
+        assert group in r.reply, "the source group must still be a listed option"
+        assert other in r.reply
+        assert "You are about to SHARE" not in r.reply, "must not auto-confirm an ambiguity"
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
+async def test_ig_share_exact_match_among_many_wins_over_source_group():
+    """When WhatsApp's own search returns several loose results but
+    exactly one is a real exact title match for the requested recipient
+    (not the source group), that exact match wins directly — this is
+    the "Heena Talentgram" production scenario exactly as verified live:
+    the source group appearing among the loose results never blocks the
+    genuine exact match from resolving normally."""
+    group = f"Talentgram Scouting Agent {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    anusha = await _seed_talent(f"Anusha Sharma {tag}", instagram_handle="anusha.official")
+    recipient_name = f"Heena {tag} Talentgram"
+    try:
+        worker = _with_simulated_recipient_search(
+            recipient_name,
+            [
+                {"name": recipient_name, "type": "group"},
+                {"name": group, "type": None},
+                {"name": f"Rising Sun {tag} x Talentgram Agency", "type": None},
+            ],
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Instagram link of Anusha Sharma {tag} to {recipient_name}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert "You are about to SHARE Instagram links:" in r.reply, r.reply
+        assert recipient_name in r.reply, r.reply
+        assert "WhatsApp group" in r.reply, r.reply
+        assert "I found multiple WhatsApp matches" not in r.reply, r.reply
+
+        await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup(phone, talent_ids=[anusha])
+        await _restore_share_config(original)
+
+
 async def test_compound_add_move_share_survives_stale_instagram_conversation():
     """Issue 2 — THE reported regression, reproduced exactly: a prior,
     unrelated SHARE Instagram command left dangling in "editing" step

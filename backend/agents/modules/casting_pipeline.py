@@ -7472,7 +7472,20 @@ async def _search_whatsapp_live(query: str) -> Tuple[List[Dict[str, Any]], Optio
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
 
 
-async def _resolve_instagram_recipient(query: str) -> Tuple[Any, Optional[str]]:
+def _normalize_recipient_name(s: str) -> str:
+    """Case/whitespace-insensitive normalization for comparing a WhatsApp
+    display name against a recipient query or the inbound source group's
+    own name — collapses runs of whitespace and folds case, tolerating
+    the natural-language spacing/capitalization variance this grammar
+    has always tolerated, without doing any fuzzy/approximate matching
+    (still a plain equality check on the normalized strings, not a
+    similarity score)."""
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+
+
+async def _resolve_instagram_recipient(
+    query: str, *, source_group_name: str = "",
+) -> Tuple[Any, Optional[str]]:
     """SHARE Instagram's own recipient resolver — WhatsApp-first, per
     Part 1's explicit priority order:
 
@@ -7481,6 +7494,11 @@ async def _resolve_instagram_recipient(query: str) -> Tuple[Any, Optional[str]]:
         existing saved-recipient mechanisms (CRM contact / saved
         contact/group list) as a LAST-resort assist, never the primary
         source of truth for "does this WhatsApp destination exist".
+
+    `source_group_name` is the WhatsApp group the inbound COMMAND itself
+    arrived in — passed through only so the safety guard below can
+    recognize it; it is NEVER treated as a recipient candidate on its
+    own and never searched for.
 
     Returns (wa._RecipientTarget, chat_type) — chat_type is "group" |
     "contact" | None (worker couldn't determine, or the target wasn't
@@ -7498,6 +7516,14 @@ async def _resolve_instagram_recipient(query: str) -> Tuple[Any, Optional[str]]:
     q = (query or "").strip()
     if not q:
         return wa._RecipientTarget(ok=False, error="Who should this go to?"), None
+
+    q_norm = _normalize_recipient_name(q)
+    source_group_norm = _normalize_recipient_name(source_group_name) if source_group_name else ""
+    # Query explicitly names the inbound source group itself — the ONE
+    # case where selecting it is legitimate ("...to Talentgram Scouting
+    # Agent", said inside that very group). Anything else must never
+    # let that group win by accident.
+    query_explicitly_names_source_group = bool(source_group_norm) and q_norm == source_group_norm
 
     # 1. Explicit phone number — no WhatsApp lookup needed, the number
     # itself IS the destination.
@@ -7518,14 +7544,40 @@ async def _resolve_instagram_recipient(query: str) -> Tuple[Any, Optional[str]]:
     # results also came back; otherwise 2+ results are a genuine
     # ambiguity (Part 9) and exactly 1 result is used as-is (WhatsApp's
     # own search already did its own matching — no second fuzzy pass on
-    # top of it).
+    # top of it) — UNLESS that single result is the inbound source
+    # group and the user never actually asked for it by name (Production
+    # fix, 2026-09-03): a real production run of "...to Heena Talentgram"
+    # came back from WhatsApp's own live search with the CURRENT group
+    # ("Talentgram Scouting Agent") as its result and this tier blindly
+    # trusted it — the one WhatsApp-search shape with zero cross-check
+    # against the query at all. The exact-match-among-many branch below
+    # needs no equivalent guard: by construction a name only lands there
+    # by literally equaling the query, so a source-group match there
+    # only ever happens because the user explicitly typed that name.
     candidates, search_error = await _search_whatsapp_live(q)
+    single_filtered_as_source_group_leak = False
     if candidates:
         chosen = None
         if len(candidates) == 1:
-            chosen = candidates[0]
+            single = candidates[0]
+            single_is_unrequested_source_group = (
+                source_group_norm
+                and _normalize_recipient_name(single.get("name") or "") == source_group_norm
+                and not query_explicitly_names_source_group
+            )
+            if single_is_unrequested_source_group:
+                # The ONLY thing WhatsApp's own search returned was the
+                # group the command was received in, and the user never
+                # asked for it by name — never auto-select it. This is
+                # NOT "one candidate, ambiguous" (an ambiguity list with
+                # a single filtered-out option makes no sense); it's
+                # treated exactly like an empty search, falling through
+                # to tiers 3/4 below.
+                single_filtered_as_source_group_leak = True
+            else:
+                chosen = single
         else:
-            exact = [c for c in candidates if (c.get("name") or "").strip().lower() == q.lower()]
+            exact = [c for c in candidates if _normalize_recipient_name(c.get("name") or "") == q_norm]
             if len(exact) == 1:
                 chosen = exact[0]
         if chosen:
@@ -7538,17 +7590,24 @@ async def _resolve_instagram_recipient(query: str) -> Tuple[Any, Optional[str]]:
                 ]),
                 display_label=name,
             ), chat_type
-        # 2+ plausible WhatsApp results, no clear exact winner — a
-        # genuine ambiguity, shown with WhatsApp's own real names (Part
-        # 9), never internal database matching details.
-        options = [{"label": c.get("name") or "", "value": c.get("name") or ""} for c in candidates]
-        return wa._RecipientTarget(
-            ok=False,
-            ambiguous=wa.AmbiguousEntity(
-                entity_type="talent", field_key=SHARE_INSTAGRAM_RECIPIENT_FIELD.key,
-                candidates=[disambiguation.Candidate(id=o["value"], label=o["label"]) for o in options],
-            ),
-        ), None
+        if not single_filtered_as_source_group_leak:
+            # 2+ plausible WhatsApp results, no clear exact winner — a
+            # genuine ambiguity, shown with WhatsApp's own real names
+            # (Part 9), never internal database matching details. The
+            # source group is left in this list rather than filtered
+            # out: picking it here requires the user to explicitly
+            # reply with its number or name, which is exactly the
+            # "explicitly names that group" case the safety rule
+            # allows — the rule is about automatic selection, not about
+            # hiding a real WhatsApp result.
+            options = [{"label": c.get("name") or "", "value": c.get("name") or ""} for c in candidates]
+            return wa._RecipientTarget(
+                ok=False,
+                ambiguous=wa.AmbiguousEntity(
+                    entity_type="talent", field_key=SHARE_INSTAGRAM_RECIPIENT_FIELD.key,
+                    candidates=[disambiguation.Candidate(id=o["value"], label=o["label"]) for o in options],
+                ),
+            ), None
 
     # 3. Project's own WhatsApp casting group (Part 6.D's "project-
     # associated WhatsApp group", e.g. "Hinge group") — an EXPLICIT
@@ -7591,7 +7650,7 @@ async def _resolve_instagram_recipient(query: str) -> Tuple[Any, Optional[str]]:
     return target, None
 
 
-async def _resolve_share_instagram(collected: dict) -> _InstagramShareResolution:
+async def _resolve_share_instagram(collected: dict, *, source_group_name: str = "") -> _InstagramShareResolution:
     """The Instagram content_type's own resolve — mirrors _resolve_
     share's shape (ok/error/disambiguation) but against fundamentally
     different targets: talents are the CONTENT SOURCE (whose Instagram
@@ -7599,7 +7658,12 @@ async def _resolve_share_instagram(collected: dict) -> _InstagramShareResolution
     recipient, resolved through _resolve_instagram_recipient above.
     Never sends anything itself — pure resolution, reused by both the
     confirmation card and the real executor (Part 12's own "resolve
-    everything, THEN show confirmation, THEN send" sequencing)."""
+    everything, THEN show confirmation, THEN send" sequencing).
+
+    `source_group_name` — the inbound command's own WhatsApp group —
+    is threaded straight through to _resolve_instagram_recipient's
+    safety guard; see that function's docstring. Every caller here has
+    an ExecContext and passes ctx.group_name."""
     talents_query = (collected.get(SHARE_INSTAGRAM_TALENTS_FIELD.key) or "").strip()
     recipient_query = (collected.get(SHARE_INSTAGRAM_RECIPIENT_FIELD.key) or "").strip()
 
@@ -7646,7 +7710,9 @@ async def _resolve_share_instagram(collected: dict) -> _InstagramShareResolution
             )
         return _InstagramShareResolution(ok=False, error=msg)
 
-    target, chat_type = await _resolve_instagram_recipient(recipient_query)
+    target, chat_type = await _resolve_instagram_recipient(
+        recipient_query, source_group_name=source_group_name,
+    )
     if target.ambiguous:
         options = [{"label": c.label, "value": c.label} for c in target.ambiguous.candidates]
         opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
@@ -7736,7 +7802,7 @@ def _instagram_recipient_lines(resolved: "_InstagramShareResolution") -> List[st
 
 
 async def _build_share_instagram_confirmation(collected: dict, ctx: ExecContext) -> str:
-    resolved = await _resolve_share_instagram(collected)
+    resolved = await _resolve_share_instagram(collected, source_group_name=ctx.group_name)
     if not resolved.ok:
         if resolved.disambiguation:
             await session_context.update_session(
@@ -7760,7 +7826,7 @@ async def _build_share_instagram_confirmation(collected: dict, ctx: ExecContext)
 
 
 async def _build_share_instagram_edit_prompt(collected: dict, ctx: ExecContext) -> str:
-    resolved = await _resolve_share_instagram(collected)
+    resolved = await _resolve_share_instagram(collected, source_group_name=ctx.group_name)
     if not resolved.ok:
         talents_desc = (collected.get(SHARE_INSTAGRAM_TALENTS_FIELD.key) or "").strip() or "?"
         recipient_desc = (collected.get(SHARE_INSTAGRAM_RECIPIENT_FIELD.key) or "").strip() or "?"
@@ -7826,7 +7892,7 @@ async def _share_instagram_parse_edits_async(
         m = numbered_re.match(stripped)
         if not m:
             continue
-        resolved = await _resolve_share_instagram(collected)
+        resolved = await _resolve_share_instagram(collected, source_group_name=ctx.group_name)
         current_names = list(resolved.talent_labels) if resolved.ok else []
         if not current_names:
             break
@@ -7847,7 +7913,7 @@ async def _share_instagram_parse_edits_async(
 
     m = _SHARE_EDIT_REMOVE_RE.match(stripped) or _SHARE_EDIT_ADD_RE.match(stripped)
     if m:
-        resolved = await _resolve_share_instagram(collected)
+        resolved = await _resolve_share_instagram(collected, source_group_name=ctx.group_name)
         current_names = list(resolved.talent_labels) if resolved.ok else []
         if current_names:
             remove_m = _SHARE_EDIT_REMOVE_RE.match(stripped)
@@ -7948,7 +8014,7 @@ async def _watch_and_report_instagram_share_delivery(
 async def _share_instagram_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     from agents.modules import whatsapp_campaign_agent as wa
 
-    resolved = await _resolve_share_instagram(collected)
+    resolved = await _resolve_share_instagram(collected, source_group_name=ctx.group_name)
     if not resolved.ok:
         return ExecResult(ok=False, error="share_instagram_resolution_failed", message=resolved.error)
 

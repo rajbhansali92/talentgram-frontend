@@ -133,6 +133,14 @@ export async function retryJob(batchId, jobId) {
   return res.data;
 }
 
+// --- CASTING CALL (Global Talent → Add to Projects → "Send Casting Call") ---
+// Always uses the existing built-in `casting_call` template — the caller
+// never picks a template. body: { talent_ids: [...], project_ids: [...] }
+export async function sendCastingCall(body) {
+  const res = await adminApi.post("/whatsapp/casting-call/send", body);
+  return res.data;
+}
+
 // --- SESSIONS ---
 export async function getSessionStatus() {
   const res = await adminApi.get("/whatsapp/session");

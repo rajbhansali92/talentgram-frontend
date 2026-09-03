@@ -11,6 +11,7 @@ import TagPopover from "@/components/TagPopover";
 import ProjectsPopover from "@/components/ProjectsPopover";
 import BulkTagDialog from "@/components/BulkTagDialog";
 import AddToProjectModal from "@/components/AddToProjectModal";
+import { getBatch, getJobs } from "@/lib/whatsappApi";
 import MergeTalentsModal from "@/components/MergeTalentsModal";
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
 import { useTalentDirectory } from "@/hooks/useTalentDirectory";
@@ -651,6 +652,12 @@ export default function TalentList() {
     const [bulkTagAction, setBulkTagAction] = useState(null); // 'assign' | 'remove' | null
     const [showAddToProject, setShowAddToProject] = useState(false);
     const [showMergeModal, setShowMergeModal] = useState(false);
+    // Casting-call send groups queued from AddToProjectModal, still being
+    // watched for the final "sent to N talents" toast. Grouped by action so
+    // two separate "Send Casting Call" clicks never get merged into one
+    // summary. Kept at this (always-mounted) page level rather than inside
+    // the modal, since the modal itself closes right after queueing.
+    const [castingCallWatch, setCastingCallWatch] = useState([]); // [{ actionId, batches: [{project_id, project_name, batch_id}] }]
 
     const [viewMode, setViewMode] = useState(() => {
         try {
@@ -694,6 +701,77 @@ export default function TalentList() {
         () => setSelected(new Set(talents.map((t) => t.id))),
         [talents]
     );
+
+    // Registers one "Send Casting Call" action's batches for polling — see
+    // the effect below for the actual poll loop + final toast.
+    const watchCastingCallBatches = useCallback((batches) => {
+        setCastingCallWatch((prev) => [...prev, { actionId: `${Date.now()}-${Math.random()}`, batches }]);
+    }, []);
+
+    // Polls the EXISTING batch-status endpoint (same one WhatsApp Engine's
+    // own campaign history panel polls) every 3s until every batch in an
+    // action group reaches a terminal status, then reads that batch's jobs
+    // (also an existing endpoint) to report exactly who was actually sent
+    // to vs. failed — the job/batch status stays the single source of
+    // truth, this just narrates it. The pipeline stage move itself already
+    // happened server-side (routers/whatsapp.py's send_casting_call kicks
+    // off its own background watcher) independent of this poll — this
+    // effect only produces the toast, and only while Global Talent stays
+    // open; if the admin navigates away mid-send the move still completes,
+    // it just won't get narrated here.
+    useEffect(() => {
+        if (castingCallWatch.length === 0) return;
+        let active = true;
+        const tick = async () => {
+            try {
+                const groups = await Promise.all(
+                    castingCallWatch.map(async (group) => {
+                        const statuses = await Promise.all(
+                            group.batches.map((b) => getBatch(b.batch_id).catch(() => null))
+                        );
+                        const allTerminal = statuses.every(
+                            (s) => s && ["completed", "paused", "cancelled"].includes(s.status)
+                        );
+                        return { ...group, allTerminal };
+                    })
+                );
+                if (!active) return;
+                const finished = groups.filter((g) => g.allTerminal);
+                const stillWatching = groups.filter((g) => !g.allTerminal).map(({ allTerminal, ...g }) => g);
+
+                for (const group of finished) {
+                    const jobLists = await Promise.all(group.batches.map((b) => getJobs(b.batch_id).catch(() => [])));
+                    let sentCount = 0, failedCount = 0;
+                    const sentNames = [];
+                    jobLists.flat().forEach((j) => {
+                        if (j.status === "sent") { sentCount++; sentNames.push(j.talent_name || "Unknown"); }
+                        else if (j.status === "failed") failedCount++;
+                    });
+                    const projectNames = group.batches.map((b) => b.project_name).filter(Boolean);
+                    if (sentCount === 0) {
+                        toast.error(`Casting call send failed for ${failedCount} talent${failedCount === 1 ? "" : "s"}.`);
+                    } else if (failedCount === 0) {
+                        if (group.batches.length === 1) {
+                            toast.success(
+                                `Casting call sent successfully to:\n${sentNames.join(", ")}\nProject: ${projectNames[0] || ""}`
+                            );
+                        } else {
+                            toast.success(
+                                `Casting calls sent successfully to ${sentCount} talent${sentCount === 1 ? "" : "s"} across ${group.batches.length} projects.`
+                            );
+                        }
+                    } else {
+                        toast.warning
+                            ? toast.warning(`Casting calls sent to ${sentCount} talent${sentCount === 1 ? "" : "s"}. ${failedCount} failed.`)
+                            : toast(`Casting calls sent to ${sentCount} talent${sentCount === 1 ? "" : "s"}. ${failedCount} failed.`);
+                    }
+                }
+                if (active) setCastingCallWatch(stillWatching);
+            } catch { /* transient poll error — keep polling */ }
+        };
+        const timer = setInterval(tick, 3000);
+        return () => { active = false; clearInterval(timer); };
+    }, [castingCallWatch]);
 
     const isSelectionMode = selected.size > 0;
 
@@ -1054,6 +1132,7 @@ export default function TalentList() {
                     talentIds={Array.from(selected)}
                     onClose={() => setShowAddToProject(false)}
                     onSuccess={clear}
+                    onCastingCallQueued={watchCastingCallBatches}
                 />
             )}
 

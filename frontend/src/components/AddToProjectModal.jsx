@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { X, Search, Check, Loader2, FolderKanban } from "lucide-react";
+import { X, Search, Check, Loader2, FolderKanban, Send } from "lucide-react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
+import { sendCastingCall } from "@/lib/whatsappApi";
 
 /**
  * AddToProjectModal — bulk "Add to Project" picker launched from the Global
@@ -12,23 +13,37 @@ import { formatErrorDetail } from "@/lib/errorFormatter";
  * requests). Talents land in each project's configured default pipeline
  * stage and existing (project, talent) pairs are skipped server-side —
  * never duplicated.
+ *
+ * After a successful add, shows one extra confirmation step — "Send Casting
+ * Call?" (2026-09-03) — reusing the existing `casting_call` WhatsApp
+ * template via POST /whatsapp/casting-call/send for exactly the selected
+ * talent × selected project combinations. "Not Now" leaves everything
+ * exactly as it was before this addition: onSuccess/onClose fire immediately
+ * with no WhatsApp send and no pipeline movement.
  */
-export default function AddToProjectModal({ open, talentIds, onClose, onSuccess }) {
+export default function AddToProjectModal({ open, talentIds, onClose, onSuccess, onCastingCallQueued }) {
     const [projects, setProjects] = useState([]);
     const [loadingProjects, setLoadingProjects] = useState(false);
     const [search, setSearch] = useState("");
     const [checked, setChecked] = useState(new Set());
     const [focusedIndex, setFocusedIndex] = useState(0);
     const [submitting, setSubmitting] = useState(false);
+    // Post-add confirmation step. null = still on the picker. Set to the
+    // bulk-add response once the add succeeds, before onSuccess/onClose
+    // fire, so "Not Now" can still call them unchanged.
+    const [addResult, setAddResult] = useState(null);
+    const [sendingCastingCall, setSendingCastingCall] = useState(false);
     const searchInputRef = useRef(null);
     const listRef = useRef(null);
     const itemRefs = useRef(new Map());
+    const sendCastingCallButtonRef = useRef(null);
 
     useEffect(() => {
         if (!open) return;
         setSearch("");
         setChecked(new Set());
         setFocusedIndex(0);
+        setAddResult(null);
         let isMounted = true;
         setLoadingProjects(true);
         adminApi
@@ -45,6 +60,29 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess 
         setTimeout(() => searchInputRef.current?.focus(), 50);
         return () => { isMounted = false; };
     }, [open]);
+
+    // Escape on the "Send Casting Call?" confirmation step = same as
+    // clicking "Not Now" (the picker's own Escape handling lives in its
+    // search input's onKeyDown below, which no longer exists once we're on
+    // this step).
+    useEffect(() => {
+        if (!open || !addResult) return;
+        const onKeyDown = (e) => {
+            if (e.key === "Escape" && !sendingCastingCall) finishNotNow();
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, addResult, sendingCastingCall]);
+
+    // Explicit imperative focus (belt-and-suspenders alongside the button's
+    // own `autoFocus`) so the primary action reliably has real keyboard
+    // focus the instant this step renders — `autoFocus` alone was observed
+    // to not always win the race in every render path, which would leave
+    // Enter landing nowhere in particular.
+    useEffect(() => {
+        if (open && addResult) sendCastingCallButtonRef.current?.focus();
+    }, [open, addResult]);
 
     const filtered = useMemo(() => {
         const q = search.trim().toLowerCase();
@@ -112,8 +150,11 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess 
             toast.success(
                 `Added ${data.added} to ${data.project_count} project${data.project_count === 1 ? "" : "s"}${skippedNote}`
             );
-            onSuccess?.(data);
-            onClose();
+            // Existing behaviour (onSuccess/onClose) is preserved exactly —
+            // it now just fires from the confirmation step's own two
+            // buttons instead of immediately here. Add to Projects itself
+            // is already fully complete at this point either way.
+            setAddResult(data);
         } catch (err) {
             toast.error(formatErrorDetail(err, "Failed to add talents to project"));
         } finally {
@@ -121,9 +162,91 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess 
         }
     };
 
+    const finishNotNow = () => {
+        onSuccess?.(addResult);
+        onClose();
+    };
+
+    const handleSendCastingCall = async () => {
+        if (sendingCastingCall) return;
+        setSendingCastingCall(true);
+        try {
+            const result = await sendCastingCall({
+                talent_ids: talentIds,
+                project_ids: Array.from(checked),
+            });
+            if (result.errors?.length) {
+                toast.error(
+                    `Casting calls queued, but failed for: ${result.errors
+                        .map((e) => e.project_name || e.project_id)
+                        .join(", ")}`
+                );
+            } else {
+                toast.success("Casting calls queued successfully.");
+            }
+            // Hands the queued batches to the page-level watcher, which polls
+            // the EXISTING batch/job status endpoints and shows the final
+            // "sent to N talents" toast once the worker actually finishes —
+            // never here, and never merely because this click happened.
+            if (result.batches?.length) onCastingCallQueued?.(result.batches);
+        } catch (err) {
+            toast.error(formatErrorDetail(err, "Failed to queue casting call"));
+        } finally {
+            setSendingCastingCall(false);
+            onSuccess?.(addResult);
+            onClose();
+        }
+    };
+
     if (!open) return null;
 
     const talentCount = talentIds.length;
+
+    if (addResult) {
+        const projectCount = addResult.project_count || checked.size;
+        return (
+            <div
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+                onClick={sendingCastingCall ? undefined : finishNotNow}
+            >
+                <div
+                    className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-black/[0.08] text-black relative flex flex-col"
+                    onClick={(e) => e.stopPropagation()}
+                    data-testid="send-casting-call-modal"
+                >
+                    <div className="flex items-center gap-2 mb-3">
+                        <Send className="w-4 h-4 text-black/50" />
+                        <h3 className="font-semibold text-sm text-neutral-800">Send Casting Call?</h3>
+                    </div>
+                    <p className="text-xs text-black/60 mb-6 leading-relaxed">
+                        You've added {addResult.added} talent{addResult.added === 1 ? "" : "s"} to {projectCount} project{projectCount === 1 ? "" : "s"}.
+                        {" "}Would you like to send the casting call to these talents now?
+                    </p>
+                    <div className="flex gap-2">
+                        <button
+                            onClick={finishNotNow}
+                            disabled={sendingCastingCall}
+                            data-testid="send-casting-call-not-now"
+                            className="flex-1 py-2.5 border border-black/[0.08] hover:bg-black/[0.02] text-black/60 hover:text-black text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                        >
+                            Not Now
+                        </button>
+                        <button
+                            ref={sendCastingCallButtonRef}
+                            onClick={handleSendCastingCall}
+                            disabled={sendingCastingCall}
+                            autoFocus
+                            data-testid="send-casting-call-confirm"
+                            className="flex-1 py-2.5 bg-black text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-40 hover:bg-black/85 flex items-center justify-center gap-1.5"
+                        >
+                            {sendingCastingCall && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                            Send Casting Call
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div

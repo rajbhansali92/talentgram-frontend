@@ -19,7 +19,9 @@ Reads (read-only) from:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time as _time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -1191,12 +1193,17 @@ async def manual_validate(payload: ManualValidateIn, admin: dict = Depends(curre
     }
 
 
-@router.post("/batches", status_code=201)
-async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_admin)):
+async def _create_batch_internal(payload: BatchIn, admin: dict) -> dict:
     """Create a batch (dry-run or live).
 
     Dry-run batches resolve recipients + render messages but do NOT send.
     Live batches create pending jobs that the worker will pick up.
+
+    Extracted from the POST /batches route (2026-09-03) so the Global
+    Talent → "Send Casting Call" flow (see send_casting_call below) can
+    create batches through the EXACT same path — recipient resolution,
+    template rendering, job/batch document shape — instead of a second,
+    parallel implementation. The route below is now a thin wrapper.
     """
     # Validate template
     template = await db.whatsapp_templates.find_one({"id": payload.template_id}, {"_id": 0})
@@ -1334,6 +1341,177 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
         ],
         "skipped": skipped,
     }
+
+
+@router.post("/batches", status_code=201)
+async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_admin)):
+    return await _create_batch_internal(payload, admin)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/whatsapp/casting-call/send
+#
+# Global Talent → select talent(s) → Add to Projects → "Send Casting Call?"
+# (2026-09-03). Sends the existing `casting_call` template to every selected
+# talent × selected project combination via _create_batch_internal — the
+# SAME function the ordinary POST /batches route and the WhatsApp Scouting
+# Agent's SEND/SHARE commands already call. One batch per project (each
+# project has its own submission_link/audition_material_link, so batches
+# stay per-project exactly like every other PROJECT-source send); recipients
+# within each batch are narrowed to exactly the selected talent_ids via the
+# pre-existing talent_ids narrowing on SourceParams (previously used for
+# single-talent pipeline-card triggers — reused unmodified here for a
+# specific multi-talent list). No new template, no new queue, no new send
+# path, no new duplicate-prevention: resolve_recipients_engine already
+# dedupes by recipient_id within a batch, and each (project, talent) pair
+# only ever appears in the one batch this endpoint creates for it.
+# ---------------------------------------------------------------------------
+class CastingCallSendIn(BaseModel):
+    talent_ids: List[str] = Field(default_factory=list)
+    project_ids: List[str] = Field(default_factory=list)
+
+
+def _clean_id_list(raw: List[str]) -> List[str]:
+    seen: set = set()
+    out: List[str] = []
+    for r in raw or []:
+        if not isinstance(r, str):
+            continue
+        cid = r.strip()
+        if cid and cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+    return out
+
+
+async def _apply_casting_call_move_for_batch(batch_id: str, project_id: Optional[str]) -> None:
+    """For one casting-call batch, move every talent whose job the worker
+    actually marked 'sent' from ask_to_test → follow_up. Stage-guarded
+    (only rows still at ask_to_test are touched) so a manual move the admin
+    made in the meantime — or a second call for the same batch — is never
+    clobbered/duplicated; naturally idempotent, safe to call more than
+    once for the same batch_id."""
+    if not project_id:
+        return
+    sent_talent_ids = await db.whatsapp_jobs.distinct(
+        "talent_id",
+        {"batch_id": batch_id, "status": "sent", "talent_id": {"$ne": None}},
+    )
+    if not sent_talent_ids:
+        return
+    res = await db.casting_pipeline.update_many(
+        {"project_id": project_id, "talent_id": {"$in": sent_talent_ids}, "stage": "ask_to_test"},
+        {"$set": {"stage": "follow_up", "updated_at": _now()}},
+    )
+    logger.info(
+        "casting_call.send: batch=%s project=%s moved %d/%d ask_to_test→follow_up after successful send",
+        batch_id, project_id, res.modified_count, len(sent_talent_ids),
+    )
+
+
+async def _watch_and_apply_casting_call_move(batch_ids: List[str]) -> None:
+    """Detached background follow-up (asyncio.create_task, same
+    fire-and-forget pattern as submissions.py's
+    _enqueue_internal_whatsapp_notification_task) for /casting-call/send.
+
+    Waits for each batch's jobs to reach a terminal whatsapp_batches status
+    (the EXISTING 'completed'/'paused' values the worker already writes —
+    no new status introduced) and then applies the guarded pipeline move.
+    Runs independent of the admin's browser staying on the page, so the
+    move happens strictly on the worker's actual delivery result, never
+    merely because the admin clicked the button. Capped at 45 minutes; any
+    batch still unfinished after that is left for the admin to resolve
+    normally in WhatsApp Engine (its jobs/batch status are untouched either
+    way — this task only ever reads them)."""
+    deadline = _time.monotonic() + 45 * 60
+    remaining = set(batch_ids)
+    try:
+        while remaining and _time.monotonic() < deadline:
+            still_running = set()
+            for batch_id in list(remaining):
+                batch = await db.whatsapp_batches.find_one(
+                    {"id": batch_id}, {"_id": 0, "status": 1, "project_id": 1}
+                )
+                if not batch:
+                    continue
+                if batch.get("status") in ("completed", "paused", "cancelled"):
+                    await _apply_casting_call_move_for_batch(batch_id, batch.get("project_id"))
+                else:
+                    still_running.add(batch_id)
+            remaining = still_running
+            if remaining:
+                await asyncio.sleep(5)
+        for batch_id in remaining:
+            batch = await db.whatsapp_batches.find_one({"id": batch_id}, {"_id": 0, "project_id": 1})
+            if batch:
+                await _apply_casting_call_move_for_batch(batch_id, batch.get("project_id"))
+            logger.warning(
+                "casting_call.send: batch %s did not reach a terminal status within the wait window", batch_id,
+            )
+    except Exception:
+        logger.exception("casting_call.send: background pipeline-move watcher failed")
+
+
+@router.post("/casting-call/send", status_code=201)
+async def send_casting_call(payload: CastingCallSendIn, admin: dict = Depends(current_team_or_admin)):
+    """Queue the existing `casting_call` template to every selected
+    talent × project combination. The template is never chosen by the
+    caller — this endpoint exists specifically for the casting-call
+    workflow, so it always resolves the built-in 'casting_call' slug."""
+    talent_ids = _clean_id_list(payload.talent_ids)
+    project_ids = _clean_id_list(payload.project_ids)
+    if not talent_ids:
+        raise HTTPException(400, "Select at least one talent")
+    if not project_ids:
+        raise HTTPException(400, "Select at least one project")
+
+    template = await db.whatsapp_templates.find_one({"slug": "casting_call"}, {"_id": 0})
+    if not template:
+        raise HTTPException(404, "Casting Call template not found")
+
+    from routers.casting_pipeline import PIPELINE_STAGE_ORDER
+
+    results: List[dict] = []
+    errors: List[dict] = []
+    batch_ids: List[str] = []
+    for pid in project_ids:
+        proj = await db.projects.find_one({"id": pid}, {"_id": 0, "id": 1, "brand_name": 1})
+        if not proj:
+            errors.append({"project_id": pid, "error": "Project not found"})
+            continue
+        batch_payload = BatchIn(
+            source_type="PROJECT",
+            # Every canonical stage, narrowed to exactly the selected
+            # talent_ids — matches whichever stage each talent actually
+            # landed in via bulk-add-talents (new row at ask_to_test, or an
+            # existing row wherever it already was), without excluding any
+            # of the selection.
+            source_params=SourceParams(project_id=pid, pipeline_stages=list(PIPELINE_STAGE_ORDER), talent_ids=talent_ids),
+            template_id=template["id"],
+            is_dry_run=False,
+        )
+        try:
+            batch_result = await _create_batch_internal(batch_payload, admin)
+        except HTTPException as exc:
+            errors.append({"project_id": pid, "project_name": proj.get("brand_name"), "error": exc.detail})
+            continue
+        batch = batch_result["batch"]
+        batch_ids.append(batch["id"])
+        results.append({
+            "project_id": pid,
+            "project_name": proj.get("brand_name"),
+            "batch_id": batch["id"],
+            "queued": len(batch_result["jobs"]),
+            "skipped": len(batch_result["skipped"]),
+        })
+
+    if not results:
+        raise HTTPException(400, f"Could not queue any casting calls: {errors}")
+
+    if batch_ids:
+        asyncio.create_task(_watch_and_apply_casting_call_move(batch_ids))
+
+    return {"success": True, "batches": results, "errors": errors}
 
 
 @router.get("/batches")

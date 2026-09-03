@@ -110,6 +110,22 @@ async def test_call_tool_json_request_shape(monkeypatch):
     assert captured["model"] == "claude-sonnet-5"
 
 
+def test_client_sends_workspace_id_header_when_configured(monkeypatch):
+    """A workspace-/identity-linked ANTHROPIC_API_KEY needs the
+    anthropic-workspace-id header or the API 400s. Set -> header present;
+    unset -> header absent (plain org key path unchanged)."""
+    from ai import client as llm
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_abc123")
+    c = llm._client()
+    assert c.default_headers.get("anthropic-workspace-id") == "wrkspc_abc123"
+
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    c2 = llm._client()
+    assert "anthropic-workspace-id" not in c2.default_headers
+
+
 @pytest.mark.asyncio
 async def test_call_tool_json_surfaces_provider_error_message(monkeypatch):
     """A provider 4xx must carry its own message through so a bad request is

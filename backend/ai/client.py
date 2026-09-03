@@ -6,6 +6,11 @@ no retry framework beyond the SDK's own. ~1 function of real surface area.
 
 Env:
   ANTHROPIC_API_KEY            required — the provider credential (server-side only)
+  ANTHROPIC_WORKSPACE_ID       required IFF the key is a workspace-/identity-linked
+                               key (Anthropic then rejects the request 400 with
+                               "anthropic-workspace-id is required ..."); sent as
+                               the anthropic-workspace-id header. Harmless when a
+                               plain org key is used.
   CASTING_DESK_MODEL           optional — model id (default: claude-opus-5)
   CASTING_DESK_LLM_TIMEOUT_SEC optional — per-call wall clock (default: 90)
 
@@ -50,7 +55,16 @@ def _client():
         import anthropic  # lazy — keeps module import light for tests/tools
     except ImportError as exc:  # pragma: no cover
         raise LLMUnavailable("the 'anthropic' package is not installed") from exc
-    return anthropic.AsyncAnthropic(api_key=api_key, timeout=_TIMEOUT_SEC, max_retries=2)
+    headers: Dict[str, str] = {}
+    workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+    if workspace_id:
+        headers["anthropic-workspace-id"] = workspace_id.strip()
+    return anthropic.AsyncAnthropic(
+        api_key=api_key,
+        timeout=_TIMEOUT_SEC,
+        max_retries=2,
+        default_headers=headers or None,
+    )
 
 
 async def call_tool_json(

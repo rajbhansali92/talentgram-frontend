@@ -173,6 +173,7 @@ report `llm_configured: false` (a boolean — the key itself is never returned),
 | Variable | Default | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | -- | **Required for AI Casting Desk + AI Scout.** The only LLM credential. Set in the Railway backend service only. |
+| `ANTHROPIC_WORKSPACE_ID` | -- | **Required if `ANTHROPIC_API_KEY` is a workspace-/identity-linked key** (Anthropic then rejects requests `400` with *"anthropic-workspace-id is required when authenticating with an identity-linked API key"*). The `wrkspc_…` id from the Anthropic Console. Harmless/ignored for a plain organisation key. |
 | `CASTING_DESK_MODEL` | `claude-opus-5` | Model for the Gate-1 requirement parser. `claude-sonnet-5` is a cheaper choice for this workload. |
 | `AI_SCOUT_MODEL` | falls back to `CASTING_DESK_MODEL`'s default | Model for the Gate-2 Scout (criteria extraction + batched ranking). |
 | `CASTING_DESK_LLM_TIMEOUT_SEC` | `90` | Per-call wall-clock timeout (shared by both gates). |

@@ -189,6 +189,142 @@ async def test_send_command_duplicate_talent_resolves_via_submission_email_not_n
 
 
 # ---------------------------------------------------------------------------
+# False-duplicate talent disambiguation (master prompt Parts A/B/C/D — real
+# production bug, 2026-09-03): "SEND Amme Trivedi for PGI" tied the real
+# "Amme Triveddi" (one character off from the typed query) against "Kripa
+# Trivedi" (a completely different person sharing only the surname token
+# "Trivedi") — the general name matcher's fuzzy scoring doesn't distinguish
+# "one near-exact candidate" from "one weak partial-token candidate", never
+# a true duplicate-name collision. _narrow_send_ambiguous_talent_by_
+# whatsapp_identity is unit-tested directly here (hand-built Candidate
+# lists, bypassing the need to trigger real fuzzy ambiguity), plus one
+# full end-to-end test mirroring the exact reported scenario.
+# ---------------------------------------------------------------------------
+async def test_send_ambiguous_talent_narrowed_by_exact_whatsapp_group_match():
+    """A: duplicate/ambiguous names + exact WhatsApp source-group match ->
+    correct talent selected automatically, never asked to disambiguate."""
+    tag = uuid.uuid4().hex[:6]
+    real = await _seed_talent(f"Amme Triveddi {tag}", whatsapp_group_name=f"Amme Trivedi {tag} X Talentgram")
+    unrelated = await _seed_talent(f"Kripa Trivedi {tag}", whatsapp_group_name=f"Kripa Trivedi {tag} x Talentgram Agency")
+    try:
+        candidates = [cp.nlu.Candidate(id=real, label=f"Amme Triveddi {tag}"), cp.nlu.Candidate(id=unrelated, label=f"Kripa Trivedi {tag}")]
+        narrowed = await cp._narrow_send_ambiguous_talent_by_whatsapp_identity(f"Amme Trivedi {tag}", candidates)
+        assert narrowed is not None, "must resolve deterministically, not fall through to asking"
+        assert narrowed.id == real, narrowed
+    finally:
+        await _cleanup_send(talent_ids=[real, unrelated])
+
+
+async def test_send_ambiguous_talent_narrowed_by_exact_phone_match():
+    """B: duplicate/ambiguous names + exact source phone match -> correct
+    talent selected automatically."""
+    tag = uuid.uuid4().hex[:6]
+    right_id = f"test-ma-tal-{uuid.uuid4().hex[:8]}"
+    wrong_id = f"test-ma-tal-{uuid.uuid4().hex[:8]}"
+    await db.talents.insert_one({
+        "id": right_id, "name": f"Priya Shah {tag}", "tags": [], "notes": "",
+        "phone": "919111971399", "whatsapp_group_name": "", "email": None, "normalized_email": None,
+    })
+    await db.talents.insert_one({
+        "id": wrong_id, "name": f"Priya Shah {tag} Two", "tags": [], "notes": "",
+        "phone": "918822334455", "whatsapp_group_name": "", "email": None, "normalized_email": None,
+    })
+    try:
+        candidates = [cp.nlu.Candidate(id=right_id, label=f"Priya Shah {tag}"), cp.nlu.Candidate(id=wrong_id, label=f"Priya Shah {tag} Two")]
+        narrowed = await cp._narrow_send_ambiguous_talent_by_whatsapp_identity("919111971399", candidates)
+        assert narrowed is not None
+        assert narrowed.id == right_id, narrowed
+    finally:
+        await _cleanup_send(talent_ids=[right_id, wrong_id])
+
+
+async def test_send_ambiguous_talent_with_no_deterministic_match_falls_through():
+    """C: genuinely ambiguous names with NO deterministic source match ->
+    never guesses, falls through to the existing numbered-ambiguity
+    resolution unchanged."""
+    tag = uuid.uuid4().hex[:6]
+    a = await _seed_talent(f"John Smith {tag}", whatsapp_group_name=f"JS Talent {tag}")
+    b = await _seed_talent(f"John Smith {tag} B", whatsapp_group_name=f"Smith Casting {tag}")
+    try:
+        candidates = [cp.nlu.Candidate(id=a, label=f"John Smith {tag}"), cp.nlu.Candidate(id=b, label=f"John Smith {tag} B")]
+        narrowed = await cp._narrow_send_ambiguous_talent_by_whatsapp_identity(f"John Smith {tag}", candidates)
+        assert narrowed is None, "neither group name relates to the query — must never guess"
+    finally:
+        await _cleanup_send(talent_ids=[a, b])
+
+
+async def test_send_amme_trivedi_end_to_end_resolves_without_asking_to_disambiguate():
+    """D: the exact reported production scenario, end to end — "SEND Amme
+    Trivedi for PGI" must resolve to the talent whose WhatsApp group is
+    "Amme Trivedi X Talentgram", never the unrelated "Kripa Trivedi" (who
+    only shares the surname token), and never ask the admin to manually
+    resolve a false duplicate."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    project_label = f"Platinum Guild {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    real = await _seed_talent(f"Amme Triveddi {tag}", whatsapp_group_name=f"Amme Trivedi {tag} X Talentgram", email=f"amme.{tag}@example.com")
+    unrelated = await _seed_talent(f"Kripa Trivedi {tag}", whatsapp_group_name=f"Kripa Trivedi {tag} x Talentgram Agency")
+    submission_id = await _seed_submission(project_id, real, f"amme.{tag}@example.com", decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600029",
+            text=f"send - Amme Trivedi {tag} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "please resolve the duplicate talent records" not in r.reply.lower(), r.reply
+        assert "1 → Approve" in r.reply, r.reply
+        assert f"Amme Trivedi {tag} X Talentgram" in r.reply, r.reply
+        assert f"Kripa Trivedi {tag}" not in r.reply, r.reply
+
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600029", text="3",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+    finally:
+        await _cleanup_send(talent_ids=[real, unrelated], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_single_unambiguous_talent_with_no_submission_gets_clear_diagnostic():
+    """J: "SEND Kripa Trivedi for PGI" (a single, unambiguous talent
+    record — no duplicates at all) must correctly diagnose the real,
+    specific problem (no submission for the FORM) rather than the
+    misleading UPLOAD-flavored "mark-based upload workflow" message that
+    was blocking a full step earlier, on a check that only ever existed
+    to disambiguate BETWEEN duplicate records — which doesn't apply here
+    since there's only one."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Kripa Trivedi {tag}"
+    project_label = f"Platinum Guild {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram Agency", email=f"kripa.{tag}@example.com")
+    # Deliberately NO submission seeded — mirrors the exact real bug.
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600030",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "1 → Approve" not in r.reply, r.reply
+        assert "mark-based upload workflow" not in r.reply.lower(), (
+            f"must show the SEND-specific diagnostic, not the UPLOAD-flavored one: {r.reply!r}"
+        )
+        assert "whatsapp identity is resolved" in r.reply.lower(), r.reply
+        assert "no" in r.reply.lower() and "submission" in r.reply.lower(), r.reply
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+# ---------------------------------------------------------------------------
 # SEND Path B — WhatsApp phone-number source (master prompt Part 3/25.4):
 # a talent whose only WhatsApp presence is a direct number, no group. Both
 # sources must resolve to the same talent/project correctly; a talent with

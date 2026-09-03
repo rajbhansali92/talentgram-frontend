@@ -279,19 +279,37 @@ def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
     # early enough to protect take_number itself.
     working = _TRAILING_TIMESTAMP_RE.sub("", working)
 
+    # Priority: a NUMBERED take ("take 1") is the strongest, most explicit
+    # signal and always wins outright. Below that, intro/photos are
+    # checked BEFORE a bare, number-less "take" (Production fix,
+    # 2026-09-03) — real production bug: "MARK Introduction take for
+    # PGI" was misclassified as media_role="take" (take_number=None)
+    # because the OLD order checked bare-take first, and "Introduction
+    # take" genuinely contains the standalone word "take" (a natural,
+    # explicitly-required phrasing — see the master prompt's own worked
+    # examples: "MARK Introduction take for PGI"/"MARK Audition take for
+    # PGI"). That collided both marks onto the identical ("take", None)
+    # slot, reporting a false "marked twice" ambiguity for two genuinely
+    # different, correctly-marked items. "Introduction"/"Photos" are
+    # unambiguous, more SPECIFIC role signals whenever present; a bare
+    # "take" with no number and no more specific keyword is the correct
+    # last-resort fallback, not the first check. Verified against every
+    # existing extract_role_and_project test case: none combine a
+    # number-less "take" with "intro"/"photos" in the same text, so this
+    # reordering changes nothing for any previously-tested shape.
     take_m = _TAKE_RE.search(working)
     if take_m:
         media_role, take_number = "take", int(take_m.group(1))
         working = _TAKE_RE.sub(" ", working, count=1)
-    elif _TAKE_BARE_RE.search(working):
-        media_role, take_number = "take", None
-        working = _TAKE_BARE_RE.sub(" ", working, count=1)
     elif _INTRO_RE.search(working):
         media_role, take_number = "intro", None
         working = _INTRO_RE.sub(" ", working, count=1)
     elif _PHOTOS_RE.search(working):
         media_role, take_number = "photos", None
         working = _PHOTOS_RE.sub(" ", working, count=1)
+    elif _TAKE_BARE_RE.search(working):
+        media_role, take_number = "take", None
+        working = _TAKE_BARE_RE.sub(" ", working, count=1)
     else:
         return None
 

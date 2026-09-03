@@ -8519,6 +8519,64 @@ async def _preview_send_marks(
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
 
 
+async def _narrow_send_ambiguous_talent_by_whatsapp_identity(
+    query: str, ambiguous: List["nlu.Candidate"],
+) -> Optional["nlu.Candidate"]:
+    """SEND-only tie-break (Production fix, 2026-09-03) — real production
+    bug: "SEND Amme Trivedi for PGI" tied "Amme Triveddi" (a genuine
+    talent, one character off from the typed query) against "Kripa
+    Trivedi" (a COMPLETELY different person who only shares the surname
+    token "Trivedi") purely because the general name matcher's fuzzy
+    scoring doesn't distinguish "one near-exact candidate" from "one
+    weak partial-token candidate" — never a true duplicate-name
+    collision. That general matcher (casting_pipeline_nlu.
+    resolve_against_candidates) is deliberately left untouched here —
+    it's shared by ADD/MOVE/UPLOAD/etc. and already carries several
+    talent-specific hotfixes; re-tuning its fuzzy scoring for this one
+    case risks regressing all of those.
+
+    Instead, SEND applies its OWN, narrower, deterministic check on
+    JUST the already-ambiguous candidate set: does the query correspond
+    to exactly ONE candidate's actual configured WhatsApp identity
+    (group name or phone)? "amme trivedi" is a normalized substring of
+    "Amme Trivedi X Talentgram" (Amme Triveddi's own group) and NOT of
+    "Kripa Trivedi x Talentgram Agency" — a real, structural signal a
+    shared-surname token match can never produce for an unrelated
+    person. Returns that one candidate, or None if zero or 2+ candidates
+    match (never guesses among a genuine tie — a real duplicate-name
+    collision with unrelated group names falls through unchanged to the
+    existing ambiguity handling)."""
+    if len(ambiguous) < 2:
+        return None
+    q_norm = _normalize_recipient_name(query)
+    q_digits = "".join(ch for ch in (query or "") if ch.isdigit())
+    if not q_norm:
+        return None
+    docs = await db.talents.find(
+        {"id": {"$in": [c.id for c in ambiguous]}}, {"_id": 0, "id": 1, "whatsapp_group_name": 1, "phone": 1},
+    ).to_list(20)
+    by_id = {d["id"]: d for d in docs}
+
+    group_matches = []
+    phone_matches = []
+    for c in ambiguous:
+        doc = by_id.get(c.id) or {}
+        group_norm = _normalize_recipient_name(doc.get("whatsapp_group_name") or "")
+        if group_norm and q_norm in group_norm:
+            group_matches.append(c)
+        phone_digits = "".join(ch for ch in (doc.get("phone") or "") if ch.isdigit())
+        if q_digits and len(q_digits) >= 7 and phone_digits and (
+            q_digits == phone_digits or q_digits.endswith(phone_digits) or phone_digits.endswith(q_digits)
+        ):
+            phone_matches.append(c)
+
+    if len(group_matches) == 1:
+        return group_matches[0]
+    if len(phone_matches) == 1:
+        return phone_matches[0]
+    return None
+
+
 async def _resolve_send_target(
     collected: dict, *, destination_group_override: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[ExecResult]]:
@@ -8567,11 +8625,19 @@ async def _resolve_send_target(
     project = match.project
 
     # Step 2: name resolution -> candidate set (never the authoritative
-    # destination by itself) — identical to upload's own step 2.
+    # destination by itself) — identical to upload's own step 2, PLUS
+    # SEND's own WhatsApp-identity tie-break on a false ambiguity before
+    # falling through to upload's shared behavior (see
+    # _narrow_send_ambiguous_talent_by_whatsapp_identity's docstring).
     talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target(talent_selector)
     if ambiguous:
-        candidate_ids = [c.id for c in ambiguous]
-        candidate_label = ambiguous[0].label
+        narrowed = await _narrow_send_ambiguous_talent_by_whatsapp_identity(talent_selector, ambiguous)
+        if narrowed is not None:
+            candidate_ids = [narrowed.id]
+            candidate_label = narrowed.label
+        else:
+            candidate_ids = [c.id for c in ambiguous]
+            candidate_label = ambiguous[0].label
     elif talent_id:
         candidate_ids = [talent_id]
         candidate_label = talent_label
@@ -8619,18 +8685,36 @@ async def _resolve_send_target(
         source_type = "phone"
 
     # Step 4: email-authoritative talent resolution — the EXACT SAME
-    # function upload uses, unchanged. SEND never resolves its source
-    # solely from name when this relationship is available.
-    auth = await media_assignment.resolve_authoritative_talent_for_upload(project["id"], candidate_ids)
-    if not auth.ok:
-        template = _UPLOAD_RESOLUTION_ERROR_MESSAGES.get(
-            auth.error, "Could not verify the send source for {talent_label} / {project_label} ({error})."
-        )
-        message = template.format(talent_label=candidate_label, project_label=project["label"], error=auth.error)
-        return None, ExecResult(ok=False, error=f"send_source_unresolved:{auth.error}", message=message)
-
-    authoritative_talent_id = auth.talent_id
-    authoritative_talent_label = auth.talent_label or candidate_label
+    # function upload uses, but ONLY when genuinely needed (Production
+    # fix, 2026-09-03). resolve_authoritative_talent_for_upload's whole
+    # purpose is disambiguating BETWEEN 2+ candidate talent records
+    # sharing a name, using each one's own submission email as the
+    # tie-breaker — which requires a submission to exist purely as a
+    # SIDE EFFECT of that disambiguation mechanism. When Step 2 (with
+    # the WhatsApp-identity narrowing above) already landed on exactly
+    # ONE unambiguous candidate, there is nothing left to disambiguate.
+    # Real production bug: "SEND Kripa Trivedi for PGI" — a single,
+    # unambiguous talent record, no duplicates at all — was refused with
+    # "No PGI submission was found... the mark-based UPLOAD workflow
+    # attaches media to an existing project submission" (an UPLOAD-
+    # specific constraint SEND doesn't share: UPLOAD's whole purpose is
+    # attaching media TO a submission, SEND's isn't), a full step before
+    # Step 6's own, genuinely-necessary submission check (needed for the
+    # FORM, not for talent identity) ever got a chance to report the
+    # real, specific problem.
+    if len(candidate_ids) == 1:
+        authoritative_talent_id = candidate_ids[0]
+        authoritative_talent_label = candidate_label
+    else:
+        auth = await media_assignment.resolve_authoritative_talent_for_upload(project["id"], candidate_ids)
+        if not auth.ok:
+            template = _UPLOAD_RESOLUTION_ERROR_MESSAGES.get(
+                auth.error, "Could not verify the send source for {talent_label} / {project_label} ({error})."
+            )
+            message = template.format(talent_label=candidate_label, project_label=project["label"], error=auth.error)
+            return None, ExecResult(ok=False, error=f"send_source_unresolved:{auth.error}", message=message)
+        authoritative_talent_id = auth.talent_id
+        authoritative_talent_label = auth.talent_label or candidate_label
 
     identity = await media_assignment.get_gunwanti_identity()
     if not identity or not identity.get("lid"):
@@ -8679,8 +8763,12 @@ async def _resolve_send_target(
     if not submission:
         return None, ExecResult(
             ok=False, error="no_submission",
-            message=f"{authoritative_talent_label} has no submission for {project['label']} — "
-                    "send requires a submission to build the outgoing form from.",
+            message=f"{authoritative_talent_label}'s WhatsApp identity is resolved, but there is "
+                    f"no {project['label']} submission on file for them yet — SEND needs a "
+                    f"submission to build the outgoing form (Age/Height/Location/Availability/"
+                    f"Instagram/Budget). This is separate from the marked media itself: create a "
+                    f"submission for {authoritative_talent_label} on {project['label']} first "
+                    f"(the normal submission flow), then retry send.",
         )
 
     return {

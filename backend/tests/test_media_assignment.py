@@ -151,6 +151,39 @@ def test_extract_role_and_project_intro_variants():
         assert parsed.project_fragment.lower() == "google"
 
 
+def test_extract_role_and_project_introduction_take_is_intro_not_bare_take():
+    """Real production bug (2026-09-03): "MARK Introduction take for PGI"
+    — an explicitly required phrasing (master prompt's own worked
+    example) — was misclassified as media_role="take" (no number)
+    because the bare word "take" also appears inside "Introduction
+    take", and the OLD priority order checked bare-take before intro.
+    "Introduction"/"Photos" are more specific role signals and must win
+    over a bare, number-less "take" whenever both are present — this
+    collided two genuinely different marks ("Introduction take" and
+    "Audition take") onto the identical ("take", None) slot, reporting a
+    false "marked twice" ambiguity."""
+    parsed = ma.extract_role_and_project("mark introduction take for PGI")
+    assert parsed is not None
+    assert parsed.media_role == "intro"
+    assert parsed.take_number is None
+    assert parsed.project_fragment.lower() == "for pgi" or "pgi" in parsed.project_fragment.lower()
+
+    # A genuinely bare, no-more-specific-keyword "take" still resolves as
+    # take — the reordering only changes what happens when intro/photos
+    # ALSO match, never the plain case.
+    parsed2 = ma.extract_role_and_project("mark audition take for PGI")
+    assert parsed2 is not None
+    assert parsed2.media_role == "take"
+    assert parsed2.take_number is None
+
+    # A numbered take still wins outright over intro/photos wording,
+    # exactly as before — the reordering only affects the BARE-take tier.
+    parsed3 = ma.extract_role_and_project("mark introduction take 2 for PGI")
+    assert parsed3 is not None
+    assert parsed3.media_role == "take"
+    assert parsed3.take_number == 2
+
+
 def test_extract_role_and_project_photos():
     parsed = ma.extract_role_and_project("mark google photos")
     assert parsed is not None

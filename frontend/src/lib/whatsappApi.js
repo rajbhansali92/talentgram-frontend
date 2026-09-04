@@ -53,6 +53,13 @@ export async function resolveTargets(body) {
   return res.data;
 }
 
+// --- ONGOING PROJECT TALENTS (2026-09) ---
+// Talent-first daily follow-up list — { talents: [...], refreshed_at }.
+export async function getOngoingPipelineTalents() {
+  const res = await adminApi.get("/whatsapp/ongoing-pipeline-talents");
+  return res.data;
+}
+
 // --- CRM SOURCE (Slice 2) ---
 export async function getCrmContactTypes() {
   const res = await adminApi.get("/whatsapp/crm/contact-types");

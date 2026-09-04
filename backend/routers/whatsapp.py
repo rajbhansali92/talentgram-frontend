@@ -851,8 +851,15 @@ def _normalize_phone(raw: Optional[str]) -> Optional[str]:
     return cand if _PHONE_RE.match(cand) else None
 
 
-def _make_recipient(*, name, phone, group_name, source, source_id, kind, recipient_id):
-    """Route a raw contact and return (dest_type, destination, reason, recipient)."""
+def _make_recipient(*, name, phone, group_name, source, source_id, kind, recipient_id, custom_vars=None):
+    """Route a raw contact and return (dest_type, destination, reason, recipient).
+
+    `custom_vars` (added for ONGOING_PIPELINE — see _create_batch_internal's
+    render loop) lets one recipient carry its OWN extra {{}} values on top of
+    the batch-wide ones, e.g. a talent's consolidated multi-project reminder
+    text. Every other source leaves it unset — zero change to their
+    behaviour.
+    """
     dest_type, destination, reason = _resolve_destination(
         {"name": name, "phone": phone, "whatsapp_group_name": group_name}
     )
@@ -866,8 +873,158 @@ def _make_recipient(*, name, phone, group_name, source, source_id, kind, recipie
         "source_id": source_id,
         "recipient_kind": kind,
         "recipient_id": recipient_id,
+        "custom_vars": custom_vars or {},
     }
     return dest_type, destination, reason, rec
+
+
+# ===========================================================================
+# ONGOING PROJECT TALENTS — talent-first daily follow-up list
+# ("WhatsApp Campaigns" → new Target Source "ONGOING_PIPELINE"). Reuses
+# casting_pipeline.list_pipeline's OWN is_follow_up definition verbatim
+# (stage == "follow_up", or stage == "ask_to_test" with no submission yet
+# for THAT project) — just aggregated across every ongoing project instead
+# of one, and grouped by talent instead of by pipeline row, so a talent
+# pending on N projects surfaces once with all N attached. No new project
+# statuses, no new pipeline stages, no new routing logic — this only reads
+# db.projects/db.casting_pipeline/db.submissions/db.talents/db.whatsapp_jobs,
+# all already-existing collections.
+# ===========================================================================
+
+def _build_reminder_message(talent_name: str, pending: List[dict]) -> str:
+    """The ONE consolidated message for a talent with N pending projects —
+    never N separate messages. Plain text (not run through the {{}}
+    template engine — nothing in it needs substitution since names/links
+    are already resolved here); handed to the existing "Custom Message"
+    template ({{message}}) at send time, so nothing about the actual
+    send/worker path is new."""
+    first = _first_name(talent_name)
+    lines = [
+        f"Hi {first}," if first else "Hi,",
+        "",
+        "This is a reminder regarding your pending Talentgram projects.",
+        "",
+        "Pending projects:",
+        "",
+    ]
+    for i, p in enumerate(pending, 1):
+        lines.append(f"{i}. *{p['project_name']}* — {p['submission_link']}")
+        lines.append("")
+    lines.append("Please complete the pending submissions at the earliest.")
+    lines.append("")
+    lines.append("— Talentgram")
+    return "\n".join(lines)
+
+
+async def _compute_ongoing_pipeline_reminders(talent_ids: Optional[List[str]] = None) -> List[dict]:
+    """Returns one row per talent who currently needs a follow-up reminder
+    for at least one ongoing project — the data behind both the "Ongoing
+    Project Talents" list (talent_ids=None) AND the ONGOING_PIPELINE send
+    path (talent_ids=the admin's selection, recomputed fresh right before
+    sending — see resolve_recipients_engine below). Same function, same
+    eligibility rule, both times: a talent who submitted/completed since
+    the list was last fetched simply won't come back here, which is
+    exactly "do not send if no longer eligible" with no extra code.
+    """
+    from routers.casting_pipeline import _normalise_stage
+    from core import active_only
+
+    projects = await db.projects.find(
+        {"status": "ongoing"}, {"_id": 0, "id": 1, "brand_name": 1, "slug": 1}
+    ).to_list(2000)
+    if not projects:
+        return []
+    project_by_id = {p["id"]: p for p in projects}
+    project_ids = list(project_by_id.keys())
+
+    pipeline_query: Dict[str, Any] = {"project_id": {"$in": project_ids}}
+    if talent_ids:
+        pipeline_query["talent_id"] = {"$in": talent_ids}
+    rows = await db.casting_pipeline.find(
+        pipeline_query, {"_id": 0, "project_id": 1, "talent_id": 1, "stage": 1}
+    ).to_list(20000)
+    if not rows:
+        return []
+
+    # Same submission-aware follow_up signal list_pipeline computes per
+    # project — here for every ongoing project in one query.
+    submission_docs = await db.submissions.find(
+        active_only({"project_id": {"$in": project_ids}}),
+        {"_id": 0, "project_id": 1, "talent_id": 1},
+    ).to_list(None)
+    submitted_by_project: Dict[str, set] = {}
+    for s in submission_docs:
+        pid, tid = s.get("project_id"), s.get("talent_id")
+        if pid and tid:
+            submitted_by_project.setdefault(pid, set()).add(tid)
+
+    pending_by_talent: Dict[str, List[dict]] = {}
+    for row in rows:
+        pid, tid = row.get("project_id"), row.get("talent_id")
+        if not pid or not tid or pid not in project_by_id:
+            continue
+        stage = _normalise_stage(row.get("stage")) or row.get("stage")
+        is_follow_up = (
+            stage == "follow_up"
+            or (stage == "ask_to_test" and tid not in submitted_by_project.get(pid, set()))
+        )
+        if not is_follow_up:
+            continue
+        proj = project_by_id[pid]
+        slug = (proj.get("slug") or "").strip()
+        pending_by_talent.setdefault(tid, []).append({
+            "project_id": pid,
+            "project_name": proj.get("brand_name") or "Untitled Project",
+            "submission_link": f"https://submit.talentgramagency.com/submit/{slug}" if slug else "",
+        })
+
+    if not pending_by_talent:
+        return []
+
+    tids = list(pending_by_talent.keys())
+    talent_docs = await db.talents.find(
+        {"id": {"$in": tids}},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "whatsapp_group_name": 1},
+    ).to_list(len(tids))
+    talent_by_id = {t["id"]: t for t in talent_docs}
+
+    # Last SUCCESSFUL reminder per talent — one aggregation, not N+1 at
+    # 500+ talent scale. "Successful" == status "sent" (Feature 6's own
+    # terminal-success value throughout this file); a "failed" or still-
+    # "pending" job is never mistaken for a completed reminder.
+    last_reminder_by_talent: Dict[str, Any] = {}
+    async for doc in db.whatsapp_jobs.aggregate([
+        {"$match": {"talent_id": {"$in": tids}, "status": "sent"}},
+        {"$group": {"_id": "$talent_id", "last_sent": {"$max": "$sent_at"}}},
+    ]):
+        if doc.get("last_sent"):
+            last_reminder_by_talent[doc["_id"]] = doc["last_sent"]
+
+    results: List[dict] = []
+    for tid, pending in pending_by_talent.items():
+        talent = talent_by_id.get(tid)
+        if not talent:
+            continue
+        name = talent.get("name") or ""
+        pending_sorted = sorted(pending, key=lambda p: p["project_name"].lower())
+        dest_type, destination, reason = _resolve_destination(talent)
+        results.append({
+            "talent_id": tid,
+            "name": name,
+            "phone": (talent.get("phone") or "").strip(),
+            "whatsapp_group_name": (talent.get("whatsapp_group_name") or "").strip(),
+            "destination_type": dest_type,
+            "destination": destination,
+            "unresolvable_reason": reason,
+            "pending_projects": pending_sorted,
+            "last_reminder_at": last_reminder_by_talent.get(tid),
+            "message": _build_reminder_message(name, pending_sorted) if dest_type else None,
+        })
+
+    # Default operational order: never reminded first, then oldest → most
+    # recently reminded last. No filtering/framework — a plain sort.
+    results.sort(key=lambda r: (1, r["last_reminder_at"]) if r["last_reminder_at"] else (0, ""))
+    return results
 
 
 async def resolve_recipients_engine(source_type: str, params: "SourceParams",
@@ -1033,6 +1190,21 @@ async def resolve_recipients_engine(source_type: str, params: "SourceParams",
                         name="", phone="", group_name=gname,
                         source="SAVED_LISTS", source_id=glist_id,
                         kind="SAVED_GROUP", recipient_id=rid))
+
+    elif source_type == "ONGOING_PIPELINE":
+        # Recomputed fresh every call (never trusts a previously-fetched
+        # list) — this is what makes "do not send if no longer eligible"
+        # and "use current recipient-routing logic at send time" true for
+        # free, both at preview time and at actual createBatch time.
+        rows = await _compute_ongoing_pipeline_reminders(talent_ids=params.talent_ids or None)
+        for r in rows:
+            _add(*_make_recipient(
+                name=r["name"], phone=r["phone"], group_name=r["whatsapp_group_name"],
+                source="ONGOING_PIPELINE", source_id=None, kind="TALENT",
+                recipient_id=r["talent_id"],
+                custom_vars={"message": r["message"]} if r["message"] else {},
+            ))
+
     else:
         raise HTTPException(400, f"Unknown source_type {source_type!r}")
 
@@ -1067,6 +1239,17 @@ async def resolve_targets(payload: ResolveIn, admin: dict = Depends(current_team
     return await resolve_recipients_engine(
         payload.source_type, payload.source_params, payload.excluded_recipient_ids
     )
+
+
+@router.get("/ongoing-pipeline-talents")
+async def get_ongoing_pipeline_talents(admin: dict = Depends(current_team_or_admin)):
+    """"Ongoing Project Talents" tab — the display list backing the
+    ONGOING_PIPELINE campaign source. A thin wrapper: all the actual work
+    (eligibility, consolidation, last-reminder, recipient routing) lives in
+    _compute_ongoing_pipeline_reminders so the exact same logic also runs
+    at send time (see resolve_recipients_engine's ONGOING_PIPELINE branch)."""
+    rows = await _compute_ongoing_pipeline_reminders()
+    return {"talents": rows, "refreshed_at": _utcnow()}
 
 
 # ── COMMUNICATION TIMELINE (Feature 2) — polymorphic, one timeline ──────────
@@ -1240,6 +1423,8 @@ async def _create_batch_internal(payload: BatchIn, admin: dict) -> dict:
         source_label = params.contact_type or "All CRM contacts"
     elif source_type == "MANUAL":
         source_label = f"{len(rec_list)} manual contact(s)"
+    elif source_type == "ONGOING_PIPELINE":
+        source_label = f"{len(rec_list)} talent(s) — Ongoing Project follow-up"
     base_vars.update(_sender_variables(admin))
     base_vars.update(_system_variables())
 
@@ -1248,7 +1433,12 @@ async def _create_batch_internal(payload: BatchIn, admin: dict) -> dict:
     batch_id = _new_id()
     jobs = []
     for rec in rec_list:
-        rec_vars = {**base_vars, **_recipient_variables(rec["name"], rec.get("phone", ""))}
+        # `custom_vars` (ONGOING_PIPELINE only, so far — see _make_recipient)
+        # layers per-RECIPIENT values on top of the batch-wide ones, e.g. a
+        # talent's own consolidated multi-project reminder text. Highest
+        # precedence: it's what makes this one recipient's message differ
+        # from every other recipient in the same batch.
+        rec_vars = {**base_vars, **_recipient_variables(rec["name"], rec.get("phone", "")), **rec.get("custom_vars", {})}
         message_body = _render_message(template["body_text"], rec_vars)
         logger.info("whatsapp: COMPILED MESSAGE recipient=%r (len=%d): %r",
                     rec["name"], len(message_body), message_body)

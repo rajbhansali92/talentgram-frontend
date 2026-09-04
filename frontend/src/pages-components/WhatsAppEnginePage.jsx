@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from "react";
-import { 
-  Play, Pause, Square, QrCode, RefreshCw, AlertTriangle, CheckCircle, 
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import {
+  Play, Pause, Square, QrCode, RefreshCw, AlertTriangle, CheckCircle,
   Settings, Clock, ShieldAlert, History, Edit, Send, Save, Plus, Trash2, Database, AlertCircle,
-  ChevronLeft, ChevronRight, Laptop, Smartphone, Search, Filter, Info, User
+  ChevronLeft, ChevronRight, Laptop, Smartphone, Search, Filter, Info, User, Loader2, X
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
@@ -18,6 +18,7 @@ import {
   resolveTargets, getCrmContactTypes, validateManual,
   getContactLists, createContactList, updateContactList, deleteContactList,
   getGroupLists, createGroupList, updateGroupList, deleteGroupList,
+  getOngoingPipelineTalents,
   // TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION
   testInternalNotification,
 } from "@/lib/whatsappApi";
@@ -753,7 +754,7 @@ function WECampaignLauncher() {
           <div className="space-y-3">
             <label className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Target Source</label>
             <div className="flex flex-wrap gap-2">
-              {["PROJECT", "SAVED_LISTS", "CRM", "MANUAL"].map((src) => (
+              {["PROJECT", "ONGOING_PIPELINE", "SAVED_LISTS", "CRM", "MANUAL"].map((src) => (
                 <button
                   key={src}
                   type="button"
@@ -763,11 +764,23 @@ function WECampaignLauncher() {
                   }`}
                   data-testid={`source-${src}`}
                 >
-                  {src === "PROJECT" ? "Project Pipeline" : src === "SAVED_LISTS" ? "Saved Lists" : src === "CRM" ? "Marketing CRM" : "Manual Contacts"}
+                  {src === "PROJECT" ? "Project Pipeline" : src === "ONGOING_PIPELINE" ? "Ongoing Project Talents" : src === "SAVED_LISTS" ? "Saved Lists" : src === "CRM" ? "Marketing CRM" : "Manual Contacts"}
                 </button>
               ))}
             </div>
           </div>
+
+          {/* "Ongoing Project Talents" is a different shape of feature
+              (talent-first, no template/variable config, no per-project
+              targeting) from the other four sources, so it replaces the
+              rest of this column outright rather than threading a dozen
+              small conditionals through the existing PROJECT/CRM/MANUAL/
+              SAVED_LISTS sections below. Nothing about those sections
+              changes. */}
+          {sourceType === "ONGOING_PIPELINE" ? (
+            <OngoingPipelinePanel templates={templates} />
+          ) : (
+          <>
 
           {/* Saved Lists source */}
           {sourceType === "SAVED_LISTS" && (
@@ -1159,12 +1172,17 @@ function WECampaignLauncher() {
               </div>
             )}
           </div>
+          </>
+          )}
 
         </div>
 
-        {/* WhatsApp Mobile Shell Preview Column (Task 4.1 & Task 8.2) */}
+        {/* WhatsApp Mobile Shell Preview Column (Task 4.1 & Task 8.2) —
+            not part of the ONGOING_PIPELINE flow (that source has its own
+            send-confirmation preview inside OngoingPipelinePanel). */}
+        {sourceType !== "ONGOING_PIPELINE" && (
         <div className="flex flex-col items-center justify-start space-y-6">
-          
+
           {/* Smart Phone Container Mockup */}
           <div className="w-[340px] h-[580px] bg-[#1a1a1a] rounded-[48px] p-3 shadow-2xl relative border-4 border-[#333333] flex flex-col overflow-hidden">
             {/* Status bar notch */}
@@ -1299,6 +1317,7 @@ function WECampaignLauncher() {
             )}
           </div>
         </div>
+        )}
 
       </div>
 
@@ -1341,6 +1360,374 @@ function WECampaignLauncher() {
         </div>
       )}
 
+    </div>
+  );
+}
+
+// ==========================================
+// 2b. ONGOING PROJECT TALENTS
+// Talent-first daily follow-up list (2026-09) — one row per talent who
+// needs a reminder, however many ongoing projects they're pending on.
+// Sends through the exact same createBatch()/worker path every other
+// source uses, via the "Custom Message" template ({{message}}) already
+// seeded for the WhatsApp engine — no new sender, no new template.
+// ==========================================
+function isSameDay(iso, ref) {
+  if (!iso) return false;
+  const d = new Date(iso);
+  return d.toDateString() === ref.toDateString();
+}
+
+function formatLastReminder(iso) {
+  if (!iso) return "Never";
+  const d = new Date(iso);
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (isSameDay(iso, now)) return `Today, ${time}`;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (isSameDay(iso, yesterday)) return `Yesterday, ${time}`;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+}
+
+function RecipientBadge({ talent }) {
+  if (talent.destination_type === "group") {
+    return (
+      <div className="text-[11px]">
+        <span className="block text-[9px] font-bold uppercase tracking-wider text-indigo-700">WhatsApp Group</span>
+        <span className="text-[#111111] font-medium truncate block max-w-[160px]">{talent.whatsapp_group_name}</span>
+      </div>
+    );
+  }
+  if (talent.destination_type === "number") {
+    return (
+      <div className="text-[11px]">
+        <span className="block text-[9px] font-bold uppercase tracking-wider text-sky-700">WhatsApp Number</span>
+        <span className="text-[#111111] font-mono">{talent.phone}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="text-[11px]">
+      <span className="block text-[9px] font-bold uppercase tracking-wider text-red-500">Unavailable</span>
+    </div>
+  );
+}
+
+function OngoingTalentRow({ talent, checked, onToggle }) {
+  return (
+    <div className={`flex items-center gap-3 px-4 h-full text-xs border-b border-black/[0.04] transition-colors ${checked ? "bg-black/[0.02]" : "hover:bg-black/[0.01]"}`}>
+      <input type="checkbox" checked={checked} onChange={onToggle} className="shrink-0" />
+      <div className="w-40 shrink-0 min-w-0">
+        <p className="font-semibold text-[#111111] truncate">{talent.name || "—"}</p>
+        <p className="text-[10px] text-[#6B7280]">{talent.pending_projects.length} pending project{talent.pending_projects.length !== 1 ? "s" : ""}</p>
+      </div>
+      <div className="flex-1 min-w-0 text-[11px] text-[#6B7280] truncate">
+        {talent.pending_projects.map((p) => p.project_name).join(", ")}
+      </div>
+      <div className="w-32 shrink-0 text-[11px] text-[#111111]">
+        {formatLastReminder(talent.last_reminder_at)}
+      </div>
+      <div className="w-40 shrink-0">
+        <RecipientBadge talent={talent} />
+      </div>
+    </div>
+  );
+}
+
+function OngoingTalentCard({ talent, checked, onToggle }) {
+  return (
+    <div className={`border rounded-xl p-4 space-y-2.5 transition-colors ${checked ? "border-black bg-black/[0.02]" : "border-black/[0.08] bg-white"}`}>
+      <div className="flex items-start gap-3">
+        <input type="checkbox" checked={checked} onChange={onToggle} className="mt-1 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold text-sm text-[#111111]">{talent.name || "—"}</p>
+          <p className="text-[11px] text-[#6B7280]">{talent.pending_projects.length} pending project{talent.pending_projects.length !== 1 ? "s" : ""}</p>
+        </div>
+      </div>
+      <div className="pl-7 space-y-0.5">
+        {talent.pending_projects.map((p) => (
+          <p key={p.project_id} className="text-xs text-[#111111]">{p.project_name}</p>
+        ))}
+      </div>
+      <div className="pl-7 flex items-center justify-between pt-1 border-t border-black/[0.04]">
+        <div>
+          <span className="block text-[9px] font-bold uppercase tracking-wider text-[#6B7280]">Last reminder</span>
+          <span className="text-xs text-[#111111]">{formatLastReminder(talent.last_reminder_at)}</span>
+        </div>
+        <RecipientBadge talent={talent} />
+      </div>
+    </div>
+  );
+}
+
+function OngoingPipelinePanel({ templates }) {
+  const [talents, setTalents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshedAt, setRefreshedAt] = useState(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all"); // all | never | today
+  const [selected, setSelected] = useState(() => new Set());
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const customTemplateId = useMemo(
+    () => (templates.find((t) => t.slug === "custom") || {}).id || "",
+    [templates]
+  );
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await getOngoingPipelineTalents();
+      setTalents(data.talents || []);
+      setRefreshedAt(data.refreshed_at || null);
+      setSelected(new Set());
+    } catch (err) {
+      toast.error(formatErrorDetail(err, "Failed to load ongoing project talents"));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = useMemo(() => {
+    const now = new Date();
+    const q = search.trim().toLowerCase();
+    return talents.filter((t) => {
+      if (filter === "never" && t.last_reminder_at) return false;
+      if (filter === "today" && !isSameDay(t.last_reminder_at, now)) return false;
+      if (q) {
+        const nameMatch = (t.name || "").toLowerCase().includes(q);
+        const projectMatch = t.pending_projects.some((p) => p.project_name.toLowerCase().includes(q));
+        if (!nameMatch && !projectMatch) return false;
+      }
+      return true;
+    });
+  }, [talents, search, filter]);
+
+  const toggle = (tid) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(tid) ? next.delete(tid) : next.add(tid);
+      return next;
+    });
+  };
+
+  const allFilteredSelected = filtered.length > 0 && filtered.every((t) => selected.has(t.talent_id));
+  const selectAllFiltered = (checked) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      filtered.forEach((t) => (checked ? next.add(t.talent_id) : next.delete(t.talent_id)));
+      return next;
+    });
+  };
+
+  const selectedTalents = talents.filter((t) => selected.has(t.talent_id));
+
+  const handleSend = async () => {
+    if (!customTemplateId) {
+      toast.error('"Custom Message" template not found — cannot send reminders.');
+      return;
+    }
+    setSending(true);
+    try {
+      await createBatch({
+        source_type: "ONGOING_PIPELINE",
+        source_params: { talent_ids: Array.from(selected) },
+        template_id: customTemplateId,
+        variable_data: {},
+        is_dry_run: false,
+      });
+      toast.success(`Reminder queued for ${selected.size} talent(s)`);
+      setConfirmOpen(false);
+      // Eligibility/recipient/last-reminder are all recomputed fresh on the
+      // next load — no optimistic client-side timestamp guessing (the
+      // worker sends asynchronously, so "just sent" isn't "sent" yet).
+      load();
+    } catch (err) {
+      toast.error(formatErrorDetail(err, "Failed to send reminders"));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const FILTERS = [
+    { id: "all", label: "All" },
+    { id: "never", label: "Never Reminded" },
+    { id: "today", label: "Reminded Today" },
+  ];
+
+  return (
+    <div className="space-y-4" data-testid="ongoing-pipeline-panel">
+      {/* Header: refresh + last refreshed */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Ongoing Project Talents</h3>
+          <p className="text-[10px] text-[#6B7280]/80 mt-0.5 font-mono">
+            {refreshedAt ? `Last refreshed: ${new Date(refreshedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : loading ? "Loading…" : ""}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold px-3.5 py-2 rounded-lg border border-black/10 hover:border-black/30 bg-[#f8f8f7] disabled:opacity-50 transition-colors"
+        >
+          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+          Refresh
+        </button>
+      </div>
+
+      {/* Search + simple filters */}
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search talent or project…"
+          className="flex-1 min-w-[180px] text-xs px-3 py-2 border border-black/10 rounded-lg focus:outline-none focus:border-black/40 h-[40px] bg-[#f8f8f7]"
+        />
+        {FILTERS.map((f) => (
+          <button
+            key={f.id}
+            type="button"
+            onClick={() => setFilter(f.id)}
+            className={`text-[11px] font-semibold px-3 py-2 rounded-lg border transition-colors h-[40px] shrink-0 ${
+              filter === f.id ? "bg-black text-white border-black" : "bg-[#f8f8f7] border-black/10 hover:border-black/30"
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Select all */}
+      {!loading && filtered.length > 0 && (
+        <label className="flex items-center gap-2 text-[11px] text-[#6B7280] font-semibold uppercase tracking-wider cursor-pointer select-none">
+          <input type="checkbox" checked={allFilteredSelected} onChange={(e) => selectAllFiltered(e.target.checked)} />
+          Select All ({filtered.length})
+        </label>
+      )}
+
+      {loading && (
+        <div className="space-y-2">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="h-[56px] w-full bg-[#f8f8f7] animate-pulse rounded-xl border border-black/[0.02]" />
+          ))}
+        </div>
+      )}
+
+      {!loading && filtered.length === 0 && (
+        <div className="border border-dashed border-black/[0.08] bg-[#fafaf9] rounded-lg p-8 text-center text-xs text-black/40">
+          {talents.length === 0
+            ? "No talents currently need a reminder for ongoing projects."
+            : "No talents match this search/filter."}
+        </div>
+      )}
+
+      {/* Desktop table */}
+      {!loading && filtered.length > 0 && (
+        <div className="hidden md:block border border-black/[0.06] rounded-xl overflow-hidden shadow-sm bg-white">
+          <div className="flex items-center gap-3 px-4 py-2 text-[10px] uppercase tracking-wider text-[#6B7280] bg-[#fafafa] border-b border-black/[0.04]">
+            <span className="w-4 shrink-0" />
+            <span className="w-40 shrink-0">Talent</span>
+            <span className="flex-1">Pending Projects</span>
+            <span className="w-32 shrink-0">Last Reminder</span>
+            <span className="w-40 shrink-0">Recipient</span>
+          </div>
+          <VirtualList
+            items={filtered}
+            rowHeight={56}
+            height={Math.min(filtered.length, 8) * 56 || 56}
+            renderRow={(t) => (
+              <OngoingTalentRow talent={t} checked={selected.has(t.talent_id)} onToggle={() => toggle(t.talent_id)} />
+            )}
+          />
+        </div>
+      )}
+
+      {/* Mobile cards */}
+      {!loading && filtered.length > 0 && (
+        <div className="md:hidden space-y-3 pb-2">
+          {filtered.map((t) => (
+            <OngoingTalentCard key={t.talent_id} talent={t} checked={selected.has(t.talent_id)} onToggle={() => toggle(t.talent_id)} />
+          ))}
+        </div>
+      )}
+
+      {/* Sticky batch-selection bar */}
+      {selected.size > 0 && (
+        <div className="sticky bottom-4 z-20 flex items-center justify-between gap-3 bg-black text-white rounded-xl px-5 py-3.5 shadow-lg">
+          <span className="text-xs font-semibold">{selected.size} talent{selected.size !== 1 ? "s" : ""} selected</span>
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(true)}
+            className="inline-flex items-center gap-1.5 bg-white text-black text-xs font-bold px-4 py-2 rounded-lg hover:bg-white/90 transition-colors active:scale-[0.98]"
+          >
+            <Send className="w-3.5 h-3.5" />
+            Send Reminder
+          </button>
+        </div>
+      )}
+
+      {/* Pre-send confirmation — reuses the existing preview idea (who,
+          how many projects, recipient, the actual consolidated message)
+          rather than the phone-mockup component, which is built around a
+          single {{}}-template body and doesn't fit a per-recipient custom
+          message cleanly. */}
+      {confirmOpen && (
+        <div className="fixed inset-0 z-[200] bg-black/40 flex items-center justify-center p-4" onClick={(e) => e.target === e.currentTarget && !sending && setConfirmOpen(false)}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[85vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-black/[0.06] shrink-0">
+              <p className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">
+                Send {selectedTalents.length} Reminder{selectedTalents.length !== 1 ? "s" : ""}
+              </p>
+              <button type="button" onClick={() => !sending && setConfirmOpen(false)} className="p-1 rounded-md text-black/40 hover:text-black hover:bg-black/[0.04]">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              <p className="text-xs text-[#6B7280]">
+                {selectedTalents.length === 1
+                  ? "One consolidated WhatsApp message will be sent."
+                  : `${selectedTalents.length} consolidated WhatsApp messages will be sent — one per talent, regardless of how many pending projects each has.`}
+              </p>
+              {selectedTalents[0] && (
+                <div className="border border-black/[0.08] rounded-xl p-4 space-y-3 bg-[#fafaf9]">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-[#111111]">{selectedTalents[0].name}</p>
+                      <p className="text-[11px] text-[#6B7280]">{selectedTalents[0].pending_projects.length} pending project{selectedTalents[0].pending_projects.length !== 1 ? "s" : ""}</p>
+                    </div>
+                    <RecipientBadge talent={selectedTalents[0]} />
+                  </div>
+                  <div className="bg-white border border-black/[0.06] rounded-lg p-3 text-[11px] leading-relaxed whitespace-pre-wrap text-[#111111] max-h-48 overflow-y-auto">
+                    {selectedTalents[0].message}
+                  </div>
+                  {selectedTalents.length > 1 && (
+                    <p className="text-[10px] text-[#6B7280]/70 italic">Preview shown for {selectedTalents[0].name} — every other selected talent gets their own message with only their pending projects.</p>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-black/[0.06] shrink-0">
+              <button type="button" onClick={() => setConfirmOpen(false)} disabled={sending} className="px-3.5 py-2 text-xs font-semibold text-black/60 hover:text-black disabled:opacity-50">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSend}
+                disabled={sending}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold bg-black text-white hover:bg-black/85 disabled:opacity-50 transition-colors"
+              >
+                {sending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {sending ? "Sending…" : `Send ${selectedTalents.length} Reminder${selectedTalents.length !== 1 ? "s" : ""}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -86,13 +86,23 @@ describe("computeRequirementItems — requirement tiers", () => {
         expect(findItem(itemsFilled, "first_name").satisfied).toBe(true);
     });
 
-    it("marks a profile field OPTIONAL (not hidden) when config doesn't say required — this engine has no per-field hidden tier", () => {
+    it("marks a profile field OPTIONAL when config doesn't say required or hidden (unset defaults to optional)", () => {
         const project = strictProject({ fields: {} });
         const items = computeRequirementItems({ project, form: baseForm(), submission: null });
         const bio = findItem(items, "bio");
         expect(bio.requirement).toBe(REQUIREMENT_TIERS.OPTIONAL);
         // Still present in the model (not omitted) so section rollups can count it.
         expect(bio).toBeDefined();
+    });
+
+    // 2026-09 P1 fix: a profile field's "hidden" config previously had no
+    // effect at all — fieldTier only ever distinguished REQUIRED from
+    // everything else, so admin's "Hidden" choice silently behaved like
+    // "Optional" (still rendered, still on the talent-facing form).
+    it("marks a profile field HIDDEN when config says so, distinct from OPTIONAL", () => {
+        const project = strictProject({ fields: { height: "hidden" } });
+        const items = computeRequirementItems({ project, form: baseForm(), submission: null });
+        expect(findItem(items, "height").requirement).toBe(REQUIREMENT_TIERS.HIDDEN);
     });
 
     it("marks a media category HIDDEN when its visibility is explicitly hidden, and still computes satisfied", () => {
@@ -347,6 +357,20 @@ describe("computeRequirementItems — project configuration variations", () => {
         expect(skillItems).toHaveLength(1);
         expect(skillItems[0].id).toBe("skills_language");
         expect(skillItems[0].requirement).toBe(REQUIREMENT_TIERS.REQUIRED);
+    });
+
+    // 2026-09 P0 fix: a returning talent's flow never visits the standalone
+    // Skills & Attributes step, so a mandatory skills_* item tagged
+    // section: "skills" was previously unreachable for them — no control on
+    // the page they actually see could ever satisfy or clear it.
+    it("mandatory skills items are tagged section 'skills' for a new talent, 'projectQuestions' for a returning talent", () => {
+        const project = strictProject({ skills: { language: true } });
+        const form = { ...baseForm(), skills: [] };
+        const newTalentItems = computeRequirementItems({ project, form, submission: null, isReturningTalent: false });
+        expect(findItem(newTalentItems, "skills_language").section).toBe("skills");
+
+        const returningTalentItems = computeRequirementItems({ project, form, submission: null, isReturningTalent: true });
+        expect(findItem(returningTalentItems, "skills_language").section).toBe("projectQuestions");
     });
 
     it("custom questions are enumerated from project.custom_questions, tiered by custom_questions config", () => {

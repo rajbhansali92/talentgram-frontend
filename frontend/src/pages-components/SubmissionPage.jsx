@@ -2616,6 +2616,15 @@ function SubmissionPage() {
         const item = experience.readinessModel.find((i) => i.id === fieldId);
         return !!item && item.requirement === REQUIREMENT_TIERS.REQUIRED;
     }, [experience.readinessModel]);
+    // P1 fix (2026-09): the admin's "Hidden" choice under Profile Fields
+    // Configuration previously had no effect on rendering at all (only
+    // "required" vs "everything else" was ever checked) — this is the one
+    // new check that lets a HIDDEN field actually be omitted below, using
+    // the Requirement Engine's own tier exactly like isFieldRequired does.
+    const isFieldHidden = useCallback((fieldId) => {
+        const item = experience.readinessModel.find((i) => i.id === fieldId);
+        return !!item && item.requirement === REQUIREMENT_TIERS.HIDDEN;
+    }, [experience.readinessModel]);
     // For a returning talent, Instagram lives on Project Questions now (see
     // recurringProfileFields below), not inside this disclosure — so it
     // shouldn't be a reason to auto-open a disclosure that no longer
@@ -3234,7 +3243,7 @@ function SubmissionPage() {
     // for a returning talent (who never sees "Your Profile" at all, and so
     // previously had no way to fill these fields when a project required
     // them). Never both at once, so there is no duplicate field/state.
-    const dobField = (
+    const dobField = !isFieldHidden("dob") && (
         <PremiumFormField
             // Only the returning-talent (Project Questions) placement grows a
             // dynamic required marker, matching Height's existing pattern —
@@ -3310,7 +3319,7 @@ function SubmissionPage() {
         </div>
     );
 
-    const ageDisplayBlock = (
+    const ageDisplayBlock = !isFieldHidden("age") && (
         <div data-testid="form-age-field">
             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                 Age {form.dob ? "(auto calculated)" : isFieldRequired("age") ? "*" : "(optional)"}
@@ -3331,7 +3340,7 @@ function SubmissionPage() {
         </div>
     );
 
-    const heightBlock = (
+    const heightBlock = !isFieldHidden("height") && (
         <div data-testid="form-height-field">
             <div className="flex flex-wrap items-center justify-between gap-y-2 gap-x-3">
                 <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono whitespace-nowrap">
@@ -3402,7 +3411,7 @@ function SubmissionPage() {
         </div>
     );
 
-    const instagramHandleField = (
+    const instagramHandleField = !isFieldHidden("instagram_handle") && (
         <PremiumFormField
             label={isReturningTalent ? `Instagram ${isFieldRequired("instagram_handle") ? "*" : "(optional)"}` : "Instagram Handle"}
             value={form.instagram_handle}
@@ -3435,11 +3444,11 @@ function SubmissionPage() {
             autoCorrect="off"
             spellCheck={false}
             required={isFieldRequired("instagram_handle")}
-            hint={isReturningTalent && isFieldRequired("instagram_handle") ? "Required for this project." : "Optional, but helps casting teams review additional work."}
+            hint={isFieldRequired("instagram_handle") ? "Required for this project." : "Optional, but helps casting teams review additional work."}
         />
     );
 
-    const instagramFollowersBlock = (
+    const instagramFollowersBlock = !isFieldHidden("instagram_followers") && (
         <div data-testid="form-instagram-followers-field">
             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                 Instagram Followers
@@ -3499,6 +3508,35 @@ function SubmissionPage() {
                 links={form.work_links || []}
                 onChange={(arr) => {
                     setForm({ ...form, work_links: arr });
+                    setTimeout(saveForm, 0);
+                }}
+            />
+        </div>
+    );
+
+    // Same field/state/handler as the "Skills & Attributes" step's own
+    // <SkillsSelector> — defined once here, same pattern as workLinksBlock
+    // above, so a returning talent's one-page form can show it inline on
+    // Project Questions instead of on the standalone step they never visit
+    // (see recurringProfileFields). Reuses the existing SkillsSelector
+    // component unchanged; the only addition is a plain-text line naming
+    // any mandatory categories, using the same label/hint styling already
+    // used for Work Links right above — no new visual language.
+    const mandatorySkillCategories = Object.keys(requirements.skills || {}).filter((cat) => requirements.skills[cat]);
+    const skillsFieldBlock = (
+        <div className="md:col-span-2" data-testid="form-skills-field">
+            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono block mb-2">
+                Skills & Special Abilities
+            </span>
+            {mandatorySkillCategories.length > 0 && (
+                <p className="text-[12px] text-[#666] mt-1 mb-2 leading-relaxed">
+                    Required: select at least one skill from {mandatorySkillCategories.map((c) => `"${c}"`).join(", ")}.
+                </p>
+            )}
+            <SkillsSelector
+                selectedSkills={form.skills || []}
+                onChange={(arr) => {
+                    setForm((prev) => ({ ...prev, skills: arr }));
                     setTimeout(saveForm, 0);
                 }}
             />
@@ -4054,6 +4092,7 @@ function SubmissionPage() {
                                             error={validationErrors.last_name}
                                             inputRef={(el) => { fieldRefs.current.last_name = el; }}
                                         />
+                                        {!isFieldHidden("phone") && (
                                         <PremiumFormField
                                             label="Phone Number (WhatsApp)"
                                             type="tel"
@@ -4065,6 +4104,7 @@ function SubmissionPage() {
                                             testid="form-phone"
                                             hint="Please enter the number that is active on WhatsApp. This will be used for casting communication and project updates."
                                         />
+                                        )}
                                         <PremiumFormField
                                             label="Alternate Contact Number (optional)"
                                             type="tel"
@@ -4102,6 +4142,7 @@ function SubmissionPage() {
                                         data-step="1"
                                         data-testid="unified-identity-block"
                                     >
+                                        {!isFieldHidden("gender") && (
                                         <div data-testid="form-gender-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Gender
@@ -4135,6 +4176,8 @@ function SubmissionPage() {
                                                 })}
                                             </div>
                                         </div>
+                                        )}
+                                        {!isFieldHidden("ethnicity") && (
                                         <div data-testid="form-ethnicity-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Ethnicity
@@ -4167,6 +4210,7 @@ function SubmissionPage() {
                                                 </Select>
                                             </div>
                                         </div>
+                                        )}
                                         {/* Recurring talents see Instagram on Project Questions
                                             instead (see recurringProfileFields below). */}
                                         {!isReturningTalent && (
@@ -4218,25 +4262,19 @@ function SubmissionPage() {
 
                             {!collapsedSections.skills && (
                                 <div className="space-y-8 animate-fadeIn">
+                                    {/* Recurring talents see this same block inline on Project
+                                        Questions instead (see recurringProfileFields below) —
+                                        this step is never visible to them anyway, but guarded
+                                        for consistency with every other relocated field. */}
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8">
-                                        <div className="md:col-span-2" data-testid="form-skills-field">
-                                            <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono block mb-2">
-                                                Skills & Special Abilities
-                                            </span>
-                                            <SkillsSelector
-                                                selectedSkills={form.skills || []}
-                                                onChange={(arr) => {
-                                                    setForm((prev) => ({ ...prev, skills: arr }));
-                                                    setTimeout(saveForm, 0);
-                                                }}
-                                            />
-                                        </div>
+                                        {!isReturningTalent && skillsFieldBlock}
                                     </div>
                                     {/* Bio + Work Links behind the "Update my Profile"
                                         disclosure — Skills above stays always visible as
                                         the step's core content. */}
                                     <UpdateProfileDisclosure defaultOpen={skillsDisclosureOpen}>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-8">
+                                        {!isFieldHidden("bio") && (
                                         <label className="block md:col-span-2" data-testid="form-bio-field">
                                             <span className="text-[11px] text-[#333333] tracking-[0.2em] uppercase font-mono">
                                                 Bio (optional)
@@ -4257,6 +4295,7 @@ function SubmissionPage() {
                                                 placeholder="A short note about you (max 600 chars)"
                                             />
                                         </label>
+                                        )}
                                         {!isReturningTalent && workLinksBlock}
                                     </div>
                                     </UpdateProfileDisclosure>
@@ -4329,11 +4368,18 @@ function SubmissionPage() {
                                                 {instagramHandleField}
                                                 {instagramFollowersBlock}
                                                 {workLinksBlock}
+                                                {/* P0 fix (2026-09): a returning talent never visits
+                                                    the standalone Skills & Attributes step, so a
+                                                    mandatory skill category they don't already have
+                                                    was previously unreachable — same relocation
+                                                    pattern as every other field in this block. */}
+                                                {skillsFieldBlock}
                                             </div>
                                         </div>
                                     )}
                                     {/* CURRENT LOCATION — project-specific answer only; never
                                         written back to the talent's global profile location. */}
+                                    {!isFieldHidden("location") && (
                                     <div
                                         data-testid="location-question-block"
                                         className="mb-6"
@@ -4352,8 +4398,10 @@ function SubmissionPage() {
                                             error={validationErrors.location}
                                         />
                                     </div>
+                                    )}
 
                                     {/* AVAILABILITY — decision block */}
+                                    {!isFieldHidden("availability") && (
                                     <div
                                         data-testid="availability-block"
                                         data-step="2"
@@ -4438,6 +4486,7 @@ function SubmissionPage() {
                                             />
                                         )}
                                     </div>
+                                    )}
 
                                     {/* COMMISSION — card */}
                                     {project.commission_percent && (
@@ -4460,7 +4509,7 @@ function SubmissionPage() {
                                     )}
 
                                     {/* BUDGET — decision block */}
-                                    {(project.budget_per_day || (project.talent_budget || []).length > 0) && (
+                                    {!isFieldHidden("budget_expectation") && (project.budget_per_day || (project.talent_budget || []).length > 0) && (
                                         <div
                                             data-testid="budget-block"
                                             data-step="2"
@@ -4577,7 +4626,7 @@ function SubmissionPage() {
                                         </div>
                                     )}
 
-                                    {project.competitive_brand_enabled && (
+                                    {project.competitive_brand_enabled && !isFieldHidden("competitive_brand") && (
                                         <div
                                             data-testid="competitive-brand-block"
                                             data-step="2"

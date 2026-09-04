@@ -2143,9 +2143,26 @@ async def submission_finalize(sid: str, response: Response, authorization: Optio
             "Special Skills": ["Skateboarding", "Roller Skating", "Ice Skating", "Surfing", "Scuba Diving", "Fire Performance", "Juggling"],
             "Languages": ["English", "Hindi", "Spanish", "French", "Mandarin Chinese", "Japanese", "Russian", "German", "Arabic", "Marathi", "Gujarati", "Punjabi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Urdu", "Other"]
         }
+        # Legacy/abbreviated category-key aliases (2026-09 audit fix): an
+        # older project's submission_requirements.skills can still contain
+        # the pre-8-category abbreviated keys (e.g. "sports" instead of
+        # "Sports & Fitness") — the frontend's own requirementEngine.js
+        # already recognizes both forms via lowercasing, so without this
+        # the backend would treat such a category as unknown and reject
+        # every submission for it no matter what the talent selects.
+        SKILLS_CATEGORY_ALIASES = {
+            "language": "Languages", "languages": "Languages",
+            "performance": "Performance",
+            "sports": "Sports & Fitness", "sports & fitness": "Sports & Fitness",
+            "action": "Action & Stunts", "action & stunts": "Action & Stunts",
+            "vehicle": "Vehicle Skills", "vehicle skills": "Vehicle Skills",
+            "special": "Special Skills", "special skills": "Special Skills",
+            "dance": "Dance", "music": "Music",
+        }
         for cat, req in skills_reqs.items():
             if req:
-                valid_skills = SKILLS_CATEGORIES.get(cat) or []
+                canonical_cat = SKILLS_CATEGORY_ALIASES.get((cat or "").strip().lower())
+                valid_skills = SKILLS_CATEGORIES.get(cat) or SKILLS_CATEGORIES.get(canonical_cat) or []
                 if not any(s in valid_skills for s in user_skills):
                     raise HTTPException(400, f"At least one skill from category '{cat}' is required")
 

@@ -1438,7 +1438,7 @@ export default function ProjectEdit() {
                                 <div>
                                     <h3 className="text-sm font-semibold text-black/85 mb-4">Profile Fields Configuration</h3>
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-4">
-                                        {Object.keys(defaultRequirements.fields).map((f) => {
+                                        {Object.keys(defaultRequirements.fields).filter((f) => f !== "work_links").map((f) => {
                                             const val = reqs.fields[f] || "optional";
                                             return (
                                                 <div key={f} className="flex items-center justify-between border-b border-black/[0.04] pb-2 text-xs">

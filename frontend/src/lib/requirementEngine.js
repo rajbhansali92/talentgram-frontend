@@ -84,10 +84,17 @@ export function computeRequirementItems({ project, form, submission, isReturning
     }
 
     const fieldsConfig = requirements.fields || {};
-    // Profile fields in this engine are two-tier only (no per-field
-    // "hidden" — see 04_MEDIA_RULES/audit); anything not explicitly
-    // "required" is optional but still rendered.
-    const fieldTier = (key) => (fieldsConfig[key] === REQUIREMENT_TIERS.REQUIRED ? REQUIREMENT_TIERS.REQUIRED : REQUIREMENT_TIERS.OPTIONAL);
+    // Profile fields are genuinely three-tier (2026-09 fix): "required" and
+    // "hidden" pass through as-is, anything else (including an unset/legacy
+    // value) is optional. SubmissionPage.jsx is responsible for actually
+    // omitting a HIDDEN field's input from the page — this only reports the
+    // tier so it can.
+    const fieldTier = (key) => {
+        const raw = fieldsConfig[key];
+        if (raw === REQUIREMENT_TIERS.REQUIRED) return REQUIREMENT_TIERS.REQUIRED;
+        if (raw === REQUIREMENT_TIERS.HIDDEN) return REQUIREMENT_TIERS.HIDDEN;
+        return REQUIREMENT_TIERS.OPTIONAL;
+    };
 
     // 1. Standard Profile Fields
     items.push({ id: "first_name", label: "First name", section: "profile", selector: '[data-testid="form-first-name"]', requirement: fieldTier("name"), satisfied: !!form.first_name?.trim() });
@@ -219,10 +226,17 @@ export function computeRequirementItems({ project, form, submission, isReturning
     // optional; a category only exists as a requirement item at all when the
     // project has explicitly turned it on.
     //
-    // `bio`, `work_links`, and every `skills_${cat}` item below are tagged
-    // section: "skills" (not "profile") so the submission wizard can render
-    // them as their own step — a presentational grouping only, it changes
-    // nothing about requirement/satisfied computation.
+    // `bio` and `work_links` stay tagged section: "skills" (their own step)
+    // since they always render there too — a presentational grouping only.
+    // A mandatory `skills_${cat}` item, however, MUST be gated to wherever
+    // its actual <SkillsSelector> is rendered. A returning talent's flow
+    // never visits the standalone Skills & Attributes step (same reasoning
+    // as DOB/Height/Instagram above — see profileFieldsSection), so
+    // SubmissionPage.jsx renders the same selector inline on Project
+    // Questions for them instead (recurringProfileFields); this item's
+    // section must match that or the talent could never see — or clear —
+    // an unsatisfied mandatory category.
+    const skillsSection = isReturningTalent ? "projectQuestions" : "skills";
     const skillsReqs = requirements.skills || {};
     const userSkills = form.skills || [];
     Object.keys(skillsReqs).forEach(cat => {
@@ -232,7 +246,7 @@ export function computeRequirementItems({ project, form, submission, isReturning
             items.push({
                 id: `skills_${cat}`,
                 label: `At least one skill from category "${cat}"`,
-                section: "skills",
+                section: skillsSection,
                 selector: '[data-testid="form-skills-field"]',
                 requirement: REQUIREMENT_TIERS.REQUIRED,
                 satisfied: hasSkill,

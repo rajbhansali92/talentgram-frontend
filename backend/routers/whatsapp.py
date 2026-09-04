@@ -899,13 +899,22 @@ def _build_reminder_message(talent_name: str, pending: List[dict]) -> str:
     template ({{message}}) at send time, so nothing about the actual
     send/worker path is new.
 
-    Links are a bare URL on its own (indented) line, not `[text](url)` —
-    every existing template in this file (_seed_templates, _project_variables'
+    Links are a bare URL on its own line, not `[text](url)` — every
+    existing template in this file (_seed_templates, _project_variables'
     submission_link) already does exactly this, and grepping this whole
     WhatsApp module for markdown-style anchor syntax turns up nothing:
     WhatsApp's own client renders a bare https:// URL as a tappable link on
     its own, so that's the one reliably-working format, matching every
     other reminder/casting-call message this engine already sends.
+
+    2026-09 fix: the project line uses `N -` (not `N.`) and the URL line
+    is a literal `project details - {link}`, NOT `{i}. {link}` — WhatsApp
+    (and every other client that recognizes markdown numbered lists) was
+    treating a lone `"   https://..."` line right after `"1. *Project*"`
+    as the auto-continued item "2.", visually double-numbering every
+    project. `N -` never triggers that auto-list behavior, and prefixing
+    the URL line with words (not a bare indent) removes the second
+    "looks like a list item" line entirely.
     """
     first = _first_name(talent_name)
     lines = [
@@ -915,8 +924,8 @@ def _build_reminder_message(talent_name: str, pending: List[dict]) -> str:
         "",
     ]
     for i, p in enumerate(pending, 1):
-        lines.append(f"{i}. *{p['project_name']}*")
-        lines.append(f"   {p['submission_link']}")
+        lines.append(f"{i} - *{p['project_name']}*")
+        lines.append(f"project details - {p['submission_link']}")
         lines.append("")
     lines.append(
         "Could you please let us know *which project(s) you'll be submitting for*? "

@@ -118,9 +118,13 @@ def test_multi_project_talent_appears_once_consolidated(db, admin_token, cleanup
 
 
 def test_message_matches_the_exact_requested_structure(db, admin_token, cleanup):
-    """2026-09 template change — bold numbered project, submission URL on
-    its own indented line, blank line between entries, exact closing
-    wording, single-asterisk (WhatsApp-valid) bold — not the old format."""
+    """2026-09 template change — bold "N - *Project*" heading, URL on its
+    own "project details - {link}" line (never a bare indented line that a
+    markdown-numbered-list-aware client would auto-number as its own
+    "N+1." item — that double-numbering bug is exactly what this format
+    exists to avoid), blank line between entries, exact closing wording,
+    single-asterisk (WhatsApp-valid) bold — not the old "N. *Project*"
+    format."""
     p1, slug1 = _mk_project(db, name="ZZZ_TEST OPT Structure A")
     p2, slug2 = _mk_project(db, name="ZZZ_TEST OPT Structure B")
     cleanup["projects"] += [p1, p2]
@@ -139,11 +143,11 @@ def test_message_matches_the_exact_requested_structure(db, admin_token, cleanup)
         "\n"
         "Just checking in regarding your pending Talentgram projects:\n"
         "\n"
-        "1. *ZZZ_TEST OPT Structure A*\n"
-        f"   {link1}\n"
+        "1 - *ZZZ_TEST OPT Structure A*\n"
+        f"project details - {link1}\n"
         "\n"
-        "2. *ZZZ_TEST OPT Structure B*\n"
-        f"   {link2}\n"
+        "2 - *ZZZ_TEST OPT Structure B*\n"
+        f"project details - {link2}\n"
         "\n"
         "Could you please let us know *which project(s) you'll be submitting for*? "
         "This will help us keep the project status updated from our end.\n"
@@ -157,6 +161,10 @@ def test_message_matches_the_exact_requested_structure(db, admin_token, cleanup)
     # other message this WhatsApp engine already sends.
     assert "](" not in msg
     assert "**" not in msg  # every bold marker is single-asterisk, WhatsApp-valid
+    # The exact bug being fixed: no "N." markdown-list-style project line
+    # anywhere (that's what a WhatsApp/markdown client auto-renumbers).
+    assert "1." not in msg
+    assert "2." not in msg
 
 
 def test_mixed_status_only_pending_project_shown(db, admin_token, cleanup):

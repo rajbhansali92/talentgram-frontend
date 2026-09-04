@@ -1,0 +1,309 @@
+{
+  "captured_at": "2026-09-04T09:05:00.446790+00:00",
+  "cloudinary_last_updated": "2026-09-03",
+  "cloudinary_date_requested": "2026-09-04T00:00:00Z",
+  "plan": "Small PAYG",
+  "credits": {
+    "usage": 113.35,
+    "limit": 60.0,
+    "used_percent": 188.92
+  },
+  "storage_credits": 18.35,
+  "storage_bytes": 19699787153,
+  "bandwidth_credits": 26.79,
+  "bandwidth_bytes": 38768757885,
+  "transformation_credits": 68.21,
+  "transformations_usage_rolling": 68207,
+  "transformation_breakdown": {
+    "transformation": 9450,
+    "frame": 1,
+    "sd_video_second": 20753,
+    "hd_video_second": 591,
+    "extra_avif_mp_encoding": 10901,
+    "fourk_video_second": 1165
+  },
+  "original_resource_count": 4420,
+  "derived_resource_count": 8428,
+  "object_count": 12848,
+  "requests": 29547,
+  "transformation_registry_total": 204,
+  "transformation_registry_families": {
+    "c_fill,f_avif,q_auto,w_N/": 2,
+    "q_auto,vc_auto": 1,
+    "fl_attachment:*": 148,
+    "f_webp,fl_awebp,q_auto/png": 1,
+    "c_limit,w_N/jpg": 2,
+    "w_N,h_N,c_limit,q_auto,vc_auto,f_mpN": 1,
+    "f_mpN": 1,
+    "/mpN": 1,
+    "f_avif,q_auto/png": 1,
+    "f_avif,q_auto/webp": 1,
+    "f_avif,q_auto/heic": 1,
+    "f_avif,q_auto/jpg": 1,
+    "f_auto,q_auto": 1,
+    "c_fill,dpr_N.N,f_auto,q_auto,w_N/": 1,
+    "c_limit,h_N,w_N/q_auto,vc_auto/f_mpN/": 1,
+    "c_limit,h_N,w_N,f_mpN/q_auto,vc_auto": 1,
+    "c_limit,h_N,w_N,f_mpN/q_auto,vc_auto/f_mpN": 1,
+    "fl_sprite/jpg": 1,
+    "fl_sprite/vtt": 1,
+    "f_webm,vc_vpN/": 1,
+    "c_fill,h_N,w_N,q_auto/f_jpg": 1,
+    "c_limit,h_N,w_N/q_auto,vc_auto/f_mpN": 1,
+    "w_N,c_fill,dpr_auto,f_auto,q_auto": 1,
+    "w_N,h_N,c_fill,q_auto,f_jpg": 1,
+    "br_Nm,c_limit,h_N,q_auto,vc_hN,w_N/mpN": 1,
+    "/png": 1,
+    "c_fill,h_N,q_auto,w_N/jpg": 1,
+    "br_Nm,c_limit,h_N,q_auto,vc_hN,w_N": 1,
+    "q_auto:good,vc_auto,f_mpN": 1,
+    "f_mpN,vc_hN,q_auto:good/": 2,
+    "f_webm,vc_vpN,q_auto:good/": 1,
+    "c_fill,w_N/": 1,
+    "c_fill,dpr_N.N,f_avif,q_auto,w_N/": 2,
+    "c_fill,dpr_auto,f_auto,q_auto,w_N": 1,
+    "/jpg": 1,
+    "c_limit,h_N,w_N/q_auto,vc_auto/mpN": 1,
+    "c_fill,dpr_auto,h_N,w_N/q_auto/jpg": 1,
+    "c_fill,dpr_N.N,h_N,w_N/q_auto/jpg": 1,
+    "f_mpN,br_Nk": 1,
+    "f_avif,q_auto,w_N,c_limit/png": 2,
+    "f_webm,vc_vpN,q_auto,w_N,c_limit/mpN": 1,
+    "f_webm,vc_vpN,q_auto,w_N,c_limit/mov": 1,
+    "so_N,w_N,h_N,c_fill,q_auto,f_jpg": 1,
+    "f_avif,q_auto,w_N,c_limit/jpg": 3,
+    "f_webp,q_auto,w_N,c_limit/jpg": 2,
+    "f_mpN,vc_hN,q_auto,w_N,c_limit": 1,
+    "c_limit,h_N,w_N/q_auto,vc_auto": 1,
+    "t_media_lib_thumb/jpg": 1,
+    "t_media_lib_thumb": 1
+  },
+  "fl_attachment_registry_total": 148,
+  "fl_attachment_bare": [
+    "fl_attachment:fg_image_dl",
+    "fl_attachment:fg_take_dl",
+    "fl_attachment:WhatsApp_Image_2026-07-14_at_10_23_11__3_",
+    "fl_attachment:ebd4ecdb-97f3-4f3d-9170-e33ca3ce48a4",
+    "fl_attachment:WhatsApp_Image_2026-02-26_at_21_14_55__1_",
+    "fl_attachment:IMG_2901",
+    "fl_attachment:_MG_7152",
+    "fl_attachment:test_download_file/jpg",
+    "fl_attachment"
+  ],
+  "derived_since_p5": {
+    "p5_deploy_utc": "2026-08-30T14:09:00+00:00",
+    "newest_originals_checked": 600,
+    "originals_uploaded_since_p5": 75,
+    "originals_uploaded_since_p5_list": [
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T08:48:17Z",
+        "public_id": "talentgram/talents/ceb385d1-1d83-4c6b-813b-031c632c55d2_eesha-halankar/profile_images/4d658c7e-397b-403d-9376-90780265d39b"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T08:48:16Z",
+        "public_id": "talentgram/talents/ceb385d1-1d83-4c6b-813b-031c632c55d2_eesha-halankar/profile_images/b0db15fb-73b1-4c43-b997-01b04eeee4b4"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T08:48:15Z",
+        "public_id": "talentgram/talents/ceb385d1-1d83-4c6b-813b-031c632c55d2_eesha-halankar/profile_images/ea31d5fa-7db9-4017-969d-3a9721c3b781"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T08:48:12Z",
+        "public_id": "talentgram/talents/ceb385d1-1d83-4c6b-813b-031c632c55d2_eesha-halankar/profile_images/6c385b43-7cd5-4020-afc0-c45118113bc5"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T08:48:11Z",
+        "public_id": "talentgram/talents/ceb385d1-1d83-4c6b-813b-031c632c55d2_eesha-halankar/profile_images/b61eb69c-98c7-42f4-83b7-36c08468fd33"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T08:48:10Z",
+        "public_id": "talentgram/talents/ceb385d1-1d83-4c6b-813b-031c632c55d2_eesha-halankar/profile_images/5d12140f-ce50-4ddc-bef5-e77e6a65b041"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T08:48:10Z",
+        "public_id": "talentgram/talents/ceb385d1-1d83-4c6b-813b-031c632c55d2_eesha-halankar/profile_images/510aa47f-86e5-437f-8b8f-7c796aa1ef17"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:38:39Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/a7fbe4ee-0f19-4b27-b378-f62b3e091c27"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:38:33Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/bca6eb1e-30a6-4381-b16a-df0a7ca27abe"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:38:26Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/30a58180-519a-4285-9337-49cb3fb10e30"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:38:18Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/0b698e7b-dbad-481c-a16d-7ab676677ad7"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:38:11Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/d5b9f800-ffc3-42c3-846b-67a281c33cf9"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:38:04Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/90cb006b-d56e-43d2-a2bb-11c4938f7da2"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:37:58Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/4a5f3f21-2e54-4c11-9e91-0bd62a209afb"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:37:51Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/9361e50a-cf07-448c-8b6c-9088855371d7"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:14:44Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/32309571-be78-45c7-b361-61840526c151"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:14:38Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/ac5c67c8-5324-4417-b7db-8a2314f81f00"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:14:30Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/912d4a62-ca30-44ca-b75e-3cd536dd32b6"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:14:22Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/d7b29846-9035-4ce9-9f92-9097f83fed2b"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:14:15Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/7535646b-bc76-44ae-9e17-7cd93ee4fea1"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:14:08Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/2474203b-7a55-48ab-9417-df11b207d11f"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:14:00Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/ea06a096-374d-48c7-8368-e3bb0e5a75f1"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:13:53Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/65332de9-9acc-4896-a884-33e2ccf3616a"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:13:47Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/9f410d3c-4ed4-45a8-883e-340f3cece99f"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:10:50Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/b038c3d3-d5a3-4ede-b262-2857881d95fc"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:10:43Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/cd441d44-2c69-4e80-9f1f-a9be6c384435"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:05:52Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/4787d1ef-d469-4d15-b9b2-6ef44de7bdf1"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:04:07Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/7ab87fdd-16cc-452f-b7b5-329ff59b5a64"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-04T07:03:30Z",
+        "public_id": "talentgram/applications/ce9b5925-4abd-4009-90c5-743545b70cbe/7cb08245-0bac-455e-8e21-b453e44cf968"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T14:00:06Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/54c1c3eb-61e1-455e-9871-ccb50620f941"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:58:44Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/ebb4e5f9-00c8-4a8b-8faf-0905bf7442f2"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:57:25Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/d70aaac4-146a-4e48-9cb4-2bf8926eca88"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:57:09Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/81d30081-ff1e-49fd-b9e0-86699053bb03"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:56:24Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/0fae9920-ce80-42c5-95a5-065be256f509"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:55:53Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/89b7669f-fb48-40ed-9d7b-d62818d2bd3a"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:55:36Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/2ca956b4-6fb2-459b-aa4e-a18c2c70ed94"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:55:28Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/121a9f78-8d70-425f-be0c-8e943d9a8846"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:55:21Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/18c81e0c-fe92-4df9-b3dd-130b0c21b6f7"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:55:15Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/aa5adaad-95d9-467c-aeaa-981f05ab500e"
+      },
+      {
+        "rt": "image",
+        "created_at": "2026-09-03T13:55:05Z",
+        "public_id": "talentgram/applications/bcc5ccc0-bcbc-4198-b7c7-7e7f06656ed6/05d1c7ea-44aa-4d17-93ce-dfb8c4a16d38"
+      }
+    ],
+    "new_derived_since_p5": [],
+    "new_derived_family_counter": {}
+  },
+  "read_only": {
+    "cloudinary_writes": 0,
+    "cloudinary_deletes": 0,
+    "uploads": 0,
+    "transform_generating_requests": 0,
+    "mongodb_writes": 0
+  }
+}

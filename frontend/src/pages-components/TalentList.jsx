@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { instagramProfileUrl } from "@/lib/mediaUtils";
-import { Search, Plus, Check, User, LayoutGrid, List, Tag, Instagram, SlidersHorizontal, FolderKanban } from "lucide-react";
+import { Search, Plus, Check, User, LayoutGrid, List, Tag, Instagram, SlidersHorizontal, FolderKanban, Eye } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
@@ -13,6 +13,10 @@ import BulkTagDialog from "@/components/BulkTagDialog";
 import AddToProjectModal from "@/components/AddToProjectModal";
 import { getBatch, getJobs } from "@/lib/whatsappApi";
 import MergeTalentsModal from "@/components/MergeTalentsModal";
+// Quick View reuses Browse Roster's existing drawer + breakpoint hook
+// verbatim (same pattern PipelineCard.jsx already established) — no
+// parallel preview system, no duplicated rendering.
+import { TalentPreviewDrawer, useMediaQuery } from "@/components/pipeline/TalentBrowserModal";
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
 import { getRosterSnapshot, setRosterSnapshot } from "@/lib/talentRosterCache";
 import { useTalentDirectory } from "@/hooks/useTalentDirectory";
@@ -313,6 +317,7 @@ const TalentListRow = React.memo(function TalentListRow({
     onToggle,
     onTagClick,
     onProjectsClick,
+    onQuickView,
 }) {
     const handleToggle = useCallback(
         (e) => {
@@ -338,6 +343,15 @@ const TalentListRow = React.memo(function TalentListRow({
             onProjectsClick(t);
         },
         [t, onProjectsClick]
+    );
+
+    const handleQuickView = useCallback(
+        (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onQuickView(t);
+        },
+        [t, onQuickView]
     );
 
     // Filter media arrays safely
@@ -500,16 +514,24 @@ const TalentListRow = React.memo(function TalentListRow({
                 </div>
             </div>
 
-            {/* Right Section: Media icons for mobile + Actions */}
-            <div className="flex items-center gap-2 shrink-0">
+            {/* Right Section: Media icons for mobile + Actions.
+                flex-wrap + w-full on mobile only (md:flex-nowrap md:w-auto
+                restores the exact original desktop layout) — the extra
+                Quick View button (2026-09) pushed the action row past
+                375px width otherwise; wrapping needs the full row width to
+                actually have room to break onto a second line. */}
+            <div className="flex flex-wrap items-center gap-2 shrink-0 w-full md:w-auto md:flex-nowrap justify-end md:justify-start">
                 {/* Mobile media counts */}
                 <div className="flex md:hidden items-center gap-2 text-[10px] text-neutral-400 mr-2 shrink-0 font-medium">
                     <span>📷 {imageCount}</span>
                     <span>🎥 {videoCount}</span>
                 </div>
 
-                {/* Actions */}
-                <div className="flex items-center gap-1">
+                {/* Actions — flex-wrap so the extra Quick View button
+                    (2026-09) doesn't force horizontal page overflow on
+                    narrow (~375px) viewports; wraps within the row's own
+                    box instead of widening the page. */}
+                <div className="flex flex-wrap items-center gap-1 justify-end">
                     {!isSelectionMode && (
                         <>
                             <button
@@ -548,6 +570,21 @@ const TalentListRow = React.memo(function TalentListRow({
                                     <Instagram className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
                                 </a>
                             )}
+                            {/* Quick View — preview only, reuses Browse Roster's
+                                own TalentPreviewDrawer (see the import above and
+                                the drawer render near the other popovers below).
+                                Deliberately a plain button, not a Link: it must
+                                never navigate to /admin/talents/:id. */}
+                            <button
+                                type="button"
+                                onClick={handleQuickView}
+                                aria-label={`Quick View ${t.name || "talent"}`}
+                                data-testid={`talent-quickview-btn-${t.id}`}
+                                className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 hover:bg-black/[0.02] bg-white text-black/60 hover:text-black w-11 h-11 md:w-8 md:h-8 rounded-lg transition-colors select-none min-h-[44px] md:min-h-0 shrink-0"
+                                title="Quick View"
+                            >
+                                <Eye className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
+                            </button>
                             <Link
                                 to={`/admin/talents/${t.id}`}
                                 className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
@@ -715,6 +752,40 @@ export default function TalentList() {
     const [tagPopoverTalent, setTagPopoverTalent] = useState(null);
     // Read-only "which ongoing projects + stage" popover (List view only)
     const [projectsPopoverTalent, setProjectsPopoverTalent] = useState(null);
+
+    // Quick View — preview only, reuses Browse Roster's own drawer/hook
+    // (TalentPreviewDrawer, useMediaQuery) verbatim; no parallel preview
+    // system. Same instant-open + lazy-hydrate pattern as
+    // TalentBrowserModal.jsx's own openPreview: the roster list response
+    // doesn't carry media[] (see backend/routers/talents.py's
+    // _LIST_PROJECTION), so the drawer opens immediately with the row's
+    // already-fetched talent object, then quietly hydrates the full
+    // record (media included) via GET /talents/{id} in the background —
+    // no extra request at all on a talentPreviewCache hit (e.g. already
+    // primed by a prior Quick View open in this session).
+    const isMobile = useMediaQuery('(max-width: 767px)');
+    const [quickViewTalent, setQuickViewTalent] = useState(null);
+    const openQuickView = useCallback((talent) => {
+        const cached = talentPreviewCache.getTalent(talent.id);
+        const initial = cached || talent;
+        setQuickViewTalent(initial);
+
+        if (Array.isArray(initial.media)) return; // already hydrated — no request
+
+        talentPreviewCache
+            .hydrateTalent(talent.id, async () => {
+                const { data } = await adminApi.get(`/talents/${talent.id}`);
+                return data;
+            })
+            .then((full) => {
+                // Only patch if the admin is still looking at THIS talent —
+                // they may have opened a different row's preview meanwhile.
+                setQuickViewTalent((prev) => (prev && prev.id === talent.id ? full : prev));
+            })
+            .catch((err) => {
+                console.error("Quick View hydration failed:", err);
+            });
+    }, []);
     const [bulkTagAction, setBulkTagAction] = useState(null); // 'assign' | 'remove' | null
     const [showAddToProject, setShowAddToProject] = useState(false);
     const [showMergeModal, setShowMergeModal] = useState(false);
@@ -1118,6 +1189,7 @@ export default function TalentList() {
                             onToggle={toggle}
                             onTagClick={setTagPopoverTalent}
                             onProjectsClick={setProjectsPopoverTalent}
+                            onQuickView={openQuickView}
                         />
                     ))}
                 </div>
@@ -1230,6 +1302,18 @@ export default function TalentList() {
                 <ProjectsPopover
                     talent={projectsPopoverTalent}
                     onClose={() => setProjectsPopoverTalent(null)}
+                />
+            )}
+
+            {/* Quick View — same drawer Browse Roster uses, rendered via
+                createPortal so its position here is layout-irrelevant; a
+                preview only, never a navigation (see TalentListRow's
+                handleQuickView above). */}
+            {quickViewTalent && (
+                <TalentPreviewDrawer
+                    talent={quickViewTalent}
+                    onClose={() => setQuickViewTalent(null)}
+                    isMobile={isMobile}
                 />
             )}
 

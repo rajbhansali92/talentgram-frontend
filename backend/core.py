@@ -728,8 +728,28 @@ def cloudinary_upload(
     # (Historical: this block used to build eager mp4+jpg for video and an
     #  eager w_400 for images; see docs/CLOUDINARY_P4_AUDIT.md.)
 
+    # Cloudinary's synchronous /upload endpoint is fronted by nginx with a
+    # ~100 MB request-body cap — a single POST above it is rejected with a bare
+    # HTML "413 Request Entity Too Large" (which the SDK then can't parse). The
+    # admin talent-profile / project upload paths proxy the file THROUGH this
+    # backend and call uploader.upload() directly, so a >100 MB intro video (the
+    # UI allows up to 200 MB) fails there even though the browser-direct signed
+    # upload used by the Talent Invite / apply flow handles it via chunking.
+    # Route anything near the cap through uploader.upload_large(), which sends
+    # the file in Content-Range chunks — same result shape, same options, no
+    # eager/transformation added. Small uploads keep the exact single-request
+    # path they always had.
+    _CHUNKED_UPLOAD_THRESHOLD = 90 * 1024 * 1024  # 90 MB — margin under Cloudinary's ~100 MB cap
     try:
-        result = cloudinary.uploader.upload(data, **upload_kwargs)
+        if len(data) > _CHUNKED_UPLOAD_THRESHOLD:
+            import io
+            result = cloudinary.uploader.upload_large(
+                io.BytesIO(data),
+                chunk_size=20 * 1024 * 1024,
+                **upload_kwargs,
+            )
+        else:
+            result = cloudinary.uploader.upload(data, **upload_kwargs)
     except Exception as e:
         logger.error(f"Cloudinary upload failed (folder={folder} pid={public_id}): {e}")
         raise HTTPException(502, "Storage upload failed")

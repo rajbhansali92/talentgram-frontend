@@ -34,6 +34,7 @@ import core  # noqa: E402
 mock_db = MagicMock()
 core.db = mock_db
 
+from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from server import app  # noqa: E402
 
@@ -220,6 +221,63 @@ class TestCloudinaryUploadNoEager:
                                          resource_type="video", content_type="video/quicktime")
         assert res["video_codec"] == "prores"
         assert res["format"] == "mov"
+
+
+# ---------------------------------------------------------------------------
+# cloudinary_upload — large payloads must chunk (uploader.upload_large), so a
+# >100 MB admin intro video no longer 413s on Cloudinary's synchronous endpoint.
+# Small payloads keep the single-request uploader.upload() path unchanged.
+# ---------------------------------------------------------------------------
+class TestCloudinaryUploadLargeChunking:
+    def _fake_result(self, n):
+        return {"secure_url": "https://res.cloudinary.com/dummy/video/upload/v1/p.mp4",
+                "public_id": "talentgram/f/p", "resource_type": "video",
+                "format": "mp4", "bytes": n, "video": {"codec": "h264"}}
+
+    def _run(self, data):
+        seen = {"upload": [], "upload_large": []}
+
+        def _fake_upload(_d, **kw):
+            seen["upload"].append(kw)
+            return self._fake_result(len(_d))
+
+        def _fake_upload_large(file_io, **kw):
+            # must receive a file-like object, not raw bytes
+            assert hasattr(file_io, "read"), "upload_large needs a stream"
+            seen["upload_large"].append(kw)
+            return self._fake_result(len(file_io.read()))
+
+        with patch.object(core.cloudinary.uploader, "upload", side_effect=_fake_upload), \
+             patch.object(core.cloudinary.uploader, "upload_large", side_effect=_fake_upload_large):
+            core.cloudinary_upload(data, folder="talentgram/f", public_id="p",
+                                   resource_type="video", content_type="video/mp4")
+        return seen
+
+    def test_small_video_uses_single_request_upload(self):
+        seen = self._run(MP4_BYTES + b"\x00" * (10 * 1024 * 1024))  # ~10 MB
+        assert len(seen["upload"]) == 1 and len(seen["upload_large"]) == 0
+
+    def test_large_video_uses_chunked_upload_large(self):
+        big = MP4_BYTES + b"\x00" * (95 * 1024 * 1024)  # ~95 MB > 90 MB threshold
+        seen = self._run(big)
+        assert len(seen["upload_large"]) == 1 and len(seen["upload"]) == 0
+        kw = seen["upload_large"][0]
+        # same options, still no eager / no transcode
+        assert kw.get("resource_type") == "video"
+        assert kw.get("public_id") == "p" and kw.get("overwrite") is True
+        assert "eager" not in kw and "transformation" not in kw and "format" not in kw
+        assert kw.get("chunk_size") and kw["chunk_size"] <= 20 * 1024 * 1024
+
+    def test_large_upload_failure_still_maps_to_502(self):
+        def _boom(*a, **k):
+            raise Exception("Error parsing server response (413) - <html>...413...</html>")
+
+        big = MP4_BYTES + b"\x00" * (95 * 1024 * 1024)
+        with patch.object(core.cloudinary.uploader, "upload_large", side_effect=_boom):
+            with pytest.raises(HTTPException) as ei:
+                core.cloudinary_upload(big, folder="talentgram/f", public_id="p",
+                                       resource_type="video", content_type="video/mp4")
+        assert ei.value.status_code == 502
 
 
 # ---------------------------------------------------------------------------

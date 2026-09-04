@@ -117,6 +117,48 @@ def test_multi_project_talent_appears_once_consolidated(db, admin_token, cleanup
         assert f"*ZZZ_TEST OPT {name}*" in row["message"]
 
 
+def test_message_matches_the_exact_requested_structure(db, admin_token, cleanup):
+    """2026-09 template change — bold numbered project, submission URL on
+    its own indented line, blank line between entries, exact closing
+    wording, single-asterisk (WhatsApp-valid) bold — not the old format."""
+    p1, slug1 = _mk_project(db, name="ZZZ_TEST OPT Structure A")
+    p2, slug2 = _mk_project(db, name="ZZZ_TEST OPT Structure B")
+    cleanup["projects"] += [p1, p2]
+    tid = _mk_talent(db, name="Dia Structure", phone="+911234500009")
+    cleanup["talents"].append(tid)
+    _mk_pipeline_row(db, p1, tid)
+    _mk_pipeline_row(db, p2, tid)
+
+    row = _get_talents(admin_token)[tid]
+    msg = row["message"]
+    link1 = f"https://submit.talentgramagency.com/submit/{slug1}"
+    link2 = f"https://submit.talentgramagency.com/submit/{slug2}"
+
+    expected = (
+        "Hi Dia,\n"
+        "\n"
+        "Just checking in regarding your pending Talentgram projects:\n"
+        "\n"
+        "1. *ZZZ_TEST OPT Structure A*\n"
+        f"   {link1}\n"
+        "\n"
+        "2. *ZZZ_TEST OPT Structure B*\n"
+        f"   {link2}\n"
+        "\n"
+        "Could you please let us know *which project(s) you'll be submitting for*? "
+        "This will help us keep the project status updated from our end.\n"
+        "\n"
+        "If you're sending a submission, please complete it at the earliest.\n"
+        "\n"
+        "— Talentgram"
+    )
+    assert msg == expected
+    # No markdown-style anchor links — a bare, tappable URL, matching every
+    # other message this WhatsApp engine already sends.
+    assert "](" not in msg
+    assert "**" not in msg  # every bold marker is single-asterisk, WhatsApp-valid
+
+
 def test_mixed_status_only_pending_project_shown(db, admin_token, cleanup):
     p_pending, _ = _mk_project(db, name="ZZZ_TEST OPT Pending")
     p_submitted, _ = _mk_project(db, name="ZZZ_TEST OPT Submitted")

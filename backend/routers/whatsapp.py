@@ -897,20 +897,33 @@ def _build_reminder_message(talent_name: str, pending: List[dict]) -> str:
     template engine — nothing in it needs substitution since names/links
     are already resolved here); handed to the existing "Custom Message"
     template ({{message}}) at send time, so nothing about the actual
-    send/worker path is new."""
+    send/worker path is new.
+
+    Links are a bare URL on its own (indented) line, not `[text](url)` —
+    every existing template in this file (_seed_templates, _project_variables'
+    submission_link) already does exactly this, and grepping this whole
+    WhatsApp module for markdown-style anchor syntax turns up nothing:
+    WhatsApp's own client renders a bare https:// URL as a tappable link on
+    its own, so that's the one reliably-working format, matching every
+    other reminder/casting-call message this engine already sends.
+    """
     first = _first_name(talent_name)
     lines = [
         f"Hi {first}," if first else "Hi,",
         "",
-        "This is a reminder regarding your pending Talentgram projects.",
-        "",
-        "Pending projects:",
+        "Just checking in regarding your pending Talentgram projects:",
         "",
     ]
     for i, p in enumerate(pending, 1):
-        lines.append(f"{i}. *{p['project_name']}* — {p['submission_link']}")
+        lines.append(f"{i}. *{p['project_name']}*")
+        lines.append(f"   {p['submission_link']}")
         lines.append("")
-    lines.append("Please complete the pending submissions at the earliest.")
+    lines.append(
+        "Could you please let us know *which project(s) you'll be submitting for*? "
+        "This will help us keep the project status updated from our end."
+    )
+    lines.append("")
+    lines.append("If you're sending a submission, please complete it at the earliest.")
     lines.append("")
     lines.append("— Talentgram")
     return "\n".join(lines)

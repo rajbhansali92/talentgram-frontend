@@ -2,10 +2,11 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import {
   Play, Pause, Square, QrCode, RefreshCw, AlertTriangle, CheckCircle,
   Settings, Clock, ShieldAlert, History, Edit, Send, Save, Plus, Trash2, Database, AlertCircle,
-  ChevronLeft, ChevronRight, Laptop, Smartphone, Search, Filter, Info, User, Loader2, X
+  ChevronLeft, ChevronRight, Laptop, Smartphone, Search, Filter, Info, User, Loader2, X, Eye
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
+import { adminApi } from "@/lib/api";
 
 import {
   getTemplates, createTemplate, updateTemplate, deleteTemplate,
@@ -24,6 +25,12 @@ import {
 } from "@/lib/whatsappApi";
 import VirtualList from "@/components/VirtualList";
 import ProjectSearchModal from "@/components/ProjectSearchModal";
+// Ongoing Project Talents' Quick View reuses Browse Roster's own drawer +
+// breakpoint hook + session cache VERBATIM (same pattern TalentList.jsx's
+// Global Talent Quick View and PipelineCard.jsx already use) — no new
+// profile viewer.
+import { TalentPreviewDrawer, useMediaQuery } from "@/components/pipeline/TalentBrowserModal";
+import { talentPreviewCache } from "@/lib/talentPreviewCache";
 
 // ── Template variable catalog (mirrors backend GET /whatsapp/variables) ──────
 // Powers the editor's click-to-insert "Available Variables" panel (Part 5) and
@@ -1414,17 +1421,53 @@ function RecipientBadge({ talent }) {
   );
 }
 
-function OngoingTalentRow({ talent, checked, onToggle }) {
+// Quick View trigger — identical small icon-button treatment the Global
+// Talent list row already uses for its own Quick View action, reused
+// verbatim here (visually secondary, sits right beside the name, never
+// toggles selection).
+function QuickViewButton({ onClick, talentName }) {
   return (
-    <div className={`flex items-center gap-3 px-4 h-full text-xs border-b border-black/[0.04] transition-colors ${checked ? "bg-black/[0.02]" : "hover:bg-black/[0.01]"}`}>
-      <input type="checkbox" checked={checked} onChange={onToggle} className="shrink-0" />
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      aria-label={`Quick View ${talentName || "talent"}`}
+      title="Quick View"
+      className="inline-flex items-center justify-center shrink-0 w-6 h-6 rounded-md text-black/40 hover:text-black hover:bg-black/[0.06] transition-colors"
+    >
+      <Eye className="w-3.5 h-3.5" />
+    </button>
+  );
+}
+
+// Pending-project names, stacked one per line and never truncated — the
+// SAME talent.pending_projects array the WhatsApp reminder message is
+// built from (see _build_reminder_message on the backend), so this is
+// always exactly what a reminder would contain, never a separate copy.
+// A max-height + internal scroll (not truncation, not a popover) is the
+// only concession to "500+ rows" — every name stays fully reachable by
+// scrolling the cell, and a virtualized row can keep a fixed height.
+function PendingProjectsList({ projects, className }) {
+  return (
+    <div className={`space-y-1 overflow-y-auto ${className || ""}`}>
+      {projects.map((p) => (
+        <p key={p.project_id} className="leading-snug break-words text-[#111111]">{p.project_name}</p>
+      ))}
+    </div>
+  );
+}
+
+function OngoingTalentRow({ talent, checked, onToggle, onQuickView }) {
+  return (
+    <div className={`flex items-start gap-3 px-4 py-2.5 h-full text-xs border-b border-black/[0.04] transition-colors ${checked ? "bg-black/[0.02]" : "hover:bg-black/[0.01]"}`}>
+      <input type="checkbox" checked={checked} onChange={onToggle} className="shrink-0 mt-1" />
       <div className="w-40 shrink-0 min-w-0">
-        <p className="font-semibold text-[#111111] truncate">{talent.name || "—"}</p>
+        <div className="flex items-center gap-1">
+          <p className="font-semibold text-[#111111] truncate">{talent.name || "—"}</p>
+          <QuickViewButton onClick={() => onQuickView(talent)} talentName={talent.name} />
+        </div>
         <p className="text-[10px] text-[#6B7280]">{talent.pending_projects.length} pending project{talent.pending_projects.length !== 1 ? "s" : ""}</p>
       </div>
-      <div className="flex-1 min-w-0 text-[11px] text-[#6B7280] truncate">
-        {talent.pending_projects.map((p) => p.project_name).join(", ")}
-      </div>
+      <PendingProjectsList projects={talent.pending_projects} className="flex-1 min-w-0 text-[11px] max-h-16" />
       <div className="w-32 shrink-0 text-[11px] text-[#111111]">
         {formatLastReminder(talent.last_reminder_at)}
       </div>
@@ -1435,21 +1478,20 @@ function OngoingTalentRow({ talent, checked, onToggle }) {
   );
 }
 
-function OngoingTalentCard({ talent, checked, onToggle }) {
+function OngoingTalentCard({ talent, checked, onToggle, onQuickView }) {
   return (
     <div className={`border rounded-xl p-4 space-y-2.5 transition-colors ${checked ? "border-black bg-black/[0.02]" : "border-black/[0.08] bg-white"}`}>
       <div className="flex items-start gap-3">
         <input type="checkbox" checked={checked} onChange={onToggle} className="mt-1 shrink-0" />
         <div className="min-w-0 flex-1">
-          <p className="font-semibold text-sm text-[#111111]">{talent.name || "—"}</p>
+          <div className="flex items-center gap-1.5">
+            <p className="font-semibold text-sm text-[#111111]">{talent.name || "—"}</p>
+            <QuickViewButton onClick={() => onQuickView(talent)} talentName={talent.name} />
+          </div>
           <p className="text-[11px] text-[#6B7280]">{talent.pending_projects.length} pending project{talent.pending_projects.length !== 1 ? "s" : ""}</p>
         </div>
       </div>
-      <div className="pl-7 space-y-0.5">
-        {talent.pending_projects.map((p) => (
-          <p key={p.project_id} className="text-xs text-[#111111]">{p.project_name}</p>
-        ))}
-      </div>
+      <PendingProjectsList projects={talent.pending_projects} className="pl-7 text-xs max-h-32" />
       <div className="pl-7 flex items-center justify-between pt-1 border-t border-black/[0.04]">
         <div>
           <span className="block text-[9px] font-bold uppercase tracking-wider text-[#6B7280]">Last reminder</span>
@@ -1470,6 +1512,34 @@ function OngoingPipelinePanel({ templates }) {
   const [selected, setSelected] = useState(() => new Set());
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [sending, setSending] = useState(false);
+
+  // Quick View — identical instant-open + lazy-hydrate pattern TalentList.jsx
+  // (Global Talent) and PipelineCard.jsx (Browse Roster) already use, reusing
+  // the exact same drawer/cache/hook. This list only carries id/name/phone —
+  // no media — so it always needs the one-time GET /talents/{id} hydration;
+  // talentPreviewCache still saves the round trip if the same talent was
+  // already opened elsewhere in this session.
+  const isMobile = useMediaQuery('(max-width: 767px)');
+  const [quickViewTalent, setQuickViewTalent] = useState(null);
+  const openQuickView = useCallback((talent) => {
+    const cached = talentPreviewCache.getTalent(talent.talent_id);
+    const initial = cached || { id: talent.talent_id, name: talent.name };
+    setQuickViewTalent(initial);
+
+    if (Array.isArray(initial.media)) return; // already hydrated — no request
+
+    talentPreviewCache
+      .hydrateTalent(talent.talent_id, async () => {
+        const { data } = await adminApi.get(`/talents/${talent.talent_id}`);
+        return data;
+      })
+      .then((full) => {
+        setQuickViewTalent((prev) => (prev && prev.id === talent.talent_id ? full : prev));
+      })
+      .catch((err) => {
+        console.error("Quick View hydration failed:", err);
+      });
+  }, []);
 
   const customTemplateId = useMemo(
     () => (templates.find((t) => t.slug === "custom") || {}).id || "",
@@ -1638,10 +1708,10 @@ function OngoingPipelinePanel({ templates }) {
           </div>
           <VirtualList
             items={filtered}
-            rowHeight={56}
-            height={Math.min(filtered.length, 8) * 56 || 56}
+            rowHeight={84}
+            height={Math.min(filtered.length, 6) * 84 || 84}
             renderRow={(t) => (
-              <OngoingTalentRow talent={t} checked={selected.has(t.talent_id)} onToggle={() => toggle(t.talent_id)} />
+              <OngoingTalentRow talent={t} checked={selected.has(t.talent_id)} onToggle={() => toggle(t.talent_id)} onQuickView={openQuickView} />
             )}
           />
         </div>
@@ -1651,9 +1721,21 @@ function OngoingPipelinePanel({ templates }) {
       {!loading && filtered.length > 0 && (
         <div className="md:hidden space-y-3 pb-2">
           {filtered.map((t) => (
-            <OngoingTalentCard key={t.talent_id} talent={t} checked={selected.has(t.talent_id)} onToggle={() => toggle(t.talent_id)} />
+            <OngoingTalentCard key={t.talent_id} talent={t} checked={selected.has(t.talent_id)} onToggle={() => toggle(t.talent_id)} onQuickView={openQuickView} />
           ))}
         </div>
+      )}
+
+      {/* Quick View — same drawer Browse Roster uses, rendered via
+          createPortal so its position here is layout-irrelevant; closing it
+          returns to this exact page/selection state (see openQuickView
+          above — nothing here touches `selected`). */}
+      {quickViewTalent && (
+        <TalentPreviewDrawer
+          talent={quickViewTalent}
+          onClose={() => setQuickViewTalent(null)}
+          isMobile={isMobile}
+        />
       )}
 
       {/* Sticky batch-selection bar */}

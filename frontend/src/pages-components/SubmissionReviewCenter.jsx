@@ -455,6 +455,128 @@ function PremiumImage({ src, fallbackSrc, alt, className, onClick }) {
     );
 }
 
+// "Choose from Global Profile" picker (Admin-Added Media, 2026-09) — shows
+// THIS talent's existing Global Talent media (already fetched by the
+// caller; this component never fetches or knows a talent_id itself), so
+// the admin can attach one without re-uploading. Reuses PremiumImage for
+// thumbnails, the same modal-overlay treatment `ImageLightbox` below
+// already uses, and the exact 4 categories the Upload File dropdown
+// offers — nothing here is a new visual language.
+const GLOBAL_PICKER_GROUPS = [
+    { key: "portfolio", label: "Portfolio / General", categories: ["portfolio", "additional_portfolio", "portfolio_general"] },
+    { key: "indian", label: "Indian Look", categories: ["indian"] },
+    { key: "western", label: "Western Look", categories: ["western"] },
+];
+
+function GlobalProfileMediaPicker({ loading, media, selected, onToggle, onCancel, onConfirm, submitting }) {
+    const items = media || [];
+    const introVideo = items.find((m) => m.category === "video" && (m.url || m.public_id));
+
+    return (
+        <div className="fixed inset-0 z-[200] bg-black/40 flex items-center justify-center p-4" onClick={(e) => e.target === e.currentTarget && onCancel()}>
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-black/[0.06] shrink-0">
+                    <p className="eyebrow">Select from Global Profile</p>
+                    <button type="button" onClick={onCancel} className="p-1 rounded-md text-black/40 hover:text-black hover:bg-black/[0.04]">
+                        <XCircle className="w-5 h-5" />
+                    </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-5 space-y-6">
+                    {loading ? (
+                        <div className="flex items-center justify-center py-10 text-black/40">
+                            <Loader2 className="w-5 h-5 animate-spin" />
+                        </div>
+                    ) : (
+                        <>
+                            {GLOBAL_PICKER_GROUPS.map((group) => {
+                                const groupItems = items.filter((m) => group.categories.includes(m.category) && (m.url || m.public_id));
+                                return (
+                                    <div key={group.key}>
+                                        <p className="text-[10px] uppercase tracking-wider text-black/40 font-mono mb-2">{group.label}</p>
+                                        {groupItems.length === 0 ? (
+                                            <p className="text-xs text-black/35 italic">No Global Profile Images Available</p>
+                                        ) : (
+                                            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                                                {groupItems.map((m) => {
+                                                    const isSelected = selected.has(m.id);
+                                                    return (
+                                                        <button
+                                                            type="button"
+                                                            key={m.id}
+                                                            onClick={() => onToggle(m.id)}
+                                                            aria-pressed={isSelected}
+                                                            aria-label={`${isSelected ? "Deselect" : "Select"} ${group.label} image`}
+                                                            className={`relative aspect-square rounded-lg overflow-hidden border-2 transition-all ${isSelected ? "border-black" : "border-transparent hover:border-black/20"}`}
+                                                        >
+                                                            <PremiumImage src={m.thumbnail_url || IMAGE_URL(m)} fallbackSrc={IMAGE_URL(m)} alt="" className="w-full h-full object-cover" />
+                                                            {isSelected && (
+                                                                <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black text-white flex items-center justify-center">
+                                                                    <Check className="w-3 h-3" strokeWidth={3} />
+                                                                </span>
+                                                            )}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+
+                            <div>
+                                <p className="text-[10px] uppercase tracking-wider text-black/40 font-mono mb-2">Introduction Video</p>
+                                {!introVideo ? (
+                                    <p className="text-xs text-black/35 italic">No Global Profile Introduction Video Available</p>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => onToggle(introVideo.id)}
+                                        aria-pressed={selected.has(introVideo.id)}
+                                        aria-label={`${selected.has(introVideo.id) ? "Deselect" : "Select"} introduction video`}
+                                        className={`relative w-40 aspect-video rounded-lg overflow-hidden border-2 transition-all bg-black/5 ${selected.has(introVideo.id) ? "border-black" : "border-transparent hover:border-black/20"}`}
+                                    >
+                                        {introVideo.poster_url ? (
+                                            <img src={introVideo.poster_url} alt="" className="w-full h-full object-cover" />
+                                        ) : (
+                                            <div className="w-full h-full flex items-center justify-center">
+                                                <Video className="w-6 h-6 text-black/25" />
+                                            </div>
+                                        )}
+                                        <span className="absolute inset-0 flex items-center justify-center bg-black/10">
+                                            <Film className="w-5 h-5 text-white drop-shadow" />
+                                        </span>
+                                        {selected.has(introVideo.id) && (
+                                            <span className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black text-white flex items-center justify-center">
+                                                <Check className="w-3 h-3" strokeWidth={3} />
+                                            </span>
+                                        )}
+                                    </button>
+                                )}
+                            </div>
+                        </>
+                    )}
+                </div>
+
+                <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-black/[0.06] shrink-0">
+                    <button type="button" onClick={onCancel} className="px-3.5 py-2 text-xs font-semibold text-black/60 hover:text-black">
+                        Cancel
+                    </button>
+                    <button
+                        type="button"
+                        onClick={onConfirm}
+                        disabled={selected.size === 0 || submitting}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md text-xs font-semibold bg-black text-white hover:bg-black/85 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                    >
+                        {submitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        {submitting ? "Adding..." : `Add Selected${selected.size > 0 ? ` (${selected.size})` : ""}`}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 // Phase 3 — thumbnails intentionally load the small `thumbnail_url` transform
 // instead of the full original (see PremiumImage call sites below); this
 // lightbox is the "click/open can load a larger version" escape hatch so
@@ -664,6 +786,69 @@ export default function SubmissionReviewCenter() {
     const adminMediaInputRef = useRef(null);
     const [adminMediaUploading, setAdminMediaUploading] = useState(false);
     const [adminMediaCategory, setAdminMediaCategory] = useState("image");
+
+    // "Choose from Global Profile" — lets the admin attach media that
+    // already exists on THIS talent's Global Talent profile instead of
+    // re-uploading it. Fetched fresh each time the picker opens (plain
+    // GET /talents/{id}, already used elsewhere for exactly this — no new
+    // read endpoint); submitted via the new admin-media-from-talent
+    // endpoint, which copies by reference (same public_id/url, no
+    // re-upload) and derives the talent from the submission server-side,
+    // so this can never pull in another talent's media.
+    const [showGlobalPicker, setShowGlobalPicker] = useState(false);
+    const [globalPickerMedia, setGlobalPickerMedia] = useState(null); // null = not loaded yet
+    const [globalPickerLoading, setGlobalPickerLoading] = useState(false);
+    const [globalPickerSelected, setGlobalPickerSelected] = useState(new Set());
+    const [globalPickerSubmitting, setGlobalPickerSubmitting] = useState(false);
+
+    const openGlobalPicker = useCallback(async () => {
+        setShowGlobalPicker(true);
+        setGlobalPickerSelected(new Set());
+        if (!detail?.talent_id) {
+            setGlobalPickerMedia([]);
+            return;
+        }
+        setGlobalPickerLoading(true);
+        try {
+            const { data } = await adminApi.get(`/talents/${detail.talent_id}`);
+            setGlobalPickerMedia(data?.media || []);
+        } catch (e) {
+            toast.error("Failed to load this talent's Global Profile media");
+            setGlobalPickerMedia([]);
+        } finally {
+            setGlobalPickerLoading(false);
+        }
+    }, [detail?.talent_id]);
+
+    const toggleGlobalPickerSelection = useCallback((mediaId) => {
+        setGlobalPickerSelected((prev) => {
+            const next = new Set(prev);
+            if (next.has(mediaId)) next.delete(mediaId);
+            else next.add(mediaId);
+            return next;
+        });
+    }, []);
+
+    const confirmGlobalPickerSelection = useCallback(async () => {
+        if (!selectedId || globalPickerSelected.size === 0) return;
+        setGlobalPickerSubmitting(true);
+        try {
+            const { data } = await adminApi.post(
+                `/projects/${id}/submissions/${selectedId}/admin-media-from-talent`,
+                { media_ids: Array.from(globalPickerSelected) }
+            );
+            setDetail(data);
+            setMediaList(data?.media || []);
+            toast.success(
+                globalPickerSelected.size === 1 ? "Added from Global Profile" : `Added ${globalPickerSelected.size} items from Global Profile`
+            );
+            setShowGlobalPicker(false);
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Failed to add selected media");
+        } finally {
+            setGlobalPickerSubmitting(false);
+        }
+    }, [id, selectedId, globalPickerSelected]);
 
     // Admin "Add Submission" modal (Phase 1) — manual submission creation for
     // a talent who couldn't submit themselves, without leaving this page.
@@ -2409,6 +2594,12 @@ export default function SubmissionReviewCenter() {
                                                                 {"Hidden"}
                                                             </span>
                                                         )}
+                                                        {/* Requirement 10 — where this item came from, at a glance */}
+                                                        {m.from_global_profile && (
+                                                            <span className="absolute bottom-1.5 left-1.5 text-[8px] bg-white/90 text-black/60 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider z-10 border border-black/[0.06]">
+                                                                {"Global Profile"}
+                                                            </span>
+                                                        )}
                                                         <button
                                                             type="button"
                                                             onClick={() => handleRemoveMedia(m.id)}
@@ -2465,8 +2656,28 @@ export default function SubmissionReviewCenter() {
                                                 {adminMediaUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
                                                 {adminMediaUploading ? "Uploading..." : "Upload File"}
                                             </button>
+                                            <button
+                                                type="button"
+                                                onClick={openGlobalPicker}
+                                                className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-black/[0.12] hover:border-black/30 rounded-md text-xs font-semibold bg-white text-black/70 hover:text-black transition-all shadow-sm"
+                                            >
+                                                <ImageIcon className="w-3.5 h-3.5" />
+                                                Choose from Global Profile
+                                            </button>
                                         </div>
                                     </section>
+                                )}
+
+                                {showGlobalPicker && (
+                                    <GlobalProfileMediaPicker
+                                        loading={globalPickerLoading}
+                                        media={globalPickerMedia}
+                                        selected={globalPickerSelected}
+                                        onToggle={toggleGlobalPickerSelection}
+                                        onCancel={() => setShowGlobalPicker(false)}
+                                        onConfirm={confirmGlobalPickerSelection}
+                                        submitting={globalPickerSubmitting}
+                                    />
                                 )}
 
                                 {/* Section 1: Intro Video */}

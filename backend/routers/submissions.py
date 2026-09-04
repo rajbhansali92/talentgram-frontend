@@ -3545,6 +3545,123 @@ async def admin_add_media_complete(
     return fresh_sub
 
 
+# Global Talent category -> submission admin-media category. Only these four
+# are ever offered by the picker (Portfolio/Indian/Western/Intro Video — the
+# same four the existing Upload File dropdown offers), so anything else on
+# the talent's media[] (headshot, selfie, etc.) is simply not selectable.
+_TALENT_TO_SUBMISSION_CATEGORY = {
+    "portfolio": "image",
+    "additional_portfolio": "image",
+    "portfolio_general": "image",
+    "indian": "indian",
+    "western": "western",
+    "video": "intro_video",
+}
+
+
+class AddFromTalentMediaIn(BaseModel):
+    media_ids: List[str]
+
+
+@router.post("/projects/{pid}/submissions/{sid}/admin-media-from-talent")
+async def admin_add_media_from_talent(
+    pid: str,
+    sid: str,
+    payload: AddFromTalentMediaIn,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Admin attaches EXISTING Global Talent media as project-specific
+    Admin-Added Media — "Choose from Global Profile" in Review Center.
+
+    Copy-by-value, same mechanism sync_media_to_global_talent() already uses
+    in the opposite direction (submission -> talent library): a new media
+    dict with a new `id`, pointing at the SAME Cloudinary `public_id`/`url`
+    (no re-upload, no new Cloudinary asset, no new asset_metadata row — the
+    original upload already accounts for that storage). The talent's master
+    profile (db.talents) is never read for a write and never modified here.
+
+    Talent is resolved from the SUBMISSION, not from the request — the
+    client never gets to name a talent_id, so there is no way for this
+    endpoint to pull in another talent's media even if asked to.
+    """
+    sub = await db.submissions.find_one({"id": sid, "project_id": pid})
+    if not sub:
+        raise HTTPException(404, "Submission not found")
+    if not payload.media_ids:
+        raise HTTPException(400, "No media selected")
+
+    # Same talent-resolution fallback as GET .../submissions/{sid} above —
+    # keeps this endpoint's notion of "this talent's media" identical to
+    # whatever the picker itself was populated from.
+    talent_id = sub.get("talent_id")
+    talent_email = sub.get("talent_email")
+    talent_doc = None
+    if talent_id:
+        talent_doc = await db.talents.find_one({"id": talent_id}, {"_id": 0, "media": 1})
+    if not talent_doc and talent_email:
+        norm_email = normalize_email(talent_email)
+        talent_doc = await db.talents.find_one(
+            {"$or": [
+                {"normalized_email": norm_email},
+                {"email": norm_email},
+                {"source.talent_email": norm_email},
+            ]},
+            {"_id": 0, "media": 1},
+        )
+    if not talent_doc:
+        raise HTTPException(404, "No talent profile linked to this submission")
+
+    talent_media_by_id = {m.get("id"): m for m in (talent_doc.get("media") or []) if m.get("id")}
+    requested_ids = set(payload.media_ids)
+
+    new_items: List[Dict[str, Any]] = []
+    for media_id in payload.media_ids:
+        src = talent_media_by_id.get(media_id)
+        if not src:
+            continue  # not found on THIS talent — silently skipped, never another talent's item
+        mapped_category = _TALENT_TO_SUBMISSION_CATEGORY.get(src.get("category"))
+        if not mapped_category:
+            continue  # not one of the four categories the picker offers
+        if not (src.get("url") or src.get("public_id")):
+            continue  # still processing on the talent side — nothing usable to reference yet
+
+        is_video = mapped_category == "intro_video"
+        new_id = f"adm_{str(uuid.uuid4())[:8]}"
+        new_items.append({
+            "id": new_id,
+            "category": mapped_category,
+            "url": src.get("url"),
+            "public_id": src.get("public_id"),
+            "resource_type": src.get("resource_type") or ("video" if is_video else "image"),
+            "content_type": src.get("content_type"),
+            "original_filename": src.get("original_filename"),
+            "size": src.get("size"),
+            "created_at": _now(),
+            "scope": "admin_added",
+            "submission_id": sid,
+            "project_id": pid,
+            "admin_added": True,
+            "admin_added_by": admin.get("email"),
+            "label": src.get("label") or mapped_category,
+            "client_visible": True,
+            "duration": src.get("duration"),
+            "poster_url": src.get("poster_url"),
+            "thumbnail_url": src.get("thumbnail_url"),
+            "origin": "project",
+            # Requirement 10 — lets the UI badge this distinctly from a real
+            # new upload; also doubles as provenance for support/debugging.
+            "from_global_profile": True,
+            "source_talent_media_id": media_id,
+        })
+
+    if not new_items:
+        raise HTTPException(400, "None of the selected media could be found on this talent's profile")
+
+    await db.submissions.update_one({"id": sid}, {"$push": {"media": {"$each": new_items}}})
+    fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    return fresh_sub
+
+
 @router.delete("/projects/{pid}/submissions/{sid}/media/{media_id}")
 async def admin_remove_media_item(
     pid: str,

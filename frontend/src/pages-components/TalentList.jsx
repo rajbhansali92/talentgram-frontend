@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
@@ -14,6 +14,7 @@ import AddToProjectModal from "@/components/AddToProjectModal";
 import { getBatch, getJobs } from "@/lib/whatsappApi";
 import MergeTalentsModal from "@/components/MergeTalentsModal";
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
+import { getRosterSnapshot, setRosterSnapshot } from "@/lib/talentRosterCache";
 import { useTalentDirectory } from "@/hooks/useTalentDirectory";
 import FilterPanel from "@/components/talent-directory/FilterPanel";
 import MobileFilterSheet from "@/components/talent-directory/MobileFilterSheet";
@@ -582,6 +583,11 @@ const TalentListRow = React.memo(function TalentListRow({
 // ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
+// Roster browsing-state cache key (2026-09-04) — see talentRosterCache.js.
+// Opening a talent profile and coming Back restores page/filters/sort/
+// results/scroll from this snapshot instead of remounting to page 1.
+const ROSTER_PERSIST_KEY = "global-talent-roster";
+
 export default function TalentList() {
     const {
         search: q,
@@ -602,13 +608,73 @@ export default function TalentList() {
         talents: fetchedTalents,
         loading,
         refetch,
-    } = useTalentDirectory({ pageSize: 40 });
+    } = useTalentDirectory({ pageSize: 40, persistKey: ROSTER_PERSIST_KEY });
     // Local mirror of fetched talents — kept in sync via the effect below,
     // but still a plain useState so the existing optimistic tag-update
     // helpers (handleSaveTagsOptimistic etc.) can keep mutating it in place
     // exactly as before, without waiting on a full server round-trip.
-    const [talents, setTalents] = useState([]);
+    // Initialized FROM fetchedTalents (not []) so a roster restored from
+    // cache renders fully on the very first paint — otherwise this would
+    // start empty for one frame even though the hook already has the
+    // restored talents, producing a brief empty-grid flash on Back.
+    const [talents, setTalents] = useState(fetchedTalents);
     useEffect(() => { setTalents(fetchedTalents); }, [fetchedTalents]);
+
+    // Scroll-position restoration (2026-09-04) — see talentRosterCache.js.
+    // Tracks the live scroll position into a ref (cheap — no re-renders)
+    // and flushes the LAST tracked value into the cache on unmount. This is
+    // deliberately NOT a fresh `window.scrollY` read inside the unmount
+    // cleanup: React Router swaps in the new route's (often much shorter)
+    // DOM as part of the same commit that unmounts this page, and browsers
+    // clamp window.scrollY to fit as soon as that happens — by the time any
+    // cleanup runs, a fresh read could already reflect the NEW, wrong page.
+    // Reading the ref instead uses whatever was last captured while this
+    // page's own real content was still on screen, which is always correct.
+    const scrollYRef = useRef(typeof window !== "undefined" ? window.scrollY : 0);
+
+    // useLayoutEffect (not useEffect) so a restored scroll position is
+    // applied before the browser paints, avoiding a visible "flash at top,
+    // then jump" — only actually scrolls when a cached position exists
+    // (i.e. we just came Back from a talent profile); talents/page/etc are
+    // then already hydrated synchronously on this same render (see the
+    // useTalentDirectory persistKey hydration above), so there's no async
+    // gap where the page is too short to reach the target scrollY.
+    //
+    // Also seeds scrollYRef with the restored value immediately (not just
+    // via the scroll listener below): window.scrollTo()'s own 'scroll'
+    // event fires asynchronously, so a fast click straight back into a
+    // profile — before that event has had a chance to land — would
+    // otherwise unmount with scrollYRef still holding its pre-restore
+    // value (0), silently discarding the position we just restored.
+    useLayoutEffect(() => {
+        const cached = getRosterSnapshot(ROSTER_PERSIST_KEY);
+        if (cached && typeof cached.scrollY === "number") {
+            window.scrollTo({ top: cached.scrollY, behavior: "auto" });
+            scrollYRef.current = cached.scrollY;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+        const onScroll = () => { scrollYRef.current = window.scrollY; };
+        // Belt-and-suspenders alongside the scroll listener: browsers
+        // throttle/coalesce 'scroll' events, so a quick "scroll, then
+        // immediately click a talent" can outrun it and leave scrollYRef
+        // holding a stale, mid-scroll value. A click on this page can only
+        // mean "about to navigate away" (every interactive element here is
+        // either a Link or opens a modal that doesn't move window scroll),
+        // and fires synchronously before React Router swaps the route, so
+        // reading window.scrollY here is always the true, final position.
+        const onClick = () => { scrollYRef.current = window.scrollY; };
+        window.addEventListener("scroll", onScroll, { passive: true });
+        window.addEventListener("click", onClick, { capture: true });
+        return () => {
+            window.removeEventListener("scroll", onScroll);
+            window.removeEventListener("click", onClick, { capture: true });
+            setRosterSnapshot(ROSTER_PERSIST_KEY, { scrollY: scrollYRef.current });
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const [availableTags, setAvailableTags] = useState([]);
     useEffect(() => {

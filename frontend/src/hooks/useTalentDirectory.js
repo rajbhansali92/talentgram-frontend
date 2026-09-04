@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { adminApi } from "@/lib/api";
+import { getRosterSnapshot, setRosterSnapshot } from "@/lib/talentRosterCache";
 
 /**
  * useTalentDirectory — the ONE talent-browsing data engine, shared by the
@@ -62,14 +63,42 @@ function buildParams(filters, sortBy, page, pageSize) {
     return params;
 }
 
-export function useTalentDirectory({ pageSize = DEFAULT_PAGE_SIZE, initialFilters } = {}) {
-    const [filters, setFilters] = useState({ ...DEFAULT_FILTERS, ...initialFilters });
-    const [searchInput, setSearchInput] = useState(filters.search);
-    const [sortBy, setSortBy] = useState(DEFAULT_SORT);
-    const [page, setPage] = useState(1); // 1-indexed for display; converted to 0-indexed for the API
-    const [talents, setTalents] = useState([]);
-    const [total, setTotal] = useState(0);
-    const [pages, setPages] = useState(0);
+export function useTalentDirectory({ pageSize = DEFAULT_PAGE_SIZE, initialFilters, persistKey = null } = {}) {
+    // Browsing-state restoration (2026-09-04): when a `persistKey` is given
+    // and a snapshot from an earlier mount exists (e.g. the admin opened a
+    // talent profile and just came Back), every piece of state below
+    // hydrates from that snapshot instead of the usual defaults, and the
+    // effects further down skip their normal "first mount" fetch/reset so
+    // the restored page/filters/sort/results are never clobbered or
+    // refetched. Opt-in only — without persistKey this hook behaves exactly
+    // as before (no other current caller passes it).
+    // Lazy initializer form (() => ...) so getRosterSnapshot is read AT
+    // MOST once per component instance — a plain `useRef(expr)` would
+    // otherwise re-evaluate `expr` on every render (React only USES the
+    // first result, but still pays for the call every time).
+    const cachedRef = useRef(() => (persistKey ? getRosterSnapshot(persistKey) : null));
+    if (typeof cachedRef.current === "function") cachedRef.current = cachedRef.current();
+    const cached = cachedRef.current;
+    // `cachedRef` is never reassigned again after the line above, so the
+    // two effects below can safely compare the CURRENT filters/sort/page
+    // against it, on every render, to decide whether anything has actually
+    // changed since restoring from cache. This is deliberately NOT a
+    // "consumed once" flag: React 18/19 Strict Mode double-invokes effects
+    // once on mount (dev only) specifically to catch effects that aren't
+    // safe to re-run — a mutable "skip the first call" ref would be
+    // correct on its first (Strict Mode) invocation but then wrongly fire
+    // for real on the immediate second invocation, clobbering the very
+    // state we just restored. Comparing against a frozen, unchanging
+    // snapshot instead gives the exact same answer no matter how many
+    // times it's evaluated.
+
+    const [filters, setFilters] = useState(cached?.filters || { ...DEFAULT_FILTERS, ...initialFilters });
+    const [searchInput, setSearchInput] = useState(cached?.filters?.search ?? filters.search);
+    const [sortBy, setSortBy] = useState(cached?.sortBy || DEFAULT_SORT);
+    const [page, setPage] = useState(cached?.page || 1); // 1-indexed for display; converted to 0-indexed for the API
+    const [talents, setTalents] = useState(cached?.talents || []);
+    const [total, setTotal] = useState(cached?.total || 0);
+    const [pages, setPages] = useState(cached?.pages || 0);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const abortRef = useRef(null);
@@ -86,8 +115,15 @@ export function useTalentDirectory({ pageSize = DEFAULT_PAGE_SIZE, initialFilter
 
     // Any filter change resets to page 1 — a stale page number past the new
     // (smaller) result set would otherwise silently show an empty page.
+    // No-ops on a cache-hydrated mount, as long as filters/sort still
+    // exactly match what was restored (see cachedRef above).
     const filterKey = JSON.stringify(filters);
     useEffect(() => {
+        const c = cachedRef.current;
+        const unchangedSinceRestore = !!c
+            && filterKey === JSON.stringify(c.filters || {})
+            && (sortBy || DEFAULT_SORT) === (c.sortBy || DEFAULT_SORT);
+        if (unchangedSinceRestore) return;
         setPage(1);
     }, [filterKey, sortBy]);
 
@@ -146,11 +182,28 @@ export function useTalentDirectory({ pageSize = DEFAULT_PAGE_SIZE, initialFilter
         }
     }, [filters, sortBy, page, pageSize]);
 
+    // No-ops on a cache-hydrated mount, as long as filters/sort/page still
+    // exactly match what was restored — same reasoning as the effect above.
     useEffect(() => {
+        const c = cachedRef.current;
+        const unchangedSinceRestore = !!c
+            && filterKey === JSON.stringify(c.filters || {})
+            && (sortBy || DEFAULT_SORT) === (c.sortBy || DEFAULT_SORT)
+            && page === (c.page || 1);
+        if (unchangedSinceRestore) return;
         fetchPage();
         return () => abortRef.current?.abort();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [filterKey, sortBy, page, pageSize]);
+
+    // Keep the roster snapshot current as the admin browses, so whenever
+    // they navigate away (open a talent profile) the latest page/filters/
+    // sort/results are already saved — no separate "on navigate away"
+    // hook needed. No-op unless persistKey was given.
+    useEffect(() => {
+        if (!persistKey) return;
+        setRosterSnapshot(persistKey, { filters, sortBy, page, talents, total, pages });
+    }, [persistKey, filters, sortBy, page, talents, total, pages]);
 
     return {
         // Search box (raw input for immediate typing feedback + the debounced

@@ -7,6 +7,7 @@ Triggered by:
   - admin decision change (approve / reject / hold)
   - Production Desk: a locked talent's payment marked cleared
   - Production Desk: a project's client payment (Payment In) marked received
+  - Production Desk: a project's invoice marked sent
 
 Stored in `notifications` collection — one doc per (recipient, event).
 Recipients = every active admin/team user. We DO NOT send email yet
@@ -27,6 +28,7 @@ NOTIFICATION_TYPES = {
     "submission_decision",   # admin/team approved / rejected / put on hold
     "production_desk_payment_cleared",     # a locked talent's payment was marked cleared
     "production_desk_payment_in_received", # a project's client payment (Payment In) was marked received
+    "production_desk_invoice_sent",        # a project's invoice was marked sent
 }
 
 

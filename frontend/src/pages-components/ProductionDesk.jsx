@@ -82,6 +82,17 @@ const CREW_ROLES = [
     "Editor", "Other",
 ];
 
+// Post-lock operational stage — purely informational (see backend
+// production_desk.py's PRODUCTION_STATUS_OPTIONS docstring); does not
+// replace or gate the project's own status field shown on Project Details.
+const PRODUCTION_STATUS_OPTIONS = [
+    { value: "not_started", label: "Not Started" },
+    { value: "confirmed", label: "Confirmed" },
+    { value: "shoot_scheduled", label: "Shoot Scheduled" },
+    { value: "shoot_complete", label: "Shoot Complete" },
+    { value: "finance_closed", label: "Finance Closed" },
+];
+
 function SectionCard({ title, icon: Icon, right, children, testId }) {
     return (
         <Card className="border-black/[0.08] shadow-none" data-testid={testId}>
@@ -590,11 +601,30 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
-            {/* Project Checklist */}
-            <SectionCard title="Project Checklist" icon={ClipboardList} testId="pd-checklist">
+            {/* Project Checklist — lifecycle order: Confirmation -> Invoice
+                Raised -> Invoice Sent -> Client Payment -> GST -> Talent
+                Payments (the last row is derived from Locked Talents /
+                Overview, never a second payment record). */}
+            <SectionCard
+                title="Project Checklist"
+                icon={ClipboardList}
+                testId="pd-checklist"
+                right={
+                    <Select value={p.pd_production_status || "not_started"} onValueChange={(v) => patchProject({ production_status: v })}>
+                        <SelectTrigger className="h-7 text-xs w-[150px]" data-testid="pd-production-status">
+                            <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                            {PRODUCTION_STATUS_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                        </SelectContent>
+                    </Select>
+                }
+            >
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     {[
                         { key: "confirmation_mail_received", label: "Confirmation Mail Received", val: p.pd_confirmation_mail_received },
+                        { key: "invoice_raised", label: "Invoice Raised", val: p.pd_invoice_raised },
+                        { key: "invoice_sent", label: "Invoice Sent", val: p.pd_invoice_sent },
                         { key: "payment_in_received", label: "Client Payment In", val: p.pd_payment_in_received },
                         { key: "gst_component_received", label: "GST Component In", val: p.pd_gst_component_received },
                     ].map((item) => (
@@ -606,6 +636,14 @@ export default function ProductionDesk({ projectId, project }) {
                             </div>
                         </div>
                     ))}
+                    {/* Derived, read-only — same summary.payments_* Locked
+                        Talents already computes; not a second toggle/record. */}
+                    <div className="flex items-center justify-between gap-2 rounded-md border border-black/[0.06] px-3 py-2.5" data-testid="pd-checklist-talent-payments">
+                        <span className="text-xs text-black/70">Talent Payments</span>
+                        <span className={`text-[11px] font-medium ${summary.payments_cleared === summary.payments_total && summary.payments_total > 0 ? "text-emerald-700" : "text-amber-700"}`}>
+                            {summary.payments_cleared} / {summary.payments_total} Cleared
+                        </span>
+                    </div>
                 </div>
             </SectionCard>
 

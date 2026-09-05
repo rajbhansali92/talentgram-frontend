@@ -142,6 +142,14 @@ CREW_ROLES = {
     "Hair", "Production Manager", "Line Producer", "Client", "Casting",
     "Editor", "Other",
 }
+# Post-lock operational lifecycle (Part 3, Production Checklist + Management
+# Agent pass) — the existing project.status field (ongoing/hold/complete/
+# locked, routers/projects.py) is a coarse, whole-project state used for
+# Project List grouping; it has no granularity for "casting is locked but
+# we haven't confirmed/shot/closed finance yet". Rather than overload that
+# field or build a workflow engine, this is one small additive pd_* enum,
+# purely informational — nothing in the backend gates on it.
+PRODUCTION_STATUS_OPTIONS = ["not_started", "confirmed", "shoot_scheduled", "shoot_complete", "finance_closed"]
 
 
 def _num(v) -> Optional[float]:
@@ -330,6 +338,13 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     needs_attention: List[str] = []
     if not project.get("pd_confirmation_mail_received"):
         needs_attention.append("Confirmation mail pending")
+    if not project.get("pd_invoice_raised"):
+        needs_attention.append("Invoice not raised")
+    elif not project.get("pd_invoice_sent"):
+        # Only surface "not sent" once "raised" is already true — an
+        # invoice that hasn't been raised yet obviously hasn't been sent
+        # either; showing both would just be noise.
+        needs_attention.append("Invoice not sent")
     if not project.get("pd_payment_in_received"):
         needs_attention.append("Client payment pending")
     if not project.get("pd_gst_component_received"):
@@ -363,8 +378,15 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             "pd_production_budget_total": _num(project.get("pd_production_budget_total")),
             "pd_shooting_days": project.get("pd_shooting_days"),
             "pd_confirmation_mail_received": bool(project.get("pd_confirmation_mail_received")),
+            "pd_invoice_raised": bool(project.get("pd_invoice_raised")),
+            "pd_invoice_sent": bool(project.get("pd_invoice_sent")),
             "pd_payment_in_received": bool(project.get("pd_payment_in_received")),
             "pd_gst_component_received": bool(project.get("pd_gst_component_received")),
+            # Post-lock operational stage — see PRODUCTION_STATUS_OPTIONS.
+            # Purely informational; does NOT replace or gate the existing
+            # project.status field (ongoing/hold/complete/locked), which
+            # remains the overall project-list grouping shown elsewhere.
+            "pd_production_status": project.get("pd_production_status") or "not_started",
             "pd_call_time": project.get("pd_call_time"),
             "pd_shoot_location": project.get("pd_shoot_location"),
             "pd_shoot_notes": project.get("pd_shoot_notes"),
@@ -409,28 +431,36 @@ class ProductionDeskProjectPatch(BaseModel):
     production_budget_total: Optional[float] = None
     shooting_days: Optional[int] = None
     confirmation_mail_received: Optional[bool] = None
+    invoice_raised: Optional[bool] = None
+    invoice_sent: Optional[bool] = None
     payment_in_received: Optional[bool] = None
     gst_component_received: Optional[bool] = None
     call_time: Optional[str] = None
     shoot_location: Optional[str] = None
     shoot_notes: Optional[str] = None
     production_contact_client_id: Optional[str] = None
+    production_status: Optional[str] = None
 
 
 @router.patch("/{pid}/production-desk")
 async def update_production_desk_project(pid: str, payload: ProductionDeskProjectPatch, admin: dict = Depends(current_team_or_admin)):
     project = await _get_project_or_404(pid)
+    if payload.production_status is not None and payload.production_status not in PRODUCTION_STATUS_OPTIONS:
+        raise HTTPException(400, f"production_status must be one of {PRODUCTION_STATUS_OPTIONS}")
     field_map = {
         "production_budget_per_day": "pd_production_budget_per_day",
         "production_budget_total": "pd_production_budget_total",
         "shooting_days": "pd_shooting_days",
         "confirmation_mail_received": "pd_confirmation_mail_received",
+        "invoice_raised": "pd_invoice_raised",
+        "invoice_sent": "pd_invoice_sent",
         "payment_in_received": "pd_payment_in_received",
         "gst_component_received": "pd_gst_component_received",
         "call_time": "pd_call_time",
         "shoot_location": "pd_shoot_location",
         "shoot_notes": "pd_shoot_notes",
         "production_contact_client_id": "pd_production_contact_client_id",
+        "production_status": "pd_production_status",
     }
     updates = {field_map[k]: v for k, v in payload.model_dump(exclude_unset=True).items()}
     if updates:
@@ -438,18 +468,22 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         await db.projects.update_one({"id": pid}, {"$set": updates})
 
         # Notify the team via the EXISTING admin-notification fan-out —
-        # only on the pending -> received TRANSITION, not on every save,
-        # and only for this one high-signal financial event.
-        was_received = bool(project.get("pd_payment_in_received"))
-        now_received = updates.get("pd_payment_in_received")
-        if now_received is True and not was_received:
+        # only on the pending -> true TRANSITION, not on every save, and
+        # only for these high-signal financial state changes.
+        brand = project.get("brand_name") or "Project"
+        if updates.get("pd_payment_in_received") is True and not project.get("pd_payment_in_received"):
             await notify_fanout(
-                db,
-                type="production_desk_payment_in_received",
-                title=f"Client payment received — {project.get('brand_name') or 'Project'}",
+                db, type="production_desk_payment_in_received",
+                title=f"Client payment received — {brand}",
                 body="Payment In marked received on Production Desk.",
-                payload={"project_id": pid},
-                actor_id=admin.get("id"),
+                payload={"project_id": pid}, actor_id=admin.get("id"),
+            )
+        if updates.get("pd_invoice_sent") is True and not project.get("pd_invoice_sent"):
+            await notify_fanout(
+                db, type="production_desk_invoice_sent",
+                title=f"Invoice sent — {brand}",
+                body="Invoice marked sent on Production Desk.",
+                payload={"project_id": pid}, actor_id=admin.get("id"),
             )
     return await get_production_desk(pid, admin)
 

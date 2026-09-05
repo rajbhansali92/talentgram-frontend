@@ -598,3 +598,124 @@ async def test_no_conflicting_payment_status_source_exists(client, headers):
         assert r.json()["locked_talents"][0]["payment_status"] == "cleared"
     finally:
         await _cleanup(pid, [tid])
+
+
+# ===========================================================================
+# Production Checklist + Management Agent pass — Invoice Raised/Sent,
+# Production Status, and the resulting notification fanout.
+# ===========================================================================
+
+@_aio
+async def test_invoice_raised_and_sent_read_and_update(client, headers):
+    pid = await _make_project()
+    try:
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert r.json()["project"]["pd_invoice_raised"] is False
+        assert r.json()["project"]["pd_invoice_sent"] is False
+
+        r = await client.patch(f"/api/projects/{pid}/production-desk", json={"invoice_raised": True}, headers=headers)
+        assert r.json()["project"]["pd_invoice_raised"] is True
+        assert r.json()["project"]["pd_invoice_sent"] is False
+        assert "Invoice not sent" in r.json()["needs_attention"]
+        assert "Invoice not raised" not in r.json()["needs_attention"]
+
+        r = await client.patch(f"/api/projects/{pid}/production-desk", json={"invoice_sent": True}, headers=headers)
+        assert r.json()["project"]["pd_invoice_sent"] is True
+        assert "Invoice not sent" not in r.json()["needs_attention"]
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_invoice_not_raised_is_the_only_invoice_attention_item(client, headers):
+    """Before 'raised' is true, showing 'not sent' too would be redundant
+    noise — only the earlier lifecycle step should surface."""
+    pid = await _make_project()
+    try:
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        attention = r.json()["needs_attention"]
+        assert "Invoice not raised" in attention
+        assert "Invoice not sent" not in attention
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_existing_payment_in_and_gst_checklist_still_work(client, headers):
+    """Regression: adding invoice_raised/invoice_sent must not disturb the
+    pre-existing Payment In / GST checklist items."""
+    pid = await _make_project()
+    try:
+        r = await client.patch(
+            f"/api/projects/{pid}/production-desk",
+            json={"payment_in_received": True, "gst_component_received": True},
+            headers=headers,
+        )
+        body = r.json()
+        assert body["project"]["pd_payment_in_received"] is True
+        assert body["project"]["pd_gst_component_received"] is True
+        assert "Client payment pending" not in body["needs_attention"]
+        assert "GST component pending" not in body["needs_attention"]
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_invoice_sent_notifies_via_existing_fanout_transition_only(client, headers):
+    pid = await _make_project()
+    try:
+        before = await db.notifications.count_documents({"type": "production_desk_invoice_sent", "payload.project_id": pid})
+        assert before == 0
+
+        r = await client.patch(f"/api/projects/{pid}/production-desk", json={"invoice_sent": True}, headers=headers)
+        assert r.status_code == 200
+        after = await db.notifications.count_documents({"type": "production_desk_invoice_sent", "payload.project_id": pid})
+        assert after > 0
+
+        # Redundant re-save must not re-fire.
+        await client.patch(f"/api/projects/{pid}/production-desk", json={"invoice_sent": True}, headers=headers)
+        after2 = await db.notifications.count_documents({"type": "production_desk_invoice_sent", "payload.project_id": pid})
+        assert after2 == after
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_production_status_read_write_and_validation(client, headers):
+    pid = await _make_project()
+    try:
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert r.json()["project"]["pd_production_status"] == "not_started"
+
+        r = await client.patch(f"/api/projects/{pid}/production-desk", json={"production_status": "shoot_scheduled"}, headers=headers)
+        assert r.json()["project"]["pd_production_status"] == "shoot_scheduled"
+
+        r = await client.patch(f"/api/projects/{pid}/production-desk", json={"production_status": "not_a_real_status"}, headers=headers)
+        assert r.status_code == 400
+
+        # Existing project.status (ongoing/hold/complete/locked) must be
+        # completely untouched by pd_production_status writes.
+        project = await db.projects.find_one({"id": pid}, {"_id": 0})
+        assert project["status"] == "ongoing"
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_no_duplicate_financial_records_from_checklist_changes(client, headers):
+    """Flipping every checklist toggle must never create a second document
+    anywhere — everything lands as fields on the ONE existing project doc."""
+    pid = await _make_project()
+    try:
+        before_project_count = await db.projects.count_documents({"id": pid})
+        await client.patch(
+            f"/api/projects/{pid}/production-desk",
+            json={"invoice_raised": True, "invoice_sent": True, "payment_in_received": True, "gst_component_received": True, "production_status": "finance_closed"},
+            headers=headers,
+        )
+        after_project_count = await db.projects.count_documents({"id": pid})
+        assert before_project_count == after_project_count == 1
+        collection_names = await db.list_collection_names()
+        assert "invoices" not in collection_names
+    finally:
+        await _cleanup(pid)

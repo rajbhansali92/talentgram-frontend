@@ -105,6 +105,25 @@ async def ensure_agents_ready() -> None:
         security_mode="group_members",
     )
 
+    await registry.seed_agent_config(
+        "management-agent",
+        # New, separate WhatsApp group the user creates by hand, named
+        # exactly "Talentgram Management Agent" — SAME WhatsApp number/
+        # worker as every other agent above; routing is entirely
+        # data-driven via this config doc (see registry.resolve_agent_for_group),
+        # never touching any other agent's group_names/routing.
+        group_names=["Talentgram Management Agent"],
+        allowed_senders=[],
+        # Anyone currently in the group may issue read queries and (after
+        # explicit confirmation — see management_agent.py's build_confirmation
+        # hooks) financial-mutation commands, matching casting-agent/
+        # whatsapp-campaign-agent/fetcher-agent's existing boundary — this
+        # is a trusted operational group an admin populates by hand, not
+        # "anyone on WhatsApp"; the confirmation gate is the second,
+        # per-action control on top of group membership.
+        security_mode="group_members",
+    )
+
     try:
         await db["whatsapp_conversations"].create_index(
             [("agent_id", 1), ("phone", 1)], unique=True, name="agent_phone_unique"

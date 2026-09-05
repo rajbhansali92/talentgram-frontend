@@ -76,6 +76,7 @@ async def _cleanup(pid=None, talent_ids=None, client_ids=None):
         await db.project_kickbacks.delete_many({"project_id": pid})
         await db.project_reimbursements.delete_many({"project_id": pid})
         await db.project_crew.delete_many({"project_id": pid})
+        await db.notifications.delete_many({"payload.project_id": pid})
     if talent_ids:
         await db.talents.delete_many({"id": {"$in": talent_ids}})
     if client_ids:
@@ -459,3 +460,141 @@ async def test_needs_attention_reflects_checklist_state(client, headers):
         assert "GST component pending" not in attention
     finally:
         await _cleanup(pid)
+
+
+# ===========================================================================
+# Finance / Zoho connector pass (Production Desk stays the sole data owner —
+# there is no separate Finance module in this codebase to "connect" to; see
+# production_desk.py's module docstring for the full inspection findings).
+# ===========================================================================
+
+@_aio
+async def test_finance_block_reports_honest_zoho_not_connected(client, headers):
+    """Zoho Books integration does not exist anywhere in this codebase
+    (Case B). The GET response must say so literally, never a fake
+    "synced" state, and this must never change without a real integration
+    being built."""
+    pid = await _make_project()
+    try:
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert r.json()["finance"] == {"zoho_status": "not_connected"}
+
+        # Not mutable through any Production Desk endpoint — there is no
+        # code path that ever sets it to anything else.
+        await client.patch(f"/api/projects/{pid}/production-desk", json={"shooting_days": 3}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert r.json()["finance"]["zoho_status"] == "not_connected"
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_existing_client_and_talent_budget_lines_surfaced_read_only(client, headers):
+    """project.client_budget / project.talent_budget (the pre-existing
+    Project Details 'budget hint' fields) must be displayed, not
+    duplicated or re-entered, and must NEVER feed the commission/payment
+    math — only the pd_* structured fields do that."""
+    pid = await _make_project(
+        client_budget=[{"label": "Total Client Budget", "value": "5,52,000"}],
+        talent_budget=[{"label": "Per Talent (indicative)", "value": "40,000 - 60,000"}],
+    )
+    tid = await _make_talent()
+    await _add_to_pipeline(pid, tid, stage="locked")
+    try:
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        body = r.json()
+        assert body["project"]["client_budget_lines"] == [{"label": "Total Client Budget", "value": "5,52,000"}]
+        assert body["project"]["talent_budget_lines"] == [{"label": "Per Talent (indicative)", "value": "40,000 - 60,000"}]
+
+        # The free-text hint values must NOT leak into the numeric
+        # commission/payment calculation for the locked talent.
+        card = body["locked_talents"][0]
+        assert card["budget_total"] is None
+        assert card["commission_amount"] is None
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_project_without_budget_lines_returns_empty_lists(client, headers):
+    """Edge case: a project with no client_budget/talent_budget entered at
+    all must not error and must not fabricate placeholder lines."""
+    pid = await _make_project()
+    try:
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert r.json()["project"]["client_budget_lines"] == []
+        assert r.json()["project"]["talent_budget_lines"] == []
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_payment_cleared_notifies_via_existing_notification_fanout(client, headers):
+    """Reuses notifications.fanout() (the existing Dashboard 'Recent
+    Activity' admin notification mechanism) — no new activity/audit
+    system. Fires exactly once per pending->cleared TRANSITION, not on
+    every save."""
+    pid = await _make_project()
+    tid = await _make_talent()
+    await _add_to_pipeline(pid, tid, stage="locked")
+    try:
+        before = await db.notifications.count_documents({"type": "production_desk_payment_cleared", "payload.project_id": pid})
+        assert before == 0
+
+        r = await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"payment_status": "cleared"}, headers=headers)
+        assert r.status_code == 200
+        after_first = await db.notifications.count_documents({"type": "production_desk_payment_cleared", "payload.project_id": pid})
+        assert after_first > 0  # at least one active recipient notified
+
+        # Re-saving "cleared" again (no-op transition) must NOT re-fire.
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"payment_status": "cleared"}, headers=headers)
+        after_second = await db.notifications.count_documents({"type": "production_desk_payment_cleared", "payload.project_id": pid})
+        assert after_second == after_first
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_payment_in_received_notifies_via_existing_notification_fanout(client, headers):
+    pid = await _make_project()
+    try:
+        before = await db.notifications.count_documents({"type": "production_desk_payment_in_received", "payload.project_id": pid})
+        assert before == 0
+
+        r = await client.patch(f"/api/projects/{pid}/production-desk", json={"payment_in_received": True}, headers=headers)
+        assert r.status_code == 200
+        after = await db.notifications.count_documents({"type": "production_desk_payment_in_received", "payload.project_id": pid})
+        assert after > 0
+
+        # Flipping other unrelated fields must not re-fire.
+        await client.patch(f"/api/projects/{pid}/production-desk", json={"shooting_days": 2}, headers=headers)
+        after2 = await db.notifications.count_documents({"type": "production_desk_payment_in_received", "payload.project_id": pid})
+        assert after2 == after
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_no_conflicting_payment_status_source_exists(client, headers):
+    """Production Desk's pd_payment_status is the ONLY place a locked
+    talent's payment status is ever stored — verifies there is no second,
+    independently-updatable record that could contradict it."""
+    pid = await _make_project()
+    tid = await _make_talent()
+    await _add_to_pipeline(pid, tid, stage="locked")
+    try:
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"payment_status": "cleared"}, headers=headers)
+
+        # No separate "payments" or "finance" collection exists holding a
+        # second copy of this status.
+        collection_names = await db.list_collection_names()
+        assert "payments" not in collection_names
+        assert "finance" not in collection_names
+
+        row = await db.casting_pipeline.find_one({"project_id": pid, "talent_id": tid})
+        assert row["pd_payment_status"] == "cleared"
+
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert r.json()["locked_talents"][0]["payment_status"] == "cleared"
+    finally:
+        await _cleanup(pid, [tid])

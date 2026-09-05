@@ -343,7 +343,7 @@ export default function ProductionDesk({ projectId, project }) {
         return <div className="py-24 text-center text-black/40 text-sm">Could not load Production Desk.</div>;
     }
 
-    const { project: p, locked_talents: talents, summary, needs_attention, kickbacks, reimbursements, crew, documents } = data;
+    const { project: p, locked_talents: talents, summary, needs_attention, kickbacks, reimbursements, crew, documents, finance } = data;
 
     return (
         <div className="space-y-4 pb-16" data-testid="production-desk-root">
@@ -461,6 +461,23 @@ export default function ProductionDesk({ projectId, project }) {
                             <Label className="text-[11px] text-black/40">Number of Shooting Days</Label>
                             <InlineNumber value={p.pd_shooting_days} className="mt-1" onSave={(v) => patchProject({ shooting_days: v })} />
                         </div>
+                        {(p.client_budget_lines?.length > 0 || p.talent_budget_lines?.length > 0) && (
+                            <div className="pt-2 border-t border-black/[0.06]" data-testid="pd-budget-reference">
+                                <Label className="text-[11px] text-black/40">Budget Reference (from Project Details)</Label>
+                                <div className="mt-1.5 space-y-1">
+                                    {p.client_budget_lines?.map((l, i) => (
+                                        <div key={`cb-${i}`} className="flex justify-between text-xs text-black/60">
+                                            <span>{l.label || "Client Budget"}</span><span>{l.value}</span>
+                                        </div>
+                                    ))}
+                                    {p.talent_budget_lines?.map((l, i) => (
+                                        <div key={`tb-${i}`} className="flex justify-between text-xs text-black/60">
+                                            <span>{l.label || "Talent Budget"}</span><span>{l.value}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </SectionCard>
 
@@ -496,7 +513,17 @@ export default function ProductionDesk({ projectId, project }) {
             <SectionCard
                 title="Commission & Kickbacks"
                 icon={IndianRupee}
-                right={<Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setKickbackDialog(true)}><Plus className="h-3 w-3 mr-1" /> Add Kickback</Button>}
+                right={
+                    <div className="flex items-center gap-3">
+                        {/* Honest, static state — Zoho Books integration does not
+                            exist yet (see backend/routers/production_desk.py
+                            module docstring). Never claims a sync happened. */}
+                        <span className="text-[11px] text-black/35" data-testid="pd-zoho-status">
+                            Zoho — {finance?.zoho_status === "not_connected" ? "Not Connected" : finance?.zoho_status}
+                        </span>
+                        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setKickbackDialog(true)}><Plus className="h-3 w-3 mr-1" /> Add Kickback</Button>
+                    </div>
+                }
                 testId="pd-commission"
             >
                 <div className="flex flex-wrap gap-x-8 gap-y-3 mb-3">

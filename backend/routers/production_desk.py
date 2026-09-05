@@ -39,18 +39,64 @@ schema represents these concepts at all:
                                 a project and an EXISTING CRM client, not a
                                 new contacts table.
 
-No Finance/payment/commission/Zoho Books module exists anywhere in this
-codebase today (verified — grepped the whole backend). `pd_payment_status`
-on a locked talent's pipeline row is therefore the smallest possible place
-to track "has this talent been paid", structured so a future Finance
-module can read/sync it directly instead of Production Desk inventing a
-parallel one. No WhatsApp-agent command wiring and no reminder-schedule
-integration are included in this pass, for the same reason: neither an
-operational-checklist reminder system nor a project-operations command
-surface exists yet to hook into (the existing "Ongoing Project Talents"
-WhatsApp reminder feature is specifically talent-submission-follow-up,
-a different concern) — see the final report for what a future pass would
-need to add.
+No separate Finance/accounting module exists anywhere in this codebase
+(re-verified for the Finance/Zoho connector pass — grepped the whole repo
+again, including synonyms: billing, ledger, invoice, GST, TDS, bookkeeping).
+The only near-miss is `routers/workflow.py`'s generic team to-do tracker,
+which has a free-text "Finance" task *category* (checklist strings like
+"Invoice Sent", "Payment Received") — that is a manual checklist app with
+no amounts, no talent/project-typed linkage, and no calculations; it is
+NOT a financial ledger and is deliberately left unconnected. This means
+Production Desk's own `pd_*` fields + `project_kickbacks` /
+`project_reimbursements` ARE the sole, authoritative store for this data —
+there is no second copy anywhere to diverge from or reconcile against.
+
+Two pre-existing, genuinely-project-level fields deliberately are NOT
+wired into Production Desk's numbers: `project.talent_budget` and
+`project.client_budget` (free-text `{label, value}` lines edited via
+`BudgetLines` in Project Details). Those are pre-lock negotiation/ask
+hints shown to talents on the submission form and to clients on the
+public link — a different purpose and shape from Production Desk's
+typed, per-locked-talent payable amount. They are surfaced here
+READ-ONLY (see `client_budget_lines`/`talent_budget_lines` in the GET
+response) purely so a manager doesn't have to tab-switch to see them —
+never merged into the commission/payment math.
+
+Zoho Books: no integration exists (confirmed — no OAuth/token/API-client/
+organization-id/webhook code anywhere in the repo; the one incidental
+"zoho" string hit is a coincidental base64 substring inside an unrelated
+logo image file). Per the task's own Case-B instructions this pass does
+NOT build one — `finance.zoho_status` below is a literal, static
+"not_connected", never flipped to a fake "synced" state. The natural
+future attachment points, if a Zoho sync is ever built, are the existing
+stable ids already returned here: a locked talent's `pd_payment_status`
+(→ Zoho vendor/talent payment), `project_kickbacks` rows (→ Zoho expense
+or equivalent), `project_reimbursements` rows (→ Zoho expense), and
+`pd_payment_in_received` (→ Zoho customer payment/invoice). None of that
+mapping is implemented here — only documented as the boundary.
+
+No generic activity/audit log exists (every audit collection in this repo
+is feature-specific: storage_audit_log, profile_audits, scout_capture_audit,
+otp_audit_logs, whatsapp_audit_log). The closest genuinely reusable,
+generic mechanism is `notifications.fanout()` (the admin bell / Dashboard
+"Recent Activity" feed) — reused below (not rebuilt) for the two highest-
+signal financial state changes: a locked talent's payment marked cleared,
+and a project's client payment (Payment In) marked received. No other
+Production Desk write fires a notification, to avoid turning this into a
+noisy audit trail the existing mechanism was never designed for.
+
+No generic reminder-scheduling infrastructure exists — the only reminder
+mechanism in the repo (`_compute_ongoing_pipeline_reminders` in
+routers/whatsapp.py) is specifically a talent-submission-follow-up engine
+tied to Casting Pipeline stages, not a general "notify me while X stays
+pending" scheduler, so Production Desk's checklist/payment-pending items
+cannot cleanly hook into it without building a new engine — which is out
+of scope here and left as a disclosed limitation.
+
+No WhatsApp-agent command wiring is included in this pass — connecting
+"What's pending for X" style commands would mean extending the existing
+multi-agent NLU/intent-routing architecture, which is a meaningfully
+larger, dedicated piece of work, not a "very small change".
 """
 from __future__ import annotations
 
@@ -68,9 +114,17 @@ from core import (
     current_team_or_admin,
     db,
 )
+# Reuse the EXISTING generic admin-notification fan-out (Dashboard "Recent
+# Activity" feed) — not a new activity/audit system. See module docstring.
+from notifications import fanout as notify_fanout
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["Production Desk"])
+
+# Zoho Books integration does not exist anywhere in this codebase (see
+# module docstring). This is a literal, static, honest state — never
+# mutated by any code path — NOT a placeholder for a real sync.
+ZOHO_STATUS = "not_connected"
 
 # Categories Production Desk can attach through the EXISTING project
 # material pipeline (widens routers.projects.MATERIAL_CATEGORIES — see
@@ -315,6 +369,16 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             "pd_shoot_location": project.get("pd_shoot_location"),
             "pd_shoot_notes": project.get("pd_shoot_notes"),
             "pd_production_contact": _serialise_client_ref(project.get("pd_production_contact_client_id"), name_map),
+            # Pre-existing Project Details fields, read-only here — see
+            # module docstring for why these are deliberately NOT merged
+            # into the budget/commission math below.
+            "client_budget_lines": project.get("client_budget") or [],
+            "talent_budget_lines": project.get("talent_budget") or [],
+        },
+        "finance": {
+            # Honest, static Case-B state — see module docstring. Never
+            # flipped to "synced" by any code path in this repo.
+            "zoho_status": ZOHO_STATUS,
         },
         "locked_talents": locked,
         "summary": {
@@ -355,7 +419,7 @@ class ProductionDeskProjectPatch(BaseModel):
 
 @router.patch("/{pid}/production-desk")
 async def update_production_desk_project(pid: str, payload: ProductionDeskProjectPatch, admin: dict = Depends(current_team_or_admin)):
-    await _get_project_or_404(pid)
+    project = await _get_project_or_404(pid)
     field_map = {
         "production_budget_per_day": "pd_production_budget_per_day",
         "production_budget_total": "pd_production_budget_total",
@@ -372,6 +436,21 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
     if updates:
         updates["updated_at"] = _now()
         await db.projects.update_one({"id": pid}, {"$set": updates})
+
+        # Notify the team via the EXISTING admin-notification fan-out —
+        # only on the pending -> received TRANSITION, not on every save,
+        # and only for this one high-signal financial event.
+        was_received = bool(project.get("pd_payment_in_received"))
+        now_received = updates.get("pd_payment_in_received")
+        if now_received is True and not was_received:
+            await notify_fanout(
+                db,
+                type="production_desk_payment_in_received",
+                title=f"Client payment received — {project.get('brand_name') or 'Project'}",
+                body="Payment In marked received on Production Desk.",
+                payload={"project_id": pid},
+                actor_id=admin.get("id"),
+            )
     return await get_production_desk(pid, admin)
 
 
@@ -388,7 +467,7 @@ class TalentProductionPatch(BaseModel):
 
 @router.patch("/{pid}/production-desk/talents/{talent_id}")
 async def update_locked_talent_production(pid: str, talent_id: str, payload: TalentProductionPatch, admin: dict = Depends(current_team_or_admin)):
-    await _get_locked_pipeline_row(pid, talent_id)
+    row = await _get_locked_pipeline_row(pid, talent_id)
     if payload.payment_status is not None and payload.payment_status not in PAYMENT_STATUSES:
         raise HTTPException(400, f"payment_status must be one of {sorted(PAYMENT_STATUSES)}")
 
@@ -403,6 +482,21 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
     if updates:
         updates["updated_at"] = _now()
         await db.casting_pipeline.update_one({"project_id": pid, "talent_id": talent_id}, {"$set": updates})
+
+        # Notify the team via the EXISTING admin-notification fan-out —
+        # only on the pending -> cleared TRANSITION, not on every save.
+        was_cleared = (row.get("pd_payment_status") or "pending") == "cleared"
+        if updates.get("pd_payment_status") == "cleared" and not was_cleared:
+            talent = await db.talents.find_one({"id": talent_id}, {"_id": 0, "name": 1})
+            project = await db.projects.find_one({"id": pid}, {"_id": 0, "brand_name": 1})
+            await notify_fanout(
+                db,
+                type="production_desk_payment_cleared",
+                title=f"Talent payment cleared — {(talent or {}).get('name') or 'Talent'}",
+                body=f"{(project or {}).get('brand_name') or 'Project'} — payment marked cleared on Production Desk.",
+                payload={"project_id": pid, "talent_id": talent_id},
+                actor_id=admin.get("id"),
+            )
     return await get_production_desk(pid, admin)
 
 

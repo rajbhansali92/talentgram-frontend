@@ -5,6 +5,8 @@ Triggered by:
   - submission edit (form / media)
   - retake uploaded
   - admin decision change (approve / reject / hold)
+  - Production Desk: a locked talent's payment marked cleared
+  - Production Desk: a project's client payment (Payment In) marked received
 
 Stored in `notifications` collection — one doc per (recipient, event).
 Recipients = every active admin/team user. We DO NOT send email yet
@@ -23,6 +25,8 @@ NOTIFICATION_TYPES = {
     "submission_updated",    # talent edited form/media after submitting
     "submission_retake",     # talent uploaded a new take after submitting
     "submission_decision",   # admin/team approved / rejected / put on hold
+    "production_desk_payment_cleared",     # a locked talent's payment was marked cleared
+    "production_desk_payment_in_received", # a project's client payment (Payment In) was marked received
 }
 
 

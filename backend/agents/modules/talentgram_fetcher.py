@@ -67,10 +67,10 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from core import db
+from core import db, _filter_talent_for_client, DEFAULT_VISIBILITY
 from agents.models import AgentDefinition, IntentDefinition, FieldSpec, ExecContext, ExecResult, ValidationResult
 from agents.registry import register_agent
-from agents import session_context
+from agents import session_context, name_match
 from agents.modules import casting_pipeline_nlu as nlu
 from agents.modules import media_assignment
 from agents.modules.casting_pipeline import (
@@ -78,6 +78,10 @@ from agents.modules.casting_pipeline import (
     _fetch_all_talent_candidates,
     _resolve_talent_query_target_by_name,
 )
+# Existing DB-side talent filter/query builder (gender/age/height/location),
+# already reused cross-module by casting_pipeline.py's own talent_search
+# feature — the SAME reuse pattern, not a new import direction.
+from routers.talents import _build_talent_query
 
 AGENT_ID = "talentgram-fetcher-agent"
 
@@ -215,7 +219,348 @@ def build_copy_form_message(sub: Dict[str, Any], project: Optional[Dict[str, Any
 
 
 # ---------------------------------------------------------------------------
-# SHOW ME — natural-language parsing (comma is the ONLY structural
+# SHOW ME PROFILE — reuses the EXISTING generated-link system (audited
+# first, before writing any of this): a talent's "portfolio link" is a
+# `db.links` doc created by an admin via ForwardToLinkModal.jsx
+# ("client-ready portfolio link from APPROVED submissions") — there is no
+# separate per-talent auto-generated link anywhere in this codebase, so a
+# single-talent link (talent_ids == [this one talent], is_public=True) IS
+# the closest existing concept of "this talent's portfolio link". Fetcher
+# only ever READS this collection — it never creates a link, matching the
+# explicit "do not generate a new link" requirement. The public URL format
+# (https://links.talentgramagency.com/l/{slug}) is exactly what
+# frontend/src/middleware.ts rewrites for the `links` subdomain.
+#
+# The no-link fallback reuses core._filter_talent_for_client — the SAME
+# strict client-facing whitelist every OTHER public surface (Client Link,
+# slideshow, download bundle, PDF) already renders through — with
+# DEFAULT_VISIBILITY (core.py) as the visibility map, since a bare talent
+# record has no link-level visibility overrides to consult. This is a
+# read-only reuse, not a new admin/private-field exposure path.
+# ---------------------------------------------------------------------------
+
+_LINKS_BASE_URL = "https://links.talentgramagency.com"
+
+
+async def _find_talent_portfolio_link(talent_id: str) -> Optional[str]:
+    doc = await db.links.find_one(
+        {"talent_ids": [talent_id], "is_public": True},
+        {"_id": 0, "slug": 1},
+        sort=[("created_at", -1)],
+    )
+    if not doc or not doc.get("slug"):
+        return None
+    return f"{_LINKS_BASE_URL}/l/{doc['slug']}"
+
+
+def _render_work_link_line(stored: str) -> str:
+    """Ported from WorkLinksDisplay.jsx's parseStoredWorkLink — same
+    "Label || https://..." / bare-URL stored shape, rendered as a single
+    plain text line (no icon/domain subtitle, which is presentation-only
+    for the web UI, not needed for a WhatsApp text reply)."""
+    s = (stored or "").strip()
+    if not s:
+        return ""
+    if " || " in s:
+        idx = s.index(" || ")
+        label, url = s[:idx].strip(), s[idx + 4:].strip()
+        return f"{label}: {url}" if label else url
+    return s
+
+
+def _render_talent_profile_fallback(talent_doc: Dict[str, Any]) -> str:
+    shaped = _filter_talent_for_client(talent_doc, DEFAULT_VISIBILITY)
+    name = shaped.get("name") or "Unnamed"
+    lines = [f"Talentgram X {name}", ""]
+
+    if shaped.get("age") is not None:
+        lines.append(f"Age: {shaped['age']}")
+    if shaped.get("height"):
+        lines.append(f"Height: {shaped['height']}")
+    location_text = _format_location_copy_form(shaped.get("location"))
+    if location_text:
+        lines.append(f"Location: {location_text}")
+    ig_url = _instagram_profile_url_copy_form(shaped.get("instagram_handle"))
+    if ig_url:
+        lines.append(f"Instagram: {ig_url}")
+    skills = shaped.get("skills") or []
+    if skills:
+        lines.append(f"Skills: {', '.join(skills)}")
+
+    work_links = [
+        _render_work_link_line(wl) for wl in (shaped.get("work_links") or [])
+    ]
+    work_links = [wl for wl in work_links if wl]
+    if work_links:
+        lines.append("")
+        lines.append("Work Links:")
+        lines.extend(work_links)
+
+    return "\n".join(lines)
+
+
+async def _render_talent_profile(
+    talent_id: str, talent_label: str, talent_doc: Optional[Dict[str, Any]] = None,
+) -> str:
+    link_url = await _find_talent_portfolio_link(talent_id)
+    if link_url:
+        return f"Talentgram X {talent_label}\n\nClick to view the portfolio:\n\n{link_url}"
+    doc = talent_doc if talent_doc is not None else await db.talents.find_one({"id": talent_id}, {"_id": 0})
+    if not doc:
+        return f"Talentgram X {talent_label}\n\nNo profile information available."
+    return _render_talent_profile_fallback(doc)
+
+
+def _talent_not_found_profile_message(name_q: str) -> str:
+    return f"I couldn't find {name_q} in Talentgram."
+
+
+_PROFILE_WORD_RE = re.compile(r"(?i)\bprofiles?\b")
+_LEADING_OF_FOR_RE = re.compile(r"(?i)^\s*(?:of|for)\s+")
+_TRAILING_OF_FOR_RE = re.compile(r"(?i)\s+(?:of|for)\s*$")
+
+
+async def _handle_profile_names(ctx: ExecContext, names: List[str]) -> ExecResult:
+    if len(names) == 1:
+        return await _resolve_single_profile(ctx, names[0])
+
+    # Multiple talents -> mirrors casting_pipeline.py's own
+    # _handle_talent_projects_multi precedent: a read has no wrong-record
+    # risk, so one ambiguous/unresolved name is reported inline for THAT
+    # name only, never blocking the others (no interactive resume here —
+    # there is no project to tie-break an ambiguous name against anyway,
+    # unlike FORM).
+    candidates = await _fetch_all_talent_candidates()
+    blocks: List[str] = []
+    for name_q in names:
+        talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target_by_name(name_q, candidates)
+        if ambiguous:
+            blocks.append(f'"{name_q}" — multiple matching talents found. Ask about them one at a time to pick.')
+            continue
+        if not talent_id:
+            blocks.append(f'"{name_q}" — {_talent_not_found_profile_message(name_q)}')
+            continue
+        blocks.append(await _render_talent_profile(talent_id, talent_label))
+    return ExecResult(ok=True, message="\n\n---\n\n".join(blocks))
+
+
+async def _resolve_single_profile(ctx: ExecContext, name_q: str) -> ExecResult:
+    candidates = await _fetch_all_talent_candidates()
+    talent_id, talent_label, err, ambiguous = await _resolve_talent_query_target_by_name(name_q, candidates)
+    if ambiguous:
+        # No project context exists for a profile request, so (unlike
+        # FORM) there is no authoritative-submission tie-break available —
+        # a genuine same-name duplicate always asks.
+        return await _ask_show_me_talent_clarification(ctx, name_q, ambiguous, {"request_type": "profile"})
+    if not talent_id:
+        return ExecResult(ok=False, error="talent_not_found", message=_talent_not_found_profile_message(name_q))
+    return ExecResult(ok=True, message=await _render_talent_profile(talent_id, talent_label))
+
+
+async def _try_handle_profile_request(ctx: ExecContext, chunk: str) -> Optional[ExecResult]:
+    """Recognizes "profile of X"/"profiles of X, Y"/"X, Y profiles" —
+    tolerant of the anchor word appearing before OR after the talent list
+    (both are shown as valid phrasing in the spec). Returns None (never a
+    real error) when the chunk isn't a profile request at all, so the
+    caller falls through to trying FILTERED_TALENTS, then FORM."""
+    if not _PROFILE_WORD_RE.search(chunk):
+        return None
+    # Strip a leading "the" BEFORE removing the profile word itself —
+    # "the profile of X" would otherwise leave a stray "the  of X" that
+    # _LEADING_OF_FOR_RE (anchored on "of"/"for" only) can't clean up.
+    talent_part = re.sub(r"(?i)^\s*the\s+", "", chunk)
+    talent_part = _PROFILE_WORD_RE.sub("", talent_part)
+    talent_part = _LEADING_OF_FOR_RE.sub("", talent_part)
+    talent_part = _TRAILING_OF_FOR_RE.sub("", talent_part)
+    talent_part = talent_part.strip(" ,")
+    names = [t.strip() for t in talent_part.split(",") if t.strip()]
+    if not names:
+        return None
+    return await _handle_profile_names(ctx, names)
+
+
+# ---------------------------------------------------------------------------
+# SHOW ME FILTERED TALENTS — reuses routers/talents.py's own
+# _build_talent_query (the SAME DB-side gender/age/height/location query
+# builder casting_pipeline.py's own talent_search feature already calls)
+# and core.parse_height_to_inches indirectly via the SAME height-range
+# normalization rules that write path already relies on for height_inches.
+# No new search engine, no AI, no application-side filtering of the full
+# talent collection — every filter becomes part of the Mongo query itself.
+# ---------------------------------------------------------------------------
+
+_TALENTS_WORD_RE = re.compile(r"(?i)\btalents?\b")
+_GENDER_RE = re.compile(r"(?i)\b(female|males?|non[\s-]?binary)\b")
+_GENDER_MAP = {
+    "female": "female", "male": "male", "males": "male",
+    "non binary": "non_binary", "non-binary": "non_binary", "nonbinary": "non_binary",
+}
+
+# Apostrophe/quote height range ("5'4 to 5'8", "5'4\"-5'8\"", curly quotes
+# tolerated) — unambiguous on its own, no "height" keyword required.
+_HEIGHT_APOSTROPHE_RANGE_RE = re.compile(
+    r"(\d)\s*[’'’]\s*(\d{1,2})\s*[\"”]?\s*(?:-|to|through|and)\s*"
+    r"(\d)\s*[’'’]\s*(\d{1,2})\s*[\"”]?",
+    re.IGNORECASE,
+)
+# Dotted-decimal shorthand ("height 5.4 to 5.8") — the "height" keyword is
+# REQUIRED here (unlike the apostrophe form) since a bare number range on
+# its own would otherwise be indistinguishable from an age range.
+_HEIGHT_DECIMAL_RANGE_RE = re.compile(
+    r"height\s+(\d)(?:\.(\d{1,2}))?\s*(?:-|to|through|and)\s*(\d)(?:\.(\d{1,2}))?",
+    re.IGNORECASE,
+)
+_AGE_RANGE_RE = re.compile(
+    r"\b(?:age[s]?\s+)?(?:between\s+)?(\d{1,3})\s*(?:-|to|through|and)\s*(\d{1,3})\b"
+    r"(?:\s*years?(?:\s*old)?)?",
+    re.IGNORECASE,
+)
+# Whatever's left after stripping every recognized filter token/filler word
+# is treated as the location term — a simple, robust "subtract the known
+# vocabulary" heuristic rather than a location-specific grammar.
+_FILTER_FILLER_RE = re.compile(
+    r"(?i)\b(show|me|all|talents?|between|and|through|to|in|years?|old|"
+    r"age|ages|height|female|males?|non[\s-]?binary|nonbinary)\b"
+)
+
+
+def _normalize_gender_word(raw: str) -> str:
+    w = re.sub(r"[\s-]+", " ", raw.lower().strip())
+    return _GENDER_MAP.get(w, w)
+
+
+def _parse_filter_criteria(text: str) -> Dict[str, Any]:
+    remaining = text
+
+    gender = None
+    m = _GENDER_RE.search(remaining)
+    if m:
+        gender = _normalize_gender_word(m.group(1))
+        remaining = remaining[: m.start()] + " " + remaining[m.end():]
+
+    height_min = height_max = None
+    m = _HEIGHT_APOSTROPHE_RANGE_RE.search(remaining)
+    if m:
+        f1, i1, f2, i2 = m.groups()
+        height_min = float(int(f1) * 12 + int(i1))
+        height_max = float(int(f2) * 12 + int(i2))
+        remaining = remaining[: m.start()] + " " + remaining[m.end():]
+    else:
+        m = _HEIGHT_DECIMAL_RANGE_RE.search(remaining)
+        if m:
+            f1, i1, f2, i2 = m.groups()
+            height_min = float(int(f1) * 12 + int(i1 or 0))
+            height_max = float(int(f2) * 12 + int(i2 or 0))
+            remaining = remaining[: m.start()] + " " + remaining[m.end():]
+
+    if height_min is not None and height_max is not None and height_min > height_max:
+        height_min, height_max = height_max, height_min
+
+    age_min = age_max = None
+    m = _AGE_RANGE_RE.search(remaining)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        age_min, age_max = min(a, b), max(a, b)
+        remaining = remaining[: m.start()] + " " + remaining[m.end():]
+
+    location_text = _FILTER_FILLER_RE.sub(" ", remaining)
+    location_text = re.sub(r"[,\s]+", " ", location_text).strip()
+
+    return {
+        "gender": gender, "age_min": age_min, "age_max": age_max,
+        "height_min": height_min, "height_max": height_max,
+        "location": location_text or None,
+    }
+
+
+async def _resolve_location_terms(raw_location: Optional[str]) -> List[str]:
+    """Fuzzy-corrects a typed location term against the DISTINCT city/
+    country values actually present in the talents collection (the same
+    values routers/talents.py's own /talents/filter-options endpoint
+    surfaces) — reuses the SAME shared tiered matcher every other name
+    lookup on this platform uses, never a separate fuzzy algorithm. Falls
+    back to the raw term when nothing confidently matches (an honest zero-
+    result search, never a silently-wrong substitution)."""
+    if not raw_location:
+        return []
+    cities = await db.talents.distinct("location.city", {"location.city": {"$nin": [None, ""]}})
+    countries = await db.talents.distinct("location.country", {"location.country": {"$nin": [None, ""]}})
+    candidates = sorted({c for c in cities if c} | {c for c in countries if c})
+    if not candidates:
+        return [raw_location]
+    match = name_match.tiered_name_match(raw_location, candidates, lambda s: s)
+    if match.item is not None:
+        return [match.item]
+    return [raw_location]
+
+
+_FILTER_RESULT_PAGE_SIZE = 20  # mirrors casting_pipeline.py's own talent_search page size
+_FILTER_RESULT_CHAR_CAP = 6000
+
+
+async def _run_filtered_talent_search(filters: Dict[str, Any]) -> ExecResult:
+    location_list = await _resolve_location_terms(filters.get("location"))
+    query = _build_talent_query(
+        q=None, status=None,
+        gender=filters.get("gender"), ethnicity=None,
+        location=location_list,
+        age_min=filters.get("age_min"), age_max=filters.get("age_max"),
+        height_min=filters.get("height_min"), height_max=filters.get("height_max"),
+        followers_min=None,
+        interested_in=[], interested_in_mode="any",
+        skills=[], skills_mode="any", tags=[], tags_mode="any",
+    )
+    total = await db.talents.count_documents(query)
+    if total == 0:
+        return ExecResult(ok=True, message=(
+            "No talents matched these criteria.\n\n"
+            "You can try broadening the age, height, gender, or location criteria."
+        ))
+
+    docs = await db.talents.find(query, {"_id": 0}) \
+        .sort([("name", 1), ("id", 1)]).limit(_FILTER_RESULT_PAGE_SIZE).to_list(_FILTER_RESULT_PAGE_SIZE)
+
+    blocks: List[str] = []
+    total_len = 0
+    shown = 0
+    for doc in docs:
+        block = await _render_talent_profile(doc["id"], doc.get("name") or "Unnamed", talent_doc=doc)
+        if shown > 0 and total_len + len(block) > _FILTER_RESULT_CHAR_CAP:
+            break
+        blocks.append(block)
+        total_len += len(block)
+        shown += 1
+
+    header = f"Found {total} talent{'s' if total != 1 else ''} matching your criteria."
+    footer = ""
+    if shown < total:
+        footer = (
+            f"\n\nShowing {shown} of {total} — narrow your criteria "
+            "(age, height, gender, or location) for a shorter list."
+        )
+    body = "\n\n---\n\n".join(blocks)
+    return ExecResult(ok=True, message=f"{header}\n\n{body}{footer}")
+
+
+async def _try_handle_filtered_talents_request(ctx: ExecContext, chunk: str) -> Optional[ExecResult]:
+    """Returns None (never a real error) when the chunk doesn't look like a
+    filter query at all, so the caller falls through to FORM's existing
+    parsing — this never intercepts "<talent> form for <project>" since
+    that grammar has no bare "talent(s)" word and _parse_filter_criteria
+    would find zero real filters either way."""
+    if not _TALENTS_WORD_RE.search(chunk):
+        return None
+    filters = _parse_filter_criteria(chunk)
+    if not any([
+        filters["gender"], filters["age_min"] is not None, filters["age_max"] is not None,
+        filters["height_min"] is not None, filters["height_max"] is not None, filters["location"],
+    ]):
+        return None
+    return await _run_filtered_talent_search(filters)
+
+
+# ---------------------------------------------------------------------------
+# SHOW ME FORM — natural-language parsing (comma is the ONLY structural
 # delimiter for talents/projects/commands, per spec — no "and" handling
 # here, unlike disambiguation-reply parsing elsewhere on this platform).
 # ---------------------------------------------------------------------------
@@ -345,8 +690,12 @@ _KIND_PROJECT = "show_me_project"
 
 
 async def _ask_show_me_talent_clarification(
-    ctx: ExecContext, name_query: str, ambiguous: List["nlu.Candidate"], project_q: str,
+    ctx: ExecContext, name_query: str, ambiguous: List["nlu.Candidate"], resume: Dict[str, Any],
 ) -> ExecResult:
+    """`resume` carries a `request_type` ("form" | "profile") plus whatever
+    type-specific context is needed to finish that request once resolved
+    (FORM's `project_query`; PROFILE needs nothing extra) — see
+    _resume_show_me's _KIND_TALENT branch, which dispatches on it."""
     options = []
     for c in ambiguous:
         identifier = await _identifier_for_talent(c.id)
@@ -359,7 +708,7 @@ async def _ask_show_me_talent_clarification(
         ctx.agent_id, ctx.sender_phone,
         pending_disambiguation={
             "kind": _KIND_TALENT, "field_key": "raw_text", "options": options,
-            "resume": {"project_query": project_q},
+            "resume": resume,
         },
     )
     lines = [f"Which {name_query} do you mean?", ""]
@@ -408,7 +757,9 @@ async def _resolve_single_pair(ctx: ExecContext, talent_q: str, project_q: str) 
         if auth.ok:
             talent_id, talent_label = auth.talent_id, auth.talent_label
         else:
-            return await _ask_show_me_talent_clarification(ctx, talent_q, ambiguous, project_q)
+            return await _ask_show_me_talent_clarification(
+                ctx, talent_q, ambiguous, {"request_type": "form", "project_query": project_q},
+            )
     if not talent_id:
         return ExecResult(ok=False, error="talent_not_found", message=_talent_not_found_message(talent_q, project_q))
 
@@ -428,11 +779,13 @@ async def _resume_show_me(session: Optional[dict], ctx: ExecContext) -> ExecResu
 
     kind = pending.get("kind")
     if kind == _KIND_TALENT:
-        project_q = resume.get("project_query") or ""
         selector = nlu.parse_talent_selector(resolved_value or "")
         talent_id, talent_label = selector.resolved_id, selector.resolved_label
         if not talent_id:
             return ExecResult(ok=False, error="expired", message="That selection has expired — please send your command again.")
+        if resume.get("request_type") == "profile":
+            return ExecResult(ok=True, message=await _render_talent_profile(talent_id, talent_label))
+        project_q = resume.get("project_query") or ""
         projects = await _fetch_ongoing_projects()
         pmatch = nlu.resolve_project_by_name(project_q, projects)
         if not pmatch.project:
@@ -455,7 +808,9 @@ async def _resume_show_me(session: Optional[dict], ctx: ExecContext) -> ExecResu
             if auth.ok:
                 talent_id, talent_label = auth.talent_id, auth.talent_label
             else:
-                return await _ask_show_me_talent_clarification(ctx, talent_q, ambiguous, project_label)
+                return await _ask_show_me_talent_clarification(
+                    ctx, talent_q, ambiguous, {"request_type": "form", "project_query": project_label},
+                )
         if not talent_id:
             return ExecResult(ok=False, error="talent_not_found", message=_talent_not_found_message(talent_q, project_label))
         return await _render_single_pair(talent_id, talent_label, project)
@@ -564,6 +919,19 @@ async def _show_me_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if not chunks:
         return ExecResult(ok=False, error="unrecognized", message=_UNRECOGNIZED_MESSAGE)
 
+    # PROFILE and FILTERED_TALENTS are checked against the FIRST chunk only
+    # — neither command uses the "multiple independent 'show me' commands"
+    # grammar FORM supports (their own examples never chain that way), and
+    # both return None (never a hard error) when the chunk isn't actually
+    # theirs, so FORM's existing per-chunk parsing below is completely
+    # unaffected for every message that doesn't match either new shape.
+    profile_result = await _try_handle_profile_request(ctx, chunks[0])
+    if profile_result is not None:
+        return profile_result
+    filtered_result = await _try_handle_filtered_talents_request(ctx, chunks[0])
+    if filtered_result is not None:
+        return filtered_result
+
     pairs: List[Tuple[str, str]] = []
     for chunk in chunks:
         talents, projects, err = _parse_chunk(chunk)
@@ -609,19 +977,22 @@ async def _show_me_parse_edits_async(
 HELP_TEXT = (
     "TALENTGRAM FETCHER\n\n"
     "WHAT IT DOES\n\n"
-    "Fetches information from Talentgram and sends it here.\n\n"
-    "CURRENT COMMAND\n\n"
-    "SHOW ME\n\n"
-    "Examples:\n\n"
+    "Fetches talent information from Talentgram and sends it here.\n\n"
+    "COMMANDS\n\n"
+    "1. SHOW ME FORM\n\n"
     "Show me Angela's form for Hinge\n\n"
-    "Show me Angela, Priya forms for Hinge\n\n"
-    "Show me Angela's form for Hinge, Dove\n\n"
-    "Show me Angela, Priya forms for Hinge, Dove\n\n"
+    "2. SHOW ME PROFILE\n\n"
+    "Show me the profile of Angela Sharma\n\n"
+    "Show me the profiles of Angela, Priya, Riya\n\n"
+    "3. SHOW ME TALENTS BY CRITERIA\n\n"
+    "Show me all female talents between 18 and 25 in Mumbai\n\n"
+    "Show me female talents height 5'4 to 5'8 in Mumbai\n\n"
     "IMPORTANT\n\n"
-    "- Commas separate multiple talents or projects.\n"
     "- Spelling and spacing can be approximate.\n"
-    "- If more than one match is possible, the agent will ask you to choose.\n"
-    "- Only existing submissions can be fetched."
+    "- Commas separate multiple talents or criteria.\n"
+    "- If more than one talent matches, the agent will ask you to choose.\n"
+    "- Profile links are returned when available.\n"
+    "- If a profile link is unavailable, the agent sends a written profile instead."
 )
 
 SHOW_ME_INTENT = IntentDefinition(

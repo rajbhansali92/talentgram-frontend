@@ -6,12 +6,13 @@ isolation via whatsapp_agent_config).
 import os
 import sys
 import uuid
+from datetime import date
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import db, _now  # noqa: E402
+from core import db, _now, parse_height_to_inches, compute_age  # noqa: E402
 from agents import modules as agent_modules  # noqa: E402
 from agents.dispatcher import handle_inbound_message  # noqa: E402
 from agents.modules import talentgram_fetcher as fetcher  # noqa: E402
@@ -27,14 +28,60 @@ pytestmark = pytest.mark.asyncio(loop_scope="module")
 AGENT_ID = fetcher.AGENT_ID
 
 
-async def _seed_talent_full(name: str, *, whatsapp_group_name: str = "", email: str = "", phone=None) -> str:
+def _dob_for_age(age: int) -> str:
+    today = date.today()
+    try:
+        return today.replace(year=today.year - age).isoformat()
+    except ValueError:
+        # Feb 29 birthdays on a non-leap target year.
+        return today.replace(year=today.year - age, day=28).isoformat()
+
+
+async def _seed_talent_full(
+    name: str, *, whatsapp_group_name: str = "", email: str = "", phone=None,
+    age=None, height=None, location=None, gender=None, instagram_handle=None,
+    work_links=None, skills=None,
+) -> str:
     tid = f"test-fetcher-tal-{uuid.uuid4().hex[:8]}"
-    await db.talents.insert_one({
+    doc = {
         "id": tid, "name": name, "tags": [], "notes": "",
         "phone": phone, "whatsapp_group_name": whatsapp_group_name,
         "email": email or None, "normalized_email": (email or "").strip().lower() or None,
-    })
+        "location": location or [],
+        "gender": gender,
+        "instagram_handle": instagram_handle,
+        "work_links": work_links or [],
+        "skills": skills or [],
+    }
+    if age is not None:
+        doc["dob"] = _dob_for_age(age)
+        # Real talent docs always have `age` stored alongside `dob`
+        # (routers/talents.py computes it at write time) — _filter_talent_
+        # for_client reads talent["age"] directly, it does not derive it
+        # from dob itself, so a test seeder that only sets dob would
+        # silently produce a profile with no Age line at all.
+        doc["age"] = compute_age(doc["dob"])
+    if height is not None:
+        doc["height"] = height
+        doc["height_inches"] = parse_height_to_inches(height)
+    await db.talents.insert_one(doc)
     return tid
+
+
+async def _seed_link(talent_id: str, *, is_public: bool = True) -> str:
+    lid = f"test-fetcher-link-{uuid.uuid4().hex[:8]}"
+    slug = f"test-slug-{uuid.uuid4().hex[:8]}"
+    await db.links.insert_one({
+        "id": lid, "slug": slug, "title": f"Test link {slug}", "brand_name": None,
+        "talent_ids": [talent_id], "submission_ids": [],
+        "is_public": is_public, "password": None, "notes": None,
+        "created_at": _now(), "created_by": "test",
+    })
+    return slug
+
+
+async def _cleanup_links(*, talent_ids=()):
+    await db.links.delete_many({"talent_ids": {"$in": list(talent_ids)}})
 
 
 async def _seed_submission_with_form(
@@ -487,3 +534,634 @@ async def test_show_me_creates_no_new_database_records():
     finally:
         await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
         await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ===========================================================================
+# SHOW ME PROFILE
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Single talent with generated portfolio link.
+# ---------------------------------------------------------------------------
+async def test_profile_single_talent_with_link():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent_full(f"Angela Sharma {tag}")
+    slug = await _seed_link(talent_id)
+    try:
+        r = await _show_me(group, f"Show me the profile of Angela Sharma {tag}")
+        assert r.handled, r
+        assert f"Talentgram X Angela Sharma {tag}" in r.reply
+        assert "Click to view the portfolio:" in r.reply
+        assert f"https://links.talentgramagency.com/l/{slug}" in r.reply
+    finally:
+        await _cleanup_links(talent_ids=[talent_id])
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 2. Single talent without generated portfolio link (written fallback).
+# ---------------------------------------------------------------------------
+async def test_profile_single_talent_without_link():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent_full(
+        f"Priya Shah {tag}", age=23, height="5'6\"",
+        location=[{"city": "Mumbai", "country": "India"}],
+        instagram_handle="priya.shah", work_links=["Reel || https://vimeo.com/priya"],
+    )
+    try:
+        r = await _show_me(group, f"Show me the profile of Priya Shah {tag}")
+        assert r.handled, r
+        assert f"Talentgram X Priya Shah {tag}" in r.reply
+        assert "Click to view the portfolio" not in r.reply
+        assert "Age: 23" in r.reply
+        assert "Height: 5'6\"" in r.reply
+        assert "Location: Mumbai, India" in r.reply
+        assert "Instagram: https://www.instagram.com/priya.shah/" in r.reply
+        assert "Work Links:" in r.reply
+        assert "Reel: https://vimeo.com/priya" in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 3. Multiple talents, all with links.
+# ---------------------------------------------------------------------------
+async def test_profile_multiple_talents_with_links():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_talent_full(f"Angela Sharma {tag}")
+    t2 = await _seed_talent_full(f"Priya Shah {tag}")
+    s1 = await _seed_link(t1)
+    s2 = await _seed_link(t2)
+    try:
+        r = await _show_me(group, f"Show me the profile of Angela Sharma {tag}, Priya Shah {tag}")
+        assert r.handled, r
+        assert s1 in r.reply and s2 in r.reply
+        assert "---" in r.reply
+    finally:
+        await _cleanup_links(talent_ids=[t1, t2])
+        await _cleanup_fetcher(talent_ids=[t1, t2])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 4. Multiple talents mixed: some with links, some without.
+# ---------------------------------------------------------------------------
+async def test_profile_multiple_talents_mixed():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_talent_full(f"Angela Sharma {tag}")
+    t2 = await _seed_talent_full(f"Riya Mehta {tag}", age=21, height="5'5\"")
+    s1 = await _seed_link(t1)
+    try:
+        r = await _show_me(group, f"Show me the profiles of Angela Sharma {tag}, Riya Mehta {tag}")
+        assert r.handled, r
+        assert s1 in r.reply
+        assert f"Talentgram X Riya Mehta {tag}" in r.reply
+        assert "Age: 21" in r.reply
+    finally:
+        await _cleanup_links(talent_ids=[t1, t2])
+        await _cleanup_fetcher(talent_ids=[t1, t2])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 5. Minor talent spelling error.
+# ---------------------------------------------------------------------------
+async def test_profile_minor_spelling_error():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent_full(f"Angela Sharma {tag}")
+    try:
+        r = await _show_me(group, f"Show me the profile of Angla Sharma {tag}")
+        assert r.handled, r
+        assert f"Talentgram X Angela Sharma {tag}" in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 6. Extra spaces.
+# ---------------------------------------------------------------------------
+async def test_profile_extra_spaces():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent_full(f"Angela Sharma {tag}")
+    try:
+        r = await _show_me(group, f"Show   me   the   profile   of   Angela Sharma {tag}")
+        assert r.handled, r
+        assert f"Talentgram X Angela Sharma {tag}" in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 7. Case variation.
+# ---------------------------------------------------------------------------
+async def test_profile_case_variation():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent_full(f"Angela Sharma {tag}")
+    try:
+        r = await _show_me(group, f"SHOW ME THE PROFILE OF angela sharma {tag}".upper())
+        assert r.handled, r
+        assert f"Talentgram X Angela Sharma {tag}" in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 8. Ambiguous talent (single-talent profile request -> resumable clarification).
+# ---------------------------------------------------------------------------
+async def test_profile_ambiguous_talent():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_talent_full(f"Priya Shah {tag}", phone="9111111111")
+    t2 = await _seed_talent_full(f"Priya Shah {tag}", phone="9222222222")
+    try:
+        r = await _show_me(group, f"Show me the profile of Priya Shah {tag}")
+        assert r.handled, r
+        assert "Which Priya Shah" in r.reply
+        assert "1 →" in r.reply and "Cancel" in r.reply
+
+        r2 = await _show_me(group, "1")
+        assert r2.handled, r2
+        assert f"Talentgram X Priya Shah {tag}" in r2.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t1, t2])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 9. Verify no internal/admin fields leak into fallback.
+# ---------------------------------------------------------------------------
+async def test_profile_fallback_leaks_no_internal_fields():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent_full(f"Angela Sharma {tag}", age=24, height="5'6\"")
+    # Budget is admin-only by default visibility — must never appear.
+    await db.talents.update_one({"id": talent_id}, {"$set": {
+        "budget": {"status": "accept", "value": "50000"},
+        "notes": "internal admin note — never client facing",
+        "competitive_brand": "SecretBrand",
+    }})
+    try:
+        r = await _show_me(group, f"Show me the profile of Angela Sharma {tag}")
+        assert r.handled, r
+        assert talent_id not in r.reply
+        assert "50000" not in r.reply
+        assert "internal admin note" not in r.reply
+        assert "SecretBrand" not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 10. Verify existing public profile fields are formatted correctly.
+# ---------------------------------------------------------------------------
+async def test_profile_fields_formatted_correctly():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    talent_id = await _seed_talent_full(
+        f"Riya Mehta {tag}", age=22, height="5'7\"",
+        location=[{"city": "Delhi", "country": "India"}],
+        instagram_handle="@riya.mehta", skills=["Dancing", "Acting"],
+    )
+    try:
+        r = await _show_me(group, f"Show me the profile of Riya Mehta {tag}")
+        assert r.handled, r
+        assert "Age: 22" in r.reply
+        assert "Height: 5'7\"" in r.reply
+        assert "Location: Delhi, India" in r.reply
+        assert "Instagram: https://www.instagram.com/riya.mehta/" in r.reply
+        # Skills has no DEFAULT_VISIBILITY entry (core.py) -> gated off by
+        # default in the real public-profile whitelist this reuses; a
+        # link-level visibility override could enable it, but the no-link
+        # fallback has no such override to consult, so it correctly never
+        # appears here.
+        assert "Skills:" not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ===========================================================================
+# SHOW ME FILTERED TALENTS
+# ===========================================================================
+
+async def _seed_filterable_talent(tag, **kwargs):
+    kwargs.setdefault("location", [{"city": "Mumbai", "country": "India"}])
+    return await _seed_talent_full(f"Filter Talent {tag} {uuid.uuid4().hex[:4]}", **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# 11. Gender filter.
+# ---------------------------------------------------------------------------
+async def test_filter_gender_only():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    t1 = await _seed_filterable_talent(tag, gender="female", age=22)
+    t2 = await _seed_filterable_talent(tag, gender="male", age=22)
+    try:
+        r = await _show_me(group, "Show me all female talents")
+        assert r.handled, r
+        doc1 = await db.talents.find_one({"id": t1})
+        doc2 = await db.talents.find_one({"id": t2})
+        assert doc1["name"] in r.reply
+        assert doc2["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t1, t2])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 12. Age range.
+# ---------------------------------------------------------------------------
+async def test_filter_age_range():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    t_in = await _seed_filterable_talent(tag, age=20)
+    t_out = await _seed_filterable_talent(tag, age=40)
+    try:
+        r = await _show_me(group, "Show me all talents between 18 and 25")
+        assert r.handled, r
+        doc_in = await db.talents.find_one({"id": t_in})
+        doc_out = await db.talents.find_one({"id": t_out})
+        assert doc_in["name"] in r.reply
+        assert doc_out["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_in, t_out])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 13. Height range.
+# ---------------------------------------------------------------------------
+async def test_filter_height_range():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    # Height alone is too common a filter in the real shared dev DB to
+    # isolate cleanly (hundreds of pre-existing talents can fall in any
+    # given range, and the 20-result page cap can push a real match off
+    # the rendered page) — combine with a unique, unrealistic city so the
+    # result set is scoped to just these two seeded talents.
+    unique_city = f"Zanzibaria{tag}"
+    t_in = await _seed_talent_full(f"Filter Talent {tag} In", height="5'6\"", location=[{"city": unique_city, "country": "India"}])
+    t_out = await _seed_talent_full(f"Filter Talent {tag} Out", height="6'2\"", location=[{"city": unique_city, "country": "India"}])
+    try:
+        r = await _show_me(group, f"Show me all talents between 5'4 and 5'8 in {unique_city}")
+        assert r.handled, r
+        doc_in = await db.talents.find_one({"id": t_in})
+        doc_out = await db.talents.find_one({"id": t_out})
+        assert doc_in["name"] in r.reply
+        assert doc_out["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_in, t_out])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 14. Location.
+# ---------------------------------------------------------------------------
+async def test_filter_location_only():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_in = await _seed_talent_full(f"Filter Talent {tag} A", location=[{"city": unique_city, "country": "India"}])
+    t_out = await _seed_talent_full(f"Filter Talent {tag} B", location=[{"city": "Delhi", "country": "India"}])
+    try:
+        r = await _show_me(group, f"Show me all talents in {unique_city}")
+        assert r.handled, r
+        doc_in = await db.talents.find_one({"id": t_in})
+        doc_out = await db.talents.find_one({"id": t_out})
+        assert doc_in["name"] in r.reply
+        assert doc_out["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_in, t_out])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 15-18. Combined filters.
+# ---------------------------------------------------------------------------
+async def test_filter_gender_and_age():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    t_match = await _seed_filterable_talent(tag, gender="female", age=22)
+    t_wrong_gender = await _seed_filterable_talent(tag, gender="male", age=22)
+    t_wrong_age = await _seed_filterable_talent(tag, gender="female", age=40)
+    try:
+        r = await _show_me(group, "Show me female talents between 18 and 25")
+        assert r.handled, r
+        names = {(await db.talents.find_one({"id": tid}))["name"] for tid in (t_match, t_wrong_gender, t_wrong_age)}
+        match_name = (await db.talents.find_one({"id": t_match}))["name"]
+        assert match_name in r.reply
+        assert (await db.talents.find_one({"id": t_wrong_gender}))["name"] not in r.reply
+        assert (await db.talents.find_one({"id": t_wrong_age}))["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match, t_wrong_gender, t_wrong_age])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_filter_gender_and_height():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    t_match = await _seed_filterable_talent(tag, gender="female", height="5'6\"")
+    t_wrong = await _seed_filterable_talent(tag, gender="male", height="5'6\"")
+    try:
+        r = await _show_me(group, "Show me female talents height 5'4 to 5'8")
+        assert r.handled, r
+        assert (await db.talents.find_one({"id": t_match}))["name"] in r.reply
+        assert (await db.talents.find_one({"id": t_wrong}))["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match, t_wrong])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_filter_gender_and_location():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_match = await _seed_talent_full(f"Filter Talent {tag} A", gender="female", location=[{"city": unique_city, "country": "India"}])
+    t_wrong = await _seed_talent_full(f"Filter Talent {tag} B", gender="male", location=[{"city": unique_city, "country": "India"}])
+    try:
+        r = await _show_me(group, f"Show me female talents in {unique_city}")
+        assert r.handled, r
+        assert (await db.talents.find_one({"id": t_match}))["name"] in r.reply
+        assert (await db.talents.find_one({"id": t_wrong}))["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match, t_wrong])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_filter_age_height_location():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_match = await _seed_talent_full(f"Filter Talent {tag} A", age=22, height="5'6\"", location=[{"city": unique_city, "country": "India"}])
+    t_wrong_age = await _seed_talent_full(f"Filter Talent {tag} B", age=40, height="5'6\"", location=[{"city": unique_city, "country": "India"}])
+    try:
+        r = await _show_me(group, f"Show me talents age 18 to 25, height 5'4 to 5'8, {unique_city}")
+        assert r.handled, r
+        assert (await db.talents.find_one({"id": t_match}))["name"] in r.reply
+        assert (await db.talents.find_one({"id": t_wrong_age}))["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match, t_wrong_age])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 19. All four filters together.
+# ---------------------------------------------------------------------------
+async def test_filter_all_four_together():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_match = await _seed_talent_full(f"Filter Talent {tag} A", gender="female", age=22, height="5'6\"", location=[{"city": unique_city, "country": "India"}])
+    t_wrong = await _seed_talent_full(f"Filter Talent {tag} B", gender="male", age=22, height="5'6\"", location=[{"city": unique_city, "country": "India"}])
+    try:
+        r = await _show_me(group, f"Show me all female talents between 18 and 25, height 5'4 to 5'8, {unique_city}")
+        assert r.handled, r
+        assert (await db.talents.find_one({"id": t_match}))["name"] in r.reply
+        assert (await db.talents.find_one({"id": t_wrong}))["name"] not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match, t_wrong])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 20. Criteria supplied in different orders -> identical results.
+# ---------------------------------------------------------------------------
+async def test_filter_order_independence():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_match = await _seed_talent_full(f"Filter Talent {tag} A", gender="female", age=22, height="5'6\"", location=[{"city": unique_city, "country": "India"}])
+    try:
+        r1 = await _show_me(group, f"Show me all female talents between 18 and 25, height 5'4 to 5'8, {unique_city}")
+        r2 = await _show_me(group, f"Show me talents height 5'4 to 5'8, female, {unique_city}, age 18 to 25")
+        assert r1.handled and r2.handled
+        assert r1.reply == r2.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 21. Minor spelling error in location.
+# ---------------------------------------------------------------------------
+async def test_filter_location_minor_spelling_error():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_match = await _seed_talent_full(f"Filter Talent {tag} A", location=[{"city": unique_city, "country": "India"}])
+    typo_city = unique_city[:-1] + "e" + unique_city[-1]  # one inserted char
+    try:
+        r = await _show_me(group, f"Show me all talents in {typo_city}")
+        assert r.handled, r
+        assert (await db.talents.find_one({"id": t_match}))["name"] in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 22. Zero matches.
+# ---------------------------------------------------------------------------
+async def test_filter_zero_matches():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    try:
+        r = await _show_me(group, "Show me all female talents between 5 and 6, height 7'0 to 7'2, Nonexistentcityxyz")
+        assert r.handled, r
+        assert "No talents matched these criteria." in r.reply
+        assert "broadening" in r.reply
+    finally:
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 23. Multiple matching talents -> result count stated.
+# ---------------------------------------------------------------------------
+async def test_filter_multiple_matches_count_stated():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    ids = [
+        await _seed_talent_full(f"Filter Talent {tag} {i}", gender="female", location=[{"city": unique_city, "country": "India"}])
+        for i in range(3)
+    ]
+    try:
+        r = await _show_me(group, f"Show me all female talents in {unique_city}")
+        assert r.handled, r
+        assert "Found 3 talents matching your criteria." in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=ids)
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 24. Verify returned records are canonical talent records (real DB ids).
+# ---------------------------------------------------------------------------
+async def test_filter_returns_canonical_talent_records():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_match = await _seed_talent_full(f"Filter Talent {tag} A", location=[{"city": unique_city, "country": "India"}])
+    try:
+        query = fetcher._build_talent_query(
+            q=None, status=None, gender=None, ethnicity=None, location=[unique_city],
+            age_min=None, age_max=None, height_min=None, height_max=None,
+            followers_min=None, interested_in=[], interested_in_mode="any",
+            skills=[], skills_mode="any", tags=[], tags_mode="any",
+        )
+        docs = await db.talents.find(query, {"_id": 0, "id": 1}).to_list(20)
+        ids = {d["id"] for d in docs}
+        assert t_match in ids
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 25. Portfolio link resolution uses the existing generated-link system.
+# ---------------------------------------------------------------------------
+async def test_filter_result_uses_existing_link_system():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_match = await _seed_talent_full(f"Filter Talent {tag} A", location=[{"city": unique_city, "country": "India"}])
+    slug = await _seed_link(t_match)
+    try:
+        r = await _show_me(group, f"Show me all talents in {unique_city}")
+        assert r.handled, r
+        assert slug in r.reply
+        assert "https://links.talentgramagency.com/l/" in r.reply
+    finally:
+        await _cleanup_links(talent_ids=[t_match])
+        await _cleanup_fetcher(talent_ids=[t_match])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# 26. Verify no new profile links are created by Fetcher.
+# ---------------------------------------------------------------------------
+async def test_filter_creates_no_new_links():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    t_match = await _seed_talent_full(f"Filter Talent {tag} A", location=[{"city": unique_city, "country": "India"}])
+    try:
+        before = await db.links.count_documents({})
+        r = await _show_me(group, f"Show me all talents in {unique_city}")
+        assert r.handled, r
+        after = await db.links.count_documents({})
+        assert after == before
+    finally:
+        await _cleanup_fetcher(talent_ids=[t_match])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ===========================================================================
+# REGRESSION
+# ===========================================================================
+
+# 27 (existing SHOW ME FORM tests) and 28 (Scouting Agent tests) are covered
+# by re-running test_talentgram_fetcher.py's own FORM tests (unchanged
+# above) and test_casting_agent.py / test_whatsapp_campaign_agent.py
+# standalone — see the deployment report, not duplicated here.
+
+# ---------------------------------------------------------------------------
+# 29. SHOW ME PROFILE sent in Scouting Agent does not execute.
+# ---------------------------------------------------------------------------
+async def test_profile_not_executed_in_scouting_agent():
+    from agents import registry
+    scouting_cfg = await registry.get_agent_config("whatsapp-campaign-agent")
+    if not scouting_cfg or not scouting_cfg.get("group_names"):
+        pytest.skip("whatsapp-campaign-agent has no configured group in this test DB")
+    scouting_group = scouting_cfg["group_names"][0]
+    r = await handle_inbound_message(
+        group_name=scouting_group, sender_phone="919000000001",
+        text="Show me the profile of Angela Sharma",
+        sender_name="Admin", sender_is_group_member=True,
+    )
+    if r.handled:
+        assert "Talentgram X" not in (r.reply or "")
+
+
+# ---------------------------------------------------------------------------
+# 30. Filtered SHOW ME sent in Scouting Agent does not execute.
+# ---------------------------------------------------------------------------
+async def test_filtered_not_executed_in_scouting_agent():
+    from agents import registry
+    scouting_cfg = await registry.get_agent_config("whatsapp-campaign-agent")
+    if not scouting_cfg or not scouting_cfg.get("group_names"):
+        pytest.skip("whatsapp-campaign-agent has no configured group in this test DB")
+    scouting_group = scouting_cfg["group_names"][0]
+    r = await handle_inbound_message(
+        group_name=scouting_group, sender_phone="919000000001",
+        text="Show me all female talents between 18 and 25 in Mumbai",
+        sender_name="Admin", sender_is_group_member=True,
+    )
+    if r.handled:
+        assert "Found" not in (r.reply or "") or "matching your criteria" not in (r.reply or "")
+
+
+# ---------------------------------------------------------------------------
+# 31. Fetcher commands execute only in Talentgram Fetcher Agent (both new
+#     commands, unregistered group).
+# ---------------------------------------------------------------------------
+async def test_profile_and_filter_do_not_execute_in_unregistered_group():
+    other_group = f"Some Other Group {uuid.uuid4().hex[:6]}"
+    r1 = await handle_inbound_message(
+        group_name=other_group, sender_phone="919000000001",
+        text="Show me the profile of Angela Sharma",
+        sender_name="Admin", sender_is_group_member=True,
+    )
+    assert not r1.handled
+    r2 = await handle_inbound_message(
+        group_name=other_group, sender_phone="919000000001",
+        text="Show me all female talents between 18 and 25 in Mumbai",
+        sender_name="Admin", sender_is_group_member=True,
+    )
+    assert not r2.handled
+
+
+# 32 (agent's own outgoing messages not reprocessed) is enforced entirely
+# by the shared transport (whatsapp-worker/inbound.py's sender.
+# _is_outgoing_msg filter), unrelated to anything added in this module —
+# see test_talentgram_fetcher.py's existing note on this point for SHOW ME
+# FORM; nothing new to test here.

@@ -186,18 +186,36 @@ def build_copy_form_message(sub: Dict[str, Any], project: Optional[Dict[str, Any
             avail_text = f"{avail_text} — {note}"
         lines.append(f"Availability - {avail_text}")
 
-    competitive_brand = od.get("competitive_brand")
-    if competitive_brand:
-        lines.append(f"Competitive Brand - {competitive_brand}")
+    # Production fix — Competitive Brand and admin-defined project
+    # questions must NEVER be silently dropped just because the answer is
+    # blank (real bug: Ameya Saawant / Mivi Phones has field_visibility.
+    # competitive_brand=True and submission_requirements.fields.
+    # competitive_brand="required", but her actual value is "" — Copy
+    # Form's own `if (od.competitive_brand)` check, which this used to
+    # port verbatim, would omit the line entirely, hiding a required-but-
+    # unanswered field from whoever reads the form). The canonical
+    # "is this even part of THIS project's form" signal is
+    # project.submission_requirements.fields.competitive_brand (audited
+    # via a real submission) — present at all means the project's form
+    # asks for it; absent means this project never did, so the line is
+    # correctly never invented for it.
+    requirements_fields = ((project or {}).get("submission_requirements") or {}).get("fields") or {}
+    if "competitive_brand" in requirements_fields:
+        competitive_brand = (od.get("competitive_brand") or "").strip() if isinstance(od.get("competitive_brand"), str) else od.get("competitive_brand")
+        lines.append(f"Competitive Brand - {competitive_brand}" if competitive_brand else "Competitive Brand - [blank]")
 
+    # Every admin-defined project question ALWAYS appears — an unanswered
+    # question is real, useful information (the client/reviewer needs to
+    # know it was asked and not yet answered), never silently dropped the
+    # way Copy Form's own blank-answer check currently does.
     for q in (project or {}).get("custom_questions") or []:
         qid = q.get("id")
         question = (q.get("question") or "").strip()
         if not question:
             continue
         answer = (od.get("custom_answers") or {}).get(qid)
-        if answer is not None and str(answer).strip() != "":
-            lines.append(f"{question} - {answer}")
+        answer_text = str(answer).strip() if answer is not None else ""
+        lines.append(f"{question} - {answer_text}" if answer_text else f"{question} - [blank]")
 
     ig_url = _instagram_profile_url_copy_form(od.get("instagram_handle"))
     if ig_url:
@@ -241,16 +259,50 @@ def build_copy_form_message(sub: Dict[str, Any], project: Optional[Dict[str, Any
 
 _LINKS_BASE_URL = "https://links.talentgramagency.com"
 
+_LINK_TITLE_PREFIX_RE = re.compile(r"(?i)^\s*talentgram\s*[x×]\s*")
 
-async def _find_talent_portfolio_link(talent_id: str) -> Optional[str]:
-    doc = await db.links.find_one(
+
+def _title_matches_talent_name(title: Optional[str], talent_label: str) -> bool:
+    """A real-data audit (Angela Kumar) found she has TWO links that both
+    pass the exact talent_ids==[id] match — "Talentgram x Angela" and
+    "Talentgram x Kay Beauty" — structurally IDENTICAL in every other
+    field (both manual "Individual Talent Share" links per LinkGenerator.
+    jsx's own inferMode: submission_ids=[], auto_pull=False). Nothing in
+    the schema marks one as "the general profile" vs "a one-off brand
+    pitch" — the admin-typed title is the only signal, and a link titled
+    after the talent's OWN name (not a brand) is what a human would
+    recognize as her actual profile link. "Most recent" alone (the prior
+    behaviour) picked "Kay Beauty" here purely because it happened to be
+    created a day later — the real bug this fixes.
+
+    Token-subset match, not exact equality — a real-data check against
+    Angela Kumar showed her own name-titled link is literally "Talentgram
+    x Angela" (first name only, not "Angela Kumar"), so exact equality
+    against the full talent_label missed it entirely. Every word in the
+    (prefix-stripped) title must appear among the talent's own name
+    words — "angela" ⊆ {"angela","kumar"} matches; "kay beauty" ⊆
+    {"angela","kumar"} does not."""
+    t = _LINK_TITLE_PREFIX_RE.sub("", title or "").strip().lower()
+    n = (talent_label or "").strip().lower()
+    if not t or not n:
+        return False
+    t_tokens = set(t.split())
+    n_tokens = set(n.split())
+    return bool(t_tokens) and t_tokens.issubset(n_tokens)
+
+
+async def _find_talent_portfolio_link(talent_id: str, talent_label: str) -> Optional[str]:
+    candidates = await db.links.find(
         {"talent_ids": [talent_id], "is_public": True},
-        {"_id": 0, "slug": 1},
-        sort=[("created_at", -1)],
-    )
-    if not doc or not doc.get("slug"):
+        {"_id": 0, "slug": 1, "title": 1},
+    ).sort([("created_at", -1)]).to_list(50)
+    if not candidates:
         return None
-    return f"{_LINKS_BASE_URL}/l/{doc['slug']}"
+    name_matches = [c for c in candidates if _title_matches_talent_name(c.get("title"), talent_label)]
+    chosen = name_matches[0] if name_matches else candidates[0]
+    if not chosen.get("slug"):
+        return None
+    return f"{_LINKS_BASE_URL}/l/{chosen['slug']}"
 
 
 def _render_work_link_line(stored: str) -> str:
@@ -302,7 +354,7 @@ def _render_talent_profile_fallback(talent_doc: Dict[str, Any]) -> str:
 async def _render_talent_profile(
     talent_id: str, talent_label: str, talent_doc: Optional[Dict[str, Any]] = None,
 ) -> str:
-    link_url = await _find_talent_portfolio_link(talent_id)
+    link_url = await _find_talent_portfolio_link(talent_id, talent_label)
     if link_url:
         return f"Talentgram X {talent_label}\n\nClick to view the portfolio:\n\n{link_url}"
     doc = talent_doc if talent_doc is not None else await db.talents.find_one({"id": talent_id}, {"_id": 0})
@@ -494,8 +546,42 @@ async def _resolve_location_terms(raw_location: Optional[str]) -> List[str]:
     return [raw_location]
 
 
-_FILTER_RESULT_PAGE_SIZE = 20  # mirrors casting_pipeline.py's own talent_search page size
-_FILTER_RESULT_CHAR_CAP = 6000
+def _render_talent_filter_card(talent_doc: Dict[str, Any]) -> str:
+    """Filtered-search result card — deliberately narrower than
+    _render_talent_profile_fallback: Name/Age/Height/Location/Instagram
+    ONLY (no Work Links, no Skills, no portfolio link). This is a
+    talent-OPTIONS list for a client to browse, not an individual profile
+    request — Production fix: the previous version reused
+    _render_talent_profile (PROFILE's own richer format) for every filter
+    result, which is why Work Links were leaking into filter output."""
+    shaped = _filter_talent_for_client(talent_doc, DEFAULT_VISIBILITY)
+    name = shaped.get("name") or "Unnamed"
+    lines = [f"Talentgram X {name}", ""]
+    if shaped.get("age") is not None:
+        lines.append(f"Age: {shaped['age']}")
+    if shaped.get("height"):
+        lines.append(f"Height: {shaped['height']}")
+    location_text = _format_location_copy_form(shaped.get("location"))
+    if location_text:
+        lines.append(f"Location: {location_text}")
+    ig_url = _instagram_profile_url_copy_form(shaped.get("instagram_handle"))
+    if ig_url:
+        lines.append(f"Instagram: {ig_url}")
+    return "\n".join(lines)
+
+
+# WhatsApp's own actual documented text-message limit is 65,536 characters
+# (audited from the transport side: whatsapp-worker/sender.py's text-send
+# path just types the string via the keyboard with no length check or
+# chunking of its own — there is no SMALLER limit anywhere else in this
+# pipeline). This is that real constraint, not an invented page size —
+# left with headroom for the header/footer text around it. Production fix:
+# the previous version capped at an arbitrary 20 results / 6000 chars and
+# silently dropped the remainder into a "showing N of M" footer — this
+# reflects the platform's own established "no truncation, no paging,
+# regardless of size" convention (casting_pipeline.py's _render_talent_list)
+# instead, up to WhatsApp's real limit.
+_WHATSAPP_SAFE_MESSAGE_CHAR_LIMIT = 60000
 
 
 async def _run_filtered_talent_search(filters: Dict[str, Any]) -> ExecResult:
@@ -518,28 +604,24 @@ async def _run_filtered_talent_search(filters: Dict[str, Any]) -> ExecResult:
         ))
 
     docs = await db.talents.find(query, {"_id": 0}) \
-        .sort([("name", 1), ("id", 1)]).limit(_FILTER_RESULT_PAGE_SIZE).to_list(_FILTER_RESULT_PAGE_SIZE)
+        .sort([("name", 1), ("id", 1)]).to_list(2000)
 
-    blocks: List[str] = []
-    total_len = 0
-    shown = 0
-    for doc in docs:
-        block = await _render_talent_profile(doc["id"], doc.get("name") or "Unnamed", talent_doc=doc)
-        if shown > 0 and total_len + len(block) > _FILTER_RESULT_CHAR_CAP:
-            break
-        blocks.append(block)
-        total_len += len(block)
-        shown += 1
-
+    blocks = [_render_talent_filter_card(doc) for doc in docs]
     header = f"Found {total} talent{'s' if total != 1 else ''} matching your criteria."
-    footer = ""
-    if shown < total:
-        footer = (
-            f"\n\nShowing {shown} of {total} — narrow your criteria "
-            "(age, height, gender, or location) for a shorter list."
-        )
     body = "\n\n---\n\n".join(blocks)
-    return ExecResult(ok=True, message=f"{header}\n\n{body}{footer}")
+    message = f"{header}\n\n{body}"
+
+    if len(message) > _WHATSAPP_SAFE_MESSAGE_CHAR_LIMIT:
+        # ONE filter request must produce ONE WhatsApp message — never a
+        # partial list split across replies. When the complete list
+        # genuinely can't fit, say so honestly instead of truncating.
+        return ExecResult(ok=True, message=(
+            f"Found {total} talents. Please narrow your criteria to get the "
+            "complete list in one message.\n\n"
+            "Try narrowing by age, height, gender, or location."
+        ))
+
+    return ExecResult(ok=True, message=message)
 
 
 async def _try_handle_filtered_talents_request(ctx: ExecContext, chunk: str) -> Optional[ExecResult]:

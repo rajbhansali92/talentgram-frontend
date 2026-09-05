@@ -68,14 +68,14 @@ async def _seed_talent_full(
     return tid
 
 
-async def _seed_link(talent_id: str, *, is_public: bool = True) -> str:
+async def _seed_link(talent_id: str, *, is_public: bool = True, title: str = None, created_at: str = None) -> str:
     lid = f"test-fetcher-link-{uuid.uuid4().hex[:8]}"
     slug = f"test-slug-{uuid.uuid4().hex[:8]}"
     await db.links.insert_one({
-        "id": lid, "slug": slug, "title": f"Test link {slug}", "brand_name": None,
+        "id": lid, "slug": slug, "title": title or f"Test link {slug}", "brand_name": None,
         "talent_ids": [talent_id], "submission_ids": [],
         "is_public": is_public, "password": None, "notes": None,
-        "created_at": _now(), "created_by": "test",
+        "created_at": created_at or _now(), "created_by": "test",
     })
     return slug
 
@@ -536,6 +536,173 @@ async def test_show_me_creates_no_new_database_records():
         await _restore_config(original, agent_id=AGENT_ID)
 
 
+async def _seed_project_with_requirements(brand_name: str, *, custom_questions=None, competitive_brand_required: bool = True):
+    pid = await _seed_project(brand_name)
+    update = {}
+    if custom_questions is not None:
+        update["custom_questions"] = custom_questions
+    if competitive_brand_required:
+        update["submission_requirements"] = {"fields": {"competitive_brand": "required"}}
+    if update:
+        await db.projects.update_one({"id": pid}, {"$set": update})
+    return pid
+
+
+# ---------------------------------------------------------------------------
+# Issue 3 regression — Competitive Brand and admin-defined project
+# questions must never be silently dropped, including when blank.
+# ---------------------------------------------------------------------------
+async def test_form_includes_competitive_brand_when_answered():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_requirements(f"Mivi Phones {tag}")
+    talent_id = await _seed_talent_full(f"Ameya Saawant {tag}")
+    await _seed_submission_with_form(project_id, talent_id, original_form_data={"first_name": "Ameya", "competitive_brand": "Samsung"})
+    try:
+        r = await _show_me(group, f"Show me Ameya Saawant {tag}'s form for Mivi Phones {tag}")
+        assert r.handled, r
+        assert "Competitive Brand - Samsung" in r.reply, r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_form_includes_competitive_brand_blank_when_project_requires_it():
+    # Real bug reproduction: Ameya Saawant / Mivi Phones — the project's
+    # own submission_requirements.fields includes competitive_brand, but
+    # her actual answer is "" — the field must still appear.
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_requirements(f"Mivi Phones {tag}")
+    talent_id = await _seed_talent_full(f"Ameya Saawant {tag}")
+    await _seed_submission_with_form(project_id, talent_id, original_form_data={"first_name": "Ameya", "competitive_brand": ""})
+    try:
+        r = await _show_me(group, f"Show me Ameya Saawant {tag}'s form for Mivi Phones {tag}")
+        assert r.handled, r
+        assert "Competitive Brand - [blank]" in r.reply, r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_form_omits_competitive_brand_when_project_never_asks_for_it():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_requirements(f"NoCompBrand Project {tag}", competitive_brand_required=False)
+    talent_id = await _seed_talent_full(f"Fixture Person {tag}")
+    await _seed_submission_with_form(project_id, talent_id, original_form_data={"first_name": "Fixture"})
+    try:
+        r = await _show_me(group, f"Show me Fixture Person {tag}'s form for NoCompBrand Project {tag}")
+        assert r.handled, r
+        assert "Talentgram x NoCompBrand" in r.reply, r.reply
+        assert "Competitive Brand" not in r.reply, r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_form_includes_multiple_custom_questions_answered_and_blank():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    questions = [
+        {"id": "q1", "question": "Have you worked with a competing brand?"},
+        {"id": "q2", "question": "Are you comfortable with a 2-day shoot?"},
+    ]
+    project_id = await _seed_project_with_requirements(f"Custom Q Project {tag}", custom_questions=questions, competitive_brand_required=False)
+    talent_id = await _seed_talent_full(f"Fixture Person {tag}")
+    await _seed_submission_with_form(
+        project_id, talent_id,
+        original_form_data={"first_name": "Fixture", "custom_answers": {"q1": "Samsung"}},
+    )
+    try:
+        r = await _show_me(group, f"Show me Fixture Person {tag}'s form for Custom Q Project {tag}")
+        assert r.handled, r
+        assert "Have you worked with a competing brand? - Samsung" in r.reply, r.reply
+        # q2 has no answer at all -> must STILL appear, blank.
+        assert "Are you comfortable with a 2-day shoot? - [blank]" in r.reply, r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_form_custom_question_ordering_matches_project_definition():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    questions = [
+        {"id": "q1", "question": f"First question {tag}"},
+        {"id": "q2", "question": f"Second question {tag}"},
+        {"id": "q3", "question": f"Third question {tag}"},
+    ]
+    project_id = await _seed_project_with_requirements(f"Order Project {tag}", custom_questions=questions, competitive_brand_required=False)
+    talent_id = await _seed_talent_full(f"Fixture Person {tag}")
+    await _seed_submission_with_form(
+        project_id, talent_id,
+        original_form_data={"first_name": "Fixture", "custom_answers": {"q1": "A", "q2": "B", "q3": "C"}},
+    )
+    try:
+        r = await _show_me(group, f"Show me Fixture Person {tag}'s form for Order Project {tag}")
+        assert r.handled, r
+        i1 = r.reply.index(f"First question {tag}")
+        i2 = r.reply.index(f"Second question {tag}")
+        i3 = r.reply.index(f"Third question {tag}")
+        assert i1 < i2 < i3, r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_form_new_future_custom_question_appears_automatically():
+    # A project defined AFTER this code was written must still work with
+    # no code changes — custom_questions is read straight off the
+    # project document, never hardcoded.
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    questions = [{"id": "future_q", "question": f"Brand new future question {tag}?"}]
+    project_id = await _seed_project_with_requirements(f"Future Project {tag}", custom_questions=questions, competitive_brand_required=False)
+    talent_id = await _seed_talent_full(f"Fixture Person {tag}")
+    await _seed_submission_with_form(
+        project_id, talent_id,
+        original_form_data={"first_name": "Fixture", "custom_answers": {"future_q": "Yes"}},
+    )
+    try:
+        r = await _show_me(group, f"Show me Fixture Person {tag}'s form for Future Project {tag}")
+        assert r.handled, r
+        assert f"Brand new future question {tag}? - Yes" in r.reply, r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_form_existing_copy_form_fields_unchanged():
+    # Regression: the ordinary answered fields (Age/Height/Location/etc.)
+    # must render exactly as before these fixes.
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_requirements(f"Regress Project {tag}", competitive_brand_required=False)
+    talent_id = await _seed_talent_full(f"Fixture Person {tag}")
+    await _seed_submission_with_form(
+        project_id, talent_id,
+        original_form_data={"first_name": "Fixture", "last_name": "Example", "age": 25, "height": "5'8\""},
+        effective_age=25,
+    )
+    try:
+        r = await _show_me(group, f"Show me Fixture Person {tag}'s form for Regress Project {tag}")
+        assert r.handled, r
+        assert "Fixture - E" in r.reply
+        assert "Age - 25" in r.reply
+        assert "Height - 5'8\"" in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
 # ===========================================================================
 # SHOW ME PROFILE
 # ===========================================================================
@@ -761,6 +928,121 @@ async def test_profile_fields_formatted_correctly():
     finally:
         await _cleanup_fetcher(talent_ids=[talent_id])
         await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# Issue 1 regression — PROFILE must pick the individual single-talent link,
+# never a multi-talent/project one, and among several valid single-talent
+# links must prefer the one titled after the talent's OWN name over a
+# brand-titled one (real bug: Angela Kumar's "Talentgram x Kay Beauty" link
+# was picked over "Talentgram x Angela" purely because it was newer).
+# ---------------------------------------------------------------------------
+async def test_profile_prefers_individual_link_over_multi_talent_link():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    name = f"Angela Kumar {tag}"
+    t1 = await _seed_talent_full(name)
+    t2 = await _seed_talent_full(f"Other Talent {tag}")
+    individual_slug = await _seed_link(t1, title=f"Talentgram x {name}")
+    lid = f"test-fetcher-link-{uuid.uuid4().hex[:8]}"
+    multi_slug = f"test-slug-{uuid.uuid4().hex[:8]}"
+    # A multi-talent/project portfolio link created AFTER the individual
+    # one (so "most recent" alone would wrongly prefer it).
+    await db.links.insert_one({
+        "id": lid, "slug": multi_slug, "title": "Talentgram x Collective", "brand_name": None,
+        "talent_ids": [t1, t2], "submission_ids": [],
+        "is_public": True, "password": None, "notes": None,
+        "created_at": _now(), "created_by": "test",
+    })
+    try:
+        r = await _show_me(group, f"Show me the profile of {name}")
+        assert r.handled, r
+        assert individual_slug in r.reply
+        assert multi_slug not in r.reply
+    finally:
+        await _cleanup_links(talent_ids=[t1, t2])
+        await _cleanup_fetcher(talent_ids=[t1, t2])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_profile_prefers_name_titled_link_over_newer_brand_titled_link():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    name = f"Angela Kumar {tag}"
+    talent_id = await _seed_talent_full(name)
+    # The name-titled link is created FIRST (older) — a naive "most
+    # recent" tie-break would wrongly pick the brand-titled one below.
+    individual_slug = await _seed_link(talent_id, title=f"Talentgram x {name}")
+    brand_slug = await _seed_link(talent_id, title="Talentgram x Kay Beauty")
+    try:
+        r = await _show_me(group, f"Show me the profile of {name}")
+        assert r.handled, r
+        assert individual_slug in r.reply, r.reply
+        assert brand_slug not in r.reply
+    finally:
+        await _cleanup_links(talent_ids=[talent_id])
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_profile_falls_back_to_most_recent_when_no_name_titled_link_exists():
+    # When NONE of the talent's single-talent links are titled after their
+    # own name (every one is a brand-specific share), the existing
+    # "most recent wins" tie-break is the only signal available and stays
+    # in place — never a hard failure just because no name-titled link
+    # exists.
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    name = f"Angela Kumar {tag}"
+    talent_id = await _seed_talent_full(name)
+    await _seed_link(talent_id, title="Talentgram x Nykaa")
+    newer_slug = await _seed_link(talent_id, title="Talentgram x Kay Beauty")
+    try:
+        r = await _show_me(group, f"Show me the profile of {name}")
+        assert r.handled, r
+        assert newer_slug in r.reply
+    finally:
+        await _cleanup_links(talent_ids=[talent_id])
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_profile_lookup_has_no_project_influence():
+    # PROFILE never takes a project into account at all — confirmed by
+    # construction (the resolver signature has no project parameter), and
+    # empirically here: a talent with submissions on several DIFFERENT
+    # projects still resolves to the SAME individual link regardless.
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    name = f"Angela Kumar {tag}"
+    talent_id = await _seed_talent_full(name)
+    p1 = await _seed_project(f"Project A {tag}")
+    p2 = await _seed_project(f"Project B {tag}")
+    await _seed_submission_with_form(p1, talent_id, original_form_data={"first_name": "Angela"})
+    await _seed_submission_with_form(p2, talent_id, original_form_data={"first_name": "Angela"})
+    individual_slug = await _seed_link(talent_id, title=f"Talentgram x {name}")
+    try:
+        r = await _show_me(group, f"Show me the profile of {name}")
+        assert r.handled, r
+        assert individual_slug in r.reply
+    finally:
+        await _cleanup_links(talent_ids=[talent_id])
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[p1, p2])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+def test_link_exact_talent_ids_condition_not_contains():
+    # Verifies the query documents the exact condition — a regex sanity
+    # check on the actual query construction in the source, so a future
+    # edit that silently loosens "==" back to "in"/"$in" fails this test.
+    import inspect
+    src = inspect.getsource(fetcher._find_talent_portfolio_link)
+    assert '"talent_ids": [talent_id]' in src
+    assert "$in" not in src
 
 
 # ===========================================================================
@@ -1057,18 +1339,23 @@ async def test_filter_returns_canonical_talent_records():
 # ---------------------------------------------------------------------------
 # 25. Portfolio link resolution uses the existing generated-link system.
 # ---------------------------------------------------------------------------
-async def test_filter_result_uses_existing_link_system():
+async def test_filter_result_never_includes_portfolio_link():
+    # Production fix (Issue 2): filter results are ALWAYS the concise
+    # Name/Age/Height/Location/Instagram card, even when the talent has a
+    # generated portfolio link — a portfolio link is only ever shown for
+    # an explicit SHOW ME PROFILE request, never for filtered talent
+    # options.
     group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
     original = await _use_test_config(group, agent_id=AGENT_ID)
     tag = uuid.uuid4().hex[:6]
     unique_city = f"Zanzibaria{tag}"
     t_match = await _seed_talent_full(f"Filter Talent {tag} A", location=[{"city": unique_city, "country": "India"}])
-    slug = await _seed_link(t_match)
+    await _seed_link(t_match)
     try:
         r = await _show_me(group, f"Show me all talents in {unique_city}")
         assert r.handled, r
-        assert slug in r.reply
-        assert "https://links.talentgramagency.com/l/" in r.reply
+        assert "https://links.talentgramagency.com" not in r.reply
+        assert "Click to view the portfolio" not in r.reply
     finally:
         await _cleanup_links(talent_ids=[t_match])
         await _cleanup_fetcher(talent_ids=[t_match])
@@ -1092,6 +1379,89 @@ async def test_filter_creates_no_new_links():
         assert after == before
     finally:
         await _cleanup_fetcher(talent_ids=[t_match])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+# ---------------------------------------------------------------------------
+# Issue 2 regression — filter output must be concise (Name/Age/Height/
+# Location/Instagram ONLY, no Work Links/Skills/portfolio link) and must
+# always be ONE message, never an artificial 15/20-result page.
+# ---------------------------------------------------------------------------
+async def test_filter_output_contains_only_required_fields():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    talent_id = await _seed_talent_full(
+        f"Filter Talent {tag}", age=24, height="5'5\"",
+        location=[{"city": unique_city, "country": "India"}],
+        instagram_handle="filter.talent", work_links=["Reel || https://vimeo.com/x"],
+        skills=["Dancing"],
+    )
+    try:
+        r = await _show_me(group, f"Show me all talents in {unique_city}")
+        assert r.handled, r
+        assert "Age: 24" in r.reply
+        assert "Height: 5'5\"" in r.reply
+        assert f"Location: {unique_city}, India" in r.reply
+        assert "Instagram: https://www.instagram.com/filter.talent/" in r.reply
+        assert "Work Links" not in r.reply
+        assert "Skills" not in r.reply
+        assert "Click to view the portfolio" not in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_filter_result_always_single_message_not_capped_at_arbitrary_page_size():
+    # Real bug: the previous implementation capped at 20 results with a
+    # "showing N of M" footer even when everything would have fit in one
+    # WhatsApp message easily. 30 seeded talents (well under the real
+    # ~65K-char WhatsApp limit even with full cards) must ALL appear in
+    # one response, uncapped.
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    ids = [
+        await _seed_talent_full(f"Filter Talent {tag} {i:02d}", location=[{"city": unique_city, "country": "India"}])
+        for i in range(30)
+    ]
+    try:
+        r = await _show_me(group, f"Show me all talents in {unique_city}")
+        assert r.handled, r
+        assert "Found 30 talents matching your criteria." in r.reply
+        assert "Showing" not in r.reply  # no "showing N of M" partial-page footer
+        for tid in ids:
+            doc = await db.talents.find_one({"id": tid})
+            assert doc["name"] in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=ids)
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_filter_too_large_result_set_asks_to_narrow_without_partial_list():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    ids = [
+        await _seed_talent_full(f"Filter Talent {tag} {i:04d}", location=[{"city": unique_city, "country": "India"}])
+        for i in range(50)
+    ]
+    original_limit = fetcher._WHATSAPP_SAFE_MESSAGE_CHAR_LIMIT
+    fetcher._WHATSAPP_SAFE_MESSAGE_CHAR_LIMIT = 500  # force the too-large branch deterministically
+    try:
+        r = await _show_me(group, f"Show me all talents in {unique_city}")
+        assert r.handled, r
+        assert "Found 50 talents." in r.reply
+        assert "narrow your criteria" in r.reply.lower()
+        # Never a partial list mixed into the same message.
+        doc0 = await db.talents.find_one({"id": ids[0]})
+        assert doc0["name"] not in r.reply
+    finally:
+        fetcher._WHATSAPP_SAFE_MESSAGE_CHAR_LIMIT = original_limit
+        await _cleanup_fetcher(talent_ids=ids)
         await _restore_config(original, agent_id=AGENT_ID)
 
 

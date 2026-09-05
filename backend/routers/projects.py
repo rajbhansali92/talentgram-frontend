@@ -237,7 +237,7 @@ async def attach_project_material(
     Returns the updated project document (``_id`` stripped).
     """
     if category not in MATERIAL_CATEGORIES:
-        raise HTTPException(400, "Invalid category (script|image|audio|video_file)")
+        raise HTTPException(400, f"Invalid category. Must be one of: {sorted(MATERIAL_CATEGORIES)}")
     project = await db.projects.find_one({"id": pid})
     if not project:
         raise HTTPException(404, "Project not found")

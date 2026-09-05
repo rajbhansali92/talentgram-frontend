@@ -2146,7 +2146,15 @@ def map_link_visibility_to_submission(link_vis: dict) -> dict:
 
 
 COMMISSION_OPTIONS = ["10%", "15%", "20%", "25%", "30%"]
-MATERIAL_CATEGORIES = {"script", "image", "audio", "video_file"}
+# Base categories plus the Production Desk's document categories (client
+# confirmation, PO, agreement, invoice, call sheet, payment proof,
+# reimbursement bills, GST/TDS docs) — all attached through the SAME
+# `attach_project_material()` upload path, not a second file store.
+MATERIAL_CATEGORIES = {
+    "script", "image", "audio", "video_file",
+    "client_confirmation", "po", "agreement", "invoice", "call_sheet",
+    "payment_proof", "reimbursement_bill", "gst_tds_document",
+}
 MAX_VIDEO_FILE_BYTES = 100 * 1024 * 1024  # 100 MB
 # Submission media slots
 #   intro_video      — single slot

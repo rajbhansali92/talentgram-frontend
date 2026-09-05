@@ -9,6 +9,7 @@ import MaterialModal from "@/components/MaterialModal";
 import BudgetLines from "@/components/BudgetLines";
 import ProjectPipeline from "@/pages-components/ProjectPipeline";
 import ProjectAIScout from "@/pages-components/ProjectAIScout";
+import ProductionDesk from "@/pages-components/ProductionDesk";
 import {
     AVAILABILITY_OPTIONS,
     BUDGET_OPTIONS,
@@ -112,6 +113,7 @@ const PROJECT_TABS = [
     { id: "scout", label: "AI Scout" },
     { id: "submissions", label: "Submission Review" },
     { id: "pipeline", label: "Casting Pipeline" },
+    { id: "production", label: "Production Desk" },
 ];
 const LAST_PROJECT_TAB_KEY = "tg_last_project_tab";
 
@@ -2104,6 +2106,12 @@ export default function ProjectEdit() {
             {visitedTabs.has("pipeline") && isEdit && (
                 <div style={{ display: activeTab === "pipeline" ? "block" : "none" }} data-testid="project-tab-panel-pipeline">
                     <ProjectPipeline projectId={id} />
+                </div>
+            )}
+
+            {visitedTabs.has("production") && isEdit && (
+                <div style={{ display: activeTab === "production" ? "block" : "none" }} data-testid="project-tab-panel-production">
+                    <ProductionDesk projectId={id} project={project} />
                 </div>
             )}
 

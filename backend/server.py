@@ -30,6 +30,7 @@ from routers import (
     notifications as notifications_router,
     password,
     portal,
+    production_desk,
     projects,
     submissions,
     talents,
@@ -136,6 +137,7 @@ app.include_router(auth.router)
 app.include_router(talents.router)
 app.include_router(links.router)
 app.include_router(projects.router)
+app.include_router(production_desk.router)
 app.include_router(submissions.router)
 app.include_router(applications.router)
 app.include_router(users.router)

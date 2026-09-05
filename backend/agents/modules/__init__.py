@@ -6,9 +6,9 @@ owns" requirement). Importing this package triggers every module's
 `register()` call — see `agents.modules.register_all()`, invoked once at
 app startup from server.py.
 """
-from . import crm, casting_pipeline, whatsapp_campaign_agent
+from . import crm, casting_pipeline, whatsapp_campaign_agent, talentgram_fetcher
 
-_MODULES = [crm, casting_pipeline, whatsapp_campaign_agent]
+_MODULES = [crm, casting_pipeline, whatsapp_campaign_agent, talentgram_fetcher]
 
 
 def register_all() -> None:

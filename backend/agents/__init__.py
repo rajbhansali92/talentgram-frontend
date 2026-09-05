@@ -89,6 +89,22 @@ async def ensure_agents_ready() -> None:
     )
     await _migrate_scouting_agent_group_name(db, registry)
 
+    await registry.seed_agent_config(
+        "talentgram-fetcher-agent",
+        # New, separate WhatsApp group the user creates by hand, named
+        # exactly "Talentgram Fetcher Agent" — routing is entirely
+        # data-driven via this config doc, so Fetcher never touches
+        # Scouting Agent's own group_names/routing in any way.
+        group_names=["Talentgram Fetcher Agent"],
+        allowed_senders=[],
+        # Anyone currently in the group may issue SHOW ME, matching
+        # casting-agent/whatsapp-campaign-agent's existing boundary — only
+        # the configured agent WhatsApp number ever acts as the bot itself
+        # (enforced generically by the transport's own outgoing-message
+        # filter, sender._is_outgoing_msg — unrelated to this security_mode).
+        security_mode="group_members",
+    )
+
     try:
         await db["whatsapp_conversations"].create_index(
             [("agent_id", 1), ("phone", 1)], unique=True, name="agent_phone_unique"

@@ -27,9 +27,11 @@ means:
     anywhere in this file.
 
 Reused, not duplicated:
-  - Project name resolution: casting_pipeline_nlu.resolve_project_by_name
-    + casting_pipeline._fetch_ongoing_projects — the EXACT same fuzzy/
-    typo-tolerant resolver ADD/MOVE/SHARE/SHOW ME already use.
+  - Project name resolution: casting_pipeline_nlu.resolve_project_by_name —
+    the EXACT same fuzzy/typo-tolerant matching ADD/MOVE/SHARE/SHOW ME
+    already use. The CANDIDATE LIST fed into it is intentionally NOT
+    casting_pipeline._fetch_ongoing_projects() (see
+    PRODUCTION_DESK_RELEVANT_STATUSES below for why).
   - Conversational continuity ("What's our commission?" with no project
     named): session_context (whatsapp_agent_sessions) — the same
     domain-agnostic per-(agent, phone) state store other agents use for
@@ -67,11 +69,35 @@ from agents import session_context
 from agents.models import AgentDefinition, ExecContext, ExecResult, FieldSpec, IntentDefinition, ValidationResult
 from agents.registry import register_agent
 from agents.modules import casting_pipeline_nlu as nlu
-from agents.modules.casting_pipeline import _fetch_ongoing_projects
 
 logger = logging.getLogger(__name__)
 
 AGENT_ID = "management-agent"
+
+# Project candidates for THIS agent's name resolution — deliberately NOT
+# casting_pipeline._fetch_ongoing_projects() (status == "ongoing" only),
+# which is scoped to Casting Pipeline's own "still needs casting work"
+# concern. Real production data has projects whose casting is fully
+# locked (project.status == "locked", a human flips this once casting is
+# done) that STILL have live Production Desk data — that is in fact the
+# primary case Production Desk (and therefore this agent) exists for.
+# Excludes "hold" (paused, nothing active yet) and "complete" (already
+# closed out). Fixes a real production incident (2026-09-05): "GOOGLE AI"
+# has project.status == "locked" — _fetch_ongoing_projects() could never
+# return it, so "What's pending for Google AI?" fell through to fuzzy-
+# matching against an unrelated candidate pool. Still reuses
+# casting_pipeline_nlu.resolve_project_by_name for the actual name
+# matching — this is only a differently-scoped candidate list, not a
+# second name-resolution system.
+PRODUCTION_DESK_RELEVANT_STATUSES = ["ongoing", "locked"]
+
+
+async def _fetch_production_desk_projects() -> List[Dict[str, str]]:
+    cursor = db.projects.find(
+        {"status": {"$in": PRODUCTION_DESK_RELEVANT_STATUSES}}, {"_id": 0, "id": 1, "brand_name": 1}
+    ).sort("brand_name", 1)
+    docs = await cursor.to_list(2000)
+    return [{"id": d["id"], "label": d.get("brand_name") or "(untitled project)"} for d in docs]
 
 # Synthetic "admin" identity passed to production_desk.py's functions,
 # which only ever read admin.get("id")/admin.get("email") off it (for
@@ -101,7 +127,7 @@ class ProjectResolution:
 
 
 async def _resolve_project(query: str, ctx: ExecContext) -> ProjectResolution:
-    projects = await _fetch_ongoing_projects()
+    projects = await _fetch_production_desk_projects()
     q = (query or "").strip()
     if not q:
         session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
@@ -118,10 +144,36 @@ async def _resolve_project(query: str, ctx: ExecContext) -> ProjectResolution:
         return ProjectResolution(project=match.project)
     if match.ambiguous:
         return ProjectResolution(ambiguous=match.ambiguous)
-    return ProjectResolution(error=match.error)
+    # PRODUCTION BUG (fixed) — ProjectNameMatch has a FOURTH outcome this
+    # wrapper originally missed entirely: `.suggestions` (Tier 5's "no
+    # confident/tied match, but here are close fuzzy candidates below the
+    # auto-resolve bar" — see casting_pipeline_nlu.resolve_project_by_name's
+    # own docstring on the field, and casting_pipeline.py's existing
+    # callers, which all handle it explicitly). When neither `.project`
+    # nor `.ambiguous` nor `.suggestions` matched (a genuine "not found"),
+    # `.error` is also not guaranteed non-empty by the dataclass itself —
+    # every existing caller defensively falls back to a literal message
+    # rather than trusting it's set; do the same here. Before this fix,
+    # a message like "What's pending for Google AI?" where "Google AI"
+    # didn't closely match any real ongoing project label produced a
+    # ProjectResolution with project=None, ambiguous=None, error=None —
+    # silently passing both `if` checks in every caller and crashing on
+    # `project["id"]` several lines later (production incident, live
+    # WhatsApp group, 2026-09-05).
+    if match.suggestions:
+        return ProjectResolution(ambiguous=match.suggestions)
+    return ProjectResolution(error=match.error or f'I couldn\'t find a project matching "{q}".')
 
 
-async def _remember_project(ctx: ExecContext, project: Dict[str, str]) -> None:
+async def _remember_project(ctx: ExecContext, project: Optional[Dict[str, str]]) -> None:
+    # Defense in depth — every real call site already only reaches here
+    # after confirming `project` is a resolved {"id","label"} dict (see
+    # the ProjectResolution.suggestions fix above, which was the actual
+    # production crash site). A None here would be a genuinely new bug
+    # elsewhere; skip silently rather than crash the whole turn over a
+    # session-continuity nicety that isn't the primary result being sent.
+    if not project or not project.get("id"):
+        return
     await session_context.update_session(
         AGENT_ID, ctx.sender_phone,
         last_project_id=project["id"], last_project_label=project.get("label"),
@@ -171,8 +223,9 @@ def _match_talent_by_name(name_query: str, locked_talents: List[dict]) -> Tuple[
 
 
 async def _find_talent_across_projects(name_query: str) -> Tuple[Optional[dict], Optional[dict], List[str]]:
-    """No project named — search LOCKED talents (any ongoing project) for a
-    name match. Talent-name-first (not project-iteration-first): a
+    """No project named — search LOCKED talents (any ongoing/locked
+    project — see PRODUCTION_DESK_RELEVANT_STATUSES) for a name match.
+    Talent-name-first (not project-iteration-first): a
     case-insensitive regex against db.talents.name, then filtered down to
     rows actually LOCKED on an ongoing project — bounded by how many
     talents match the name, not by how many ongoing projects exist (an
@@ -197,7 +250,7 @@ async def _find_talent_across_projects(name_query: str) -> Tuple[Optional[dict],
         return None, None, []
     project_ids = list({r["project_id"] for r in rows})
     projects = await db.projects.find(
-        {"id": {"$in": project_ids}, "status": "ongoing"}, {"_id": 0}
+        {"id": {"$in": project_ids}, "status": {"$in": PRODUCTION_DESK_RELEVANT_STATUSES}}, {"_id": 0}
     ).to_list(len(project_ids))
     proj_by_id = {p["id"]: p for p in projects}
     talent_by_id = {t["id"]: t for t in talent_docs}

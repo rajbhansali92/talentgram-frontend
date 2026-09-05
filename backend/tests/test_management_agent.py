@@ -390,3 +390,101 @@ async def test_existing_scouting_and_fetcher_agents_still_registered(agents_read
     assert registry.get_agent("talentgram-fetcher-agent") is not None
     assert registry.get_agent("casting-agent") is not None
     assert registry.get_agent("crm-agent") is not None
+
+
+# ===========================================================================
+# Production incident regression (2026-09-05): "What's pending for
+# Google AI?" crashed with "Something went wrong on our end" in the real
+# WhatsApp group. Root cause was TWO bugs, both covered below.
+# ===========================================================================
+
+@_aio
+async def test_locked_status_project_is_resolvable_by_name(agents_ready):
+    """Bug #1: the real 'GOOGLE AI' project has project.status == "locked"
+    (a human flips this once casting is fully done) — the agent's
+    original project candidate list only ever included status=="ongoing"
+    projects (borrowed from Casting Pipeline's own, differently-scoped
+    helper), so a "locked"-status project — precisely the ones Production
+    Desk exists for — could never be found by name at all."""
+    pid, _ = await _make_project(status="locked", brand_name="ZZZ_TEST_MGMT_LockedStatusProj")
+    tid, tname = await _make_locked_talent(pid, budget_total=42000)
+    try:
+        r = await _send("What's pending for ZZZ_TEST_MGMT_LockedStatusProj?")
+        assert r.handled
+        assert "ZZZ_TEST_MGMT_LockedStatusProj" in r.reply
+        assert "Something went wrong" not in r.reply
+        assert tname in r.reply
+    finally:
+        await _cleanup(pid, [tname])
+
+
+@_aio
+async def test_hold_and_complete_status_projects_excluded(agents_ready):
+    """Confirms the status scoping is deliberate, not "match everything":
+    a paused ("hold") or already-closed ("complete") project is correctly
+    NOT offered as a match."""
+    pid, _ = await _make_project(status="complete", brand_name="ZZZ_TEST_MGMT_ClosedProj")
+    try:
+        r = await _send("What's pending for ZZZ_TEST_MGMT_ClosedProj?")
+        assert r.handled
+        assert "couldn't find a project" in r.reply.lower()
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_no_confident_project_match_replies_helpfully_never_crashes(agents_ready, monkeypatch):
+    """Bug #2 — the actual crash: ProjectNameMatch has a FOURTH outcome
+    (.suggestions, Tier 5's "no confident/tied match, here are close fuzzy
+    candidates") that the agent's project-resolution wrapper never
+    handled, leaving project=None/ambiguous=None/error=None and crashing
+    on project["id"] a few lines later. Reproduced directly against the
+    real dataclass shape rather than relying on fragile fuzzy-score
+    tuning to land in that exact tier."""
+    from agents.modules import casting_pipeline_nlu as nlu
+    from agents.modules import management_agent as mgmt
+
+    class _FakeMatch:
+        project = None
+        ambiguous = None
+        suggestions = [{"id": "some-id", "label": "Some Close Guess"}]
+        error = None
+
+    monkeypatch.setattr(nlu, "resolve_project_by_name", lambda q, projects: _FakeMatch())
+
+    pid, _ = await _make_project(brand_name="ZZZ_TEST_MGMT_AnyProj")
+    try:
+        r = await _send("What's pending for Anything At All?")
+        assert r.handled
+        assert "Something went wrong" not in r.reply
+        # Must not raise, and must give the user something actionable —
+        # not silently swallow the turn either.
+        assert r.reply
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_project_resolution_error_always_has_a_message(agents_ready, monkeypatch):
+    """Defensive regression for the same class of bug: even if a future
+    change to resolve_project_by_name ever left `.error` as None on a
+    genuine no-match, the agent must still reply with something useful,
+    never crash on a None message."""
+    from agents.modules import casting_pipeline_nlu as nlu
+
+    class _FakeMatch:
+        project = None
+        ambiguous = None
+        suggestions = None
+        error = None  # deliberately empty, simulating a defensive gap upstream
+
+    monkeypatch.setattr(nlu, "resolve_project_by_name", lambda q, projects: _FakeMatch())
+
+    pid, _ = await _make_project(brand_name="ZZZ_TEST_MGMT_AnyProj2")
+    try:
+        r = await _send("What's pending for Nonexistent Thing?")
+        assert r.handled
+        assert r.reply
+        assert "couldn't find" in r.reply.lower()
+    finally:
+        await _cleanup(pid)

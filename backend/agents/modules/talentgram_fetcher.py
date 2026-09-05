@@ -627,9 +627,22 @@ async def _run_filtered_talent_search(filters: Dict[str, Any]) -> ExecResult:
 async def _try_handle_filtered_talents_request(ctx: ExecContext, chunk: str) -> Optional[ExecResult]:
     """Returns None (never a real error) when the chunk doesn't look like a
     filter query at all, so the caller falls through to FORM's existing
-    parsing — this never intercepts "<talent> form for <project>" since
-    that grammar has no bare "talent(s)" word and _parse_filter_criteria
-    would find zero real filters either way."""
+    parsing.
+
+    Routing hardening (real bug: a talent whose own name happens to
+    contain the bare word "talent" — e.g. "Show me Talent X's form for
+    Hinge" — was being misrouted here instead of to FORM. The bare
+    "talent(s)" word check alone isn't a safe enough signal: the
+    location heuristic below treats "whatever's left after stripping
+    known filler words" as a location, and leftover FORM-shaped text like
+    "X's form for Hinge" still passed as a non-empty "location", so the
+    request never even reached FORM's own parsing). FORM's own
+    "form(s) for" phrase is an unambiguous, structural signal that must
+    always win over an incidental "talent" substring match — checked
+    FIRST, before anything else, so this never fires for a real FORM
+    command regardless of what the talent's name happens to contain."""
+    if _FORM_FOR_RE.search(chunk):
+        return None
     if not _TALENTS_WORD_RE.search(chunk):
         return None
     filters = _parse_filter_criteria(chunk)

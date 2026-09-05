@@ -1465,6 +1465,110 @@ async def test_filter_too_large_result_set_asks_to_narrow_without_partial_list()
         await _restore_config(original, agent_id=AGENT_ID)
 
 
+# ---------------------------------------------------------------------------
+# Routing hardening regression — a talent whose own name contains the bare
+# word "talent" must never mis-route a FORM or PROFILE request into
+# FILTER. Real bug: "Show me Talent X's form for Hinge" was silently
+# answered as an empty filter search ("No talents matched these
+# criteria.") because the leftover-text location heuristic treated
+# "X's form for Hinge" as a non-empty "location", passing the filter
+# gate. Fixed by having _try_handle_filtered_talents_request decline
+# immediately when FORM's own unambiguous "form(s) for" phrase is present
+# — checked before the bare "talent(s)" word, before any filter parsing.
+# ---------------------------------------------------------------------------
+async def test_routing_profile_of_talent_named_talent_routes_to_profile():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    name = f"Talent X {tag}"
+    talent_id = await _seed_talent_full(name)
+    try:
+        r = await _show_me(group, f"Show me the profile of {name}")
+        assert r.handled, r
+        assert f"Talentgram X {name}" in r.reply, r.reply
+        assert "criteria" not in r.reply.lower()
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_routing_form_for_talent_named_talent_routes_to_form():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    name = f"Talent X {tag}"
+    project_id = await _seed_project(f"Hinge {tag}")
+    talent_id = await _seed_talent_full(name)
+    await _seed_submission_with_form(project_id, talent_id, original_form_data={"first_name": "Talent", "last_name": "X"})
+    try:
+        r = await _show_me(group, f"Show me {name}'s form for Hinge {tag}")
+        assert r.handled, r
+        assert f"Talentgram x Hinge {tag} - Form" in r.reply, r.reply
+        assert "criteria" not in r.reply.lower()
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_routing_real_filter_request_still_routes_to_filter():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    talent_id = await _seed_talent_full(f"Filter Talent {tag}", gender="female", location=[{"city": unique_city, "country": "India"}])
+    try:
+        r = await _show_me(group, f"Show me female talents in {unique_city}")
+        assert r.handled, r
+        assert "matching your criteria" in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_routing_age_range_filter_still_routes_to_filter():
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    unique_city = f"Zanzibaria{tag}"
+    talent_id = await _seed_talent_full(f"Filter Talent {tag}", age=20, location=[{"city": unique_city, "country": "India"}])
+    try:
+        r = await _show_me(group, f"Show me talents 18 to 25 in {unique_city}")
+        assert r.handled, r
+        assert "matching your criteria" in r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_routing_ordinary_names_resembling_filter_keywords_unaffected():
+    # A talent named e.g. "Height Kaur" or "Age Malhotra" (an unusual but
+    # possible real name containing a filter keyword as a substring) must
+    # still route to FORM/PROFILE correctly, exactly like the "Talent X"
+    # case above — this isn't special-cased to "talent" specifically, the
+    # fix is structural (FORM's own phrase always wins).
+    group = f"Test Fetcher {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id=AGENT_ID)
+    tag = uuid.uuid4().hex[:6]
+    name = f"Height Kaur {tag}"
+    project_id = await _seed_project(f"Hinge {tag}")
+    talent_id = await _seed_talent_full(name)
+    await _seed_submission_with_form(project_id, talent_id, original_form_data={"first_name": "Height", "last_name": "Kaur"})
+    try:
+        r = await _show_me(group, f"Show me {name}'s form for Hinge {tag}")
+        assert r.handled, r
+        assert f"Talentgram x Hinge {tag} - Form" in r.reply, r.reply
+    finally:
+        await _cleanup_fetcher(talent_ids=[talent_id], project_ids=[project_id])
+        await _restore_config(original, agent_id=AGENT_ID)
+
+
+async def test_routing_filter_declines_immediately_on_form_for_phrase():
+    # Direct unit check on the guard itself, mirroring the exact
+    # production reproduction used to root-cause this bug.
+    result = await fetcher._try_handle_filtered_talents_request(None, "Talent X's form for Hinge")
+    assert result is None
+
+
 # ===========================================================================
 # REGRESSION
 # ===========================================================================

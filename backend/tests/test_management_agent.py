@@ -72,6 +72,7 @@ async def _cleanup(pid=None, talent_names=None, client_names=None):
         await db.project_reimbursements.delete_many({"project_id": pid})
         await db.project_crew.delete_many({"project_id": pid})
         await db.notifications.delete_many({"payload.project_id": pid})
+        await db.workflow_tasks.delete_many({"project_id": pid})
     if talent_names:
         await db.talents.delete_many({"name": {"$in": talent_names}})
     if client_names:
@@ -488,3 +489,193 @@ async def test_project_resolution_error_always_has_a_message(agents_ready, monke
         assert "couldn't find" in r.reply.lower()
     finally:
         await _cleanup(pid)
+
+
+# ===========================================================================
+# Production Management Desk Phase 1+2 — today/upcoming digests, talent
+# trial/shoot lookups, task creation/completion via the SAME
+# db.workflow_tasks the admin Workflow page + Production Desk use, and
+# "mark costume trial completed".
+# ===========================================================================
+
+async def _set_talent_prep(pid, tid, **fields):
+    from routers import production_desk as pd
+    await pd.update_locked_talent_production(pid, tid, pd.TalentProductionPatch(**fields), {"id": "test", "email": "t@x.com"})
+
+
+@_aio
+async def test_project_scoped_today_query_works(agents_ready):
+    from datetime import datetime, timezone
+    pid, label = await _make_project()
+    tid, tname = await _make_locked_talent(pid, budget_total=50000)
+    try:
+        today_noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+        await db.casting_pipeline.update_one({"talent_id": tid}, {"$set": {"pd_costume_trial_at": today_noon, "pd_costume_trial_location": "Studio A", "pd_shoot_status": "today"}})
+
+        r = await _send(f"What's happening today for {label}?")
+        assert r.handled
+        assert "TODAY" in r.reply
+        assert "Shoot today" in r.reply
+        assert tname in r.reply
+    finally:
+        await _cleanup(pid, [tname])
+
+
+@_aio
+async def test_costume_trial_lookup_works(agents_ready):
+    from datetime import datetime, timezone
+    pid, label = await _make_project()
+    tid, tname = await _make_locked_talent(pid)
+    try:
+        due = datetime.now(timezone.utc).replace(hour=15, minute=0, second=0, microsecond=0).isoformat()
+        await db.casting_pipeline.update_one({"talent_id": tid}, {"$set": {"pd_costume_trial_at": due, "pd_costume_trial_location": "Studio B", "pd_fitting_status": "scheduled"}})
+
+        r = await _send(f"When is {tname}'s costume trial?")
+        assert r.handled
+        assert "Studio B" in r.reply
+        assert "SCHEDULED" in r.reply
+    finally:
+        await _cleanup(pid, [tname])
+
+
+@_aio
+async def test_shoot_lookup_works(agents_ready):
+    pid, label = await _make_project()
+    tid, tname = await _make_locked_talent(pid)
+    try:
+        await db.casting_pipeline.update_one({"talent_id": tid}, {"$set": {"pd_shoot_status": "scheduled"}})
+        r = await _send(f"When is {tname} shooting?")
+        assert r.handled
+        assert "SCHEDULED" in r.reply
+    finally:
+        await _cleanup(pid, [tname])
+
+
+@_aio
+async def test_payment_followups_due_today_global_query(agents_ready):
+    from datetime import datetime, timezone
+    pid, label = await _make_project()
+    try:
+        today_noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+        await db.projects.update_one({"id": pid}, {"$set": {"pd_next_follow_up_at": today_noon, "pd_payment_followup_status": "due"}})
+        r = await _send("What payment follow-ups are due today?")
+        assert r.handled
+        assert label in r.reply
+        assert "Payment follow-up due" in r.reply
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_global_today_digest_finds_projects_regardless_of_alphabetical_position(agents_ready):
+    """Regression for the exact bug found live during this pass: an
+    earlier version capped a project-iteration scan, silently missing
+    anything sorting past the cutoff in a large portfolio. This test uses
+    a brand_name that sorts LAST (Z-prefixed, matching the real
+    production incident) to guard against that regressing."""
+    from datetime import datetime, timezone
+    pid, label = await _make_project(brand_name=f"ZZZZZZZZZZ_TEST_MGMT_{uuid.uuid4().hex[:6]}")
+    tid, tname = await _make_locked_talent(pid)
+    try:
+        await db.casting_pipeline.update_one({"talent_id": tid}, {"$set": {"pd_shoot_status": "today"}})
+        r = await _send("What's happening today?")
+        assert r.handled
+        assert label in r.reply
+    finally:
+        await _cleanup(pid, [tname])
+
+
+@_aio
+async def test_add_task_creates_shared_workflow_task(agents_ready):
+    pid, label = await _make_project()
+    try:
+        await _send(f"What's pending for {label}?")  # sets session context
+        r = await _send("Add a task to get the call sheet tomorrow.")
+        assert "Reply 1 to confirm" in r.reply
+        r2 = await _send("1")
+        assert "Task added" in r2.reply
+
+        rows = await db.workflow_tasks.find({"project_id": pid}).to_list(10)
+        assert len(rows) == 1
+        assert "call sheet" in rows[0]["title"].lower()
+        assert rows[0]["due_at"] is not None
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_remind_me_creates_task_associated_with_named_project(agents_ready):
+    pid, label = await _make_project()
+    try:
+        r = await _send(f"Remind me to follow up with {label} on Monday.")
+        assert "Reply 1 to confirm" in r.reply
+        r2 = await _send("1")
+        assert "Task added" in r2.reply
+
+        rows = await db.workflow_tasks.find({"project_id": pid}).to_list(10)
+        assert len(rows) == 1
+        assert rows[0]["due_at"] is not None
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_task_created_via_agent_visible_via_production_scoped_query(agents_ready):
+    """Critical architecture rule: UI/Production Desk and Management
+    Agent must read the SAME records."""
+    from routers import workflow as workflow_router
+    pid, label = await _make_project()
+    try:
+        await _send(f"What's pending for {label}?")
+        await _send("Add a task to get the call sheet tomorrow.")
+        await _send("1")
+
+        r = await _send_production_query(pid)
+        assert len(r) == 1
+        assert "call sheet" in r[0]["title"].lower()
+    finally:
+        await _cleanup(pid)
+
+
+async def _send_production_query(pid):
+    from routers import workflow as workflow_router
+    return await workflow_router.list_production_tasks(project_id=pid, talent_id=None, scope=None, admin={"id": "t", "role": "admin"})
+
+
+@_aio
+async def test_mark_costume_trial_completed(agents_ready):
+    pid, label = await _make_project()
+    tid, tname = await _make_locked_talent(pid)
+    try:
+        await db.casting_pipeline.update_one({"talent_id": tid}, {"$set": {"pd_fitting_status": "scheduled"}})
+        r = await _send(f"Mark {tname}'s costume trial completed.")
+        assert "Reply 1 to confirm" in r.reply
+        assert "costume trial" in r.reply.lower()
+        r2 = await _send("1")
+        assert "completed" in r2.reply.lower()
+
+        row = await db.casting_pipeline.find_one({"talent_id": tid})
+        assert row["pd_fitting_status"] == "completed"
+
+        from routers import production_desk as pd
+        body = await pd.get_production_desk(pid, {"id": "test", "email": "t@x.com"})
+        assert body["locked_talents"][0]["fitting_status"] == "completed"
+    finally:
+        await _cleanup(pid, [tname])
+
+
+@_aio
+async def test_mark_payment_cleared_still_works_after_status_intent_merge(agents_ready):
+    """Regression: merging payment-cleared and trial-completed into one
+    MARK_TALENT_STATUS_INTENT must not break the original payment flow."""
+    pid, label = await _make_project()
+    tid, tname = await _make_locked_talent(pid, budget_total=99000)
+    try:
+        r = await _send(f"Mark {tname} payment cleared.")
+        assert "99,000" in r.reply
+        r2 = await _send("1")
+        assert "cleared" in r2.reply.lower()
+        row = await db.casting_pipeline.find_one({"talent_id": tid})
+        assert row["pd_payment_status"] == "cleared"
+    finally:
+        await _cleanup(pid, [tname])

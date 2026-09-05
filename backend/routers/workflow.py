@@ -1,8 +1,9 @@
 import uuid
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from core import db, current_user, _now, require_role
+from core import db, current_user, current_team_or_admin, _now, require_role
 from .workflow_schemas import (
     TaskIn,
     TaskUpdateIn,
@@ -74,6 +75,61 @@ async def list_tasks(user: dict = Depends(current_user)):
         logger.error("Error listing workflow tasks: %s", e)
         raise HTTPException(500, detail=f"Failed to fetch tasks: {str(e)}")
 
+
+def _today_bounds_utc():
+    """Start/end of "today" in UTC, as ISO 8601 strings matching core._now()'s
+    own format — every due_at is written in this same shape, so a plain
+    lexicographic string range query is correct (no datetime parsing
+    needed) and matches the string-comparison convention already used
+    elsewhere in this codebase for *_at fields."""
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
+@router.get("/tasks/production")
+async def list_production_tasks(
+    project_id: Optional[str] = None,
+    talent_id: Optional[str] = None,
+    scope: Optional[str] = None,  # "pending" | "today" | "upcoming" | None (all)
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Project/talent-scoped task query for Production Desk + the
+    Management Agent — deliberately NOT scoped to assignee/creator like
+    GET /tasks (that endpoint is a personal to-do view; this is a
+    project-wide OPERATIONAL view, matching how every other Production
+    Desk read works — no per-user filtering). Reads the SAME
+    db.workflow_tasks collection GET /tasks and the admin Workflow page
+    already use; a task created here shows up there and vice versa —
+    there is no second task store.
+    """
+    if not project_id and not talent_id:
+        raise HTTPException(400, "project_id or talent_id is required")
+
+    query: Dict[str, Any] = {}
+    if project_id:
+        query["project_id"] = project_id
+    if talent_id:
+        query["talent_id"] = talent_id
+
+    if scope == "pending":
+        query["status"] = {"$in": ["pending", "in_progress"]}
+    elif scope == "today":
+        start, end = _today_bounds_utc()
+        query["due_at"] = {"$gte": start, "$lt": end}
+        query["status"] = {"$in": ["pending", "in_progress"]}
+    elif scope == "upcoming":
+        _, end_today = _today_bounds_utc()
+        query["due_at"] = {"$gte": end_today}
+        query["status"] = {"$in": ["pending", "in_progress"]}
+    elif scope not in (None, "all"):
+        raise HTTPException(400, 'scope must be one of "pending", "today", "upcoming", "all"')
+
+    tasks = await db.workflow_tasks.find(query, {"_id": 0}).sort("due_at", 1).to_list(500)
+    return _to_dict(tasks)
+
+
 @router.post("/tasks")
 async def create_task(payload: TaskIn, user: dict = Depends(current_user)):
     try:
@@ -95,12 +151,27 @@ async def create_task(payload: TaskIn, user: dict = Depends(current_user)):
             "subtasks": _to_dict(payload.subtasks or []),
             "comments": [],
             "attachments": _to_dict(payload.attachments or []),
+            # Production Management Desk — additive, optional (see
+            # workflow_schemas.TaskIn). None for every existing caller.
+            "talent_id": payload.talent_id,
+            "due_at": payload.due_at,
+            "priority": payload.priority,
             "created_at": now,
             "updated_at": now,
         }
         
         await db.workflow_tasks.insert_one(task_doc)
-        
+        # PRE-EXISTING BUG (found and fixed while extending this endpoint,
+        # 2026-09): Motor's insert_one() mutates the passed dict in place,
+        # adding an `_id` ObjectId — every call to this endpoint was
+        # crashing the response's JSON serialization with "'ObjectId'
+        # object is not iterable" (confirmed present before this file's
+        # Production Management Desk changes too, via `git stash`).
+        # list_tasks/update_task were unaffected because they always
+        # re-fetch with an explicit {"_id": 0} projection; this is the
+        # only place that returned the in-memory dict directly.
+        task_doc.pop("_id", None)
+
         # Notify assignee if task created and assigned to someone else
         if payload.assignee_id and payload.assignee_id != uid:
             await trigger_workflow_notification(
@@ -142,7 +213,10 @@ async def update_task(tid: str, payload: TaskUpdateIn, user: dict = Depends(curr
             payload.assignee_id is not None or
             payload.project_id is not None or
             payload.project_name is not None or
-            payload.description is not None
+            payload.description is not None or
+            payload.talent_id is not None or
+            payload.due_at is not None or
+            payload.priority is not None
         )
         if is_core_edit and creator_is_admin and role != "admin":
             raise HTTPException(403, "Cannot edit core properties of admin-created tasks")
@@ -157,7 +231,13 @@ async def update_task(tid: str, payload: TaskUpdateIn, user: dict = Depends(curr
             update_data["project_id"] = payload.project_id
         if payload.project_name is not None:
             update_data["project_name"] = payload.project_name.strip()
-            
+        if payload.talent_id is not None:
+            update_data["talent_id"] = payload.talent_id
+        if payload.due_at is not None:
+            update_data["due_at"] = payload.due_at
+        if payload.priority is not None:
+            update_data["priority"] = payload.priority
+
         # Assignee transition trigger
         if payload.assignee_id is not None:
             prev_assignee = task.get("assignee_id")

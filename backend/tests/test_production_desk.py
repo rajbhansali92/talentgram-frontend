@@ -77,6 +77,7 @@ async def _cleanup(pid=None, talent_ids=None, client_ids=None):
         await db.project_reimbursements.delete_many({"project_id": pid})
         await db.project_crew.delete_many({"project_id": pid})
         await db.notifications.delete_many({"payload.project_id": pid})
+        await db.workflow_tasks.delete_many({"project_id": pid})
     if talent_ids:
         await db.talents.delete_many({"id": {"$in": talent_ids}})
     if client_ids:
@@ -717,5 +718,170 @@ async def test_no_duplicate_financial_records_from_checklist_changes(client, hea
         assert before_project_count == after_project_count == 1
         collection_names = await db.list_collection_names()
         assert "invoices" not in collection_names
+    finally:
+        await _cleanup(pid)
+
+
+# ===========================================================================
+# Production Management Desk Phase 1+2 — Shoot Management, Talent
+# Preparation, Payment Follow-up, and the shared workflow_tasks display.
+# ===========================================================================
+
+@_aio
+async def test_talent_preparation_fields_read_write(client, headers):
+    pid = await _make_project()
+    tid = await _make_talent()
+    await _add_to_pipeline(pid, tid, stage="locked")
+    try:
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        card = r.json()["locked_talents"][0]
+        assert card["fitting_status"] == "not_scheduled"
+        assert card["look_test_status"] == "not_scheduled"
+        assert card["shoot_status"] == "not_scheduled"
+        assert card["costume_trial_at"] is None
+
+        due = "2026-09-10T12:00:00+00:00"
+        r = await client.patch(
+            f"/api/projects/{pid}/production-desk/talents/{tid}",
+            json={"costume_trial_at": due, "costume_trial_location": "Studio A", "fitting_status": "scheduled", "look_test_status": "completed", "shoot_status": "today", "grooming_requirements": "Clean shave", "special_instructions": "Bring own shoes"},
+            headers=headers,
+        )
+        card = r.json()["locked_talents"][0]
+        assert card["costume_trial_at"] == due
+        assert card["costume_trial_location"] == "Studio A"
+        assert card["fitting_status"] == "scheduled"
+        assert card["look_test_status"] == "completed"
+        assert card["shoot_status"] == "today"
+        assert card["grooming_requirements"] == "Clean shave"
+        assert card["special_instructions"] == "Bring own shoes"
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_talent_preparation_status_validation(client, headers):
+    pid = await _make_project()
+    tid = await _make_talent()
+    await _add_to_pipeline(pid, tid, stage="locked")
+    try:
+        r = await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"fitting_status": "not_a_real_status"}, headers=headers)
+        assert r.status_code == 400
+        r = await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"shoot_status": "not_a_real_status"}, headers=headers)
+        assert r.status_code == 400
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_shoot_management_and_payment_followup_project_fields(client, headers):
+    pid = await _make_project()
+    try:
+        due = "2026-09-10T12:00:00+00:00"
+        r = await client.patch(
+            f"/api/projects/{pid}/production-desk",
+            json={
+                "reporting_time": "7:00 AM", "shoot_status": "scheduled",
+                "payment_terms": "50% advance, 50% on delivery",
+                "expected_payment_date": due, "next_follow_up_at": due,
+                "payment_followup_status": "due", "payment_followup_notes": "Called client",
+            },
+            headers=headers,
+        )
+        assert r.status_code == 200
+        proj = r.json()["project"]
+        assert proj["pd_reporting_time"] == "7:00 AM"
+        assert proj["pd_shoot_status"] == "scheduled"
+        assert proj["pd_payment_terms"] == "50% advance, 50% on delivery"
+        assert proj["pd_expected_payment_date"] == due
+        assert proj["pd_next_follow_up_at"] == due
+        assert proj["pd_payment_followup_status"] == "due"
+        assert proj["pd_payment_followup_notes"] == "Called client"
+
+        r = await client.patch(f"/api/projects/{pid}/production-desk", json={"shoot_status": "bogus"}, headers=headers)
+        assert r.status_code == 400
+        r = await client.patch(f"/api/projects/{pid}/production-desk", json={"payment_followup_status": "bogus"}, headers=headers)
+        assert r.status_code == 400
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_needs_attention_includes_payment_followup_and_shoot_details(client, headers):
+    pid = await _make_project()
+    tid = await _make_talent()
+    await _add_to_pipeline(pid, tid, stage="locked")
+    try:
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert "Shoot details incomplete" in r.json()["needs_attention"]
+
+        await client.patch(f"/api/projects/{pid}/production-desk", json={"call_time": "8am"}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert "Shoot details incomplete" not in r.json()["needs_attention"]
+
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+        await client.patch(f"/api/projects/{pid}/production-desk", json={"next_follow_up_at": today, "payment_followup_status": "due"}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert "Payment follow-up due today" in r.json()["needs_attention"]
+
+        await client.patch(f"/api/projects/{pid}/production-desk", json={"payment_followup_status": "done"}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        assert "Payment follow-up due today" not in r.json()["needs_attention"]
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_production_desk_displays_shared_workflow_tasks(client, headers):
+    """UI-created-vs-agent-created is the SAME record: Production Desk's
+    GET response reads directly from db.workflow_tasks — a task inserted
+    there any way shows up here immediately."""
+    pid = await _make_project()
+    tid = await _make_talent()
+    await _add_to_pipeline(pid, tid, stage="locked")
+    try:
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        today_due = now.replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+        future_due = (now + timedelta(days=5)).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+
+        r1 = await client.post("/api/workflow/tasks", json={"title": "Get call sheet", "category": "project", "project_id": pid, "due_at": today_due, "priority": "high"}, headers=headers)
+        r2 = await client.post("/api/workflow/tasks", json={"title": "Confirm costume trial", "category": "project", "project_id": pid, "talent_id": tid, "due_at": future_due}, headers=headers)
+
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        body = r.json()
+        assert len(body["tasks"]["all"]) == 2
+        titles = {t["title"] for t in body["tasks"]["all"]}
+        assert titles == {"Get call sheet", "Confirm costume trial"}
+        assert any(t["title"] == "Confirm costume trial" and t["talent_name"] for t in body["tasks"]["all"])
+        assert len(body["today"]["tasks"]) == 1
+        assert body["today"]["tasks"][0]["title"] == "Get call sheet"
+        assert len(body["upcoming"]["tasks"]) == 1
+        assert body["upcoming"]["tasks"][0]["title"] == "Confirm costume trial"
+
+        # Completing a task (e.g. via the Management Agent / Workflow page)
+        # must be immediately reflected here — no separate sync step.
+        await client.put(f"/api/workflow/tasks/{r1.json()['id']}", json={"status": "completed"}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        body = r.json()
+        assert len(body["tasks"]["pending"]) == 1
+        assert body["tasks"]["pending"][0]["title"] == "Confirm costume trial"
+        assert "1 task overdue" not in body["needs_attention"]  # not overdue, just completed+one future
+    finally:
+        await _cleanup(pid, [tid])
+        await db.workflow_tasks.delete_many({"project_id": pid})
+
+
+@_aio
+async def test_overdue_task_surfaces_in_needs_attention(client, headers):
+    pid = await _make_project()
+    try:
+        from datetime import datetime, timedelta, timezone
+        past_due = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        r1 = await client.post("/api/workflow/tasks", json={"title": "Overdue task", "category": "project", "project_id": pid, "due_at": past_due}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        body = r.json()
+        assert len(body["tasks"]["overdue"]) == 1
+        assert "1 task overdue" in body["needs_attention"]
     finally:
         await _cleanup(pid)

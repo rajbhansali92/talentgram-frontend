@@ -30,6 +30,15 @@ class TaskIn(BaseModel):
     project_name: Optional[str] = ""  # lightweight flat reference Name
     subtasks: Optional[List[SubtaskItem]] = []
     attachments: Optional[List[TaskAttachment]] = []
+    # Production Management Desk (additive, back-compatible — every
+    # existing General/Scouting/Finance-category task simply never sets
+    # these). talent_id is the SAME id used everywhere else in the app
+    # (db.talents.id / casting_pipeline.talent_id) — no new relationship
+    # type. due_at is an ISO 8601 datetime string, same shape as every
+    # other *_at field in this codebase (core._now()'s own format).
+    talent_id: Optional[str] = None
+    due_at: Optional[str] = None
+    priority: Optional[str] = None  # "low" | "normal" | "high" — informational, not enforced
 
 class TaskUpdateIn(BaseModel):
     title: Optional[str] = None
@@ -41,6 +50,9 @@ class TaskUpdateIn(BaseModel):
     project_name: Optional[str] = None
     subtasks: Optional[List[SubtaskItem]] = None
     attachments: Optional[List[TaskAttachment]] = None
+    talent_id: Optional[str] = None
+    due_at: Optional[str] = None
+    priority: Optional[str] = None
 
 class ScoutEntryIn(BaseModel):
     instagram_link: str

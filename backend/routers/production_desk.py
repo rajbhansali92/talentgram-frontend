@@ -151,6 +151,19 @@ CREW_ROLES = {
 # purely informational — nothing in the backend gates on it.
 PRODUCTION_STATUS_OPTIONS = ["not_started", "confirmed", "shoot_scheduled", "shoot_complete", "finance_closed"]
 
+# Shoot status — deliberately a MANUALLY-SET status enum, not computed
+# from a parsed date. Neither the project nor a locked talent has a
+# structured shoot-date field anywhere in this schema (project.shoot_dates
+# is free text like "24th - 30th August (ANY ONE DAY)" — not reliably
+# parseable without guessing, which this codebase's own "never guess,
+# always deterministic" convention rules out). "today" is therefore an
+# explicit status a manager sets, the same way every other pd_* status
+# field in this file already works — this is what TODAY's "shoots today"
+# section reads, never a date computation.
+SHOOT_STATUS_OPTIONS = ["not_scheduled", "scheduled", "today", "completed", "cancelled"]
+TRIAL_STATUS_OPTIONS = ["not_scheduled", "scheduled", "completed"]
+PAYMENT_FOLLOWUP_STATUSES = ["not_due", "due", "in_progress", "done"]
+
 
 def _num(v) -> Optional[float]:
     """Best-effort float coercion — treats "", None, and non-numeric input
@@ -243,6 +256,15 @@ def _talent_card(t: dict, row: dict, project: dict) -> dict:
         "commission_percent": (commission_fraction * 100.0) if commission_fraction is not None else None,
         "commission_amount": commission_amount,
         "payment_status": row.get("pd_payment_status") or "pending",
+        # Talent Preparation (Phase 2) — additive fields on the SAME
+        # locked casting_pipeline row, no second talent/project record.
+        "costume_trial_at": row.get("pd_costume_trial_at"),
+        "costume_trial_location": row.get("pd_costume_trial_location"),
+        "fitting_status": row.get("pd_fitting_status") or "not_scheduled",
+        "look_test_status": row.get("pd_look_test_status") or "not_scheduled",
+        "grooming_requirements": row.get("pd_grooming_requirements"),
+        "special_instructions": row.get("pd_special_instructions"),
+        "shoot_status": row.get("pd_shoot_status") or "not_scheduled",
     }
 
 
@@ -291,6 +313,43 @@ async def _client_name_map(client_ids: List[str]) -> Dict[str, str]:
     return {str(d["_id"]): d.get("name", "") for d in docs}
 
 
+_ACTIVE_TASK_STATUSES = ["pending", "in_progress"]
+
+
+async def _tasks_for_project(pid: str, talent_ids: List[str]) -> List[dict]:
+    """Every workflow_tasks row tied to this project OR any of its locked
+    talents — the EXACT SAME db.workflow_tasks collection the admin
+    Workflow page and the Management Agent read/write. No second task
+    store; a task created in any of the three places shows up in all of
+    them immediately."""
+    or_clauses: List[dict] = [{"project_id": pid}]
+    if talent_ids:
+        or_clauses.append({"talent_id": {"$in": talent_ids}})
+    tasks = await db.workflow_tasks.find({"$or": or_clauses}, {"_id": 0}).sort("due_at", 1).to_list(500)
+    return tasks
+
+
+def _bucket_tasks(tasks: List[dict], today_start: str, today_end: str) -> Dict[str, List[dict]]:
+    """Deterministic date-string bucketing (no date parsing needed — see
+    module docstring: every due_at is an ISO 8601 UTC string, same shape
+    as core._now(), so lexicographic comparison is chronological
+    comparison)."""
+    due_today, overdue, upcoming, pending = [], [], [], []
+    for t in tasks:
+        status = t.get("status") or "pending"
+        due_at = t.get("due_at")
+        if status in _ACTIVE_TASK_STATUSES:
+            pending.append(t)
+            if due_at:
+                if due_at < today_start:
+                    overdue.append(t)
+                elif today_start <= due_at < today_end:
+                    due_today.append(t)
+                elif due_at >= today_end:
+                    upcoming.append(t)
+    return {"due_today": due_today, "overdue": overdue, "upcoming": upcoming, "pending": pending}
+
+
 # ---------------------------------------------------------------------------
 # GET /projects/{pid}/production-desk — the consolidated view
 # ---------------------------------------------------------------------------
@@ -335,6 +394,45 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
 
     documents = [m for m in (project.get("materials") or []) if m.get("category") in PRODUCTION_DESK_DOCUMENT_CATEGORIES]
 
+    # Production Management Desk (Phase 1+2) — tasks from the SAME
+    # db.workflow_tasks collection the admin Workflow page + Management
+    # Agent use, bucketed by due date. Costume trials use a real
+    # pd_costume_trial_at datetime (so "today"/"upcoming" IS a genuine
+    # date comparison); shoots use the manually-set pd_shoot_status
+    # (see SHOOT_STATUS_OPTIONS' docstring for why — no parseable shoot
+    # date exists anywhere in this schema).
+    from routers.workflow import _today_bounds_utc
+    today_start, today_end = _today_bounds_utc()
+
+    locked_talent_ids = [c["talent_id"] for c in locked]
+    tasks = await _tasks_for_project(pid, locked_talent_ids)
+    task_talent_ids = [t.get("talent_id") for t in tasks if t.get("talent_id")]
+    task_talent_names: Dict[str, str] = {}
+    if task_talent_ids:
+        tt_docs = await db.talents.find({"id": {"$in": task_talent_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(len(task_talent_ids))
+        task_talent_names = {d["id"]: d.get("name", "") for d in tt_docs}
+    for t in tasks:
+        t["talent_name"] = task_talent_names.get(t.get("talent_id"))
+    task_buckets = _bucket_tasks(tasks, today_start, today_end)
+
+    trials_today = [c for c in locked if c["costume_trial_at"] and today_start <= c["costume_trial_at"] < today_end]
+    trials_upcoming = [c for c in locked if c["costume_trial_at"] and c["costume_trial_at"] >= today_end]
+    shoots_today = [c for c in locked if c["shoot_status"] == "today"]
+    shoots_upcoming = [c for c in locked if c["shoot_status"] == "scheduled"]
+    project_shoot_today = project.get("pd_shoot_status") == "today"
+
+    next_follow_up = project.get("pd_next_follow_up_at")
+    followup_status = project.get("pd_payment_followup_status") or "not_due"
+    payment_followup_due_today = bool(
+        next_follow_up and followup_status != "done" and today_start <= next_follow_up < today_end
+    )
+    payment_followup_overdue = bool(
+        next_follow_up and followup_status != "done" and next_follow_up < today_start
+    )
+    payment_followup_upcoming = bool(
+        next_follow_up and followup_status != "done" and next_follow_up >= today_end
+    )
+
     needs_attention: List[str] = []
     if not project.get("pd_confirmation_mail_received"):
         needs_attention.append("Confirmation mail pending")
@@ -360,6 +458,15 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     missing_bills = sum(1 for r in reimbursements if not r.get("material_id"))
     if missing_bills:
         needs_attention.append(f"{missing_bills} reimbursement bill{'s' if missing_bills != 1 else ''} missing")
+    if task_buckets["overdue"]:
+        n = len(task_buckets["overdue"])
+        needs_attention.append(f"{n} task{'s' if n != 1 else ''} overdue")
+    if payment_followup_overdue:
+        needs_attention.append("Payment follow-up overdue")
+    elif payment_followup_due_today:
+        needs_attention.append("Payment follow-up due today")
+    if locked and not project.get("pd_shoot_location") and not project.get("pd_call_time"):
+        needs_attention.append("Shoot details incomplete")
 
     return {
         "project": {
@@ -396,6 +503,20 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             # into the budget/commission math below.
             "client_budget_lines": project.get("client_budget") or [],
             "talent_budget_lines": project.get("talent_budget") or [],
+            # Shoot Management (Phase 2) — additive project-level fields.
+            "pd_reporting_time": project.get("pd_reporting_time"),
+            "pd_shoot_status": project.get("pd_shoot_status") or "not_scheduled",
+            # Payment Follow-up Management (Phase 2) — operational
+            # follow-up tracking ONLY, not a Finance/accounting record.
+            # pd_payment_in_received (existing) stays the one boolean
+            # "has it actually arrived" field; these are the working
+            # notes a manager keeps while chasing it.
+            "pd_payment_terms": project.get("pd_payment_terms"),
+            "pd_expected_payment_date": project.get("pd_expected_payment_date"),
+            "pd_last_follow_up_at": project.get("pd_last_follow_up_at"),
+            "pd_next_follow_up_at": next_follow_up,
+            "pd_payment_followup_status": followup_status,
+            "pd_payment_followup_notes": project.get("pd_payment_followup_notes"),
         },
         "finance": {
             # Honest, static Case-B state — see module docstring. Never
@@ -420,6 +541,26 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
         "reimbursements": reimbursements,
         "crew": crew,
         "documents": documents,
+        "tasks": {
+            "all": tasks,
+            "due_today": task_buckets["due_today"],
+            "overdue": task_buckets["overdue"],
+            "upcoming": task_buckets["upcoming"],
+            "pending": task_buckets["pending"],
+        },
+        "today": {
+            "tasks": task_buckets["due_today"],
+            "trials": trials_today,
+            "shoots": shoots_today,
+            "project_shoot_today": project_shoot_today,
+            "payment_followup_due": payment_followup_due_today,
+        },
+        "upcoming": {
+            "tasks": task_buckets["upcoming"],
+            "trials": trials_upcoming,
+            "shoots": shoots_upcoming,
+            "payment_followup": payment_followup_upcoming,
+        },
     }
 
 
@@ -440,6 +581,17 @@ class ProductionDeskProjectPatch(BaseModel):
     shoot_notes: Optional[str] = None
     production_contact_client_id: Optional[str] = None
     production_status: Optional[str] = None
+    # Shoot Management (Phase 2)
+    reporting_time: Optional[str] = None
+    shoot_status: Optional[str] = None
+    # Payment Follow-up Management (Phase 2) — operational tracking only,
+    # not a Finance record. See module docstring.
+    payment_terms: Optional[str] = None
+    expected_payment_date: Optional[str] = None
+    last_follow_up_at: Optional[str] = None
+    next_follow_up_at: Optional[str] = None
+    payment_followup_status: Optional[str] = None
+    payment_followup_notes: Optional[str] = None
 
 
 @router.patch("/{pid}/production-desk")
@@ -447,6 +599,10 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
     project = await _get_project_or_404(pid)
     if payload.production_status is not None and payload.production_status not in PRODUCTION_STATUS_OPTIONS:
         raise HTTPException(400, f"production_status must be one of {PRODUCTION_STATUS_OPTIONS}")
+    if payload.shoot_status is not None and payload.shoot_status not in SHOOT_STATUS_OPTIONS:
+        raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
+    if payload.payment_followup_status is not None and payload.payment_followup_status not in PAYMENT_FOLLOWUP_STATUSES:
+        raise HTTPException(400, f"payment_followup_status must be one of {PAYMENT_FOLLOWUP_STATUSES}")
     field_map = {
         "production_budget_per_day": "pd_production_budget_per_day",
         "production_budget_total": "pd_production_budget_total",
@@ -461,6 +617,14 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         "shoot_notes": "pd_shoot_notes",
         "production_contact_client_id": "pd_production_contact_client_id",
         "production_status": "pd_production_status",
+        "reporting_time": "pd_reporting_time",
+        "shoot_status": "pd_shoot_status",
+        "payment_terms": "pd_payment_terms",
+        "expected_payment_date": "pd_expected_payment_date",
+        "last_follow_up_at": "pd_last_follow_up_at",
+        "next_follow_up_at": "pd_next_follow_up_at",
+        "payment_followup_status": "pd_payment_followup_status",
+        "payment_followup_notes": "pd_payment_followup_notes",
     }
     updates = {field_map[k]: v for k, v in payload.model_dump(exclude_unset=True).items()}
     if updates:
@@ -497,6 +661,14 @@ class TalentProductionPatch(BaseModel):
     shooting_days: Optional[int] = None
     commission_percent: Optional[float] = None
     payment_status: Optional[str] = None
+    # Talent Preparation (Phase 2)
+    costume_trial_at: Optional[str] = None
+    costume_trial_location: Optional[str] = None
+    fitting_status: Optional[str] = None
+    look_test_status: Optional[str] = None
+    grooming_requirements: Optional[str] = None
+    special_instructions: Optional[str] = None
+    shoot_status: Optional[str] = None
 
 
 @router.patch("/{pid}/production-desk/talents/{talent_id}")
@@ -504,6 +676,12 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
     row = await _get_locked_pipeline_row(pid, talent_id)
     if payload.payment_status is not None and payload.payment_status not in PAYMENT_STATUSES:
         raise HTTPException(400, f"payment_status must be one of {sorted(PAYMENT_STATUSES)}")
+    if payload.fitting_status is not None and payload.fitting_status not in TRIAL_STATUS_OPTIONS:
+        raise HTTPException(400, f"fitting_status must be one of {TRIAL_STATUS_OPTIONS}")
+    if payload.look_test_status is not None and payload.look_test_status not in TRIAL_STATUS_OPTIONS:
+        raise HTTPException(400, f"look_test_status must be one of {TRIAL_STATUS_OPTIONS}")
+    if payload.shoot_status is not None and payload.shoot_status not in SHOOT_STATUS_OPTIONS:
+        raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
 
     field_map = {
         "budget_per_day": "pd_budget_per_day",
@@ -511,6 +689,13 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
         "shooting_days": "pd_shooting_days",
         "commission_percent": "pd_commission_percent",
         "payment_status": "pd_payment_status",
+        "costume_trial_at": "pd_costume_trial_at",
+        "costume_trial_location": "pd_costume_trial_location",
+        "fitting_status": "pd_fitting_status",
+        "look_test_status": "pd_look_test_status",
+        "grooming_requirements": "pd_grooming_requirements",
+        "special_instructions": "pd_special_instructions",
+        "shoot_status": "pd_shoot_status",
     }
     updates = {field_map[k]: v for k, v in payload.model_dump(exclude_unset=True).items()}
     if updates:

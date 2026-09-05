@@ -48,7 +48,8 @@ import {
 import {
     Loader2, AlertTriangle, Users, IndianRupee, CalendarDays, FileText,
     Plus, Trash2, Upload, ChevronsUpDown, ExternalLink, Receipt,
-    ClipboardList, Wallet, UserPlus,
+    ClipboardList, Wallet, UserPlus, Sun, CalendarClock, ListChecks,
+    CheckCircle2, Circle, PhoneCall,
 } from "lucide-react";
 
 // Same INR formatter MarketingHub already uses — no second money formatter.
@@ -62,6 +63,25 @@ const formatCurrency = (val) => {
         }).format(val);
     } catch {
         return `₹${val}`;
+    }
+};
+
+// due_at / pd_*_at fields are stored as full ISO datetimes (matching
+// core._now()'s own shape); a plain <input type="date"> only round-trips
+// the date part, so these convert at the UI boundary — noon UTC is the
+// same default time the Management Agent's own date parsing uses.
+const toDateInputValue = (iso) => {
+    if (!iso) return "";
+    try { return new Date(iso).toISOString().slice(0, 10); } catch { return ""; }
+};
+const fromDateInputValue = (dateStr) => (dateStr ? `${dateStr}T12:00:00.000Z` : null);
+
+const formatDate = (iso) => {
+    if (!iso) return "—";
+    try {
+        return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+    } catch {
+        return iso;
     }
 };
 
@@ -92,6 +112,14 @@ const PRODUCTION_STATUS_OPTIONS = [
     { value: "shoot_complete", label: "Shoot Complete" },
     { value: "finance_closed", label: "Finance Closed" },
 ];
+
+// Matches backend production_desk.py's TRIAL_STATUS_OPTIONS /
+// SHOOT_STATUS_OPTIONS / PAYMENT_FOLLOWUP_STATUSES exactly — a manually-
+// set status, not computed from a parsed date (see that module's
+// SHOOT_STATUS_OPTIONS docstring for why).
+const TRIAL_STATUS_OPTIONS = ["not_scheduled", "scheduled", "completed"];
+const SHOOT_STATUS_OPTIONS = ["not_scheduled", "scheduled", "today", "completed", "cancelled"];
+const PAYMENT_FOLLOWUP_STATUSES = ["not_due", "due", "in_progress", "done"];
 
 function SectionCard({ title, icon: Icon, right, children, testId }) {
     return (
@@ -246,6 +274,7 @@ export default function ProductionDesk({ projectId, project }) {
     const [reimbursementDialog, setReimbursementDialog] = useState(false);
     const [crewDialog, setCrewDialog] = useState(false);
     const [uploadDialog, setUploadDialog] = useState(false);
+    const [taskDialog, setTaskDialog] = useState(false);
 
     const load = useCallback(async () => {
         try {
@@ -343,6 +372,27 @@ export default function ProductionDesk({ projectId, project }) {
         }
     }, [projectId]);
 
+    // Tasks — the SAME db.workflow_tasks the admin Workflow page and the
+    // Management Agent read/write (routers/workflow.py). Not a
+    // Production-Desk-only task store.
+    const createTask = useCallback(async (payload) => {
+        try {
+            await adminApi.post("/workflow/tasks", { ...payload, project_id: projectId, project_name: data?.project?.brand_name || "" });
+            await load();
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not add task");
+        }
+    }, [projectId, load, data]);
+
+    const updateTaskStatus = useCallback(async (taskId, status) => {
+        try {
+            await adminApi.put(`/workflow/tasks/${taskId}`, { status });
+            await load();
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not update task");
+        }
+    }, [load]);
+
     if (loading) {
         return (
             <div className="flex items-center justify-center py-24 text-black/40">
@@ -354,7 +404,7 @@ export default function ProductionDesk({ projectId, project }) {
         return <div className="py-24 text-center text-black/40 text-sm">Could not load Production Desk.</div>;
     }
 
-    const { project: p, locked_talents: talents, summary, needs_attention, kickbacks, reimbursements, crew, documents, finance } = data;
+    const { project: p, locked_talents: talents, summary, needs_attention, kickbacks, reimbursements, crew, documents, finance, today, upcoming, tasks } = data;
 
     return (
         <div className="space-y-4 pb-16" data-testid="production-desk-root">
@@ -385,6 +435,46 @@ export default function ProductionDesk({ projectId, project }) {
                     </div>
                 )}
             </SectionCard>
+
+            {/* Today / Upcoming — derived from Locked Talents' Talent
+                Preparation fields, workflow_tasks, and the payment
+                follow-up fields below; not a second data source. */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <SectionCard title="Today" icon={Sun} testId="pd-today">
+                    <div className="space-y-1.5 text-xs">
+                        {today.project_shoot_today && <div className="text-black/80">🎬 Shoot is today</div>}
+                        {today.shoots.map((c) => <div key={`shoot-${c.talent_id}`} className="text-black/80">🎬 Shoot today — {c.name}</div>)}
+                        {today.trials.map((c) => (
+                            <div key={`trial-${c.talent_id}`} className="text-black/80">
+                                👗 Costume trial — {c.name}{c.costume_trial_location ? ` (${c.costume_trial_location})` : ""}
+                            </div>
+                        ))}
+                        {today.tasks.map((t) => (
+                            <div key={t.id} className="text-black/80">✓ {t.title}{t.talent_name ? ` (${t.talent_name})` : ""}</div>
+                        ))}
+                        {today.payment_followup_due && <div className="text-amber-700">💰 Payment follow-up due today</div>}
+                        {!today.project_shoot_today && today.shoots.length === 0 && today.trials.length === 0 && today.tasks.length === 0 && !today.payment_followup_due && (
+                            <div className="text-black/40 py-2 text-center">Nothing scheduled today.</div>
+                        )}
+                    </div>
+                </SectionCard>
+
+                <SectionCard title="Upcoming" icon={CalendarClock} testId="pd-upcoming">
+                    <div className="space-y-1.5 text-xs">
+                        {upcoming.shoots.map((c) => <div key={`up-shoot-${c.talent_id}`} className="text-black/70">🎬 Shoot scheduled — {c.name}</div>)}
+                        {upcoming.trials.map((c) => (
+                            <div key={`up-trial-${c.talent_id}`} className="text-black/70">👗 Costume trial — {c.name} ({formatDate(c.costume_trial_at)})</div>
+                        ))}
+                        {upcoming.tasks.map((t) => (
+                            <div key={t.id} className="text-black/70">✓ {t.title}{t.talent_name ? ` (${t.talent_name})` : ""} — due {formatDate(t.due_at)}</div>
+                        ))}
+                        {upcoming.payment_followup && <div className="text-black/70">💰 Payment follow-up — {formatDate(p.pd_next_follow_up_at)}</div>}
+                        {upcoming.shoots.length === 0 && upcoming.trials.length === 0 && upcoming.tasks.length === 0 && !upcoming.payment_followup && (
+                            <div className="text-black/40 py-2 text-center">Nothing upcoming.</div>
+                        )}
+                    </div>
+                </SectionCard>
+            </div>
 
             {/* Locked Talents */}
             <SectionCard title={`Locked Talents (${talents.length})`} icon={Users} testId="pd-locked-talents">
@@ -456,6 +546,112 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
+            {/* Talent Preparation — additive fields on the SAME locked
+                casting_pipeline row Locked Talents above reads; no second
+                talent/project relationship. */}
+            {talents.length > 0 && (
+                <SectionCard title="Talent Preparation" icon={ListChecks} testId="pd-talent-prep">
+                    <div className="overflow-x-auto">
+                        <Table>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHead className="text-xs">Talent</TableHead>
+                                    <TableHead className="text-xs">Costume Trial</TableHead>
+                                    <TableHead className="text-xs">Trial Location</TableHead>
+                                    <TableHead className="text-xs">Fitting</TableHead>
+                                    <TableHead className="text-xs">Look Test</TableHead>
+                                    <TableHead className="text-xs">Shoot Status</TableHead>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                {talents.map((t) => (
+                                    <TableRow key={t.talent_id} data-testid={`pd-prep-row-${t.talent_id}`}>
+                                        <TableCell className="text-xs font-medium text-black/80">{t.name}</TableCell>
+                                        <TableCell>
+                                            <Input
+                                                type="date"
+                                                defaultValue={toDateInputValue(t.costume_trial_at)}
+                                                className="h-7 text-xs w-[130px]"
+                                                onBlur={(e) => {
+                                                    const iso = fromDateInputValue(e.target.value);
+                                                    if (iso !== t.costume_trial_at) patchTalent(t.talent_id, { costume_trial_at: iso });
+                                                }}
+                                            />
+                                        </TableCell>
+                                        <TableCell>
+                                            <Input
+                                                defaultValue={t.costume_trial_location || ""}
+                                                placeholder="Location"
+                                                className="h-7 text-xs w-[130px]"
+                                                onBlur={(e) => { if (e.target.value !== (t.costume_trial_location || "")) patchTalent(t.talent_id, { costume_trial_location: e.target.value }); }}
+                                            />
+                                        </TableCell>
+                                        <TableCell>
+                                            <Select value={t.fitting_status} onValueChange={(v) => patchTalent(t.talent_id, { fitting_status: v })}>
+                                                <SelectTrigger className="h-7 text-xs w-[120px]"><SelectValue /></SelectTrigger>
+                                                <SelectContent>
+                                                    {TRIAL_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
+                                                </SelectContent>
+                                            </Select>
+                                        </TableCell>
+                                        <TableCell>
+                                            <Select value={t.look_test_status} onValueChange={(v) => patchTalent(t.talent_id, { look_test_status: v })}>
+                                                <SelectTrigger className="h-7 text-xs w-[120px]"><SelectValue /></SelectTrigger>
+                                                <SelectContent>
+                                                    {TRIAL_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
+                                                </SelectContent>
+                                            </Select>
+                                        </TableCell>
+                                        <TableCell>
+                                            <Select value={t.shoot_status} onValueChange={(v) => patchTalent(t.talent_id, { shoot_status: v })}>
+                                                <SelectTrigger className="h-7 text-xs w-[120px]"><SelectValue /></SelectTrigger>
+                                                <SelectContent>
+                                                    {SHOOT_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
+                                                </SelectContent>
+                                            </Select>
+                                        </TableCell>
+                                    </TableRow>
+                                ))}
+                            </TableBody>
+                        </Table>
+                    </div>
+                </SectionCard>
+            )}
+
+            {/* Tasks — the SAME db.workflow_tasks the Management Agent and
+                the admin Workflow page read/write. */}
+            <SectionCard
+                title={`Tasks (${tasks.pending.length})`}
+                icon={ListChecks}
+                right={<Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setTaskDialog(true)}><Plus className="h-3 w-3 mr-1" /> Add Task</Button>}
+                testId="pd-tasks"
+            >
+                {tasks.pending.length === 0 ? (
+                    <div className="text-xs text-black/40 py-4 text-center">No open tasks.</div>
+                ) : (
+                    <div className="space-y-1.5">
+                        {tasks.pending.map((t) => {
+                            const isOverdue = tasks.overdue.some((o) => o.id === t.id);
+                            return (
+                                <div key={t.id} className="flex items-center justify-between gap-2 text-xs rounded-md border border-black/[0.06] px-3 py-2" data-testid={`pd-task-${t.id}`}>
+                                    <button className="flex items-center gap-2 text-left flex-1 min-w-0" onClick={() => updateTaskStatus(t.id, "completed")}>
+                                        <Circle className="h-3.5 w-3.5 text-black/30 shrink-0" />
+                                        <span className="truncate">
+                                            <span className="font-medium text-black/80">{t.title}</span>
+                                            {t.talent_name && <span className="text-black/40"> · {t.talent_name}</span>}
+                                        </span>
+                                    </button>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                        {t.priority && <Badge variant="outline" className="text-[10px]">{t.priority}</Badge>}
+                                        <span className={isOverdue ? "text-red-600 font-medium" : "text-black/40"}>{formatDate(t.due_at)}</span>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </SectionCard>
+
             {/* Production Budget & Shoot Details */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <SectionCard title="Production Budget" icon={Wallet} testId="pd-production-budget">
@@ -500,8 +696,21 @@ export default function ProductionDesk({ projectId, project }) {
                             <Input defaultValue={p.pd_call_time || ""} placeholder="e.g. 8:00 AM" className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_call_time || "")) patchProject({ call_time: e.target.value }); }} />
                         </div>
                         <div className="flex items-center justify-between gap-2">
+                            <span className="text-black/40 shrink-0">Reporting Time</span>
+                            <Input defaultValue={p.pd_reporting_time || ""} placeholder="e.g. 7:00 AM" className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_reporting_time || "")) patchProject({ reporting_time: e.target.value }); }} />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
                             <span className="text-black/40 shrink-0">Location</span>
                             <Input defaultValue={p.pd_shoot_location || ""} placeholder="Shoot location" className="h-7 text-xs max-w-[220px]" onBlur={(e) => { if (e.target.value !== (p.pd_shoot_location || "")) patchProject({ shoot_location: e.target.value }); }} />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="text-black/40 shrink-0">Shoot Status</span>
+                            <Select value={p.pd_shoot_status} onValueChange={(v) => patchProject({ shoot_status: v })}>
+                                <SelectTrigger className="h-7 text-xs w-[130px]"><SelectValue /></SelectTrigger>
+                                <SelectContent>
+                                    {SHOOT_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
+                                </SelectContent>
+                            </Select>
                         </div>
                         <div>
                             <span className="text-black/40 block mb-1">Production Contact</span>
@@ -519,6 +728,46 @@ export default function ProductionDesk({ projectId, project }) {
                     </div>
                 </SectionCard>
             </div>
+
+            {/* Payment Follow-up — operational tracking ONLY, not a
+                Finance/accounting record. pd_payment_in_received (in
+                Project Checklist below) stays the one "has it actually
+                arrived" boolean; this is the working notes a manager
+                keeps while chasing it. */}
+            <SectionCard title="Payment Follow-up" icon={PhoneCall} testId="pd-payment-followup">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                        <Label className="text-[11px] text-black/40">Payment Terms</Label>
+                        <Input defaultValue={p.pd_payment_terms || ""} placeholder="e.g. 50% advance, 50% on delivery" className="h-8 text-xs mt-1" onBlur={(e) => { if (e.target.value !== (p.pd_payment_terms || "")) patchProject({ payment_terms: e.target.value }); }} />
+                    </div>
+                    <div>
+                        <Label className="text-[11px] text-black/40">Status</Label>
+                        <Select value={p.pd_payment_followup_status} onValueChange={(v) => patchProject({ payment_followup_status: v })}>
+                            <SelectTrigger className="h-8 text-xs mt-1"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                                {PAYMENT_FOLLOWUP_STATUSES.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
+                            </SelectContent>
+                        </Select>
+                    </div>
+                    <div>
+                        <Label className="text-[11px] text-black/40">Expected Date</Label>
+                        <Input type="date" defaultValue={toDateInputValue(p.pd_expected_payment_date)} className="h-8 text-xs mt-1"
+                            onBlur={(e) => { const iso = fromDateInputValue(e.target.value); if (iso !== p.pd_expected_payment_date) patchProject({ expected_payment_date: iso }); }} />
+                    </div>
+                    <div>
+                        <Label className="text-[11px] text-black/40">Next Follow-up</Label>
+                        <Input type="date" defaultValue={toDateInputValue(p.pd_next_follow_up_at)} className="h-8 text-xs mt-1"
+                            onBlur={(e) => { const iso = fromDateInputValue(e.target.value); if (iso !== p.pd_next_follow_up_at) patchProject({ next_follow_up_at: iso, last_follow_up_at: new Date().toISOString() }); }} />
+                    </div>
+                    <div className="sm:col-span-2">
+                        <Label className="text-[11px] text-black/40">Notes</Label>
+                        <Textarea defaultValue={p.pd_payment_followup_notes || ""} rows={2} className="text-xs mt-1" onBlur={(e) => { if (e.target.value !== (p.pd_payment_followup_notes || "")) patchProject({ payment_followup_notes: e.target.value }); }} />
+                    </div>
+                </div>
+                {p.pd_last_follow_up_at && (
+                    <div className="mt-3 text-[11px] text-black/40">Last followed up: {formatDate(p.pd_last_follow_up_at)}</div>
+                )}
+            </SectionCard>
 
             {/* Commission & Kickbacks */}
             <SectionCard
@@ -815,6 +1064,21 @@ export default function ProductionDesk({ projectId, project }) {
                 </DialogContent>
             </Dialog>
 
+            {/* Add Task dialog — writes to the SAME db.workflow_tasks the
+                Management Agent and the admin Workflow page use. */}
+            <Dialog open={taskDialog} onOpenChange={setTaskDialog}>
+                <DialogContent className="max-w-sm">
+                    <DialogHeader><DialogTitle className="text-sm">Add Task</DialogTitle></DialogHeader>
+                    <AddTaskForm
+                        talents={talents}
+                        onSubmit={async (payload) => {
+                            await createTask(payload);
+                            setTaskDialog(false);
+                        }}
+                    />
+                </DialogContent>
+            </Dialog>
+
             {quickViewTalent && (
                 <TalentPreviewDrawer talent={quickViewTalent} onClose={() => setQuickViewTalent(null)} isMobile={isMobile} />
             )}
@@ -942,6 +1206,70 @@ function UploadDocumentForm({ onSubmit }) {
             <DialogFooter>
                 <Button size="sm" disabled={!file || saving} onClick={async () => { setSaving(true); await onSubmit({ category, file }); setSaving(false); }}>
                     {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Upload"}
+                </Button>
+            </DialogFooter>
+        </div>
+    );
+}
+
+function AddTaskForm({ talents, onSubmit }) {
+    const [title, setTitle] = useState("");
+    const [dueDate, setDueDate] = useState("");
+    const [priority, setPriority] = useState("normal");
+    const [talentId, setTalentId] = useState("none");
+    const [saving, setSaving] = useState(false);
+    return (
+        <div className="space-y-3">
+            <div>
+                <Label className="text-xs">Task</Label>
+                <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Get call sheet" className="h-8 text-xs mt-1" autoFocus />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+                <div>
+                    <Label className="text-xs">Due Date</Label>
+                    <Input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="h-8 text-xs mt-1" />
+                </div>
+                <div>
+                    <Label className="text-xs">Priority</Label>
+                    <Select value={priority} onValueChange={setPriority}>
+                        <SelectTrigger className="h-8 text-xs mt-1"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="low">Low</SelectItem>
+                            <SelectItem value="normal">Normal</SelectItem>
+                            <SelectItem value="high">High</SelectItem>
+                        </SelectContent>
+                    </Select>
+                </div>
+            </div>
+            {talents.length > 0 && (
+                <div>
+                    <Label className="text-xs">Talent (optional)</Label>
+                    <Select value={talentId} onValueChange={setTalentId}>
+                        <SelectTrigger className="h-8 text-xs mt-1"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="none">None</SelectItem>
+                            {talents.map((t) => <SelectItem key={t.talent_id} value={t.talent_id}>{t.name}</SelectItem>)}
+                        </SelectContent>
+                    </Select>
+                </div>
+            )}
+            <DialogFooter>
+                <Button
+                    size="sm"
+                    disabled={!title.trim() || saving}
+                    onClick={async () => {
+                        setSaving(true);
+                        await onSubmit({
+                            title: title.trim(),
+                            category: "project",
+                            due_at: fromDateInputValue(dueDate),
+                            priority,
+                            talent_id: talentId === "none" ? null : talentId,
+                        });
+                        setSaving(false);
+                    }}
+                >
+                    {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Add Task"}
                 </Button>
             </DialogFooter>
         </div>

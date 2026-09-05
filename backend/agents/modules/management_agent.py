@@ -419,7 +419,12 @@ _FOCUS_KEYWORDS = {
     "documents": ("document",),
     # Production Management Desk (Phase 1+2)
     "today": ("happening today", "today"),
-    "upcoming": ("upcoming", "what's next", "whats next"),
+    # "tomorrow" maps here too — "What's happening tomorrow for Google AI?"
+    # (project-scoped) renders the same Upcoming section the project-less
+    # global digest shows for "tomorrow" (everything after today, not
+    # filtered to exactly tomorrow's date — an honest, if slightly
+    # broader, answer rather than nothing).
+    "upcoming": ("upcoming", "what's next", "whats next", "tomorrow"),
     "tasks": ("task", "todo", "to-do"),
     "payment_followup": ("payment follow-up", "payment followup", "follow-up", "followup"),
 }

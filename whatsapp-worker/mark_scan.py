@@ -674,6 +674,28 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
         if not mark_text:
             continue
         quoted_hash = _smallest_hash(quoted_html)
+        # Production fix (2026-09-07, round 2): WhatsApp's quoted-message
+        # preview does not ALWAYS embed an inline base64 thumbnail the
+        # regex-based _smallest_hash can find — proven by this exact
+        # scenario recurring after the round-1 jump-fallback fix, which
+        # only triggered when quoted_hash WAS extracted but simply didn't
+        # match anything in-window. A forwarded video, or a quoted-message
+        # DOM variant this codebase hasn't captured before, can carry NO
+        # embeddable inline blob at all while still clearly being a real,
+        # single-item media quote (not WhatsApp's "N videos/photos" whole-
+        # album summary, which is a SEPARATE, already-handled case below).
+        # _media_type() detects "video" vs "image" purely from the
+        # data-testid marker (video-thumb/video-content vs image-thumb/
+        # image-content) — completely independent of whether a hash blob
+        # was found — so it survives exactly where the hash extraction
+        # fails, and gives a real (not fabricated) secondary identity
+        # signal to cross-check a live-jump result against when no hash
+        # is available to verify by.
+        quoted_media_type = _media_type(quoted_html)
+        logger.info(
+            "mark_scan: candidate mark_text=%r quoted_hash=%s quoted_media_type=%s",
+            mark_text, (quoted_hash[:16] + "...") if quoted_hash else None, quoted_media_type,
+        )
 
         if quoted_hash is None:
             # No thumbnail hash at all in the quoted block — proven
@@ -697,24 +719,46 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
 
         source = sources_by_hash.get(quoted_hash) if quoted_hash else None
         jump_fallback_used = False
-        if source is None and quoted_hash is not None and jump_fallback_attempts < MAX_JUMP_FALLBACK_ATTEMPTS_PER_SCAN:
+        # Attempt the live jump whenever the cheap in-window lookup didn't
+        # already resolve it AND we have at least ONE real identity signal
+        # to verify a jump result against — a hash (preferred, strongest)
+        # or, when no hash could be extracted, the quote's own media-type
+        # marker (weaker, but still a real DOM signal, never fabricated).
+        # Neither present means the quote carried no identifiable content
+        # at all — genuinely nothing to jump toward or verify, so no
+        # attempt is made and this stays a hard, honest resolution failure.
+        can_attempt_jump = quoted_hash is not None or quoted_media_type is not None
+        if source is None and can_attempt_jump and jump_fallback_attempts < MAX_JUMP_FALLBACK_ATTEMPTS_PER_SCAN:
             # Live-jump fallback (Production fix — real bug, "Sneha
-            # Varghese / Vaseline (Birthday film)"): the reply's quoted
-            # hash IS real/valid, it just isn't among the plain source
-            # messages this bounded window scan happened to capture (the
-            # original media can fall outside WhatsApp Web's own render
-            # window well before its later reply does). Only attempted
-            # HERE, per-candidate, exactly because the cheap in-window
-            # lookup above already failed — never a broader/repeated
-            # re-scan, and never for a candidate the cheap lookup already
-            # resolved. See _resolve_single_media_via_jump's own
-            # docstring for the full reasoning and the hash-reverification
-            # safety check.
+            # Varghese / Vaseline (Birthday film)"): a reply's quoted
+            # block unambiguously targets one exact original message —
+            # WhatsApp's own "click quoted block -> jump to/highlight
+            # original" feature IS that exact resolution, not a guess.
+            # Round 1 only reached this path when a hash was extracted
+            # but didn't match anything in the bounded scan window
+            # (original scrolled out). Round 2: also reached when NO hash
+            # could be extracted from the quoted block at all (e.g. a
+            # forwarded video's quoted preview, or any quoted-message DOM
+            # shape without an embeddable inline blob) — the jump is
+            # attempted anyway, verified by media-type cross-check
+            # instead of hash equality. Only attempted HERE, per-
+            # candidate, exactly because the cheap in-window lookup above
+            # already failed — never a broader/repeated re-scan, never
+            # for a candidate the cheap lookup already resolved. See
+            # _resolve_single_media_via_jump's own docstring for the
+            # full reasoning and both verification modes.
             reply_id = _own_data_id(html)
+            logger.info(
+                "mark_scan: jump fallback %s for reply_id=%s (quoted_hash=%s, quoted_media_type=%s)",
+                "attempting" if reply_id else "SKIPPED (no reply_id)", reply_id,
+                bool(quoted_hash), quoted_media_type,
+            )
             if reply_id:
                 jump_fallback_attempts += 1
                 try:
-                    jump_result = await _resolve_single_media_via_jump(page, group_name, reply_id, quoted_hash)
+                    jump_result = await _resolve_single_media_via_jump(
+                        page, group_name, reply_id, quoted_hash, expected_media_type=quoted_media_type,
+                    )
                 except Exception as exc:
                     # An unexpected failure during the live-jump attempt
                     # (page/session trouble, an unforeseen DOM shape, etc.)
@@ -725,6 +769,7 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
                     # been attempted.
                     logger.warning("mark_scan: live-jump fallback failed for reply %r: %s", reply_id, exc)
                     jump_result = {"ok": False, "reason": f"jump fallback raised: {exc}"}
+                logger.info("mark_scan: jump fallback result for reply_id=%s -> %s", reply_id, jump_result)
                 if jump_result.get("ok"):
                     source = {
                         "source_message_id": jump_result["source_message_id"],
@@ -745,6 +790,10 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             "album_tile_index": (source or {}).get("album_tile_index"),
             "resolved_via_jump_fallback": jump_fallback_used,
         })
+        logger.info(
+            "mark_scan: candidate FINAL mark_text=%r reply_message_id=%s -> resolved_source_message_id=%s (via_jump=%s)",
+            mark_text, _own_data_id(html), (source or {}).get("source_message_id"), jump_fallback_used,
+        )
 
     # Live resolution phase for whole-album batch marks (2026-08-23) — the
     # one part of this scan that needs real Playwright interaction rather
@@ -1312,39 +1361,64 @@ async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dic
 
 
 async def _resolve_single_media_via_jump(
-    page, group_name: str, reply_data_id: str, expected_hash: str,
+    page, group_name: str, reply_data_id: str,
+    expected_hash: Optional[str], expected_media_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """MARK/SEND source-resolution fallback (Production fix — real
-    production bug: "Sneha Varghese / Vaseline (Birthday film)". A reply's
-    quoted-message block DID carry a valid, real thumbnail hash — the
-    reply genuinely targets one exact piece of media — but that hash
-    didn't match anything the bounded window scan (_dump_window, capped
-    at whatever's currently rendered) happened to capture. WhatsApp Web
-    only keeps a limited render window mounted around wherever the chat
-    is scrolled; the ORIGINAL media message can fall outside that window
-    well before enough later chat activity happens, while the REPLY
-    itself (more recent, closer to when SEND runs) is still well within
-    reach — the reply's own embedded quoted-thumbnail is unaffected by
-    this (it's rendered inside the reply's OWN bubble), but the plain
-    source-message index (`sources_by_hash`) built only from the SAME
-    bounded window has no entry for it, so the existing hash lookup
-    fails even though the reply unambiguously identifies a real, specific
-    message.
+    production bug: "Sneha Varghese / Vaseline (Birthday film)", TWO
+    rounds. Round 1 (2026-09-07): a reply's quoted-message block DID
+    carry a valid, real thumbnail hash — the reply genuinely targets one
+    exact piece of media — but that hash didn't match anything the
+    bounded window scan (_dump_window, capped at whatever's currently
+    rendered) happened to capture. WhatsApp Web only keeps a limited
+    render window mounted around wherever the chat is scrolled; the
+    ORIGINAL media message can fall outside that window well before
+    enough later chat activity happens, while the REPLY itself (more
+    recent, closer to when SEND runs) is still well within reach.
+
+    Round 2 (same day, real recurrence after round 1 deployed): the
+    SAME failure kept happening for Sneha Varghese's real marks even
+    with round 1 live. Traced to a second, distinct gap: round 1's
+    fallback only ever triggered when `expected_hash` WAS extracted from
+    the quoted block. Real-world evidence (this exact recurrence) proves
+    a quoted-message block does not always embed an inline base64
+    thumbnail _smallest_hash's regex can find — e.g. a forwarded video's
+    quoted preview, or any quoted-message DOM variant this codebase
+    hadn't captured before — while still being an ordinary, real,
+    single-item media quote (never WhatsApp's "N videos/photos" whole-
+    album summary, a separate, already-handled case in _run_scan). When
+    `expected_hash` is None, this function is still invoked (from
+    _run_scan) whenever `expected_media_type` — detected purely from the
+    quoted block's own data-testid marker (video-thumb/video-content vs
+    image-thumb/image-content), independent of whether a hash blob was
+    found — is available instead.
 
     WhatsApp's own quoted-message block is clickable and deterministically
     jumps to/highlights the EXACT original message — the same native
     "jump to quoted message" feature the whole-album batch-mark path
     (_resolve_quoted_jump) already relies on and this codebase already
-    proved reliable. Reused here as a targeted, PER-CANDIDATE fallback —
+    proved reliable. This click-and-jump IS WhatsApp's own authoritative
+    resolution of "what does this reply point at" — not a guess, not a
+    heuristic re-scan; reused here as a targeted, PER-CANDIDATE fallback,
     never a broader re-scan, never expensive: only ever attempted for a
     candidate that already failed the cheap in-window hash lookup.
 
-    Safety: the jumped-to message's OWN hash is re-verified against
-    `expected_hash` (the reply's own quoted hash) before ANY result is
-    trusted. A jump landing near, but not exactly on, the right message
-    (viewport-centering imprecision, or a genuinely different message
-    entirely) is NEVER silently accepted as a substitute — that failure
-    is reported exactly like any other unresolved mark, never guessed."""
+    Safety (two verification modes, never neither):
+      - `expected_hash` given (strongest): the jumped-to message's OWN
+        hash is re-verified against it before ANY result is trusted. A
+        jump landing near, but not exactly on, the right message
+        (viewport-centering imprecision, or a genuinely different
+        message entirely) is NEVER silently accepted as a substitute.
+      - `expected_hash` is None but `expected_media_type` given (weaker,
+        but a real DOM signal, never fabricated): the jumped-to
+        message's own media type must match. Still never accepted
+        blindly — a jump landing on a message of the WRONG media type
+        is rejected exactly like a hash mismatch.
+      - Both None: nothing to verify against at all — this function is
+        never even called in that case (see _run_scan's `can_attempt_jump`
+        gate), and callers must not call it with neither.
+    Either way, failure is reported exactly like any other unresolved
+    mark, never guessed."""
     jumped = await _jump_to_quoted_message(page, group_name, reply_data_id)
     if not jumped.get("ok"):
         return jumped
@@ -1358,14 +1432,28 @@ async def _resolve_single_media_via_jump(
             "ok": False, "data_id": jumped["data_id"],
             "reason": "jumped-to message is an album, not the expected single media item",
         }
-    live_hash = _smallest_hash(jumped_html)
-    if live_hash != expected_hash:
-        return {
-            "ok": False, "data_id": jumped["data_id"],
-            "reason": "jumped-to message's own hash does not match the reply's quoted hash",
-            "expected_hash": expected_hash, "live_hash": live_hash,
-        }
     media_type = _media_type(jumped_html)
+    if expected_hash is not None:
+        live_hash = _smallest_hash(jumped_html)
+        if live_hash != expected_hash:
+            return {
+                "ok": False, "data_id": jumped["data_id"],
+                "reason": "jumped-to message's own hash does not match the reply's quoted hash",
+                "expected_hash": expected_hash, "live_hash": live_hash,
+            }
+    elif expected_media_type is not None:
+        if media_type != expected_media_type:
+            return {
+                "ok": False, "data_id": jumped["data_id"],
+                "reason": "jumped-to message's media type does not match the quoted block's own media type",
+                "expected_media_type": expected_media_type, "live_media_type": media_type,
+            }
+    else:
+        # Defensive only — _run_scan never calls this function with
+        # neither signal available (can_attempt_jump gate); a direct
+        # caller doing so has nothing to verify against, so this must
+        # never silently succeed.
+        return {"ok": False, "data_id": jumped["data_id"], "reason": "no expected hash or media type to verify the jump against"}
     if not media_type:
         return {"ok": False, "data_id": jumped["data_id"], "reason": "jumped-to message has no recognizable media"}
     return {

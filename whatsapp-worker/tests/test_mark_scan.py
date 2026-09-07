@@ -2835,7 +2835,7 @@ def main():
 
     fallback_calls_89: list = []
 
-    async def _fake_jump_fallback_89(page, group_name, reply_id, expected_hash):
+    async def _fake_jump_fallback_89(page, group_name, reply_id, expected_hash, expected_media_type=None):
         fallback_calls_89.append((reply_id, expected_hash))
         if expected_hash == audition_hash_89:
             return {"ok": True, "source_message_id": "SNEHA_AUDITION_ORIGINAL", "source_media_type": "video", "source_sender": "Sneha Varghese"}
@@ -2887,7 +2887,7 @@ def main():
     )
     window_91 = [{"messageHtml": unresolvable_reply_91, "quotedHtml": unresolvable_quoted_91}]
 
-    async def _fake_jump_fallback_fails_91(page, group_name, reply_id, expected_hash):
+    async def _fake_jump_fallback_fails_91(page, group_name, reply_id, expected_hash, expected_media_type=None):
         return {"ok": False, "reason": "jumped-to message's own hash does not match the reply's quoted hash"}
 
     async def _fake_dump_window_91(page, group_name, max_messages, diagnostic=None, max_steps=10):
@@ -2930,7 +2930,7 @@ def main():
         {"messageHtml": crash_reply_92, "quotedHtml": crash_quoted_92},  # fallback raises for this one
     ]
 
-    async def _fake_jump_fallback_raises_92(page, group_name, reply_id, expected_hash):
+    async def _fake_jump_fallback_raises_92(page, group_name, reply_id, expected_hash, expected_media_type=None):
         raise RuntimeError("simulated page/session trouble during live jump")
 
     async def _fake_dump_window_92(page, group_name, max_messages, diagnostic=None, max_steps=10):
@@ -2972,7 +2972,7 @@ def main():
 
     call_count_93 = {"n": 0}
 
-    async def _fake_jump_fallback_counts_93(page, group_name, reply_id, expected_hash):
+    async def _fake_jump_fallback_counts_93(page, group_name, reply_id, expected_hash, expected_media_type=None):
         call_count_93["n"] += 1
         return {"ok": False, "reason": "no match"}
 
@@ -3007,7 +3007,7 @@ def main():
     ]
     fallback_call_count_94 = {"n": 0}
 
-    async def _fake_jump_fallback_counts_94(page, group_name, reply_id, expected_hash):
+    async def _fake_jump_fallback_counts_94(page, group_name, reply_id, expected_hash, expected_media_type=None):
         fallback_call_count_94["n"] += 1
         return {"ok": False, "reason": "should never be called"}
 
@@ -3091,6 +3091,239 @@ def main():
     assert len(cands_96) == 1, cands_96
     assert cands_96[0]["resolved_source_message_id"] == "SIMILAR_CAPTION_B", cands_96[0]  # never A, despite similar surrounding context
     print("96. similar-caption disambiguation -> reply quoting B's exact hash resolves to B, never to A, despite near-identical surrounding context/captions")
+
+    # ------------------------------------------------------------------
+    # 97-103: ROUND 2 — real recurrence of the SAME production error after
+    # round 1 (tests 85-96) was deployed. Traced: round 1's live-jump
+    # fallback only ever triggered when a thumbnail hash WAS extracted
+    # from the quoted block but simply didn't match anything in-window.
+    # Real-world evidence (this exact recurrence for Sneha Varghese's
+    # marks, live, AFTER round 1 was deployed) proves a quoted-message
+    # block does not always embed an inline base64 thumbnail at all
+    # (_smallest_hash's regex finds nothing) — e.g. a forwarded video's
+    # quoted preview — while still being an ordinary single-item media
+    # quote, never WhatsApp's "N videos/photos" whole-album summary.
+    # Round 1's fallback gate (`quoted_hash is not None`) skipped this
+    # case ENTIRELY: no fallback was even attempted, so it degraded
+    # straight to "could not be matched" exactly like before round 1
+    # existed. Round 2 also triggers the fallback when the quote's own
+    # media-type marker (video-thumb/video-content/image-thumb/
+    # image-content — detected independently of any hash) is present,
+    # verifying the jump result by media-type match instead of hash
+    # equality when no hash is available.
+    # ------------------------------------------------------------------
+
+    mark_scan.sender._resolve_scope = _fake_resolve_scope_jump
+
+    # 97: expected_hash=None, expected_media_type="video" -> jumped-to
+    # message IS a video -> resolves via media-type verification alone.
+    jumped_video_97 = (
+        '<div data-id="NOHASH_VIDEO_97" data-testid="conv-msg-NOHASH_VIDEO_97">'
+        '<div data-testid="video-content"></div></div>'
+    )
+    page_97, quoted_97 = _setup_jump_fixture("REPLY97", "NOHASH_VIDEO_97", jumped_video_97)
+    result_97 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_97, "Sneha Varghese", "REPLY97", None, expected_media_type="video",
+    ))
+    assert result_97["ok"] is True, result_97
+    assert result_97["source_message_id"] == "NOHASH_VIDEO_97", result_97
+    assert result_97["source_media_type"] == "video", result_97
+    print("97. live-jump media-type-only verification succeeds -> no hash extractable from the quote at all, jumped-to message's own media type matches -> resolves")
+
+    # 98: expected_hash=None, expected_media_type="video" -> jumped-to
+    # message is actually an IMAGE -> media-type mismatch -> rejected,
+    # never accepted as a substitute.
+    jumped_image_98 = (
+        '<div data-id="WRONG_TYPE_98" data-testid="conv-msg-WRONG_TYPE_98">'
+        '<div data-testid="image-thumb"></div></div>'
+    )
+    page_98, _ = _setup_jump_fixture("REPLY98", "WRONG_TYPE_98", jumped_image_98)
+    result_98 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_98, "Sneha Varghese", "REPLY98", None, expected_media_type="video",
+    ))
+    assert result_98["ok"] is False, result_98
+    assert "does not match" in result_98["reason"], result_98
+    print("98. live-jump media-type-only verification safety: media-type mismatch -> jumped-to message rejected, never substituted")
+
+    # 99: neither expected_hash NOR expected_media_type available -> the
+    # function itself refuses to guess (defensive — _run_scan's own
+    # can_attempt_jump gate should never actually call it this way, but
+    # the function itself must not silently succeed if it ever is).
+    jumped_99 = '<div data-id="ANYTHING_99" data-testid="conv-msg-ANYTHING_99"><div data-testid="video-content"></div></div>'
+    page_99, _ = _setup_jump_fixture("REPLY99", "ANYTHING_99", jumped_99)
+    result_99 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_99, "Sneha Varghese", "REPLY99", None, expected_media_type=None,
+    ))
+    assert result_99["ok"] is False, result_99
+    assert "no expected hash or media type" in result_99["reason"], result_99
+    print("99. live-jump refuses with neither signal -> no hash and no media-type to verify against -> clean refusal, never a blind accept")
+
+    mark_scan.sender._resolve_scope = orig_resolve_scope_jump
+    mark_scan._find_message_index_by_data_id = orig_find_idx_jump
+    mark_scan._evaluate = orig_evaluate_jump
+
+    # 100-103: full _run_scan integration, REAL (unmocked)
+    # _resolve_single_media_via_jump — the actual Sneha Varghese /
+    # Vaseline scenario as it recurred in production: BOTH marks' quoted
+    # blocks carry NO embeddable hash at all (modeling a forwarded
+    # video's quoted preview), only a real video-content testid marker.
+    class _FakeScanSenderWithScope:
+        async def _open_group_chat(self, page, group_name):
+            return "OPENED"
+        async def _resolve_scope(self, page):
+            return "#main"
+
+    orig_sender_100 = mark_scan.sender
+    mark_scan.sender = _FakeScanSenderWithScope()
+
+    audition_reply_100 = REPLY_TO_PHOTO_HTML.replace("3EB0CAC0901DAD51217B30", "REPLY100A").replace(
+        "mark spike take 1", "mark audition take for vaseline",
+    )
+    intro_reply_100 = REPLY_TO_PHOTO_HTML.replace("3EB0CAC0901DAD51217B30", "REPLY100B").replace(
+        "mark spike take 1", "mark introduction take for vaseline",
+    )
+    # No embedded base64 blob at all in either quoted block — only the
+    # real data-testid marker WhatsApp renders regardless of thumbnail
+    # availability. _smallest_hash(...) returns None for both; _media_type
+    # still finds "video" for both, purely from the testid.
+    no_hash_video_quote = '<div data-testid="quoted-message"><span data-testid="author">Raj Talentgram</span><div data-testid="video-content"></div></div>'
+    window_100 = [
+        {"messageHtml": audition_reply_100, "quotedHtml": no_hash_video_quote},
+        {"messageHtml": intro_reply_100, "quotedHtml": no_hash_video_quote},
+    ]
+
+    jumped_audition_100 = '<div data-id="JUMPED100A" data-testid="conv-msg-JUMPED100A"><div data-testid="video-content"></div></div>'
+    jumped_intro_100 = '<div data-id="JUMPED100B" data-testid="conv-msg-JUMPED100B"><div data-testid="video-content"></div></div>'
+    idx_by_data_id_100 = {"REPLY100A": 0, "JUMPED100A": 1, "REPLY100B": 2, "JUMPED100B": 3}
+    by_idx_100 = {
+        0: _FakeJumpReplyMessage(_FakeJumpQuotedBlock(count=1)),
+        1: _FakeJumpTargetMessage(jumped_audition_100),
+        2: _FakeJumpReplyMessage(_FakeJumpQuotedBlock(count=1)),
+        3: _FakeJumpTargetMessage(jumped_intro_100),
+    }
+    reply_to_jumped_100 = {"REPLY100A": "JUMPED100A", "REPLY100B": "JUMPED100B"}
+    find_idx_calls_100: list = []
+
+    async def _fake_find_idx_100(page, group_name, data_id):
+        find_idx_calls_100.append(data_id)
+        return idx_by_data_id_100.get(data_id)
+
+    async def _fake_evaluate_100(p, js, arg=None, timeout=10.0):
+        last_reply = next(d for d in reversed(find_idx_calls_100) if d in reply_to_jumped_100)
+        return {"dataId": reply_to_jumped_100[last_reply]}
+
+    orig_find_idx_100 = mark_scan._find_message_index_by_data_id
+    orig_evaluate_100 = mark_scan._evaluate
+    orig_dump_window_100 = mark_scan._dump_window
+
+    async def _fake_dump_window_100(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_100
+
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_100
+
+    class _FakeJumpPage100:
+        def __init__(self):
+            pass
+        def locator(self, sel):
+            return _FakeJumpLocatorRoot(by_idx_100)
+        async def wait_for_timeout(self, ms):
+            pass
+
+    mark_scan._evaluate = _fake_evaluate_100
+    mark_scan._dump_window = _fake_dump_window_100
+    try:
+        scan_result_100 = asyncio.run(mark_scan._run_scan(page=_FakeJumpPage100(), req={"group_name": "Sneha Varghese"}))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_100
+        mark_scan._evaluate = orig_evaluate_100
+        mark_scan._dump_window = orig_dump_window_100
+        mark_scan.sender = orig_sender_100
+    cands_100 = scan_result_100.get("candidates") or []
+    by_text_100 = {c["mark_text"]: c for c in cands_100}
+    assert len(cands_100) == 2, cands_100
+    audition_cand_100 = by_text_100["mark audition take for vaseline"]
+    assert audition_cand_100["quoted_thumbnail_hash"] is None, audition_cand_100  # confirms this IS the no-hash-at-all case, not the round-1 scrolled-out case
+    assert audition_cand_100["resolved_source_message_id"] == "JUMPED100A", audition_cand_100
+    assert audition_cand_100["resolved_via_jump_fallback"] is True, audition_cand_100
+    print("100. Sneha/Vaseline audition mark resolves with NO extractable quote hash at all -> live-jump fallback triggers on media-type signal alone -> exact source found (the REAL round-2 recurrence, reproduced and fixed)")
+
+    # 101: the SECOND mark (introduction), SAME scan, SAME no-hash
+    # condition -> resolves to its OWN distinct source, no cross-
+    # contamination, proving round 2 handles multiple no-hash marks in
+    # one scan correctly (not by accidentally reusing the first jump).
+    intro_cand_101 = by_text_100["mark introduction take for vaseline"]
+    assert intro_cand_101["resolved_source_message_id"] == "JUMPED100B", intro_cand_101
+    assert intro_cand_101["resolved_via_jump_fallback"] is True, intro_cand_101
+    assert intro_cand_101["resolved_source_message_id"] != audition_cand_100["resolved_source_message_id"], "audition and intro must never resolve to the same source even in the no-hash path"
+    print("101. Sneha/Vaseline introduction mark resolves distinctly under the same no-hash condition -> two marks, two distinct exact sources, no cross-contamination")
+
+    # 102: quoted block has NEITHER a hash NOR any recognizable media-type
+    # marker at all (e.g. a reply to a plain text message, or a
+    # genuinely unrecognized quote shape) -> can_attempt_jump is False ->
+    # the live-jump fallback is never even attempted (verified via a
+    # call-counting fake) -> stays a clean, honest unresolved failure.
+    text_quote_102 = '<div data-testid="quoted-message"><span data-testid="author">Raj Talentgram</span><span data-testid="selectable-text">just a text message, not media</span></div>'
+    reply_102 = REPLY_TO_PHOTO_HTML.replace("3EB0CAC0901DAD51217B30", "REPLY102").replace(
+        "mark spike take 1", "mark take 1 for noquotecontentproject",
+    )
+    window_102 = [{"messageHtml": reply_102, "quotedHtml": text_quote_102}]
+    jump_call_count_102 = {"n": 0}
+
+    async def _fake_jump_counts_102(page, group_name, reply_id, expected_hash, expected_media_type=None):
+        jump_call_count_102["n"] += 1
+        return {"ok": True, "source_message_id": "SHOULD_NEVER_BE_USED", "source_media_type": "video"}
+
+    async def _fake_dump_window_102(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_102
+
+    mark_scan.sender = _FakeScanSenderForRunScan()
+    orig_jump_fallback_102 = mark_scan._resolve_single_media_via_jump
+    mark_scan._resolve_single_media_via_jump = _fake_jump_counts_102
+    mark_scan._dump_window = _fake_dump_window_102
+    try:
+        scan_result_102 = asyncio.run(mark_scan._run_scan(page=object(), req={"group_name": "Test Group"}))
+    finally:
+        mark_scan._resolve_single_media_via_jump = orig_jump_fallback_102
+        mark_scan._dump_window = orig_dump_window_89
+        mark_scan.sender = orig_sender_100
+    cands_102 = scan_result_102.get("candidates") or []
+    assert len(cands_102) == 1, cands_102
+    assert jump_call_count_102["n"] == 0, "no hash AND no media-type marker means nothing to verify a jump against -> must never even attempt one"
+    assert cands_102[0]["resolved_source_message_id"] is None, cands_102[0]
+    print("102. no hash AND no media-type marker in the quote -> live-jump fallback never even attempted (nothing to verify against), reported unresolved honestly")
+
+    # 103: media-type-only verification's safety check IN THE FULL
+    # _run_scan integration (not just the unit-level test 98) — the jump
+    # lands on a message whose media type does NOT match the quote's own
+    # marker -> rejected, mark stays unresolved, never a wrong forward.
+    reply_103 = REPLY_TO_PHOTO_HTML.replace("3EB0CAC0901DAD51217B30", "REPLY103").replace(
+        "mark spike take 1", "mark audition take for mismatchproject",
+    )
+    window_103 = [{"messageHtml": reply_103, "quotedHtml": no_hash_video_quote}]  # quote says "video"
+
+    async def _fake_jump_mismatch_103(page, group_name, reply_id, expected_hash, expected_media_type=None):
+        # Simulates a real jump landing on a genuinely different message
+        # whose own media type doesn't match — exactly what
+        # _resolve_single_media_via_jump's own media-type check rejects.
+        return {"ok": False, "reason": "jumped-to message's media type does not match the quoted block's own media type"}
+
+    async def _fake_dump_window_103(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_103
+
+    mark_scan.sender = _FakeScanSenderForRunScan()
+    mark_scan._resolve_single_media_via_jump = _fake_jump_mismatch_103
+    mark_scan._dump_window = _fake_dump_window_103
+    try:
+        scan_result_103 = asyncio.run(mark_scan._run_scan(page=object(), req={"group_name": "Test Group"}))
+    finally:
+        mark_scan._resolve_single_media_via_jump = orig_jump_fallback_102
+        mark_scan._dump_window = orig_dump_window_89
+        mark_scan.sender = orig_sender_100
+    cands_103 = scan_result_103.get("candidates") or []
+    assert len(cands_103) == 1, cands_103
+    assert cands_103[0]["resolved_source_message_id"] is None, cands_103[0]
+    assert cands_103[0]["resolved_via_jump_fallback"] is False, cands_103[0]
+    print("103. media-type mismatch in full _run_scan integration -> jump result rejected, mark stays unresolved, never a wrong forward")
 
     mark_scan.sender = orig_sender_for_run_scan
 

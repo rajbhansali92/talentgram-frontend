@@ -607,7 +607,11 @@ async def test_add_task_creates_shared_workflow_task(agents_ready):
 async def test_remind_me_creates_task_associated_with_named_project(agents_ready):
     pid, label = await _make_project()
     try:
-        r = await _send(f"Remind me to follow up with {label} on Monday.")
+        # NOTE: "follow up with X on Y" is deliberately NOT used here —
+        # that phrasing is a project payment-follow-up field statement
+        # (Phase H fix), not a task, and has its own dedicated regression
+        # test below (test_remind_me_follow_up_with_sets_field_not_task).
+        r = await _send(f"Remind me to send the invoice for {label} tomorrow.")
         assert "Reply 1 to confirm" in r.reply
         r2 = await _send("1")
         assert "Task added" in r2.reply
@@ -615,6 +619,29 @@ async def test_remind_me_creates_task_associated_with_named_project(agents_ready
         rows = await db.workflow_tasks.find({"project_id": pid}).to_list(10)
         assert len(rows) == 1
         assert rows[0]["due_at"] is not None
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_remind_me_follow_up_with_sets_field_not_task(agents_ready):
+    """Phase H fix: ADD_TASK_INTENT's own "remind me" trigger used to
+    unconditionally win over the "follow up with X on Y" project-field
+    statement, silently misfiling it as a generic task instead of
+    setting project.pd_next_follow_up_at. Locks in the fix."""
+    pid, label = await _make_project()
+    try:
+        r = await _send(f"Remind me to follow up with {label} on 30 August.")
+        assert "Reply 1 to confirm" in r.reply
+        assert "follow-up" in r.reply.lower()
+        r2 = await _send("1")
+        assert "Next follow-up" in r2.reply
+
+        rows = await db.workflow_tasks.find({"project_id": pid}).to_list(10)
+        assert len(rows) == 0  # no stray task was created
+
+        row = await db.projects.find_one({"id": pid}, {"_id": 0})
+        assert row.get("pd_next_follow_up_at")
     finally:
         await _cleanup(pid)
 

@@ -789,6 +789,27 @@ async def add_kickback(pid: str, payload: KickbackIn, admin: dict = Depends(curr
     return await get_production_desk(pid, admin)
 
 
+class KickbackUpdateIn(BaseModel):
+    # Phase H — completes the kickback CRUD surface (create+delete already
+    # existed; "Set Rahul's kickback to 5000" needs an update path, which
+    # simply didn't exist before). Same collection, same shape — not a
+    # second kickback model.
+    amount: Optional[float] = Field(None, gt=0)
+    recipient_name: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.patch("/{pid}/production-desk/kickbacks/{kickback_id}")
+async def update_kickback(pid: str, kickback_id: str, payload: KickbackUpdateIn, admin: dict = Depends(current_team_or_admin)):
+    updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if updates:
+        updates["updated_at"] = _now()
+        res = await db.project_kickbacks.update_one({"id": kickback_id, "project_id": pid}, {"$set": updates})
+        if not res.matched_count:
+            raise HTTPException(404, "Kickback not found")
+    return await get_production_desk(pid, admin)
+
+
 @router.delete("/{pid}/production-desk/kickbacks/{kickback_id}")
 async def delete_kickback(pid: str, kickback_id: str, admin: dict = Depends(current_admin)):
     res = await db.project_kickbacks.delete_one({"id": kickback_id, "project_id": pid})
@@ -897,6 +918,24 @@ async def add_crew(pid: str, payload: CrewIn, admin: dict = Depends(current_team
         "created_at": _now(),
     }
     await db.project_crew.insert_one(doc)
+    return await get_production_desk(pid, admin)
+
+
+class CrewUpdateIn(BaseModel):
+    # Phase H — "Change Amit's role to line producer" needs an update
+    # path; create+delete already existed. Same collection/shape.
+    role: Optional[str] = None
+    status: Optional[str] = None
+
+
+@router.patch("/{pid}/production-desk/crew/{crew_id}")
+async def update_crew(pid: str, crew_id: str, payload: CrewUpdateIn, admin: dict = Depends(current_team_or_admin)):
+    updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if updates:
+        updates["updated_at"] = _now()
+        res = await db.project_crew.update_one({"id": crew_id, "project_id": pid}, {"$set": updates})
+        if not res.matched_count:
+            raise HTTPException(404, "Crew member not found")
     return await get_production_desk(pid, admin)
 
 

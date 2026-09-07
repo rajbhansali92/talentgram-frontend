@@ -240,6 +240,18 @@ async def _remember_project(ctx: ExecContext, project: Optional[Dict[str, str]])
     )
 
 
+async def _remember_task(ctx: ExecContext, task_id: str, title: str) -> None:
+    """Phase H / P0-H — "it"/"that task" resolution. Reuses the SAME
+    session_context store _remember_project already writes to (domain-
+    agnostic — see that module's docstring), just two more fields on the
+    same document. No second context store."""
+    if not task_id:
+        return
+    await session_context.update_session(
+        AGENT_ID, ctx.sender_phone, last_task_id=task_id, last_task_title=title or "",
+    )
+
+
 def _ambiguous_project_message(candidates: List[Dict[str, str]]) -> str:
     lines = ["Which project do you mean?", ""]
     lines += [f"{i}. {c['label']}" for i, c in enumerate(candidates, start=1)]
@@ -264,7 +276,7 @@ def _extract_talent_before_payment(text: str) -> str:
 
 
 _TALENT_TOPIC_RE = re.compile(
-    r"^(?:when is|when's|show|what's|whats|is|mark)\s+(.+?)\s+(costume trial|trial|fitting|look test|shoot(?:ing)?|payment)\b",
+    r"^(?:when is|when's|show|what's|whats|is|mark)\s+(.+?)\s+(costume trial|trial|fitting|look test|shoot(?:ing)?|payment|reimbursement|ready)\b",
     re.IGNORECASE,
 )
 
@@ -289,6 +301,10 @@ def _extract_talent_and_topic(text: str) -> Tuple[str, Optional[str]]:
         topic = "shoot"
     elif "payment" in topic_raw:
         topic = "payment"
+    elif "reimbursement" in topic_raw:
+        topic = "reimbursement"
+    elif "ready" in topic_raw:
+        topic = "readiness"
     else:
         topic = None
     return name, topic
@@ -705,9 +721,115 @@ async def _global_digest(day_offset: int) -> str:
     return "\n".join(lines)
 
 
+async def _global_needs_attention() -> str:
+    """Phase H / P0-I — "What needs attention?" / "What's overdue?" /
+    "Which talents aren't ready?" — a READ/QUERY layer only, aggregating
+    the SAME structured signals _global_digest already reads directly
+    (no N+1 per-project fan-out, no new store — see that function's own
+    docstring for why direct signal queries, not project iteration, is
+    this file's established pattern for a cross-project view)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    overdue_tasks = await db.workflow_tasks.find(
+        {"due_at": {"$lt": now_iso, "$ne": None}, "status": {"$in": _ACTIVE_STATUSES}, "project_id": {"$ne": None}},
+        {"_id": 0},
+    ).to_list(500)
+    overdue_followups = await db.projects.find(
+        {"pd_next_follow_up_at": {"$lt": now_iso, "$ne": None}, "pd_payment_followup_status": {"$ne": "done"},
+         "status": {"$in": PRODUCTION_DESK_RELEVANT_STATUSES}},
+        {"_id": 0, "id": 1, "brand_name": 1},
+    ).to_list(200)
+    # "Not ready": locked, but fitting/look-test still open, or no
+    # costume trial on file at all yet.
+    not_ready_rows = await db.casting_pipeline.find(
+        {"stage": "locked", "$or": [
+            {"pd_fitting_status": {"$in": [None, "not_scheduled", "scheduled"]}},
+            {"pd_costume_trial_at": None},
+        ]},
+        {"_id": 0},
+    ).to_list(1000)
+    pending_payment_rows = await db.casting_pipeline.find(
+        {"stage": "locked", "pd_payment_status": {"$in": [None, "pending"]}}, {"_id": 0},
+    ).to_list(1000)
+
+    relevant_ids = {p["id"] for p in await db.projects.find(
+        {"status": {"$in": PRODUCTION_DESK_RELEVANT_STATUSES}}, {"_id": 0, "id": 1},
+    ).to_list(10000)}
+    not_ready_rows = [r for r in not_ready_rows if r.get("project_id") in relevant_ids]
+    pending_payment_rows = [r for r in pending_payment_rows if r.get("project_id") in relevant_ids]
+
+    project_ids = {t.get("project_id") for t in overdue_tasks}
+    project_ids |= {p["id"] for p in overdue_followups}
+    project_ids |= {r.get("project_id") for r in not_ready_rows + pending_payment_rows}
+    project_ids.discard(None)
+    projects = await db.projects.find({"id": {"$in": list(project_ids)}}, {"_id": 0, "id": 1, "brand_name": 1}).to_list(len(project_ids)) if project_ids else []
+    label_by_id = {p["id"]: p.get("brand_name") or "(untitled project)" for p in projects}
+
+    talent_ids = list({r["talent_id"] for r in not_ready_rows + pending_payment_rows if r.get("talent_id")})
+    talent_docs = await db.talents.find({"id": {"$in": talent_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(len(talent_ids)) if talent_ids else []
+    talent_name_by_id = {t["id"]: t.get("name") or "Talent" for t in talent_docs}
+
+    sections: Dict[str, List[str]] = {}
+
+    def _add(project_id: Optional[str], line: str) -> None:
+        if not project_id:
+            return
+        sections.setdefault(project_id, []).append(line)
+
+    for t in overdue_tasks:
+        _add(t.get("project_id"), f"  • Overdue task: {t.get('title')}")
+    for p in overdue_followups:
+        _add(p["id"], "  • Payment follow-up overdue")
+    for r in pending_payment_rows:
+        _add(r.get("project_id"), f"  • Payment pending — {talent_name_by_id.get(r.get('talent_id'), 'Talent')}")
+    for r in not_ready_rows:
+        _add(r.get("project_id"), f"  • Not ready — {talent_name_by_id.get(r.get('talent_id'), 'Talent')} (costume trial/fitting pending)")
+
+    if not sections:
+        return "✓ Nothing needs attention right now."
+    lines = ["⚠ NEEDS ATTENTION"]
+    for project_id, items in sections.items():
+        lines.append("")
+        lines.append(label_by_id.get(project_id, project_id))
+        lines.extend(items)
+    return "\n".join(lines)
+
+
+_NEEDS_ATTENTION_RE = re.compile(
+    r"needs? attention|which projects? need|which talents?.*(?:not ready|aren.t ready)|who isn.t ready|"
+    r"who is not ready|talents? who aren.t ready|not ready for|production tasks?.*overdue|^what.s overdue|^what is overdue|"
+    r"projects? with pending payments?",
+    re.IGNORECASE,
+)
+
+
+def _talent_readiness_issues(talent: dict) -> List[str]:
+    """P1 — derived purely from EXISTING Production Desk fields, no new
+    readiness collection/status of its own."""
+    issues = []
+    if not talent.get("costume_trial_at"):
+        issues.append("costume trial not scheduled")
+    if (talent.get("fitting_status") or "not_scheduled") != "completed":
+        issues.append(f"fitting {(talent.get('fitting_status') or 'not_scheduled').replace('_', ' ')}")
+    if (talent.get("look_test_status") or "not_scheduled") != "completed":
+        issues.append(f"look test {(talent.get('look_test_status') or 'not_scheduled').replace('_', ' ')}")
+    if (talent.get("shoot_status") or "not_scheduled") == "not_scheduled":
+        issues.append("shoot not scheduled")
+    return issues
+
+
 def _render_talent_reply(talent: dict, project_label: str, topic: Optional[str]) -> str:
     lines = [f"👤 {talent['name']} — {project_label}", ""]
-    if topic == "trial":
+    if topic == "readiness":
+        issues = _talent_readiness_issues(talent)
+        lines.append("✓ READY" if not issues else "⚠ NOT READY")
+        for i in issues:
+            lines.append(f"  • {i}")
+        lines.append(f"Costume trial: {_format_due(talent.get('costume_trial_at'))}")
+        lines.append(f"Fitting: {(talent.get('fitting_status') or 'not_scheduled').upper()}")
+        lines.append(f"Look test: {(talent.get('look_test_status') or 'not_scheduled').upper()}")
+        lines.append(f"Shoot status: {(talent.get('shoot_status') or 'not_scheduled').upper()}")
+    elif topic == "trial":
         lines.append(f"Costume trial: {_format_due(talent.get('costume_trial_at'))}")
         lines.append(f"Location: {talent.get('costume_trial_location') or '—'}")
         lines.append(f"Fitting status: {talent['fitting_status'].upper()}")
@@ -730,8 +852,76 @@ _GLOBAL_DIGEST_RE = re.compile(
 )
 
 
+_TASK_ASSIGNED_RE = re.compile(r"assigned to\s+(.+?)\s*\??$", re.IGNORECASE)
+_MY_PENDING_TASKS_RE = re.compile(r"my pending tasks|show.*pending tasks", re.IGNORECASE)
+
+
+async def _render_tasks_query(raw: str) -> Optional[str]:
+    """Phase H / P0-H — global (cross-project) task queries: "Show my
+    pending tasks." / "What tasks are assigned to Rahul?" Project-scoped
+    task queries ("Show Google AI tasks.") already work via the existing
+    "tasks" focus keyword below — this only covers the two shapes that
+    genuinely have no project to resolve."""
+    m = _TASK_ASSIGNED_RE.search(raw)
+    if m:
+        hint = _trim_trailing_stopwords(m.group(1).strip())
+        user = await db.users.find_one({"name": {"$regex": re.escape(hint), "$options": "i"}}, {"_id": 0, "id": 1, "name": 1})
+        if not user:
+            return f'No team member matching "{hint}" found.'
+        tasks = await db.workflow_tasks.find(
+            {"assignee_id": user["id"], "status": {"$in": _ACTIVE_STATUSES}}, {"_id": 0},
+        ).sort("due_at", 1).to_list(100)
+        if not tasks:
+            return f"No pending tasks assigned to {user['name']}."
+        lines = [f"TASKS — {user['name']}"]
+        for t in tasks:
+            proj = f" ({t['project_name']})" if t.get("project_name") else ""
+            lines.append(f"  • {t['title']}{proj} — due {_format_due(t.get('due_at'))} — {t['status'].upper()}")
+        return "\n".join(lines)
+
+    if _MY_PENDING_TASKS_RE.search(raw):
+        tasks = await db.workflow_tasks.find(
+            {"status": {"$in": _ACTIVE_STATUSES}}, {"_id": 0},
+        ).sort("due_at", 1).to_list(200)
+        if not tasks:
+            return "No pending tasks."
+        lines = ["PENDING TASKS"]
+        for t in tasks:
+            proj = f" ({t['project_name']})" if t.get("project_name") else ""
+            lines.append(f"  • {t['title']}{proj} — due {_format_due(t.get('due_at'))}")
+        return "\n".join(lines)
+    return None
+
+
 async def _status_query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     raw = collected.get("raw_text", "")
+
+    # "Show my pending tasks." / "What tasks are assigned to Rahul?" —
+    # checked before the needs-attention/project branches since these
+    # never name a project either.
+    tasks_reply = await _render_tasks_query(raw)
+    if tasks_reply:
+        return ExecResult(ok=True, message=tasks_reply)
+
+    # "What needs attention?" / "What's overdue?" / "Which talents aren't
+    # ready?" — a global, cross-project query; checked before the
+    # project-scoped branches below since these never name a project.
+    if _NEEDS_ATTENTION_RE.search(raw) and not _extract_trailing_project(raw):
+        return ExecResult(ok=True, message=await _global_needs_attention())
+
+    # "What is the kickback for Rahul?" — checked first since "kickback"
+    # is a specific, unambiguous keyword that can't collide with any
+    # other query shape below.
+    kb_m = _KICKBACK_QUERY_RE.search(raw)
+    if kb_m:
+        hint = _trim_trailing_stopwords(kb_m.group(1).strip())
+        if _is_plausible_name(hint):
+            resolution = await _resolve_project("", ctx)
+            if resolution.project:
+                row = await _find_kickback_row(resolution.project["id"], hint)
+                if row:
+                    return ExecResult(ok=True, message=f"{row.get('recipient_name') or hint}'s kickback on {resolution.project['label']}: {_format_inr(pd._num(row.get('amount')) or 0)}.")
+                return ExecResult(ok=True, message=f'No kickback on file for "{hint}" on {resolution.project["label"]}.')
 
     # "What's happening today/tomorrow?" / "What payment follow-ups are
     # due today?" with NO project named — a global, cross-project digest
@@ -805,6 +995,13 @@ STATUS_QUERY_INTENT = IntentDefinition(
         # are the natural phrasing for reading the same due-today/
         # due-tomorrow digest the reminder worker itself acts on.
         "what's due", "whats due", "what is due", "what reminders", "reminders",
+        # Phase H — checklist-focused phrasing (same "pending" render the
+        # existing "what's pending" trigger already produces).
+        "which checklist", "checklist items", "which projects need attention",
+        "which talents", "who isn't ready", "who is not ready",
+        "what needs attention", "needs attention", "what's overdue", "whats overdue", "what is overdue",
+        "show me projects", "show me all talents",
+        "my pending tasks", "show my pending", "what tasks are assigned", "what tasks",
     ],
     fields=[FieldSpec(key="raw_text", label="Query", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False)],
     # Deliberately trivial extract_fields: the whole raw message IS the
@@ -926,10 +1123,57 @@ MARK_GST_RECEIVED_INTENT = IntentDefinition(
 #     SAME locked casting_pipeline row Production Desk's Talent
 #     Preparation section reads — no second "trial" record.
 # ===========================================================================
+_MARK_LIFECYCLE_RE = re.compile(r"^mark\s+(.+?)\s+as\s+(.+?)\s*[\.\?!]*$", re.IGNORECASE)
+_LIFECYCLE_AS_MAP = {
+    "confirmed": "confirmed",
+    "shoot scheduled": "shoot_scheduled",
+    "shoot complete": "shoot_complete", "shoot completed": "shoot_complete",
+    "finance closed": "finance_closed",
+    "not started": "not_started",
+}
+
+
 def _talent_status_extract_fields(text: str) -> Dict[str, str]:
+    # "Mark Google AI as shoot scheduled." is a PROJECT lifecycle
+    # statement, not a talent-status one — checked first, since
+    # _TALENT_TOPIC_RE's bare "mark X shoot..." shape would otherwise
+    # misparse "Google AI as" as a talent name (the "shoot" in "shoot
+    # scheduled" looks like the existing shoot-topic word to that
+    # regex). Only redirected when the "as ..." phrase actually maps to
+    # a known lifecycle value — an unrecognised "mark X as Y" still
+    # falls through to the normal talent-status handling below.
+    lifecycle_m = _MARK_LIFECYCLE_RE.match(text or "")
+    if lifecycle_m:
+        status = _LIFECYCLE_AS_MAP.get(lifecycle_m.group(2).strip().lower())
+        project_hint = _trim_trailing_stopwords(lifecycle_m.group(1).strip())
+        if status and _is_plausible_name(project_hint):
+            return {"_kind": "lifecycle", "project": project_hint, "lifecycle_value": status}
+
     talent, topic = _extract_talent_and_topic(text)
-    kind = "trial" if topic == "trial" else "payment"  # default to payment for bare "mark X payment cleared"
-    return {"project": _extract_trailing_project(text), "talent": talent, "_kind": kind}
+    if topic == "trial":
+        return {"project": _extract_trailing_project(text), "talent": talent, "_kind": "trial"}
+    if topic == "reimbursement":
+        return {"project": _extract_trailing_project(text), "talent": talent, "_kind": "reimbursement_paid"}
+
+    # "Mark it complete." / "Mark that task complete." — the bare "mark"
+    # trigger (this intent's own, shortest, fallback trigger) always
+    # wins the dispatch for ANY "mark ..." opener, so TASK_MANAGE_INTENT's
+    # own "mark it complete"/"mark it done" triggers can never be reached
+    # when the sentence ends right there with no space after (a trailing
+    # "." fails detect_trigger's own startswith(trigger+" ") check — see
+    # its own docstring). Checked ONLY after the established topic
+    # detection above finds nothing — "Mark Shivi's costume trial
+    # completed." must keep resolving to _kind="trial" exactly as before,
+    # never redirected here. Regex-shape-only (extract_fields must stay
+    # sync/DB-free); try_auto_execute verifies a real task actually
+    # exists before committing to this kind, falling back to the normal
+    # payment-clear handling below otherwise — never a guess.
+    task_m = _TASK_COMPLETE_RE.match(text or "") if text and text.strip().lower().startswith("mark") else None
+    if task_m:
+        return {"_kind": "task_action", "task_hint": task_m.group(1)}
+
+    # default to payment for bare "mark X payment cleared"
+    return {"project": _extract_trailing_project(text), "talent": talent, "_kind": "payment"}
 
 
 async def _resolve_talent_for_mark(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
@@ -971,19 +1215,87 @@ async def _resolve_talent_for_mark(collected: dict, ctx: ExecContext) -> Optiona
 
 
 async def _talent_status_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
-    return await _resolve_talent_for_mark(collected, ctx)
+    if collected.get("_kind") == "lifecycle":
+        resolution = await _resolve_project(collected.get("project", ""), ctx)
+        if resolution.ambiguous:
+            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+        if resolution.error:
+            return ExecResult(ok=False, message=resolution.error)
+        await _remember_project(ctx, resolution.project)
+        collected["_resolved_project_id"] = resolution.project["id"]
+        collected["_resolved_project_label"] = resolution.project["label"]
+        return None
+
+    if collected.get("_kind") == "task_action":
+        task, _err = await _resolve_task_reference(collected.get("task_hint", ""), ctx)
+        if task:
+            collected["_task_id"] = task["id"]
+            collected["_task_title"] = task.get("title") or ""
+            return None
+        # No real task matches — this was never a task command at all
+        # (e.g. a genuinely unrecognised "mark X complete" about
+        # something else); fall through to the ordinary payment-clear
+        # handling below, exactly as an unrecognised "mark X ..." always
+        # has, rather than surfacing a confusing "no task found" error.
+        collected["_kind"] = "payment"
+        collected["talent"] = collected.get("task_hint", "")
+
+    err = await _resolve_talent_for_mark(collected, ctx)
+    if err:
+        return err
+    if collected.get("_kind") == "reimbursement_paid":
+        pid, tid = collected["_resolved_project_id"], collected["_resolved_talent_id"]
+        rows = await db.project_reimbursements.find(
+            {"project_id": pid, "talent_id": tid, "status": "pending"}, {"_id": 0}
+        ).sort("created_at", -1).to_list(1)
+        if not rows:
+            name = collected.get("_resolved_talent_name")
+            return ExecResult(ok=False, message=f"No pending reimbursement found for {name} on {collected['_resolved_project_label']}.")
+        collected["_reimbursement_id"] = rows[0]["id"]
+        collected["_reimbursement_amount"] = str(rows[0].get("amount") or 0)
+        collected["_reimbursement_type"] = rows[0].get("expense_type") or "expense"
+    return None
 
 
 async def _talent_status_build_confirmation(collected: dict, ctx: ExecContext) -> str:
+    if collected.get("_kind") == "lifecycle":
+        status_label = collected.get("lifecycle_value", "").replace("_", " ")
+        return f"Mark {collected.get('_resolved_project_label')} as {status_label}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+    if collected.get("_kind") == "task_action":
+        return f'Mark task "{collected.get("_task_title")}" complete?\n\nReply 1 to confirm, 2 to edit, 3 to cancel.'
     name = collected.get("_resolved_talent_name") or collected.get("talent")
     if collected.get("_kind") == "trial":
         return f"Mark {name}'s costume trial as completed?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+    if collected.get("_kind") == "reimbursement_paid":
+        amount_txt = _format_inr(float(collected.get("_reimbursement_amount") or 0))
+        reason = collected.get("_reimbursement_type", "expense")
+        return f"Mark {name}'s {reason} reimbursement ({amount_txt}) as paid?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
     amount = collected.get("_resolved_amount")
     amount_txt = f" of {_format_inr(amount)}" if amount else ""
     return f"Mark {name}'s payment{amount_txt} as cleared?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
 
 
 async def _talent_status_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    if collected.get("_kind") == "lifecycle":
+        pid = collected.get("_resolved_project_id")
+        status = collected.get("lifecycle_value")
+        try:
+            await pd.update_production_desk_project(pid, pd.ProductionDeskProjectPatch(production_status=status), _AGENT_ADMIN)
+        except HTTPException as e:
+            return ExecResult(ok=False, message=f"Couldn't update: {e.detail}")
+        return ExecResult(ok=True, message=f"✓ {collected.get('_resolved_project_label')} marked {status.replace('_', ' ')}.")
+
+    if collected.get("_kind") == "task_action":
+        from routers import workflow as workflow_router
+        tid_task = collected.get("_task_id")
+        title = collected.get("_task_title", "")
+        await _remember_task(ctx, tid_task, title)
+        try:
+            await workflow_router.update_task(tid_task, workflow_router.TaskUpdateIn(status="completed"), {"id": _AGENT_ADMIN["id"], "role": "admin"})
+        except HTTPException as e:
+            return ExecResult(ok=False, message=f"Couldn't update: {e.detail}")
+        return ExecResult(ok=True, message=f'✓ Task "{title}" marked complete.')
+
     pid = collected.get("_resolved_project_id")
     tid = collected.get("_resolved_talent_id")
     if not pid or not tid:
@@ -997,6 +1309,14 @@ async def _talent_status_executor(collected: dict, ctx: ExecContext) -> ExecResu
         except HTTPException as e:
             return ExecResult(ok=False, message=f"Couldn't update: {e.detail}")
         return ExecResult(ok=True, message=f"✓ {name}'s costume trial marked completed.")
+
+    if collected.get("_kind") == "reimbursement_paid":
+        rid = collected.get("_reimbursement_id")
+        try:
+            await pd.update_reimbursement_status(pid, rid, pd.ReimbursementStatusPatch(status="paid"), _AGENT_ADMIN)
+        except HTTPException as e:
+            return ExecResult(ok=False, message=f"Couldn't update: {e.detail}")
+        return ExecResult(ok=True, message=f"✓ {name}'s reimbursement marked paid.")
 
     try:
         await pd.update_locked_talent_production(
@@ -1012,8 +1332,15 @@ MARK_TALENT_STATUS_INTENT = IntentDefinition(
     triggers=["mark"],  # shortest — only wins when no longer "mark X" trigger above matches first
     fields=[
         FieldSpec(key="_kind", label="Kind", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
-        FieldSpec(key="talent", label="Talent", question="Which talent?", validate=lambda v: ValidationResult(ok=True, value=v) if v else ValidationResult(ok=False, error="Please name the talent.")),
+        # Not required at the generic-engine level any more (Phase H): the
+        # "lifecycle" kind (project-level, no talent at all) needs this
+        # NOT to block before try_auto_execute runs — _resolve_talent_for_mark
+        # already returns its own "Which talent?" error for the other kinds
+        # when talent is genuinely missing, so no coverage is lost.
+        FieldSpec(key="talent", label="Talent", question="Which talent?", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
         FieldSpec(key="project", label="Project", question="Which project?", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
+        FieldSpec(key="lifecycle_value", label="Status", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
+        FieldSpec(key="task_hint", label="Task", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
     ],
     extract_fields=_talent_status_extract_fields,
     try_auto_execute=_talent_status_try_auto_execute,
@@ -1047,6 +1374,46 @@ def _reimbursement_extract_fields(text: str) -> Dict[str, str]:
     }
 
 
+# "Shivi's travel reimbursement is 2500." — bare (no "add"), so only
+# reachable via resolve_bare_reply; feeds ADD_INTENT's SAME reimbursement
+# branch as "Add ₹2,500 travel reimbursement for Shivi." (identical
+# collected shape, different entry point).
+_REIMBURSEMENT_POSSESSIVE_RE = re.compile(
+    r"(.+?)'s\s+([a-zA-Z ]+?)\s+reimbursement\s+is\s*(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)", re.IGNORECASE
+)
+
+
+def _bare_reimbursement_fields(text: str) -> Optional[Dict[str, str]]:
+    m = _REIMBURSEMENT_POSSESSIVE_RE.search(text or "")
+    if not m:
+        return None
+    talent = _trim_leading_stopwords(m.group(1).strip())
+    if not _is_plausible_name(talent):
+        return None
+    return {"_kind": "reimbursement", "amount": m.group(3), "reason": m.group(2).strip() or "expense", "talent": talent}
+
+
+# "Change Amit's role to line producer." / "Remove Amit from the project
+# crew." — neither "change" nor "remove" is a registered trigger word
+# anywhere else, so both only ever reach resolve_bare_reply.
+_CREW_ROLE_CHANGE_RE = re.compile(r"change\s+(.+?)'s\s+role\s+to\s+(.+?)\s*[\.\?!]*$", re.IGNORECASE)
+_CREW_REMOVE_RE = re.compile(r"remove\s+(.+?)\s+from\s+(?:the\s+)?(?:project\s+)?crew\b", re.IGNORECASE)
+
+
+def _bare_crew_command_fields(text: str) -> Optional[Dict[str, str]]:
+    m = _CREW_ROLE_CHANGE_RE.search(text or "")
+    if m:
+        name = _trim_leading_stopwords(m.group(1).strip())
+        if _is_plausible_name(name):
+            return {"_kind": "crew_update", "name": name, "role": m.group(2).strip()}
+    m = _CREW_REMOVE_RE.search(text or "")
+    if m:
+        name = _trim_leading_stopwords(m.group(1).strip())
+        if _is_plausible_name(name):
+            return {"_kind": "crew_remove", "name": name}
+    return None
+
+
 def _validate_amount(raw: str) -> ValidationResult:
     try:
         val = float((raw or "").replace(",", ""))
@@ -1075,6 +1442,81 @@ def _match_crew_role(raw: str) -> str:
     return raw.title() if raw else "Other"
 
 
+async def _find_crew_row(pid: str, name_hint: str) -> Optional[dict]:
+    """Crew rows only store client_id — resolve each candidate's CRM name
+    to match against, same as the read side's own crew rendering."""
+    rows = await db.project_crew.find({"project_id": pid}, {"_id": 0}).to_list(200)
+    if not rows:
+        return None
+    from bson import ObjectId
+    from bson.errors import InvalidId
+    hint_low = (name_hint or "").strip().lower()
+    for row in rows:
+        try:
+            client = await db.clients.find_one({"_id": ObjectId(row["client_id"])}, {"_id": 0, "name": 1})
+        except (InvalidId, TypeError):
+            client = None
+        name = ((client or {}).get("name") or "").strip().lower()
+        if name and (name == hint_low or hint_low in name or name in hint_low):
+            row["_client_name"] = client["name"]
+            return row
+    return None
+
+
+_ADD_KICKBACK_PCT_RE = re.compile(r"^\s*add\s+(?:a\s+)?(\d+(?:\.\d+)?)\s*%\s*kickback\s+for\s+(.+?)\s*[\.\?!]*$", re.IGNORECASE)
+_ADD_KICKBACK_AMT_RE = re.compile(r"^\s*add\s+(?:a\s+)?(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)\s*kickback\s+for\s+(.+?)\s*[\.\?!]*$", re.IGNORECASE)
+
+# Bare kickback phrasings — no fixed "add"/"set" opener, or opened by
+# "set"/"remove"/"what" which already belong to OTHER intents' triggers.
+# One shared parser feeds both SMART_UPDATE_INTENT's "set..." path and
+# resolve_bare_reply's fallback path, so "Set Rahul's kickback to 5000.",
+# "Rahul has a ₹5,000 kickback.", "Rahul's kickback is 5000.", and
+# "Remove Rahul's kickback." are all recognised the same way.
+_KICKBACK_REMOVE_RE = re.compile(r"remove\s+(.+?)'s\s+kickback\b", re.IGNORECASE)
+_KICKBACK_POSSESSIVE_RE = re.compile(r"(.+?)'s\s+kickback\s+(?:is|to|=)\s*(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)", re.IGNORECASE)
+_KICKBACK_HAS_RE = re.compile(r"^\s*(.+?)\s+has\s+a\s+(?:₹|rs\.?|inr)?\s*([\d,]+(?:\.\d+)?)\s*kickback\b", re.IGNORECASE)
+# "X has a 10% kickback." — the percent-bearing sibling of _KICKBACK_HAS_RE
+# above (that one's [\d,]+ capture has nothing to skip a literal "%" with,
+# so "has a 10% kickback" never matched it).
+_KICKBACK_HAS_PCT_RE = re.compile(r"^\s*(.+?)\s+has\s+a\s+(\d+(?:\.\d+)?)\s*%\s*kickback\b", re.IGNORECASE)
+_KICKBACK_PCT_BARE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*kickback\s+for\s+(.+?)\s*[\.\?!]*$", re.IGNORECASE)
+_KICKBACK_QUERY_RE = re.compile(r"kickback\s+for\s+(.+?)\s*\??$", re.IGNORECASE)
+
+
+def _kickback_command_from_text(text: str) -> Optional[Dict[str, str]]:
+    """Returns {"kb_action", "kb_recipient", "kb_amount"?/"kb_percent"?}
+    or None — used by both SMART_UPDATE_INTENT (for "Set X's kickback to
+    Y") and resolve_bare_reply (for "X has a kickback"/"Remove X's
+    kickback", which open with no fixed trigger word at all)."""
+    text = text or ""
+    if "kickback" not in text.lower():
+        return None
+    m = _KICKBACK_REMOVE_RE.search(text)
+    if m:
+        hint = _trim_leading_stopwords(m.group(1).strip())
+        if _is_plausible_name(hint):
+            return {"kb_action": "remove", "kb_recipient": hint}
+    m = _KICKBACK_POSSESSIVE_RE.search(text)
+    if m:
+        hint = _trim_leading_stopwords(m.group(1).strip())
+        if _is_plausible_name(hint):
+            return {"kb_action": "set", "kb_recipient": hint, "kb_amount": m.group(2)}
+    m = _KICKBACK_HAS_PCT_RE.search(text)
+    if m:
+        hint = _trim_leading_stopwords(m.group(1).strip())
+        if _is_plausible_name(hint):
+            return {"kb_action": "set", "kb_recipient": hint, "kb_percent": m.group(2)}
+    m = _KICKBACK_HAS_RE.search(text)
+    if m:
+        hint = _trim_leading_stopwords(m.group(1).strip())
+        if _is_plausible_name(hint):
+            return {"kb_action": "set", "kb_recipient": hint, "kb_amount": m.group(2)}
+    m = _KICKBACK_PCT_BARE_RE.search(text)
+    if m and _is_plausible_name(m.group(2)):
+        return {"kb_action": "set", "kb_recipient": _trim_trailing_stopwords(m.group(2).strip()), "kb_percent": m.group(1)}
+    return None
+
+
 def _add_extract_fields(text: str) -> Dict[str, str]:
     crew_m = _ADD_CREW_RE.match(text or "")
     if crew_m and _is_plausible_name(crew_m.group(1)):
@@ -1084,12 +1526,174 @@ def _add_extract_fields(text: str) -> Dict[str, str]:
             "role": crew_m.group(2).strip(),
             "project": (crew_m.group(3) or "").strip(),
         }
+    # "Add a 10% kickback for Rahul." / "Add a ₹5,000 kickback for Rahul."
+    # — checked before the generic reimbursement fallback since both
+    # start with bare "add" and share no other structure.
+    pct_m = _ADD_KICKBACK_PCT_RE.match(text or "")
+    if pct_m and _is_plausible_name(pct_m.group(2)):
+        return {"_kind": "kickback", "kb_action": "set", "kb_recipient": pct_m.group(2).strip(), "kb_percent": pct_m.group(1)}
+    amt_m = _ADD_KICKBACK_AMT_RE.match(text or "")
+    if amt_m and _is_plausible_name(amt_m.group(2)):
+        return {"_kind": "kickback", "kb_action": "set", "kb_recipient": amt_m.group(2).strip(), "kb_amount": amt_m.group(1)}
     fields = _reimbursement_extract_fields(text)
     fields["_kind"] = "reimbursement"
     return fields
 
 
+# ===========================================================================
+# Kickbacks (Phase H / P0-C) — completes the previously-deferred NLU
+# coverage for the EXISTING db.project_kickbacks model (amount,
+# recipient_client_id, recipient_name, notes — see
+# routers/production_desk.py's KickbackIn/KickbackUpdateIn). No new
+# kickback model. Percent-based commands ("Add a 10% kickback for Rahul")
+# are a deterministic ARITHMETIC convenience over the talent's own known
+# budget_total — the existing model has no percent field, so a % command
+# is converted to a flat amount at write time, exactly like every other
+# amount this schema already stores; never guessed when no budget is on
+# file (an honest error asking for a flat amount instead).
+# ===========================================================================
+async def _resolve_kickback_recipient(pid: str, hint: str) -> Tuple[str, Optional[str], Optional[float]]:
+    """(display_name, recipient_client_id_or_None, talent_budget_total_or_None).
+    Prefers an already-locked talent's real name/budget (the common case —
+    a kickback paid to the talent themselves); falls back to the SAME
+    CRM lookup-or-create the crew flow already uses — never a duplicate
+    identity for a non-talent recipient (an agent/manager)."""
+    match, project_hit, _others = await _find_talent_across_projects(hint)
+    if match and project_hit and project_hit["id"] == pid:
+        return match["name"], None, match.get("budget_total")
+    client = await _resolve_or_create_crm_contact(hint)
+    return client["name"], client["id"], None
+
+
+async def _resolve_kickback_write(hint: str, action: str, kb_amount_raw: str, kb_percent_raw: str, ctx: ExecContext) -> Tuple[Optional[dict], Optional[str]]:
+    """Shared by ADD_INTENT's "add ... kickback" branch and
+    SMART_UPDATE_INTENT's "set"/bare-phrasing branch — one resolution
+    path, two entry points (see _apply_kickback_write for the equivalent
+    on the write side). Returns (plan_dict, error_message).
+
+    Kickback commands rarely name a project explicitly ("Rahul has a
+    ₹5,000 kickback") — the recipient themselves usually IS the answer:
+    if they're a locked talent, their OWN project is used directly,
+    never requiring the user to separately establish session context
+    first. Only falls back to session context when the recipient isn't
+    a locked talent anywhere (a crew/CRM-only kickback recipient)."""
+    if not hint:
+        return None, 'Who is this kickback for? e.g. "Add a ₹5,000 kickback for Rahul."'
+
+    match, project_hit, _others = await _find_talent_across_projects(hint)
+    if match and project_hit:
+        project = project_hit
+    else:
+        resolution = await _resolve_project("", ctx)
+        if resolution.ambiguous:
+            return None, _ambiguous_project_message(resolution.ambiguous)
+        if resolution.error:
+            return None, "Which project is this kickback for?"
+        project = resolution.project
+
+    await _remember_project(ctx, project)
+    plan: Dict[str, Any] = {"project_id": project["id"], "project_label": project["label"]}
+
+    if action == "remove":
+        existing = await _find_kickback_row(project["id"], hint)
+        if not existing:
+            return None, f'No kickback found for "{hint}" on {project["label"]}.'
+        plan.update({"action": "remove", "name": existing.get("recipient_name") or hint,
+                     "existing_id": existing["id"], "amount": existing.get("amount") or 0})
+        return plan, None
+
+    if match and project_hit and project_hit["id"] == project["id"]:
+        name, client_id, budget_total = match["name"], None, match.get("budget_total")
+    else:
+        name, client_id, budget_total = await _resolve_kickback_recipient(project["id"], hint)
+
+    amount: Optional[float] = None
+    if kb_amount_raw:
+        amount = _extract_amount(kb_amount_raw)
+    elif kb_percent_raw:
+        pct = float(kb_percent_raw)
+        if budget_total is None:
+            return None, f"I don't have a budget on file for {name} to calculate {pct}% from — please give a flat amount instead, e.g. \"Set {name}'s kickback to 5000.\""
+        amount = round(budget_total * pct / 100.0, 2)
+    if amount is None or amount <= 0:
+        return None, "Please give a kickback amount, e.g. ₹5,000 or a percentage."
+
+    existing_id = (await _find_kickback_row(project["id"], name) or {}).get("id", "")
+    plan.update({"action": "set", "name": name, "client_id": client_id or "", "existing_id": existing_id, "amount": amount})
+    return plan, None
+
+
+async def _find_kickback_row(pid: str, recipient_hint: str) -> Optional[dict]:
+    rows = await db.project_kickbacks.find({"project_id": pid}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    hint_low = (recipient_hint or "").strip().lower()
+    for row in rows:
+        name = (row.get("recipient_name") or "").strip().lower()
+        if name and (name == hint_low or hint_low in name or name in hint_low):
+            return row
+    return None
+
+
+async def _apply_kickback_write(
+    action: str, project_id: str, name: str,
+    client_id: str = "", existing_id: str = "", amount: float = 0.0,
+) -> ExecResult:
+    """Shared by ADD_INTENT's "add ... kickback" branch (the "add" trigger
+    always routes there — see its own comment) and SMART_UPDATE_INTENT's
+    "set"/bare-phrasing branch. One write path, two entry points."""
+    try:
+        if action == "remove":
+            await pd.delete_kickback(project_id, existing_id, _AGENT_ADMIN)
+            return ExecResult(ok=True, message=f"✓ Removed {name}'s kickback.")
+        if existing_id:
+            await pd.update_kickback(project_id, existing_id, pd.KickbackUpdateIn(amount=amount), _AGENT_ADMIN)
+        else:
+            await pd.add_kickback(
+                project_id,
+                pd.KickbackIn(amount=amount, recipient_client_id=client_id or None, recipient_name=name),
+                _AGENT_ADMIN,
+            )
+        return ExecResult(ok=True, message=f"✓ Kickback for {name}: {_format_inr(float(amount))}.")
+    except HTTPException as e:
+        return ExecResult(ok=False, message=f"Couldn't save the kickback: {e.detail}")
+
+
 async def _add_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    if collected.get("_kind") == "kickback":
+        plan, err = await _resolve_kickback_write(
+            collected.get("kb_recipient", ""), collected.get("kb_action") or "set",
+            collected.get("kb_amount", ""), collected.get("kb_percent", ""), ctx,
+        )
+        if err:
+            return ExecResult(ok=False, message=err)
+        collected["_resolved_project_id"] = plan["project_id"]
+        collected["_resolved_project_label"] = plan["project_label"]
+        collected["_kb_name"] = plan["name"]
+        collected["_kb_client_id"] = plan.get("client_id", "")
+        collected["_kb_existing_id"] = plan.get("existing_id", "")
+        collected["_kb_amount"] = str(plan["amount"])
+        return None
+
+    if collected.get("_kind") in ("crew_update", "crew_remove"):
+        name = collected.get("name", "")
+        if not name:
+            return ExecResult(ok=False, message="Which crew member?")
+        resolution = await _resolve_project("", ctx)
+        if resolution.ambiguous:
+            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+        if resolution.error:
+            return ExecResult(ok=False, message="Which project's crew?")
+        project = resolution.project
+        row = await _find_crew_row(project["id"], name)
+        if not row:
+            return ExecResult(ok=False, message=f'No crew member matching "{name}" found on {project["label"]}.')
+        await _remember_project(ctx, project)
+        collected["_resolved_project_id"] = project["id"]
+        collected["_resolved_project_label"] = project["label"]
+        collected["_crew_id"] = row["id"]
+        collected["_crew_name"] = row.get("_client_name") or name
+        collected["_crew_old_role"] = row.get("role", "")
+        return None
+
     if collected.get("_kind") == "crew":
         name = collected.get("name", "")
         if not name:
@@ -1113,6 +1717,12 @@ async def _add_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[E
             collected["_client_name"] = name
             collected["_client_is_new"] = "1"
 
+        # Pre-existing gap, found while testing Phase H's crew-update flow:
+        # the crew ADD path never remembered the project, unlike every
+        # other write in this file — meaning "Change Amit's role..." right
+        # after adding him had nothing to resolve against. Fixed here,
+        # generically (not special-cased to crew_update).
+        await _remember_project(ctx, resolution.project)
         collected["_resolved_project_id"] = resolution.project["id"]
         collected["_resolved_project_label"] = resolution.project["label"]
         return None
@@ -1142,6 +1752,22 @@ async def _add_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[E
 
 
 async def _add_build_confirmation(collected: dict, ctx: ExecContext) -> str:
+    if collected.get("_kind") == "kickback":
+        name = collected.get("_kb_name", "")
+        amount_txt = _format_inr(float(collected.get("_kb_amount") or 0))
+        project_label = collected.get("_resolved_project_label", "")
+        if collected.get("kb_action") == "remove":
+            return f"Remove {name}'s kickback ({amount_txt}) on {project_label}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+        verb = "Update" if collected.get("_kb_existing_id") else "Add"
+        return f"{verb} kickback for {name} on {project_label}: {amount_txt}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+
+    if collected.get("_kind") == "crew_update":
+        role = _match_crew_role(collected.get("role", ""))
+        return f"Change {collected.get('_crew_name')}'s role from {collected.get('_crew_old_role') or '—'} to {role} on {collected.get('_resolved_project_label')}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+
+    if collected.get("_kind") == "crew_remove":
+        return f"Remove {collected.get('_crew_name')} ({collected.get('_crew_old_role') or 'crew'}) from {collected.get('_resolved_project_label')}'s crew?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+
     if collected.get("_kind") == "crew":
         role = _match_crew_role(collected.get("role", ""))
         name = collected.get("_client_name") or collected.get("name")
@@ -1157,6 +1783,33 @@ async def _add_build_confirmation(collected: dict, ctx: ExecContext) -> str:
 
 
 async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    if collected.get("_kind") == "kickback":
+        pid = collected.get("_resolved_project_id")
+        if not pid:
+            return ExecResult(ok=False, message="Couldn't resolve the project — please resend the command.")
+        return await _apply_kickback_write(
+            collected.get("kb_action") or "set", pid, collected.get("_kb_name", ""),
+            client_id=collected.get("_kb_client_id", ""), existing_id=collected.get("_kb_existing_id", ""),
+            amount=float(collected.get("_kb_amount") or 0),
+        )
+
+    if collected.get("_kind") == "crew_update":
+        pid = collected.get("_resolved_project_id")
+        role = _match_crew_role(collected.get("role", ""))
+        try:
+            await pd.update_crew(pid, collected.get("_crew_id"), pd.CrewUpdateIn(role=role), _AGENT_ADMIN)
+        except HTTPException as e:
+            return ExecResult(ok=False, message=f"Couldn't update crew member: {e.detail}")
+        return ExecResult(ok=True, message=f"✓ {collected.get('_crew_name')} is now {role}.")
+
+    if collected.get("_kind") == "crew_remove":
+        pid = collected.get("_resolved_project_id")
+        try:
+            await pd.delete_crew(pid, collected.get("_crew_id"), _AGENT_ADMIN)
+        except HTTPException as e:
+            return ExecResult(ok=False, message=f"Couldn't remove crew member: {e.detail}")
+        return ExecResult(ok=True, message=f"✓ Removed {collected.get('_crew_name')} from the crew.")
+
     if collected.get("_kind") == "crew":
         pid = collected.get("_resolved_project_id")
         if not pid:
@@ -1220,6 +1873,10 @@ ADD_INTENT = IntentDefinition(
         FieldSpec(key="talent", label="Talent", question="Who is this for?", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
         FieldSpec(key="amount", label="Amount", question="What's the amount?", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
         FieldSpec(key="reason", label="Reason", question="What's it for?", validate=lambda v: ValidationResult(ok=True, value=v or "expense"), required=False),
+        FieldSpec(key="kb_action", label="Kickback action", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
+        FieldSpec(key="kb_recipient", label="Kickback recipient", question="Who is this kickback for?", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
+        FieldSpec(key="kb_amount", label="Kickback amount", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
+        FieldSpec(key="kb_percent", label="Kickback percent", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
     ],
     extract_fields=_add_extract_fields,
     try_auto_execute=_add_try_auto_execute,
@@ -1244,6 +1901,28 @@ _FOR_PROJECT_TAIL_RE = re.compile(r"\bfor\s+(.+)$", re.IGNORECASE)
 
 
 def _add_task_extract_fields(text: str) -> Dict[str, str]:
+    # "Remind me to follow up with Google AI on 30 August." — ADD_TASK's
+    # own "remind me" trigger unconditionally wins over
+    # SMART_UPDATE_INTENT's parsing for ANY "remind me..." opener (a
+    # trigger match always beats resolve_bare_reply — see agents/models.py's
+    # own docstring on that hook), so a genuine payment-follow-up
+    # statement would otherwise get silently misfiled as a generic task
+    # instead of setting project.pd_next_follow_up_at. Checked first,
+    # BEFORE the normal title/due-date extraction below, and redirected
+    # into its own small kind — reusing the EXACT SAME field/resolution
+    # the "follow up with X on Y" phrase already uses elsewhere in this
+    # file (_FOLLOW_UP_WITH_RE), never a second implementation.
+    fu_m = _FOLLOW_UP_WITH_RE.search(text or "")
+    if fu_m:
+        project_hint = _trim_trailing_stopwords(fu_m.group(1).strip())
+        if _is_plausible_name(project_hint):
+            return {
+                "_kind": "followup_redirect",
+                "title": "(payment follow-up)",  # placeholder — never actually used
+                "project_hint": project_hint,
+                "_followup_date_raw": fu_m.group(2).strip(),
+            }
+
     m = _ADD_TASK_TRIGGER_RE.match(text or "") or _REMIND_TRIGGER_RE.match(text or "")
     if not m:
         return {}
@@ -1270,6 +1949,21 @@ def _add_task_extract_fields(text: str) -> Dict[str, str]:
 
 
 async def _add_task_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    if collected.get("_kind") == "followup_redirect":
+        resolution = await _resolve_project(collected.get("project_hint", ""), ctx)
+        if resolution.ambiguous:
+            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+        if resolution.error:
+            return ExecResult(ok=False, message=resolution.error)
+        dt = _parse_absolute_datetime(collected.get("_followup_date_raw", ""))
+        if not dt:
+            return ExecResult(ok=False, message=f"Couldn't understand the follow-up date \"{collected.get('_followup_date_raw')}\".")
+        await _remember_project(ctx, resolution.project)
+        collected["_resolved_project_id"] = resolution.project["id"]
+        collected["_resolved_project_label"] = resolution.project["label"]
+        collected["_followup_date"] = dt
+        return None
+
     title = collected.get("title", "").strip()
     if not title:
         return ExecResult(ok=False, message='What should the task be? e.g. "Add a task to get the call sheet tomorrow."')
@@ -1297,6 +1991,8 @@ async def _add_task_try_auto_execute(collected: dict, ctx: ExecContext) -> Optio
 
 
 async def _add_task_build_confirmation(collected: dict, ctx: ExecContext) -> str:
+    if collected.get("_kind") == "followup_redirect":
+        return f"Set next follow-up for {collected.get('_resolved_project_label')} to {_format_due(collected.get('_followup_date'))}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
     title = collected.get("title")
     due_at = collected.get("due_at")
     project_label = collected.get("_resolved_project_label") or ""
@@ -1307,6 +2003,14 @@ async def _add_task_build_confirmation(collected: dict, ctx: ExecContext) -> str
 
 async def _add_task_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     from routers import workflow as workflow_router
+
+    if collected.get("_kind") == "followup_redirect":
+        pid = collected.get("_resolved_project_id")
+        try:
+            await pd.update_production_desk_project(pid, pd.ProductionDeskProjectPatch(next_follow_up_at=collected.get("_followup_date")), _AGENT_ADMIN)
+        except HTTPException as e:
+            return ExecResult(ok=False, message=f"Couldn't update: {e.detail}")
+        return ExecResult(ok=True, message=f"✓ {collected.get('_resolved_project_label')}: Next follow-up → {_format_due(collected.get('_followup_date'))}")
 
     title = collected.get("title")
     due_at = collected.get("due_at") or None
@@ -1322,9 +2026,10 @@ async def _add_task_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         priority="normal",
     )
     try:
-        await workflow_router.create_task(payload, synthetic_user)
+        created = await workflow_router.create_task(payload, synthetic_user)
     except HTTPException as e:
         return ExecResult(ok=False, message=f"Couldn't add task: {e.detail}")
+    await _remember_task(ctx, created.get("id", ""), title)
     due_txt = f" (due {_format_due(due_at)})" if due_at else ""
     return ExecResult(ok=True, message=f"✓ Task added: {title}{due_txt}")
 
@@ -1336,11 +2041,191 @@ ADD_TASK_INTENT = IntentDefinition(
         FieldSpec(key="title", label="Task", question="What should the task be?", validate=lambda v: ValidationResult(ok=True, value=v) if v else ValidationResult(ok=False, error="Please describe the task.")),
         FieldSpec(key="due_at", label="Due", question="When is it due?", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
         FieldSpec(key="project_hint", label="Project", question="Which project, if any?", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
+        FieldSpec(key="_kind", label="Kind", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
+        FieldSpec(key="_followup_date_raw", label="Follow-up date", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False),
     ],
     extract_fields=_add_task_extract_fields,
     try_auto_execute=_add_task_try_auto_execute,
     build_confirmation=_add_task_build_confirmation,
     executor=_add_task_executor,
+)
+
+
+# ===========================================================================
+# CONVERSATIONAL TASK MANAGEMENT (Phase H / P0-H) — update/complete/reopen
+# an EXISTING workflow_tasks row (creation stays ADD_TASK_INTENT's job).
+# Writes through routers.workflow.update_task DIRECTLY — the SAME
+# db.workflow_tasks collection/API the admin Workflow page and Production
+# Desk's own task queries already use. No new task model.
+#
+# "It"/"that task" resolution reuses session_context (see _remember_task)
+# — the SAME store _remember_project already writes to, not a second
+# context mechanism. A non-pronoun hint ("the call sheet task") is
+# resolved by a case-insensitive title match, narrowed to the session's
+# last project when one is set.
+# ===========================================================================
+_TASK_PRONOUNS = {"it", "that", "that task", "the task", "this task"}
+
+
+def _clean_task_hint(raw: str) -> str:
+    raw = (raw or "").strip()
+    low = raw.lower()
+    if low in _TASK_PRONOUNS:
+        return low
+    raw = re.sub(r"^(?:the|that|this)\s+", "", raw, flags=re.IGNORECASE).strip()
+    raw = re.sub(r"\s+task$", "", raw, flags=re.IGNORECASE).strip()
+    return raw
+
+
+async def _resolve_task_reference(hint: str, ctx: ExecContext) -> Tuple[Optional[dict], Optional[str]]:
+    hint = _clean_task_hint(hint)
+    session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+    if not hint or hint in _TASK_PRONOUNS:
+        tid = (session or {}).get("last_task_id")
+        if not tid:
+            return None, 'Which task do you mean? Try naming it, e.g. "the call sheet task".'
+        task = await db.workflow_tasks.find_one({"id": tid}, {"_id": 0})
+        if not task:
+            return None, "That task no longer exists."
+        return task, None
+
+    candidates = await db.workflow_tasks.find(
+        {"title": {"$regex": re.escape(hint), "$options": "i"}}, {"_id": 0},
+    ).sort("created_at", -1).to_list(50)
+    if not candidates:
+        return None, None  # genuinely no match — caller decides how to treat this (see callers)
+    pid = (session or {}).get("last_project_id")
+    if pid:
+        scoped = [t for t in candidates if t.get("project_id") == pid]
+        if scoped:
+            candidates = scoped
+    return candidates[0], None  # most recent match — a deterministic tie-break, never a silent guess across unrelated projects since session already narrows scope
+
+
+_TASK_REOPEN_RE = re.compile(r"^reopen\s+(.+?)\s*[\.\?!]*$", re.IGNORECASE)
+_TASK_COMPLETE_RE = re.compile(r"^(?:mark\s+)?(.+?)\s+(?:is\s+)?(?:as\s+)?(?:complete|completed|done)\s*[\.\?!]*$", re.IGNORECASE)
+_TASK_MAKE_PRIORITY_RE = re.compile(r"^make\s+(.+?)\s+(high|low|normal|urgent)\s*priority\s*[\.\?!]*$", re.IGNORECASE)
+_TASK_MOVE_DUE_RE = re.compile(r"^move\s+(.+?)\s+to\s+(.+?)\s*[\.\?!]*$", re.IGNORECASE)
+_TASK_RETITLE_RE = re.compile(r"^change\s+(.+?)\s+to\s+(.+?)\s*[\.\?!]*$", re.IGNORECASE)
+
+
+def _classify_task_command(text: str) -> Optional[dict]:
+    text = (text or "").strip()
+    m = _TASK_REOPEN_RE.match(text)
+    if m:
+        return {"action": "reopen", "hint": m.group(1)}
+    m = _TASK_MAKE_PRIORITY_RE.match(text)
+    if m:
+        priority = m.group(2).lower()
+        return {"action": "update", "hint": m.group(1), "priority": "high" if priority == "urgent" else priority}
+    m = _TASK_MOVE_DUE_RE.match(text)
+    if m:
+        due_at = _parse_absolute_datetime(m.group(2))
+        if due_at:
+            return {"action": "update", "hint": m.group(1), "due_at": due_at}
+    m = _TASK_RETITLE_RE.match(text)
+    if m:
+        return {"action": "update", "hint": m.group(1), "new_title": m.group(2).strip()}
+    m = _TASK_COMPLETE_RE.match(text)
+    if m:
+        return {"action": "complete", "hint": m.group(1)}
+    return None
+
+
+async def _task_manage_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    cmd = _classify_task_command(collected.get("raw_text", ""))
+    if not cmd:
+        return ExecResult(ok=False, message='Which task, and what should change? e.g. "Make that task high priority." or "Mark that task complete."')
+    task, err = await _resolve_task_reference(cmd["hint"], ctx)
+    if err:
+        return ExecResult(ok=False, message=err)
+    if not task:
+        return ExecResult(ok=False, message=f"No task matching \"{_clean_task_hint(cmd['hint'])}\" found.")
+    collected["_task_id"] = task["id"]
+    collected["_task_title"] = task.get("title") or ""
+    collected["_action"] = cmd["action"]
+    if cmd["action"] == "update":
+        collected["_new_priority"] = cmd.get("priority", "")
+        collected["_new_due_at"] = cmd.get("due_at", "")
+        collected["_new_title"] = cmd.get("new_title", "")
+    return None
+
+
+async def _task_manage_build_confirmation(collected: dict, ctx: ExecContext) -> str:
+    title = collected.get("_task_title", "")
+    action = collected.get("_action")
+    if action == "complete":
+        return f'Mark task "{title}" complete?\n\nReply 1 to confirm, 2 to edit, 3 to cancel.'
+    if action == "reopen":
+        return f'Reopen task "{title}"?\n\nReply 1 to confirm, 2 to edit, 3 to cancel.'
+    parts = []
+    if collected.get("_new_priority"):
+        parts.append(f"priority → {collected['_new_priority']}")
+    if collected.get("_new_due_at"):
+        parts.append(f"due → {_format_due(collected['_new_due_at'])}")
+    if collected.get("_new_title"):
+        parts.append(f"title → {collected['_new_title']}")
+    change_txt = ", ".join(parts) or "no recognisable change"
+    return f'Update task "{title}": {change_txt}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel.'
+
+
+async def _task_manage_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    from routers import workflow as workflow_router
+
+    tid = collected.get("_task_id")
+    title = collected.get("_task_title", "")
+    action = collected.get("_action")
+    synthetic_user = {"id": _AGENT_ADMIN["id"], "role": "admin"}
+    await _remember_task(ctx, tid, title)
+
+    if action == "complete":
+        try:
+            await workflow_router.update_task(tid, workflow_router.TaskUpdateIn(status="completed"), synthetic_user)
+        except HTTPException as e:
+            return ExecResult(ok=False, message=f"Couldn't update: {e.detail}")
+        return ExecResult(ok=True, message=f'✓ Task "{title}" marked complete.')
+
+    if action == "reopen":
+        try:
+            await workflow_router.update_task(tid, workflow_router.TaskUpdateIn(status="pending"), synthetic_user)
+        except HTTPException as e:
+            return ExecResult(ok=False, message=f"Couldn't update: {e.detail}")
+        return ExecResult(ok=True, message=f'✓ Task "{title}" reopened.')
+
+    patch_kwargs = {}
+    if collected.get("_new_priority"):
+        patch_kwargs["priority"] = collected["_new_priority"]
+    if collected.get("_new_due_at"):
+        patch_kwargs["due_at"] = collected["_new_due_at"]
+    if collected.get("_new_title"):
+        patch_kwargs["title"] = collected["_new_title"]
+    if not patch_kwargs:
+        return ExecResult(ok=False, message="Nothing recognisable to change.")
+    try:
+        await workflow_router.update_task(tid, workflow_router.TaskUpdateIn(**patch_kwargs), synthetic_user)
+    except HTTPException as e:
+        return ExecResult(ok=False, message=f"Couldn't update: {e.detail}")
+    display_title = collected.get("_new_title") or title
+    _labels = {"priority": "priority", "due_at": "due"}
+    _fmt = lambda k, v: _format_due(v) if k == "due_at" else v
+    changes = ", ".join(f"{_labels.get(k, k)} → {_fmt(k, v)}" for k, v in patch_kwargs.items() if k != "title")
+    changes_txt = f" ({changes})" if changes else ""
+    return ExecResult(ok=True, message=f'✓ Task "{display_title}" updated{changes_txt}.')
+
+
+TASK_MANAGE_INTENT = IntentDefinition(
+    intent_id="management.task_manage",
+    triggers=[
+        "make that task", "make it", "move it", "move that task", "move the task",
+        "update the task", "update that task", "change the task", "change that task",
+        "mark that task", "mark it complete", "mark it done", "complete that task", "complete it",
+        "reopen that task", "reopen it", "reopen the task", "reopen",
+    ],
+    fields=[FieldSpec(key="raw_text", label="Command", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False)],
+    extract_fields=lambda text: {"raw_text": text},
+    try_auto_execute=_task_manage_try_auto_execute,
+    build_confirmation=_task_manage_build_confirmation,
+    executor=_task_manage_executor,
 )
 
 
@@ -1402,7 +2287,18 @@ def _unprotect(text: str) -> str:
     return text.replace("\x00AND\x00", "and").replace("\x00TO\x00", "to")
 
 
-_CLAUSE_SPLIT_RE = re.compile(r"\.\s+|;\s*|,\s+and\s+|,\s*(?=[a-z])|\s+and\s+(?=[A-Z])")
+_CLAUSE_SPLIT_RE = re.compile(
+    r"\.\s+|;\s*|,\s+and\s+|,\s*(?=[a-z])|\s+and\s+(?=[A-Z])"
+    # Phase H fix: a comma followed by a CAPITALIZED word is only safe to
+    # split on when that word is immediately its own clause subject —
+    # "...call time 7:30 AM, Shivi's fitting is complete" must split
+    # before "Shivi", but "location is Mumbai, India" must not split
+    # before "India". The generic, structural signal: the capitalized
+    # word is directly followed by "'s"/" is "/" has " (a real subject
+    # starting a new statement), not just any capitalized word (which
+    # could be a value continuation).
+    r"|,\s*(?=[A-Z][\w'.]*(?:'s\b|\s+is\b|\s+has\b))"
+)
 
 
 def _split_into_clauses(text: str) -> List[str]:
@@ -1540,7 +2436,24 @@ _PROJECT_FIELD_PHRASES: List[Tuple[str, List[Tuple[str, Optional[str]]]]] = [
     ("invoice_raised", [("invoice raised", "true"), ("invoice has been raised", "true")]),
     ("invoice_sent", [("invoice sent", "true"), ("invoice has been sent", "true")]),
     ("payment_in_received", [("client payment received", "true"), ("client payment", "true"), ("payment received from", "true")]),
-    ("gst_component_received", [("gst component received", "true"), ("gst received", "true"), ("gst component", "true")]),
+    ("gst_component_received", [("gst component received", "true"), ("gst payment received", "true"), ("gst received", "true"), ("gst component", "true")]),
+    # Project lifecycle (Phase H / P0-G) — production_status is a purely
+    # informational pd_* enum (routers/production_desk.py's
+    # PRODUCTION_STATUS_OPTIONS); nothing in the backend gates a
+    # transition, so there is no business-rule check to preserve here
+    # beyond the existing enum-membership validation
+    # update_production_desk_project already does.
+    # "shoot scheduled" (bare) stays exclusively shoot_status's own
+    # phrase, unchanged — only the longer, more specific "as shoot
+    # scheduled" belongs to production_status, so the two never compete
+    # for the same span (the longer phrase always wins an overlap).
+    ("production_status", [
+        ("is confirmed", "confirmed"), ("as confirmed", "confirmed"),
+        ("as shoot scheduled", "shoot_scheduled"),
+        ("shoot is complete", "shoot_complete"), ("shoot complete", "shoot_complete"),
+        ("to finance closed", "finance_closed"), ("finance closed", "finance_closed"),
+        ("production status is", None), ("production status", None),
+    ]),
 ]
 
 _TALENT_FIELD_PHRASES: List[Tuple[str, List[Tuple[str, Optional[str]]]]] = [
@@ -1638,6 +2551,18 @@ def _trim_trailing_stopwords(candidate: str) -> str:
     return " ".join(words)
 
 
+def _trim_leading_stopwords(candidate: str) -> str:
+    """"Set Rahul" -> "Rahul" — the mirror-image of
+    _trim_trailing_stopwords, for a capture that ran BACKWARD into a
+    preceding trigger/verb word (e.g. a possessive regex with `re.search`
+    matching from the earliest possible position, "Set Rahul's kickback"
+    -> group(1)="Set Rahul")."""
+    words = (candidate or "").split()
+    while words and re.sub(r"[^a-z0-9']", "", words[0].lower()) in _ENTITY_STOPWORDS:
+        words.pop(0)
+    return " ".join(words)
+
+
 def _slice_field_values(clause: str, matches: List[Tuple[int, int, str, Optional[str]]]) -> Dict[str, str]:
     result: Dict[str, str] = {}
     for i, (start, end, key, forced_value) in enumerate(matches):
@@ -1680,7 +2605,7 @@ def _extract_subject_from_clause(clause: str, first_field_pos: Optional[int]) ->
 
     if first_field_pos and first_field_pos > 0:
         candidate = clause[:first_field_pos].strip()
-        candidate = re.sub(r"^(?:mark|set|make|add note that|add note)\s+", "", candidate, flags=re.IGNORECASE).strip()
+        candidate = re.sub(r"^(?:mark|set|make|move|add note that|add note)\s+", "", candidate, flags=re.IGNORECASE).strip()
         if candidate.endswith("'s"):
             candidate = candidate[:-2].strip()
         elif candidate.endswith("s'"):
@@ -1969,6 +2894,7 @@ _PROJECT_FIELD_LABELS = {
     "invoice_raised": "Invoice raised", "invoice_sent": "Invoice sent",
     "payment_in_received": "Client payment received", "gst_component_received": "GST component received",
     "production_contact_client_id": "Production contact",
+    "production_status": "Production status", "shoot_date": "Shoot date (reminders)",
 }
 _TALENT_FIELD_LABELS = {
     "costume_trial_at": "Costume trial", "costume_trial_location": "Trial location",
@@ -1997,6 +2923,8 @@ def _display_value(key: str, value: Any) -> str:
         return "Yes"
     if key in _DATE_VALUE_FIELDS:
         return _format_due(value)
+    if key == "production_status":
+        return str(value).replace("_", " ")
     return str(value)
 
 
@@ -2133,6 +3061,23 @@ async def _resolve_smart_plan(text: str, ctx: ExecContext) -> dict:
 
 async def _smart_update_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
     raw = collected.get("raw_text", "")
+
+    # Kickback commands ("Set Rahul's kickback to 5000.") are checked
+    # first and handled as their own small plan — see
+    # _kickback_command_from_text's docstring for why this can't just be
+    # folded into the project/talent/task plan below. Standalone-message
+    # only in this pass (not composed with other field updates in the
+    # same multi-action message) — a disclosed V1 scope limit.
+    kb_cmd = _kickback_command_from_text(raw)
+    if kb_cmd:
+        plan, err = await _resolve_kickback_write(
+            kb_cmd["kb_recipient"], kb_cmd["kb_action"], kb_cmd.get("kb_amount", ""), kb_cmd.get("kb_percent", ""), ctx,
+        )
+        if err:
+            return ExecResult(ok=False, message=err)
+        collected["_kb_plan"] = json.dumps(plan)
+        return None
+
     plan = await _resolve_smart_plan(raw, ctx)
     total_items = len(plan["projects"]) + len(plan["talents"]) + len(plan["tasks"])
     if total_items == 0:
@@ -2156,6 +3101,14 @@ async def _smart_update_try_auto_execute(collected: dict, ctx: ExecContext) -> O
 
 
 async def _smart_update_build_confirmation(collected: dict, ctx: ExecContext) -> str:
+    if collected.get("_kb_plan"):
+        kb = json.loads(collected["_kb_plan"])
+        amount_txt = _format_inr(float(kb.get("amount") or 0))
+        if kb["action"] == "remove":
+            return f"Remove {kb['name']}'s kickback ({amount_txt}) on {kb['project_label']}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+        verb = "Update" if kb.get("existing_id") else "Add"
+        return f"{verb} kickback for {kb['name']} on {kb['project_label']}: {amount_txt}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+
     plan = json.loads(collected.get("_plan") or "{}")
     lines: List[str] = []
     n = 0
@@ -2186,6 +3139,13 @@ async def _smart_update_build_confirmation(collected: dict, ctx: ExecContext) ->
 async def _smart_update_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     from routers import workflow as workflow_router
 
+    if collected.get("_kb_plan"):
+        kb = json.loads(collected["_kb_plan"])
+        return await _apply_kickback_write(
+            kb["action"], kb["project_id"], kb["name"],
+            client_id=kb.get("client_id", ""), existing_id=kb.get("existing_id", ""), amount=float(kb.get("amount") or 0),
+        )
+
     plan = json.loads(collected.get("_plan") or "{}")
     applied: List[str] = []
     failed: List[str] = []
@@ -2215,7 +3175,8 @@ async def _smart_update_executor(collected: dict, ctx: ExecContext) -> ExecResul
                 due_at=tk.get("due_at"),
                 priority="normal",
             )
-            await workflow_router.create_task(payload, {"id": _AGENT_ADMIN["id"], "role": "admin"})
+            created = await workflow_router.create_task(payload, {"id": _AGENT_ADMIN["id"], "role": "admin"})
+            await _remember_task(ctx, created.get("id", ""), tk["title"])
             applied.append(f"✓ Task: {tk['title']}")
         except Exception as e:  # noqa: BLE001 — best-effort per-item, never abort the batch
             failed.append(f"Task '{tk['title']}': {e}")
@@ -2258,6 +3219,42 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
     plan = _parse_smart_message(text)
     if plan["project_updates"] or plan["talent_updates"] or plan["tasks"]:
         return SMART_UPDATE_INTENT, {"raw_text": text}
+    # "Rahul has a ₹5,000 kickback." / "Rahul's kickback is 5000." /
+    # "Remove Rahul's kickback." — none of these open with a fixed
+    # trigger word, so they only ever reach here. Routes into
+    # SMART_UPDATE_INTENT's own kickback branch (see
+    # _smart_update_try_auto_execute) — the SAME resolution/confirm/
+    # execute path "Set Rahul's kickback to 5000." already uses.
+    if _kickback_command_from_text(text):
+        return SMART_UPDATE_INTENT, {"raw_text": text}
+    # "Shivi's travel reimbursement is 2500." — no fixed trigger word.
+    bare_reimb = _bare_reimbursement_fields(text)
+    if bare_reimb:
+        return ADD_INTENT, bare_reimb
+    bare_crew = _bare_crew_command_fields(text)
+    if bare_crew:
+        return ADD_INTENT, bare_crew
+    # "Is Shivi ready for Google AI?" / "Who isn't ready for tomorrow?" —
+    # a READ query with no registered trigger of its own (a bare "is" is
+    # deliberately NOT a trigger — far too broad). Routes into
+    # STATUS_QUERY_INTENT's existing (auto_confirm) executor, which
+    # already knows how to read talent+topic="readiness" or the global
+    # needs-attention aggregation.
+    _, topic = _extract_talent_and_topic(text)
+    if topic == "readiness" or _NEEDS_ATTENTION_RE.search(text):
+        return STATUS_QUERY_INTENT, {"raw_text": text}
+    # "The call sheet task is done." — bare, no fixed trigger. Checked
+    # LAST and only claimed once a REAL task is actually found matching
+    # the hint (never a guess) — this keeps "Shivi's fitting is
+    # complete" and every other "X is complete/done" sentence the
+    # earlier checks already own from ever reaching here (they're
+    # claimed above, before this point) or, on a genuine miss, simply
+    # falling through to unhandled/ignored exactly as before.
+    cmd = _classify_task_command(text)
+    if cmd and cmd["action"] in ("complete", "reopen"):
+        task, _err = await _resolve_task_reference(cmd["hint"], ctx)
+        if task:
+            return TASK_MANAGE_INTENT, {"raw_text": text}
     return None
 
 
@@ -2312,6 +3309,7 @@ MANAGEMENT_AGENT = AgentDefinition(
         MARK_TALENT_STATUS_INTENT,
         ADD_INTENT,
         ADD_TASK_INTENT,
+        TASK_MANAGE_INTENT,
         SMART_UPDATE_INTENT,
     ],
     # The natural-language multi-field/multi-action engine (Part 15-20 of

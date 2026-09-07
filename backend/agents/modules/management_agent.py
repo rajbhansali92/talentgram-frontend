@@ -279,6 +279,21 @@ _TALENT_TOPIC_RE = re.compile(
     r"^(?:when is|when's|show|what's|whats|is|mark)\s+(.+?)\s+(costume trial|trial|fitting|look test|shoot(?:ing)?|payment|reimbursement|ready)\b",
     re.IGNORECASE,
 )
+# Phase I — "What is pending for Shivi?" (the spec's own example phrasing
+# for the talent-readiness summary): name comes AFTER the topic word here,
+# the reverse order of _TALENT_TOPIC_RE above. Deliberately NOT wired into
+# _extract_talent_and_topic itself — "pending for X" is ALSO the existing,
+# pre-established project-digest phrasing ("What's pending for Google AI?"),
+# and _extract_talent_and_topic is checked BEFORE project resolution in
+# _status_query_executor, so unconditionally treating "pending for X" as a
+# talent name here shadowed that older command (found live in regression
+# testing). Instead this is only consulted from the EXISTING "project
+# resolution already, definitively failed -> try X as a bare talent name"
+# fallback below, matching that fallback's own established guardrail.
+_TALENT_PENDING_FOR_RE = re.compile(
+    r"^(?:what(?:'s| is)\s+)?pending for\s+(.+?)\??$",
+    re.IGNORECASE,
+)
 
 
 def _extract_talent_and_topic(text: str) -> Tuple[str, Optional[str]]:
@@ -722,18 +737,35 @@ async def _global_digest(day_offset: int) -> str:
 
 
 async def _global_needs_attention() -> str:
-    """Phase H / P0-I — "What needs attention?" / "What's overdue?" /
-    "Which talents aren't ready?" — a READ/QUERY layer only, aggregating
-    the SAME structured signals _global_digest already reads directly
-    (no N+1 per-project fan-out, no new store — see that function's own
+    """Phase H / P0-I, expanded in Phase I — "What needs attention?" /
+    "What's overdue?" / "Which talents aren't ready?" / "Anything
+    urgent?" — a READ/QUERY layer only, aggregating the SAME structured
+    signals _global_digest and the reminder worker already read directly
+    (no N+1 per-project fan-out, no new store — see _global_digest's own
     docstring for why direct signal queries, not project iteration, is
-    this file's established pattern for a cross-project view)."""
-    now_iso = datetime.now(timezone.utc).isoformat()
+    this file's established pattern for a cross-project view). Reuses
+    services/production_reminder_worker.py's own date helpers and
+    _shoot_pending_items — one place computes "what's pending on this
+    shoot", shared by the reminder worker, this query, and the daily
+    briefing, not three separate implementations."""
+    from services import production_reminder_worker as reminder_worker
 
-    overdue_tasks = await db.workflow_tasks.find(
-        {"due_at": {"$lt": now_iso, "$ne": None}, "status": {"$in": _ACTIVE_STATUSES}, "project_id": {"$ne": None}},
-        {"_id": 0},
-    ).to_list(500)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    today = reminder_worker._ist_today()
+    tomorrow = today + timedelta(days=1)
+
+    relevant_ids = {p["id"] for p in await db.projects.find(
+        {"status": {"$in": PRODUCTION_DESK_RELEVANT_STATUSES}}, {"_id": 0, "id": 1},
+    ).to_list(10000)}
+    rid_list = list(relevant_ids)
+
+    active_tasks = await db.workflow_tasks.find(
+        {"due_at": {"$ne": None}, "status": {"$in": _ACTIVE_STATUSES}}, {"_id": 0},
+    ).to_list(1000)
+    overdue_tasks = [t for t in active_tasks if t["due_at"] < now_iso]
+    due_today_tasks = [t for t in active_tasks if reminder_worker._date_of(t["due_at"]) == today and t["due_at"] >= now_iso]
+    high_priority_tasks = [t for t in active_tasks if (t.get("priority") or "").lower() == "high"]
+
     overdue_followups = await db.projects.find(
         {"pd_next_follow_up_at": {"$lt": now_iso, "$ne": None}, "pd_payment_followup_status": {"$ne": "done"},
          "status": {"$in": PRODUCTION_DESK_RELEVANT_STATUSES}},
@@ -751,15 +783,25 @@ async def _global_needs_attention() -> str:
     pending_payment_rows = await db.casting_pipeline.find(
         {"stage": "locked", "pd_payment_status": {"$in": [None, "pending"]}}, {"_id": 0},
     ).to_list(1000)
-
-    relevant_ids = {p["id"] for p in await db.projects.find(
-        {"status": {"$in": PRODUCTION_DESK_RELEVANT_STATUSES}}, {"_id": 0, "id": 1},
-    ).to_list(10000)}
     not_ready_rows = [r for r in not_ready_rows if r.get("project_id") in relevant_ids]
     pending_payment_rows = [r for r in pending_payment_rows if r.get("project_id") in relevant_ids]
 
-    project_ids = {t.get("project_id") for t in overdue_tasks}
-    project_ids |= {p["id"] for p in overdue_followups}
+    checklist_gap_projects = await db.projects.find(
+        {"id": {"$in": rid_list}, "$or": [
+            {"pd_confirmation_mail_received": {"$ne": True}},
+            {"pd_invoice_raised": {"$ne": True}},
+            {"pd_invoice_sent": {"$ne": True}},
+            {"pd_gst_component_received": {"$ne": True}},
+        ]},
+        {"_id": 0},
+    ).to_list(len(rid_list)) if rid_list else []
+
+    all_projects = await db.projects.find({"id": {"$in": rid_list}}, {"_id": 0}).to_list(len(rid_list)) if rid_list else []
+    shoots_today = [p for p in all_projects if reminder_worker._date_of(p.get("pd_shoot_date")) == today]
+    shoots_tomorrow = [p for p in all_projects if reminder_worker._date_of(p.get("pd_shoot_date")) == tomorrow]
+
+    project_ids = {t.get("project_id") for t in overdue_tasks + due_today_tasks + high_priority_tasks}
+    project_ids |= {p["id"] for p in overdue_followups + checklist_gap_projects + shoots_today + shoots_tomorrow}
     project_ids |= {r.get("project_id") for r in not_ready_rows + pending_payment_rows}
     project_ids.discard(None)
     projects = await db.projects.find({"id": {"$in": list(project_ids)}}, {"_id": 0, "id": 1, "brand_name": 1}).to_list(len(project_ids)) if project_ids else []
@@ -776,10 +818,27 @@ async def _global_needs_attention() -> str:
             return
         sections.setdefault(project_id, []).append(line)
 
+    for p in shoots_today:
+        _add(p["id"], "  • Shoot today")
+    for p in shoots_tomorrow:
+        _add(p["id"], "  • Shoot tomorrow")
     for t in overdue_tasks:
         _add(t.get("project_id"), f"  • Overdue task: {t.get('title')}")
+    for t in due_today_tasks:
+        _add(t.get("project_id"), f"  • Task due today: {t.get('title')}")
+    for t in high_priority_tasks:
+        _add(t.get("project_id"), f"  • High priority task: {t.get('title')}")
     for p in overdue_followups:
         _add(p["id"], "  • Payment follow-up overdue")
+    for p in checklist_gap_projects:
+        gaps = [label for flag, label in (
+            ("pd_confirmation_mail_received", "confirmation mail pending"),
+            ("pd_invoice_raised", "invoice not raised"),
+            ("pd_invoice_sent", "invoice not sent"),
+            ("pd_gst_component_received", "GST component pending"),
+        ) if not p.get(flag)]
+        if gaps:
+            _add(p["id"], f"  • Checklist: {', '.join(gaps)}")
     for r in pending_payment_rows:
         _add(r.get("project_id"), f"  • Payment pending — {talent_name_by_id.get(r.get('talent_id'), 'Talent')}")
     for r in not_ready_rows:
@@ -798,37 +857,47 @@ async def _global_needs_attention() -> str:
 _NEEDS_ATTENTION_RE = re.compile(
     r"needs? attention|which projects? need|which talents?.*(?:not ready|aren.t ready)|who isn.t ready|"
     r"who is not ready|talents? who aren.t ready|not ready for|production tasks?.*overdue|^what.s overdue|^what is overdue|"
-    r"projects? with pending payments?",
+    r"projects? with pending payments?|anything urgent|urgent\??$|"
+    r"today.s production issues|what.s pending today|what is pending today|follow up on\??$|what.*follow up on",
     re.IGNORECASE,
 )
 
 
 def _talent_readiness_issues(talent: dict) -> List[str]:
     """P1 — derived purely from EXISTING Production Desk fields, no new
-    readiness collection/status of its own."""
+    readiness collection/status of its own. "Confirmation" reuses the
+    EXISTING shoot_status enum's own "scheduled"/"today"/"completed"
+    values as the confirmed signal (Phase F's own "confirmed for the
+    shoot" -> shoot_status="scheduled" mapping) — not a new field."""
     issues = []
+    if (talent.get("shoot_status") or "not_scheduled") == "not_scheduled":
+        issues.append("confirmation pending")
     if not talent.get("costume_trial_at"):
         issues.append("costume trial not scheduled")
     if (talent.get("fitting_status") or "not_scheduled") != "completed":
         issues.append(f"fitting {(talent.get('fitting_status') or 'not_scheduled').replace('_', ' ')}")
     if (talent.get("look_test_status") or "not_scheduled") != "completed":
         issues.append(f"look test {(talent.get('look_test_status') or 'not_scheduled').replace('_', ' ')}")
-    if (talent.get("shoot_status") or "not_scheduled") == "not_scheduled":
-        issues.append("shoot not scheduled")
     return issues
 
 
-def _render_talent_reply(talent: dict, project_label: str, topic: Optional[str]) -> str:
+def _render_talent_reply(
+    talent: dict, project_label: str, topic: Optional[str],
+    call_time: Optional[str] = None, reporting_time: Optional[str] = None,
+) -> str:
     lines = [f"👤 {talent['name']} — {project_label}", ""]
     if topic == "readiness":
         issues = _talent_readiness_issues(talent)
-        lines.append("✓ READY" if not issues else "⚠ NOT READY")
-        for i in issues:
-            lines.append(f"  • {i}")
-        lines.append(f"Costume trial: {_format_due(talent.get('costume_trial_at'))}")
-        lines.append(f"Fitting: {(talent.get('fitting_status') or 'not_scheduled').upper()}")
-        lines.append(f"Look test: {(talent.get('look_test_status') or 'not_scheduled').upper()}")
-        lines.append(f"Shoot status: {(talent.get('shoot_status') or 'not_scheduled').upper()}")
+        confirmed = (talent.get("shoot_status") or "not_scheduled") != "not_scheduled"
+        lines.append(f"Confirmation: {'Done' if confirmed else 'Pending'}")
+        lines.append(f"Costume Trial: {'Done' if talent.get('costume_trial_at') else 'Pending'}")
+        lines.append(f"Fitting: {'Done' if talent.get('fitting_status') == 'completed' else 'Pending'}")
+        lines.append(f"Look Test: {'Done' if talent.get('look_test_status') == 'completed' else 'Pending'}")
+        if reporting_time:
+            lines.append(f"Reporting: {reporting_time}")
+        if call_time:
+            lines.append(f"Call: {call_time}")
+        lines.append(f"Status: {'READY' if not issues else 'NOT READY'}")
     elif topic == "trial":
         lines.append(f"Costume trial: {_format_due(talent.get('costume_trial_at'))}")
         lines.append(f"Location: {talent.get('costume_trial_location') or '—'}")
@@ -850,6 +919,85 @@ _GLOBAL_DIGEST_RE = re.compile(
     r"(?:happening|payment follow-?ups?(?:\s+are|\s+due)?|due|reminders?)\s*.*?\b(today|tomorrow)\b",
     re.IGNORECASE,
 )
+
+
+_SHOOTS_QUERY_RE = re.compile(r"\bshoot(?:s|ing)?\b", re.IGNORECASE)
+_SHOOTS_TIMEFRAME_RE = re.compile(r"\b(today|tomorrow|this week|coming up|upcoming)\b", re.IGNORECASE)
+# "What is happening this week?" (spec's own example phrasing) never says
+# "shoot" — treat it as an alternate entry point into the same renderer.
+# Deliberately restricted to "this week"/"coming up"/"upcoming" ONLY, never
+# "today"/"tomorrow" — "What's happening today/tomorrow?" is the PRE-
+# EXISTING _GLOBAL_DIGEST_RE trigger (Phase F/G), and this function is
+# checked earlier in _status_query_executor, so an unrestricted "happening"
+# match here would silently shadow that older, broader digest command
+# (found live in regression testing: it started answering a plain
+# alphabetical-position digest test with an empty shoots-only reply).
+_SHOOTS_HAPPENING_RE = re.compile(r"\bhappening\b.*\b(this week|coming up|upcoming)\b", re.IGNORECASE)
+
+
+async def _render_shoots_query(raw: str) -> Optional[str]:
+    """Phase I — "What shoots are today/tomorrow?" / "Show me tomorrow's
+    shoots." / "Who is shooting tomorrow?" / "What is happening this
+    week?" — a global (cross-project) query. A project- OR talent-
+    scoped "shoot" question ("What's the Google AI shoot date?", "When
+    is Shivi shooting?") already works via the EXISTING "shoot" focus
+    keyword / _extract_talent_and_topic and is deliberately left to that
+    path — this function steps aside the moment EITHER a project or a
+    talent name is mentioned (found live in regression testing: "When is
+    Shivi shooting?" was being wrongly swallowed here before this
+    check)."""
+    has_shoot_word = bool(_SHOOTS_QUERY_RE.search(raw or ""))
+    has_happening_word = bool(_SHOOTS_HAPPENING_RE.search(raw or ""))
+    if not (has_shoot_word or has_happening_word):
+        return None
+    if _extract_trailing_project(raw):
+        return None
+    talent_hint, _topic = _extract_talent_and_topic(raw)
+    if talent_hint:
+        return None
+    from services import production_reminder_worker as reminder_worker
+
+    today = reminder_worker._ist_today()
+    tf_m = _SHOOTS_TIMEFRAME_RE.search(raw)
+    timeframe = (tf_m.group(1).lower() if tf_m else "coming up")
+    if timeframe == "today":
+        start, end, label = today, today, "TODAY"
+    elif timeframe == "tomorrow":
+        d = today + timedelta(days=1)
+        start, end, label = d, d, "TOMORROW"
+    elif timeframe == "this week":
+        start, end, label = today, today + timedelta(days=6), "THIS WEEK"
+    else:
+        start, end, label = today, today + timedelta(days=13), "UPCOMING"
+
+    relevant_ids = {p["id"] for p in await db.projects.find(
+        {"status": {"$in": PRODUCTION_DESK_RELEVANT_STATUSES}}, {"_id": 0, "id": 1},
+    ).to_list(10000)}
+    rid_list = list(relevant_ids)
+    projects = await db.projects.find(
+        {"id": {"$in": rid_list}, "pd_shoot_date": {"$ne": None}}, {"_id": 0},
+    ).to_list(len(rid_list)) if rid_list else []
+    matches = [p for p in projects if p.get("pd_shoot_date") and start <= reminder_worker._date_of(p["pd_shoot_date"]) <= end]
+
+    if not matches:
+        return f"📋 SHOOTS — {label}\n\nNothing scheduled."
+    matches.sort(key=lambda p: reminder_worker._date_of(p["pd_shoot_date"]))
+    lines = [f"📋 SHOOTS — {label}"]
+    for p in matches:
+        d = reminder_worker._date_of(p["pd_shoot_date"])
+        talent_count = await db.casting_pipeline.count_documents({"project_id": p["id"], "stage": "locked"})
+        pending = await reminder_worker._shoot_pending_items(p)
+        status = "✓ Ready" if not pending else f"⚠ {len(pending)} pending"
+        lines.append("")
+        lines.append(f"{p.get('brand_name') or '(untitled project)'} — {reminder_worker._fmt_date(d)}")
+        if p.get("pd_shoot_location"):
+            lines.append(f"  Location: {p['pd_shoot_location']}")
+        if p.get("pd_reporting_time"):
+            lines.append(f"  Reporting: {p['pd_reporting_time']}")
+        if p.get("pd_call_time"):
+            lines.append(f"  Call: {p['pd_call_time']}")
+        lines.append(f"  Talents: {talent_count}  ·  {status}")
+    return "\n".join(lines)
 
 
 _TASK_ASSIGNED_RE = re.compile(r"assigned to\s+(.+?)\s*\??$", re.IGNORECASE)
@@ -896,6 +1044,13 @@ async def _render_tasks_query(raw: str) -> Optional[str]:
 async def _status_query_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     raw = collected.get("raw_text", "")
 
+    # "What shoots are today/tomorrow?" / "Who is shooting tomorrow?" —
+    # checked first since it's the most specific keyword ("shoot") of
+    # the global queries below.
+    shoots_reply = await _render_shoots_query(raw)
+    if shoots_reply:
+        return ExecResult(ok=True, message=shoots_reply)
+
     # "Show my pending tasks." / "What tasks are assigned to Rahul?" —
     # checked before the needs-attention/project branches since these
     # never name a project either.
@@ -940,7 +1095,12 @@ async def _status_query_executor(collected: dict, ctx: ExecContext) -> ExecResul
         talent, project, others = await _find_talent_across_projects(talent_q)
         if talent and project:
             await _remember_project(ctx, project)
-            return ExecResult(ok=True, message=_render_talent_reply(talent, project["label"], topic))
+            call_time = reporting_time = None
+            if topic == "readiness":
+                proj_doc = await db.projects.find_one({"id": project["id"]}, {"_id": 0, "pd_call_time": 1, "pd_reporting_time": 1})
+                call_time = (proj_doc or {}).get("pd_call_time")
+                reporting_time = (proj_doc or {}).get("pd_reporting_time")
+            return ExecResult(ok=True, message=_render_talent_reply(talent, project["label"], topic, call_time, reporting_time))
         if others:
             return ExecResult(ok=False, message=f'Found "{talent_q}" locked on more than one project: {", ".join(others)}. Please specify which one.')
         return ExecResult(ok=False, message=f'Couldn\'t find a locked talent matching "{talent_q}" on any ongoing project.')
@@ -957,7 +1117,17 @@ async def _status_query_executor(collected: dict, ctx: ExecContext) -> ExecResul
             talent, project, others = await _find_talent_across_projects(project_q)
             if talent and project:
                 await _remember_project(ctx, project)
-                return ExecResult(ok=True, message=_render_talent_reply(talent, project["label"], None))
+                # "What is pending for Shivi?" — Phase I's own example
+                # phrasing for the talent-readiness summary; project
+                # resolution has already, definitively failed above, so
+                # "pending for X" now safely means "X is a talent".
+                pf_topic = "readiness" if _TALENT_PENDING_FOR_RE.match(raw.strip()) else None
+                call_time = reporting_time = None
+                if pf_topic == "readiness":
+                    proj_doc = await db.projects.find_one({"id": project["id"]}, {"_id": 0, "pd_call_time": 1, "pd_reporting_time": 1})
+                    call_time = (proj_doc or {}).get("pd_call_time")
+                    reporting_time = (proj_doc or {}).get("pd_reporting_time")
+                return ExecResult(ok=True, message=_render_talent_reply(talent, project["label"], pf_topic, call_time, reporting_time))
             if others:
                 return ExecResult(ok=False, message=f'Found "{project_q}" locked on more than one project: {", ".join(others)}. Please specify which one.')
         return ExecResult(ok=False, message=resolution.error)
@@ -971,7 +1141,9 @@ async def _status_query_executor(collected: dict, ctx: ExecContext) -> ExecResul
     if talent_q:
         match, others = _match_talent_by_name(talent_q, body["locked_talents"])
         if match:
-            return ExecResult(ok=True, message=_render_talent_reply(match, project["label"], topic))
+            ct = body["project"].get("pd_call_time") if topic == "readiness" else None
+            rt = body["project"].get("pd_reporting_time") if topic == "readiness" else None
+            return ExecResult(ok=True, message=_render_talent_reply(match, project["label"], topic, ct, rt))
         if others:
             names = ", ".join(t["name"] for t in others)
             return ExecResult(ok=False, message=f'Multiple locked talents match "{talent_q}" on {project["label"]}: {names}.')
@@ -1002,6 +1174,19 @@ STATUS_QUERY_INTENT = IntentDefinition(
         "what needs attention", "needs attention", "what's overdue", "whats overdue", "what is overdue",
         "show me projects", "show me all talents",
         "my pending tasks", "show my pending", "what tasks are assigned", "what tasks",
+        # Phase I — proactive-ops query phrasing (Section "Success Criteria").
+        # Note: several of these are short, terminal phrases ("Anything
+        # urgent?") that a trailing "?" with no following space keeps
+        # detect_trigger's own prefix-match from ever catching (see the
+        # Phase H "Mark it complete." bug write-up) — they're ALSO
+        # covered by _NEEDS_ATTENTION_RE inside resolve_bare_reply below,
+        # so registering the trigger here is a belt-and-suspenders extra,
+        # not the only path; a genuinely bare "urgent" is deliberately
+        # NOT a trigger (too broad on its own).
+        "anything urgent", "show me today's production issues",
+        "what do i need to follow up on", "what's happening this week", "whats happening this week",
+        "what is happening this week", "who is shooting", "who's shooting", "what shoots",
+        "show me tomorrow's shoots", "show me today's shoots",
     ],
     fields=[FieldSpec(key="raw_text", label="Query", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False)],
     # Deliberately trivial extract_fields: the whole raw message IS the
@@ -3286,6 +3471,17 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
     # needs-attention aggregation.
     _, topic = _extract_talent_and_topic(text)
     if topic == "readiness" or _NEEDS_ATTENTION_RE.search(text):
+        return STATUS_QUERY_INTENT, {"raw_text": text}
+    # "What shoots are coming up?" / "Who is shooting tomorrow?" — same
+    # trailing-punctuation safety net as the needs-attention/readiness
+    # checks just above (only claimed when _render_shoots_query would
+    # actually have something to say — a bare "shoot" substring alone,
+    # with no timeframe/project, is too weak a signal to claim here).
+    if (
+        (_SHOOTS_QUERY_RE.search(text) or _SHOOTS_HAPPENING_RE.search(text))
+        and _SHOOTS_TIMEFRAME_RE.search(text)
+        and not _extract_trailing_project(text)
+    ):
         return STATUS_QUERY_INTENT, {"raw_text": text}
     # "The call sheet task is done." — bare, no fixed trigger. Checked
     # LAST and only claimed once a REAL task is actually found matching

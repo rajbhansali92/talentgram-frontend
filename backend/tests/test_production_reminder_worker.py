@@ -44,9 +44,13 @@ async def infra_ready():
         upsert=True,
     )
     yield
+    # Phase I: replace_one (not $set) so a field a test newly ADDED
+    # (e.g. last_daily_briefing_date, which run_reminder_cycle now also
+    # exercises) is actually removed on teardown, not just left behind
+    # because it wasn't present in the pre-test snapshot to $set over.
     if original:
-        await db[worker.registry.CONFIG_COLLECTION].update_one(
-            {"agent_id": "management-agent"}, {"$set": original}
+        await db[worker.registry.CONFIG_COLLECTION].replace_one(
+            {"agent_id": "management-agent"}, original
         )
 
 

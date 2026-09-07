@@ -99,6 +99,32 @@ this worker's own comparisons are affected by (they read whatever date
 ended up stored, correctly, regardless of how it got there) — flagged for
 visibility, deliberately left unchanged to avoid touching already-shipped,
 already-tested Phase F code outside this phase's stated scope.
+
+Phase I (2026-09-07) additions — same architecture, same idempotency
+idiom, three more reminder kinds plus one daily summary:
+  - Shoot reminders (_check_shoots) now APPEND a "Pending" section
+    listing missing operational info (call time/reporting time/
+    location/confirmation) and outstanding talent prep/call-sheet-task
+    items, reusing the SAME _shoot_pending_items() helper the Needs
+    Attention query and the daily briefing also call — one source of
+    truth for "what's still pending on this shoot", not three.
+  - _check_post_shoot_checklist: one reminder, the day after a shoot,
+    listing whichever of invoice-raised/invoice-sent/client-payment/GST
+    is still pending — purely a nudge over the EXISTING checklist
+    fields, never a Finance record.
+  - _check_payment_overdue: one reminder the day pd_expected_payment_date
+    passes with no payment in — distinct idempotency key from the
+    existing follow-up-date reminder (Section 4's "Payment Overdue" is a
+    different event from "Payment Follow-up Due").
+  - _maybe_send_daily_briefing: one deterministic summary per calendar
+    day (IST), sent once the clock passes DAILY_BRIEFING_HOUR_IST.
+    Idempotency deliberately does NOT get a new collection — it's one
+    additive field (last_daily_briefing_date) on the SAME
+    whatsapp_agent_config document already used to resolve the
+    Management Agent's group (a natural, existing, one-per-agent
+    singleton), claimed with the same atomic find_one_and_update idiom
+    as every other reminder kind here, so a Railway restart mid-send
+    can never double-send it either.
 """
 from __future__ import annotations
 
@@ -237,6 +263,48 @@ async def _locked_talent_names(project_id: str) -> List[str]:
         return []
     docs = await db.talents.find({"id": {"$in": ids}}, {"_id": 0, "name": 1}).to_list(len(ids))
     return [d.get("name") or "Talent" for d in docs]
+
+
+async def _shoot_pending_items(project: dict) -> List[str]:
+    """Phase I — deterministic "what's still pending" for one project's
+    shoot, derived purely from EXISTING fields (never invented). Shared
+    by the day-before/morning-of shoot reminder below, the Management
+    Agent's Needs Attention query, and the daily briefing — one place
+    computes this, not three."""
+    items: List[str] = []
+    if not project.get("pd_call_time"):
+        items.append("Call time missing")
+    if not project.get("pd_reporting_time"):
+        items.append("Reporting time missing")
+    if not project.get("pd_shoot_location"):
+        items.append("Location missing")
+    if not project.get("pd_confirmation_mail_received"):
+        items.append("Confirmation mail pending")
+
+    rows = await db.casting_pipeline.find(
+        {"project_id": project["id"], "stage": "locked"}, {"_id": 0},
+    ).to_list(200)
+    if rows:
+        talent_ids = [r["talent_id"] for r in rows if r.get("talent_id")]
+        talents = await db.talents.find(
+            {"id": {"$in": talent_ids}}, {"_id": 0, "id": 1, "name": 1},
+        ).to_list(len(talent_ids)) if talent_ids else []
+        name_by_id = {t["id"]: t.get("name") or "Talent" for t in talents}
+        for r in rows:
+            name = name_by_id.get(r.get("talent_id"), "Talent")
+            if (r.get("pd_fitting_status") or "not_scheduled") != "completed":
+                items.append(f"{name} fitting")
+            if not r.get("pd_costume_trial_at"):
+                items.append(f"{name} costume trial")
+
+    call_sheet_task = await db.workflow_tasks.find_one(
+        {"project_id": project["id"], "status": {"$in": _ACTIVE_TASK_STATUSES},
+         "title": {"$regex": "call sheet", "$options": "i"}},
+        {"_id": 0, "id": 1},
+    )
+    if call_sheet_task:
+        items.append("Call sheet task")
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +449,10 @@ async def _check_shoots(relevant_project_ids: Set[str]) -> int:
             lines.append(f"Reporting time: {p['pd_reporting_time']}")
         if p.get("pd_shoot_location"):
             lines.append(f"Location: {p['pd_shoot_location']}")
+        pending = await _shoot_pending_items(p)
+        if pending:
+            lines.append("Pending:")
+            lines.extend(f"  • {item}" for item in pending)
         if await _send_reminder("\n".join(lines)):
             sent += 1
         else:
@@ -431,6 +503,210 @@ async def _check_payment_followups(relevant_project_ids: Set[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 5. Post-shoot checklist — Phase I: once the day after the shoot,
+# nudge on whichever EXISTING checklist fields are still pending. Never
+# a Finance record — purely a reminder over production_desk.py's own
+# pd_invoice_raised/pd_invoice_sent/pd_payment_in_received/
+# pd_gst_component_received booleans.
+# ---------------------------------------------------------------------------
+async def _check_post_shoot_checklist(relevant_project_ids: Set[str]) -> int:
+    today = _ist_today()
+    projects = await db.projects.find({
+        "id": {"$in": list(relevant_project_ids)},
+        "pd_shoot_date": {"$ne": None},
+    }, {"_id": 0}).to_list(5000)
+
+    sent = 0
+    for p in projects:
+        shoot_date = _date_of(p.get("pd_shoot_date"))
+        if not shoot_date or shoot_date + timedelta(days=1) != today:
+            continue  # only the day immediately after — see module docstring
+        pending = [
+            label for flag, label in (
+                ("pd_invoice_raised", "Invoice not raised"),
+                ("pd_invoice_sent", "Invoice not sent"),
+                ("pd_payment_in_received", "Client payment pending"),
+                ("pd_gst_component_received", "GST component pending"),
+            ) if not p.get(flag)
+        ]
+        if not pending:
+            continue
+
+        shoot_date_raw = p.get("pd_shoot_date")
+        if p.get("pd_postshoot_reminder_sent_for") == shoot_date_raw:
+            continue
+        claimed = await db.projects.find_one_and_update(
+            {"id": p["id"], "pd_shoot_date": shoot_date_raw, "pd_postshoot_reminder_sent_for": {"$ne": shoot_date_raw}},
+            {"$set": {"pd_postshoot_reminder_sent_for": shoot_date_raw}},
+        )
+        if not claimed:
+            continue
+
+        proj_label = p.get("brand_name") or "(untitled project)"
+        lines = ["Post-Shoot Follow-up", proj_label + " — shoot wrapped, still pending:"]
+        lines.extend(f"  • {item}" for item in pending)
+        if await _send_reminder("\n".join(lines)):
+            sent += 1
+        else:
+            await db.projects.update_one({"id": p["id"]}, {"$set": {"pd_postshoot_reminder_sent_for": None}})
+    return sent
+
+
+# ---------------------------------------------------------------------------
+# 6. Payment overdue — Phase I: distinct from the existing follow-up-date
+# reminder (Section 4 above) — fires once when pd_expected_payment_date
+# has PASSED with no payment in yet, a different event from "today is the
+# configured follow-up date". Never computes/invents an amount.
+# ---------------------------------------------------------------------------
+async def _check_payment_overdue(relevant_project_ids: Set[str]) -> int:
+    today = _ist_today()
+    projects = await db.projects.find({
+        "id": {"$in": list(relevant_project_ids)},
+        "pd_expected_payment_date": {"$ne": None},
+        "pd_payment_in_received": {"$ne": True},
+    }, {"_id": 0}).to_list(5000)
+
+    sent = 0
+    for p in projects:
+        expected = _date_of(p.get("pd_expected_payment_date"))
+        if not expected or expected >= today:
+            continue  # only once it has genuinely passed
+        expected_raw = p.get("pd_expected_payment_date")
+        if p.get("pd_payment_overdue_reminder_sent_for") == expected_raw:
+            continue
+        claimed = await db.projects.find_one_and_update(
+            {
+                "id": p["id"], "pd_expected_payment_date": expected_raw,
+                "pd_payment_in_received": {"$ne": True},
+                "pd_payment_overdue_reminder_sent_for": {"$ne": expected_raw},
+            },
+            {"$set": {"pd_payment_overdue_reminder_sent_for": expected_raw}},
+        )
+        if not claimed:
+            continue
+
+        proj_label = p.get("brand_name") or "(untitled project)"
+        lines = ["Payment Overdue", f"Project: {proj_label}", f"Expected payment: {_fmt_date(expected)}", "Status: Pending"]
+        if await _send_reminder("\n".join(lines)):
+            sent += 1
+        else:
+            await db.projects.update_one({"id": p["id"]}, {"$set": {"pd_payment_overdue_reminder_sent_for": None}})
+    return sent
+
+
+# ---------------------------------------------------------------------------
+# 7. Daily Production Briefing — Phase I: one deterministic summary per
+# calendar day (IST), sent once the clock passes DAILY_BRIEFING_HOUR_IST.
+# Idempotency reuses the SAME whatsapp_agent_config document
+# _management_agent_group() already reads (one additive field, no new
+# collection) — atomically claimed the same way every other reminder
+# kind here claims its own record, so a Railway restart mid-cycle can
+# never double-send it.
+# ---------------------------------------------------------------------------
+DAILY_BRIEFING_HOUR_IST = 8
+
+
+async def _daily_briefing_text() -> Optional[str]:
+    today = _ist_today()
+    tomorrow = today + timedelta(days=1)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    relevant_ids = await _relevant_project_ids()
+    rid_list = list(relevant_ids)
+
+    all_projects = await db.projects.find(
+        {"id": {"$in": rid_list}}, {"_id": 0},
+    ).to_list(len(rid_list)) if rid_list else []
+    shoots_today = [p for p in all_projects if _date_of(p.get("pd_shoot_date")) == today]
+    shoots_tomorrow = [p for p in all_projects if _date_of(p.get("pd_shoot_date")) == tomorrow]
+
+    active_dated_tasks = await db.workflow_tasks.find(
+        {"status": {"$in": _ACTIVE_TASK_STATUSES}, "due_at": {"$ne": None}}, {"_id": 0, "due_at": 1},
+    ).to_list(2000)
+    # "Due today" is a CALENDAR-day match (the date component as written —
+    # see the module docstring's Timezone section), same as every other
+    # date-only comparison in this file; "overdue" stays a genuine
+    # absolute-instant comparison, matching _check_tasks's own semantics.
+    tasks_due_today = sum(1 for t in active_dated_tasks if _date_of(t["due_at"]) == today)
+    overdue_tasks = sum(1 for t in active_dated_tasks if t["due_at"] < now_iso)
+    followups_today = [p for p in all_projects if _date_of(p.get("pd_next_follow_up_at")) == today and p.get("pd_payment_followup_status") != "done"]
+
+    not_ready_rows = await db.casting_pipeline.find(
+        {"project_id": {"$in": rid_list}, "stage": "locked", "$or": [
+            {"pd_fitting_status": {"$in": [None, "not_scheduled", "scheduled"]}},
+            {"pd_costume_trial_at": None},
+        ]}, {"_id": 0, "talent_id": 1, "project_id": 1},
+    ).to_list(1000) if rid_list else []
+
+    needs_attention_lines: List[str] = []
+    for p in shoots_tomorrow:
+        pending = await _shoot_pending_items(p)
+        if pending:
+            needs_attention_lines.append(f"{p.get('brand_name') or '(untitled project)'} — {pending[0]}")
+    for p in followups_today:
+        needs_attention_lines.append(f"{p.get('brand_name') or '(untitled project)'} — client payment follow-up due")
+    overdue_task_docs = await db.workflow_tasks.find(
+        {"status": {"$in": _ACTIVE_TASK_STATUSES}, "due_at": {"$ne": None, "$lt": now_iso}}, {"_id": 0, "title": 1, "project_name": 1},
+    ).to_list(20)
+    for t in overdue_task_docs[:5]:
+        proj = f"{t['project_name']} — " if t.get("project_name") else ""
+        needs_attention_lines.append(f"{proj}{t.get('title')} overdue")
+
+    lines = [f"Talentgram Production Brief — {_fmt_date(today)}"]
+    if shoots_today:
+        lines.append(f"Today's Shoots: {len(shoots_today)}")
+    if shoots_tomorrow:
+        lines.append(f"Tomorrow: {len(shoots_tomorrow)}")
+    if tasks_due_today:
+        lines.append(f"Tasks Due: {tasks_due_today}")
+    if overdue_tasks:
+        lines.append(f"Overdue Tasks: {overdue_tasks}")
+    if followups_today:
+        lines.append(f"Payment Follow-ups: {len(followups_today)}")
+    if not_ready_rows:
+        lines.append(f"Talents Not Ready: {len(not_ready_rows)}")
+
+    if len(lines) == 1 and not needs_attention_lines:
+        return None  # a genuinely empty day — see Section "do not show categories with zero items"
+
+    if needs_attention_lines:
+        lines.append("")
+        lines.append("Needs Attention:")
+        for i, item in enumerate(needs_attention_lines[:10], 1):
+            lines.append(f"  {i}. {item}")
+    return "\n".join(lines)
+
+
+async def _maybe_send_daily_briefing() -> int:
+    now_ist = datetime.now(IST)
+    if now_ist.hour < DAILY_BRIEFING_HOUR_IST:
+        return 0
+    today_str = now_ist.date().isoformat()
+    cfg = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": "management-agent", "active": True}, {"_id": 0, "last_daily_briefing_date": 1})
+    if (cfg or {}).get("last_daily_briefing_date") == today_str:
+        return 0
+    claimed = await db[registry.CONFIG_COLLECTION].find_one_and_update(
+        {"agent_id": "management-agent", "active": True, "last_daily_briefing_date": {"$ne": today_str}},
+        {"$set": {"last_daily_briefing_date": today_str}},
+    )
+    if not claimed:
+        return 0  # lost the race (or already sent) — never a duplicate
+
+    text = await _daily_briefing_text()
+    if text and await _send_reminder(text):
+        return 1
+    # Nothing to report yet, or the enqueue failed — revert the claim so
+    # a LATER cycle the same day can retry (new data — a task going
+    # overdue, a follow-up date arriving — can make an empty morning
+    # genuinely worth reporting by afternoon), rather than permanently
+    # spending the day's one briefing slot on emptiness or a transient
+    # send failure.
+    await db[registry.CONFIG_COLLECTION].update_one(
+        {"agent_id": "management-agent"}, {"$set": {"last_daily_briefing_date": None}}
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Poll loop — mirrors services/media_assignment_worker.py's exact shape.
 # ---------------------------------------------------------------------------
 async def run_reminder_cycle() -> int:
@@ -443,6 +719,9 @@ async def run_reminder_cycle() -> int:
     total += await _check_costume_trials(relevant_ids)
     total += await _check_shoots(relevant_ids)
     total += await _check_payment_followups(relevant_ids)
+    total += await _check_post_shoot_checklist(relevant_ids)
+    total += await _check_payment_overdue(relevant_ids)
+    total += await _maybe_send_daily_briefing()
     return total
 
 

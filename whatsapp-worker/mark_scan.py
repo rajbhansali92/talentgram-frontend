@@ -55,6 +55,13 @@ logger = logging.getLogger(__name__)
 POLL_SEC = 1.0
 MAX_MESSAGES_SCANNED_DEFAULT = 300
 HTML_TRUNCATE = 60000
+# Bounds the live-jump source-resolution fallback (Production fix — see
+# _resolve_single_media_via_jump) to a small, fixed number of attempts per
+# scan — real usage is a handful of marks per talent at most; this is a
+# worst-case safety rail against a pathological number of unresolved
+# "mark" replies turning one scan into many sequential live WhatsApp
+# interactions, never a limit that should realistically bind in practice.
+MAX_JUMP_FALLBACK_ATTEMPTS_PER_SCAN = 10
 
 BASE = f"{config.AGENTS_BACKEND_URL}/api/agents/whatsapp"
 
@@ -656,6 +663,7 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
     # reached this point as a candidate would make that backend fix moot.
     candidates: List[Dict[str, Any]] = []
     batch_candidates: List[Dict[str, Any]] = []
+    jump_fallback_attempts = 0
     for item in window:
         quoted_html = item.get("quotedHtml")
         if not quoted_html:
@@ -688,6 +696,42 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
                 continue
 
         source = sources_by_hash.get(quoted_hash) if quoted_hash else None
+        jump_fallback_used = False
+        if source is None and quoted_hash is not None and jump_fallback_attempts < MAX_JUMP_FALLBACK_ATTEMPTS_PER_SCAN:
+            # Live-jump fallback (Production fix — real bug, "Sneha
+            # Varghese / Vaseline (Birthday film)"): the reply's quoted
+            # hash IS real/valid, it just isn't among the plain source
+            # messages this bounded window scan happened to capture (the
+            # original media can fall outside WhatsApp Web's own render
+            # window well before its later reply does). Only attempted
+            # HERE, per-candidate, exactly because the cheap in-window
+            # lookup above already failed — never a broader/repeated
+            # re-scan, and never for a candidate the cheap lookup already
+            # resolved. See _resolve_single_media_via_jump's own
+            # docstring for the full reasoning and the hash-reverification
+            # safety check.
+            reply_id = _own_data_id(html)
+            if reply_id:
+                jump_fallback_attempts += 1
+                try:
+                    jump_result = await _resolve_single_media_via_jump(page, group_name, reply_id, quoted_hash)
+                except Exception as exc:
+                    # An unexpected failure during the live-jump attempt
+                    # (page/session trouble, an unforeseen DOM shape, etc.)
+                    # must degrade to "fallback did not resolve this ONE
+                    # candidate", never crash the whole scan — every OTHER
+                    # candidate in this same window is still processed
+                    # normally, exactly as if the fallback simply hadn't
+                    # been attempted.
+                    logger.warning("mark_scan: live-jump fallback failed for reply %r: %s", reply_id, exc)
+                    jump_result = {"ok": False, "reason": f"jump fallback raised: {exc}"}
+                if jump_result.get("ok"):
+                    source = {
+                        "source_message_id": jump_result["source_message_id"],
+                        "source_media_type": jump_result["source_media_type"],
+                        "source_sender": jump_result.get("source_sender"),
+                    }
+                    jump_fallback_used = True
         candidates.append({
             "mention_lid": lid,
             "mark_text": mark_text,
@@ -699,6 +743,7 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             "source_timestamp": None,
             "is_album_tile": (source or {}).get("is_album_tile", False),
             "album_tile_index": (source or {}).get("album_tile_index"),
+            "resolved_via_jump_fallback": jump_fallback_used,
         })
 
     # Live resolution phase for whole-album batch marks (2026-08-23) — the
@@ -1197,15 +1242,19 @@ async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: s
     return {"ok": False, "reason": "unreachable", "restoration_log": restoration_log}
 
 
-async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
-    """Clicks a reply's own quoted-message block (a real WhatsApp button
-    that jumps to/highlights the original message) and observes which
-    message ends up closest to the viewport's vertical center afterward —
-    the proven identity link (2026-08-23: jumped to the exact known
-    album, 0.3px from dead-center, all 4 tile hashes matched) for a reply
-    whose quoted block carries no thumbnail hash — WhatsApp's collapsed
-    "N videos"/"N photos" summary for a reply to a WHOLE album, not one
-    tile. Returns {ok, data_id, is_album, tile_hashes_and_types, reason}."""
+async def _jump_to_quoted_message(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
+    """Shared low-level primitive (Production fix — MARK/SEND
+    source-resolution): clicks a reply's own quoted-message block (a real
+    WhatsApp button that jumps to/highlights the original message) and
+    returns the message that ends up closest to the viewport's vertical
+    center afterward — {"ok": True, "data_id", "html", "locator"} or
+    {"ok": False, "reason", ...}. The proven identity link (2026-08-23:
+    jumped to the exact known album, 0.3px from dead-center, all 4 tile
+    hashes matched). Used by BOTH the whole-album batch-mark jump
+    (_resolve_quoted_jump, unchanged below) and the single-media fallback
+    (_resolve_single_media_via_jump) — the click-and-observe mechanism is
+    identical either way; only what each caller does with the jumped-to
+    message differs."""
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
     located = await _wait_for_quoted_message_block(page, group_name, reply_data_id, full_sel)
@@ -1231,19 +1280,97 @@ async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dic
         jumped_html = await jumped_message.evaluate("(el) => el.outerHTML", timeout=10000)
     except Exception as exc:
         return {"ok": False, "reason": f"could not read jumped-to message HTML: {exc}", "data_id": centered["dataId"]}
-    jumped_html = jumped_html[:HTML_TRUNCATE]
+    return {
+        "ok": True, "data_id": centered["dataId"], "html": jumped_html[:HTML_TRUNCATE],
+        "locator": jumped_message, "centered": centered,
+    }
+
+
+async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
+    """Clicks a reply's own quoted-message block and jumps to the original
+    message — the resolution path for a reply whose quoted block carries
+    NO thumbnail hash at all: WhatsApp's collapsed "N videos"/"N photos"
+    summary for a reply to a WHOLE album, not one tile. Returns
+    {ok, data_id, is_album, tile_hashes_and_types, reason}."""
+    jumped = await _jump_to_quoted_message(page, group_name, reply_data_id)
+    if not jumped.get("ok"):
+        return jumped
+    jumped_html = jumped["html"]
     if not _is_album(jumped_html):
         return {
-            "ok": False, "data_id": centered["dataId"],
+            "ok": False, "data_id": jumped["data_id"],
             "reason": "jumped-to message is not an album (batch marking only supports whole-album replies)",
         }
     # Per-element hashing (2026-08-23 fix), not grid-area chunking — see
     # _hash_album_tiles_live's own docstring for the full evidence trail.
-    live_tiles = await _hash_album_tiles_live(jumped_message)
+    live_tiles = await _hash_album_tiles_live(jumped["locator"])
     tile_hashes_and_types = [(t["hash"], t["media_type"]) for t in live_tiles if t["hash"]]
     return {
-        "ok": True, "data_id": centered["dataId"], "is_album": True,
-        "tile_hashes_and_types": tile_hashes_and_types, "centered": centered,
+        "ok": True, "data_id": jumped["data_id"], "is_album": True,
+        "tile_hashes_and_types": tile_hashes_and_types, "centered": jumped["centered"],
+    }
+
+
+async def _resolve_single_media_via_jump(
+    page, group_name: str, reply_data_id: str, expected_hash: str,
+) -> Dict[str, Any]:
+    """MARK/SEND source-resolution fallback (Production fix — real
+    production bug: "Sneha Varghese / Vaseline (Birthday film)". A reply's
+    quoted-message block DID carry a valid, real thumbnail hash — the
+    reply genuinely targets one exact piece of media — but that hash
+    didn't match anything the bounded window scan (_dump_window, capped
+    at whatever's currently rendered) happened to capture. WhatsApp Web
+    only keeps a limited render window mounted around wherever the chat
+    is scrolled; the ORIGINAL media message can fall outside that window
+    well before enough later chat activity happens, while the REPLY
+    itself (more recent, closer to when SEND runs) is still well within
+    reach — the reply's own embedded quoted-thumbnail is unaffected by
+    this (it's rendered inside the reply's OWN bubble), but the plain
+    source-message index (`sources_by_hash`) built only from the SAME
+    bounded window has no entry for it, so the existing hash lookup
+    fails even though the reply unambiguously identifies a real, specific
+    message.
+
+    WhatsApp's own quoted-message block is clickable and deterministically
+    jumps to/highlights the EXACT original message — the same native
+    "jump to quoted message" feature the whole-album batch-mark path
+    (_resolve_quoted_jump) already relies on and this codebase already
+    proved reliable. Reused here as a targeted, PER-CANDIDATE fallback —
+    never a broader re-scan, never expensive: only ever attempted for a
+    candidate that already failed the cheap in-window hash lookup.
+
+    Safety: the jumped-to message's OWN hash is re-verified against
+    `expected_hash` (the reply's own quoted hash) before ANY result is
+    trusted. A jump landing near, but not exactly on, the right message
+    (viewport-centering imprecision, or a genuinely different message
+    entirely) is NEVER silently accepted as a substitute — that failure
+    is reported exactly like any other unresolved mark, never guessed."""
+    jumped = await _jump_to_quoted_message(page, group_name, reply_data_id)
+    if not jumped.get("ok"):
+        return jumped
+    jumped_html = jumped["html"]
+    if _is_album(jumped_html):
+        # Structurally shouldn't happen (an album tile's own hash is keyed
+        # per-tile, distinct from a plain message's smallest-blob hash),
+        # but if it ever does, it's an unresolved fallback failure, never
+        # a guessed tile.
+        return {
+            "ok": False, "data_id": jumped["data_id"],
+            "reason": "jumped-to message is an album, not the expected single media item",
+        }
+    live_hash = _smallest_hash(jumped_html)
+    if live_hash != expected_hash:
+        return {
+            "ok": False, "data_id": jumped["data_id"],
+            "reason": "jumped-to message's own hash does not match the reply's quoted hash",
+            "expected_hash": expected_hash, "live_hash": live_hash,
+        }
+    media_type = _media_type(jumped_html)
+    if not media_type:
+        return {"ok": False, "data_id": jumped["data_id"], "reason": "jumped-to message has no recognizable media"}
+    return {
+        "ok": True, "source_message_id": jumped["data_id"], "source_media_type": media_type,
+        "source_sender": _sender_name(jumped_html),
     }
 
 

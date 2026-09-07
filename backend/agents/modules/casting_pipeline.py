@@ -9025,6 +9025,212 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
 
 _EDIT_LINE_RE = re.compile(r"^\s*(.+?)\s*[:=]\s*(.*)$")
 
+# ---------------------------------------------------------------------------
+# SEND form-edit natural language (Production fix, Issue 2) — the rigid
+# "Key = value"/"Key: value" syntax above (_EDIT_LINE_RE) is tried FIRST,
+# unchanged, for every existing caller; these patterns are additive
+# fallbacks that let the SAME _send_parse_edits_async understand phrasing
+# like "Exclude Instagram Link" (which _EDIT_LINE_RE can't match at all —
+# no ":"/"=" present) and "Change budget to 45k" (a value-setting sentence
+# rather than a "Key = value" assignment). Never invents a field: a field
+# name that doesn't resolve against the form's OWN known fields
+# (label_to_key, built fresh per call from OVERRIDABLE_FIELD_LABELS + this
+# project's own custom question text) is simply not recognized, exactly
+# like the old rigid parser already behaved for an unknown key.
+# ---------------------------------------------------------------------------
+_SEND_EDIT_REMOVE_PREFIXES = [
+    r"exclude\s+", r"remove\s+the\s+", r"remove\s+", r"delete\s+the\s+", r"delete\s+",
+    r"omit\s+", r"take\s+out\s+the\s+", r"take\s+out\s+",
+    r"don'?t\s+send\s+the\s+", r"don'?t\s+send\s+", r"do\s+not\s+send\s+the\s+", r"do\s+not\s+send\s+",
+    r"no\s+",
+]
+_SEND_EDIT_REMOVE_RES = [re.compile(rf"(?i)^\s*{p}(.+?)\s*$") for p in _SEND_EDIT_REMOVE_PREFIXES]
+_SEND_EDIT_TRAILING_FROM_FORM_RE = re.compile(r"(?i)\s+from\s+the\s+form\s*$")
+
+_SEND_EDIT_SET_PATTERNS = [
+    r"change\s+(?:the\s+)?(.+?)\s+to\s+(.+)$",
+    r"set\s+(?:the\s+)?(.+?)\s+(?:to|at)\s+(.+)$",
+    r"make\s+(?:the\s+)?(.+?)\s+(.+)$",
+]
+_SEND_EDIT_SET_RES = [re.compile(rf"(?i)^\s*{p}") for p in _SEND_EDIT_SET_PATTERNS]
+
+_SEND_EDIT_LEADING_THE_RE = re.compile(r"(?i)^\s*the\s+")
+_SEND_EDIT_TRAILING_FIELD_RE = re.compile(r"(?i)\s+(?:field|link)\s*$")
+
+
+def _match_send_edit_field(candidate: str, label_to_key: Dict[str, str]) -> Optional[str]:
+    """Resolves a natural-language field reference ("Instagram", "the
+    Instagram", "current location") against the KNOWN fields actually on
+    THIS form (label_to_key, already lowercased) — never a fuzzy/loose
+    guess: an exact match wins outright; otherwise a substring match
+    (either direction) is accepted ONLY when it resolves to exactly one
+    underlying override key, so "the Instagram" safely resolves to
+    "Instagram Link" while a genuinely ambiguous reference resolves to
+    nothing (never invented/guessed)."""
+    c = _SEND_EDIT_LEADING_THE_RE.sub("", candidate or "").strip().lower()
+    c = _SEND_EDIT_TRAILING_FIELD_RE.sub("", c).strip()
+    if not c:
+        return None
+    if c in label_to_key:
+        return label_to_key[c]
+    c_words = c.split()
+    matches = []
+    for label, key in label_to_key.items():
+        if c in label:
+            matches.append((len(label), key))
+            continue
+        # "label in c" (a known field name found INSIDE a longer candidate,
+        # e.g. "the Instagram" -> "instagram" inside "instagram link") is
+        # the risky direction: a candidate that's a greedy, multi-clause
+        # capture (from a compound "Remove X and change Y to Z" line the
+        # remove-prefix regex swallowed whole) can contain an UNRELATED
+        # known field name as a plain substring ("budget" inside "instagram
+        # and change budget to 45k"), misfiring as a match for the wrong
+        # field entirely. Real bug found via this exact input during
+        # testing. Bounding how much LONGER the candidate is allowed to be
+        # than the label it's matching (a couple of filler words like
+        # "the"/"field" is fine; a whole extra clause is not) rejects that
+        # case while still accepting every legitimate short phrasing.
+        if label in c and len(c_words) <= len(label.split()) + 2:
+            matches.append((len(label), key))
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    top_len = matches[0][0]
+    top_keys = {k for length, k in matches if length == top_len}
+    if len(top_keys) == 1:
+        return matches[0][1]
+    return None  # genuinely ambiguous between two different fields -> never guessed
+
+
+def _classify_send_edit_line(line: str, label_to_key: Dict[str, str]) -> Optional[Tuple[str, Optional[str]]]:
+    """One phrase -> (override_key, value). value is None for an
+    EXCLUSION ("Exclude Instagram Link" removes the field entirely — see
+    media_send.EXCLUDED_FIELD_VALUE — never "set Instagram to some
+    text"). Tries the existing rigid "Key = value"/"Key: value" syntax
+    first (unchanged behaviour for every phrasing that already worked),
+    then natural-language removal phrasing, then natural-language
+    set/change phrasing. Returns None when nothing recognizable is
+    found — the caller falls through to reporting no edits understood,
+    never guessing."""
+    line = (line or "").strip().rstrip(".")
+    if not line:
+        return None
+
+    m = _EDIT_LINE_RE.match(line)
+    if m:
+        key = label_to_key.get(m.group(1).strip().lower())
+        if key:
+            return key, m.group(2).strip()
+
+    for pattern_re in _SEND_EDIT_REMOVE_RES:
+        rm = pattern_re.match(line)
+        if rm:
+            candidate = _SEND_EDIT_TRAILING_FROM_FORM_RE.sub("", rm.group(1)).strip()
+            key = _match_send_edit_field(candidate, label_to_key)
+            if key:
+                return key, None
+
+    for pattern_re in _SEND_EDIT_SET_RES:
+        sm = pattern_re.match(line)
+        if sm:
+            key = _match_send_edit_field(sm.group(1), label_to_key)
+            if key:
+                return key, sm.group(2).strip()
+
+    # Bare "Field Value" with no connector word at all ("Budget 45k",
+    # "Current location Mumbai") — the LONGEST known field label that is
+    # literally a PREFIX of the line wins (so "current location" is tried
+    # before a hypothetical shorter overlapping label); the rest of the
+    # line is the value. Requires a genuinely non-empty remainder — a
+    # bare field name alone ("Instagram Link") matches nothing here.
+    low = line.lower()
+    best: Optional[Tuple[str, str]] = None
+    for label, key in label_to_key.items():
+        if low.startswith(label + " ") and (best is None or len(label) > len(best[0])):
+            best = (label, key)
+    if best is not None:
+        label, key = best
+        value = line[len(label):].strip()
+        if value:
+            return key, value
+
+    return None
+
+
+def _parse_send_edit_directives(text: str, label_to_key: Dict[str, str]) -> Dict[str, Optional[str]]:
+    """Multiple edits in one message (Issue 2) — one directive per LINE
+    (existing behaviour, unchanged), PLUS a same-line "and"-joined fallback
+    ("Remove Instagram and change budget to 45k") tried only when the
+    whole line doesn't already parse as one clean directive, so it can
+    never interfere with a value that legitimately contains the word
+    "and" in a single "Key = value" line."""
+    results: Dict[str, Optional[str]] = {}
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parsed = _classify_send_edit_line(line, label_to_key)
+        if parsed is not None:
+            key, value = parsed
+            results[key] = value
+            continue
+        for part in re.split(r"(?i)\band\b", line):
+            part = part.strip(" ,")
+            if not part:
+                continue
+            parsed2 = _classify_send_edit_line(part, label_to_key)
+            if parsed2 is not None:
+                key, value = parsed2
+                results[key] = value
+    return results
+
+
+_SEND_FIXED_FIELD_LABELS_LOWER = [v.lower() for v in media_send.OVERRIDABLE_FIELD_LABELS.values()]
+
+
+def _looks_like_send_edit(text: str) -> bool:
+    """Cheap, pure (no DB access) pre-check reusing the EXACT SAME regex
+    objects _classify_send_edit_line uses for the real parse — never a
+    second, independently-drifting notion of "is this an edit". Checked
+    against the FIXED field labels only (not a project's own custom
+    question text, which needs a DB round-trip) — good enough for the
+    "should the dispatcher even consider this a SEND edit, not a fresh
+    trigger for something else" question; the real, authoritative
+    resolution still happens in _send_parse_edits_async right after."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _EDIT_LINE_RE.match(t):
+        return True
+    for pattern_re in _SEND_EDIT_REMOVE_RES:
+        if pattern_re.match(t):
+            return True
+    for pattern_re in _SEND_EDIT_SET_RES:
+        if pattern_re.match(t):
+            return True
+    low = t.lower()
+    return any(low.startswith(label + " ") for label in _SEND_FIXED_FIELD_LABELS_LOWER)
+
+
+async def _send_claims_editing_reply(text: str, collected: Dict[str, str], ctx: ExecContext) -> bool:
+    """Guided Step-Specific Editing hook (see IntentDefinition.claims_
+    editing_reply's own docstring) — Production fix, Issue 2's real bug:
+    SEND's own natural-language edit verbs can start with a word that is
+    ALSO another intent's fresh-trigger word ("Remove Instagram and
+    change budget to 45k" starts with "remove", which is one of
+    casting.query's own triggers) — without this hook, the dispatcher's
+    normal "a fresh trigger always restarts" rule hijacks the reply into
+    a brand-new casting.query command instead of applying the SEND edit.
+    Bulk sends (2+ pairs) never claim an editing reply here — per-field
+    editing isn't supported across multiple pairs anyway (see
+    _send_parse_edits_async's own bulk guard), so a message that happens
+    to start with an edit-shaped verb during a bulk confirmation is left
+    to the normal 1/3 approve/cancel handling, unchanged."""
+    if len(_send_selector_pairs(collected)) > 1:
+        return False
+    return _looks_like_send_edit(text)
+
 
 async def _send_parse_edits_async(
     text: str, collected: Dict[str, str], fields: List[FieldSpec], ctx: ExecContext,
@@ -9036,6 +9242,16 @@ async def _send_parse_edits_async(
     underlying submission (Phase 4's explicit requirement). Falls back to
     the generic "Key = value" parser (e.g. "Talent = ...") for the
     intent's own declared fields when no form-field edit is recognized.
+
+    Natural language (Production fix, Issue 2) — "Exclude Instagram Link"/
+    "Remove Instagram"/"Don't send Instagram"/"Change budget to 45k"/
+    "Make budget 45k" etc. now work alongside the original rigid
+    "Key = value" syntax (see _parse_send_edit_directives). An exclusion
+    directive (value=None) removes that field from the form entirely
+    (media_send.EXCLUDED_FIELD_VALUE) — it is NEVER treated as "set the
+    value to something". Multiple directives in one message (separate
+    lines, or one line joined with "and") are all applied together before
+    a single regenerated preview is shown.
 
     Bulk (2026-08-27): per-field editing isn't supported across multiple
     pairs (which of N forms would "Age = 24" apply to?) — the bulk
@@ -9061,15 +9277,10 @@ async def _send_parse_edits_async(
             if question:
                 label_to_key[question.lower()] = question
 
+        directives = _parse_send_edit_directives(text, label_to_key)
         applied = False
-        for line in (text or "").splitlines():
-            m = _EDIT_LINE_RE.match(line)
-            if not m:
-                continue
-            override_key = label_to_key.get(m.group(1).strip().lower())
-            if override_key is None:
-                continue
-            overrides[override_key] = m.group(2).strip()
+        for override_key, value in directives.items():
+            overrides[override_key] = media_send.EXCLUDED_FIELD_VALUE if value is None else value
             applied = True
 
         if applied:
@@ -9253,6 +9464,7 @@ SEND_INTENT = IntentDefinition(
     build_edit_prompt=_build_send_edit_prompt,
     build_cancel_message=_build_send_cancel_message,
     parse_edits_async=_send_parse_edits_async,
+    claims_editing_reply=_send_claims_editing_reply,
     auto_confirm=False,
 )
 

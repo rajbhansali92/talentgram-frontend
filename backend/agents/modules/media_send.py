@@ -572,6 +572,14 @@ OVERRIDABLE_FIELD_LABELS: Dict[str, str] = {
     "budget": "Budget",
 }
 
+# Natural-language field EXCLUSION (Production fix, Issue 2) — "Exclude
+# Instagram Link" means REMOVE that field from the outgoing form, never
+# "set its value to something". A plain "" override already existed for
+# blanking a value while still SHOWING the field's label with nothing
+# under it; this sentinel is a distinct, explicit "omit this field's line
+# entirely" signal — see build_form_send_message's _add below.
+EXCLUDED_FIELD_VALUE = "\x00EXCLUDED\x00"
+
 
 def build_form_send_message(
     sub: Dict[str, Any], project: Optional[Dict[str, Any]], talent_label: str, project_label: str,
@@ -600,6 +608,11 @@ def build_form_send_message(
     def _add(label: str, value: Any, override_key: Optional[str] = None) -> None:
         if override_key is not None and override_key in overrides:
             value = overrides[override_key]
+        if value == EXCLUDED_FIELD_VALUE:
+            # "Exclude Instagram Link" etc. — the field's line (label AND
+            # value) is omitted from the outgoing form entirely, never
+            # shown as a blank/empty field.
+            return
         if lines:
             lines.append("")
         value = "" if value in (None, [], {}) else str(value).strip()

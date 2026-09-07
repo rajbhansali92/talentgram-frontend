@@ -202,6 +202,13 @@ class DownloadResultIn(BaseModel):
     # this run succeeded). None when the marker was withheld/not
     # attempted — never confused with an attempted-and-failed marker.
     marker_result: Optional[Dict[str, Any]] = None
+    # ack_result (Production feature, SEND workflow only): the worker's own
+    # outcome for the talent-facing "Thanks, shared for X." acknowledgement,
+    # if it attempted one this run (send_targets was non-empty AND every
+    # media/form item this run succeeded — see mark_scan.py's _run_send).
+    # None when withheld/not attempted, same "never confused with an
+    # attempted-and-failed one" shape as marker_result above.
+    ack_result: Optional[Dict[str, Any]] = None
 
 
 @router.get("/gunwanti-identity")
@@ -295,6 +302,7 @@ async def report_download_result(
             "status": status, "download_results": payload.results, "download_error": payload.error,
             "form_send_result": payload.form_send_result,
             "marker_result": payload.marker_result,
+            "ack_result": payload.ack_result,
             "updated_at": datetime.now(timezone.utc),
         }},
     )

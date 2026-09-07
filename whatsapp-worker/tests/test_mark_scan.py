@@ -2001,7 +2001,13 @@ def main():
             result = forward_results.get(target["source_message_id"], {"ok": True})
             return {"source_message_id": target["source_message_id"], **result}
 
-        async def _fake_text(page, destination_group, message):
+        async def _fake_text(page, destination_group, message, *, destination_type="group"):
+            # destination_type accepted (Production feature: the talent
+            # acknowledgement passes "number" for a phone source) but not
+            # part of the recorded tuple shape — every pre-existing
+            # assertion in this file asserts on the plain ("text", message)
+            # shape and none of them need to distinguish it; a dedicated
+            # ack test below checks destination_type directly instead.
             calls.append(("text", message))
             return text_results.get(message, {"ok": True})
 
@@ -2022,7 +2028,7 @@ def main():
     sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_73, forward_73, text_73
     try:
         req_73 = {
-            "group_name": "Source Group", "destination_group": "Dest Group",
+            "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Vaseline",
             "send_targets": [
                 _send_target("take1", "take", 1), _send_target("intro1", "intro"), _send_target("pic1", "photos"),
             ],
@@ -2035,11 +2041,15 @@ def main():
     assert all(r["ok"] for r in result_73["results"]), result_73
     assert result_73["form_send_result"]["ok"] is True, result_73
     assert result_73["marker_result"]["ok"] is True, result_73
+    # Talent acknowledgement (Production feature) — sent after Pictures,
+    # BEFORE the ☑️ marker (see calls_73's own ordering below).
+    assert result_73["ack_result"]["ok"] is True, result_73
     assert calls_73 == [
         ("open_group", "Source Group"),
         ("forward", "take1"), ("forward", "intro1"),
         ("text", "SEND FORM TEXT"),
         ("forward", "pic1"),
+        ("text", "Thanks, shared for Vaseline."),
         ("text", mark_scan.SEND_MARKER_TEXT),
     ], calls_73
     print("73. SEND fixed ordering             -> Takes -> Intro -> Form -> Pictures -> marker, form/marker never reshuffled relative to media")
@@ -2108,6 +2118,105 @@ def main():
     assert result_76["marker_result"] is None, result_76
     assert not any(c == ("text", mark_scan.SEND_MARKER_TEXT) for c in calls_76), calls_76
     print("76. SEND marker not re-sent          -> send_marker_on_success=False means the marker is never sent again, idempotent across retries")
+
+    # ------------------------------------------------------------------
+    # 76b-76e (Production feature — talent acknowledgement): "Thanks,
+    # shared for <project>." into the SOURCE chat, only after a full
+    # success, before the ☑️ marker, never on partial failure or a
+    # marker-only resume.
+    # ------------------------------------------------------------------
+    calls_76b, open_76b, forward_76b, text_76b = _install_send_fakes()
+    orig_o76b, orig_f76b, orig_t76b = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_76b, forward_76b, text_76b
+    try:
+        req_76b = {
+            "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Airtel Kick Boxing",
+            "send_targets": [_send_target("take1", "take", 1)],
+            "form_insert_index": 1, "form_message": "FORM", "send_marker_on_success": True,
+        }
+        result_76b = asyncio.run(mark_scan._run_send(_FakePage73(), req_76b))
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_o76b, orig_f76b, orig_t76b
+    assert result_76b["ack_result"]["ok"] is True, result_76b
+    assert ("text", "Thanks, shared for Airtel Kick Boxing.") in calls_76b, calls_76b
+    # Sent before the marker, into the SOURCE group (not Dest Group).
+    ack_idx = calls_76b.index(("text", "Thanks, shared for Airtel Kick Boxing."))
+    marker_idx = calls_76b.index(("text", mark_scan.SEND_MARKER_TEXT))
+    assert ack_idx < marker_idx, calls_76b
+    print("76b. Talent acknowledgement sent     -> 'Thanks, shared for <project>.' sent to source group, before the ☑️ marker")
+
+    # 76c: partial failure (one media item fails) -> acknowledgement is
+    # NEVER sent, even though the form succeeded — never falsely tell the
+    # talent everything was shared.
+    calls_76c, open_76c, forward_76c, text_76c = _install_send_fakes(forward_results={"take1": {"ok": False, "error": "boom"}})
+    orig_o76c, orig_f76c, orig_t76c = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_76c, forward_76c, text_76c
+    try:
+        req_76c = {
+            "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Airtel Kick Boxing",
+            "send_targets": [_send_target("take1", "take", 1)],
+            "form_insert_index": 0, "form_message": "FORM", "send_marker_on_success": True,
+        }
+        result_76c = asyncio.run(mark_scan._run_send(_FakePage73(), req_76c))
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_o76c, orig_f76c, orig_t76c
+    assert result_76c["ack_result"] is None, result_76c
+    assert not any(c[0] == "text" and c[1].startswith("Thanks, shared") for c in calls_76c), calls_76c
+    print("76c. Ack withheld on partial failure -> talent is never told 'shared' when a media item actually failed")
+
+    # 76d: marker-only resume (send_targets empty, e.g. everything already
+    # forwarded in an earlier run and only the ☑️ marker is retried) ->
+    # acknowledgement is NEVER re-sent — it already went out on the
+    # earlier run that actually did the forwarding.
+    calls_76d, open_76d, forward_76d, text_76d = _install_send_fakes()
+    orig_o76d, orig_f76d, orig_t76d = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_76d, forward_76d, text_76d
+    try:
+        req_76d = {
+            "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Airtel Kick Boxing",
+            "send_targets": [], "form_insert_index": 0, "form_message": None, "send_marker_on_success": True,
+        }
+        result_76d = asyncio.run(mark_scan._run_send(_FakePage73(), req_76d))
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_o76d, orig_f76d, orig_t76d
+    assert result_76d["ack_result"] is None, result_76d
+    assert not any(c[0] == "text" and c[1].startswith("Thanks, shared") for c in calls_76d), calls_76d
+    print("76d. Ack not re-sent on marker-only resume -> zero new media/form this run means the earlier run's ack already covered it")
+
+    # 76e: phone-source SEND (SEND Path B) -> the acknowledgement uses
+    # destination_type="number", exactly like _open_source_chat's own
+    # group/phone dispatch for OPENING the source chat.
+    captured_dtype = {}
+
+    async def _fake_text_capture_dtype(page, destination_group, message, *, destination_type="group"):
+        if message.startswith("Thanks, shared"):
+            captured_dtype["value"] = destination_type
+        return {"ok": True}
+
+    async def _fake_open_source_phone(page, source_type, group_name):
+        return "OPENED"
+
+    _, _, forward_76e_fake, _ = _install_send_fakes()
+    orig_open_source_76e = mark_scan._open_source_chat
+    orig_forward_76e = mark_scan._send_one_target_native_forward
+    orig_text_76e = mark_scan._send_text_message
+    mark_scan._open_source_chat = _fake_open_source_phone
+    mark_scan._send_one_target_native_forward = forward_76e_fake
+    mark_scan._send_text_message = _fake_text_capture_dtype
+    try:
+        req_76e = {
+            "group_name": "85100696", "source_type": "phone", "destination_group": "Dest Group",
+            "project_label": "Airtel Kick Boxing", "send_targets": [_send_target("take1", "take", 1)],
+            "form_insert_index": 1, "form_message": "FORM", "send_marker_on_success": False,
+        }
+        result_76e = asyncio.run(mark_scan._run_send(_FakePage73(), req_76e))
+    finally:
+        mark_scan._open_source_chat = orig_open_source_76e
+        mark_scan._send_one_target_native_forward = orig_forward_76e
+        mark_scan._send_text_message = orig_text_76e
+    assert result_76e["ack_result"]["ok"] is True, result_76e
+    assert captured_dtype.get("value") == "number", captured_dtype
+    print("76e. Ack uses phone destination_type -> a phone-source SEND acknowledges via destination_type='number', same as opening it")
 
     # ------------------------------------------------------------------
     # 77-78 (2026-08-27, real production incident — Siddhi Bankhele / TVS

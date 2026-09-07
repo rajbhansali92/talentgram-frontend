@@ -66,10 +66,21 @@ async def _fetch_ongoing_projects_raw() -> List[Dict[str, str]]:
 
 
 async def _send_report(report_text: str) -> None:
-    cfg = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": "casting-agent", "active": True})
+    # Production fix (routing hardening) — real bug: this hardcoded
+    # "casting-agent" lookup predates the Talentgram Scouting Agent
+    # consolidation, which moved every real UPLOAD/SEND/ADD/MOVE command
+    # onto whatsapp-campaign-agent's own group ("Talentgram Scouting
+    # Agent"); casting-agent's group ("Talentgram Casting Pipeline") has
+    # been redirect-only ever since (see casting_pipeline.py's
+    # CASTING_REDIRECT_INTENT) and can no longer legitimately originate a
+    # scan_request at all. Every async SEND/UPLOAD completion report was
+    # still being posted into the now-inactive Casting Pipeline group
+    # regardless of which group the command actually came from — this is
+    # the actual routing fix, not a message-hiding workaround.
+    cfg = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": "whatsapp-campaign-agent", "active": True})
     group_names = (cfg or {}).get("group_names") or []
     if not group_names:
-        logger.warning("media_assignment_worker: no casting-agent group configured, cannot send report")
+        logger.warning("media_assignment_worker: no whatsapp-campaign-agent group configured, cannot send report")
         return
     custom_template = await db.whatsapp_templates.find_one({"slug": "custom"}, {"_id": 0, "id": 1})
     if not custom_template:
@@ -223,7 +234,7 @@ def _report_upload_result(
 
 def _report_already_sent(talent_label: str, project_label: str, destination_group: str, already: List[Dict[str, Any]]) -> str:
     lines = [
-        media_assignment.role_label(a["media_role"], a.get("take_number"), project_label)
+        media_assignment.simple_role_label(a["media_role"], a.get("take_number"))
         for a in already
     ]
     return (
@@ -238,7 +249,7 @@ def _report_send_result(
     *, form_status_line: Optional[str] = None, marker_status_line: Optional[str] = None,
 ) -> str:
     already_labels = [
-        media_assignment.role_label(a["media_role"], a.get("take_number"), project_label)
+        media_assignment.simple_role_label(a["media_role"], a.get("take_number"))
         for a in already
     ]
     total = len(already_labels) + len(sent_labels) + len(failed_items)
@@ -447,12 +458,14 @@ async def _process_scan_done() -> bool:
             "mark_reply_message_id": m.get("reply_message_id"), "mark_reply_text": m.get("mark_text"),
             "mark_target_contact_id": m.get("mention_lid"),
             "destination_group": destination_group,
-            # role_label (not submission_label) — a SEND caption needs
-            # the project name, since it lands in a shared casting
-            # group alongside other talents/projects; submission_label
-            # is for the app's own submission page, where the project is
-            # already implicit.
-            "caption": f"{talent_label} — {media_assignment.role_label(m['media_role'], m['take_number'], project_label)}",
+            # simple_role_label (Production fix — media captions must be
+            # simple): the caption that actually lands in the shared
+            # casting group next to the forwarded video/photo is now just
+            # "Audition Take" / "Introduction Take" — no talent name, no
+            # project name (the casting group already knows both from
+            # context; this used to be "{talent} — {project} Take 1",
+            # unnecessarily identifying/exposing both in every caption).
+            "caption": media_assignment.simple_role_label(m["media_role"], m["take_number"]),
             "talent_id": talent_id, "project_id": project_id,
         } for m in to_send]
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
@@ -610,7 +623,11 @@ async def _process_download_done() -> bool:
         sent_labels: List[str] = []
         failed_items: List[Dict[str, str]] = []
         for i, target in enumerate(send_targets):
-            label = f"{talent_label} — {media_assignment.role_label(target['media_role'], target.get('take_number'), project_label)}"
+            # simple_role_label (Production fix — issue 7's own example
+            # shows "✓ Audition Take" / "✓ Introduction Take", not
+            # "✓ {talent} — {project} Take 1"; Talent/Project already have
+            # their own header lines above in the completion report).
+            label = media_assignment.simple_role_label(target["media_role"], target.get("take_number"))
             result = results[i] if i < len(results) else None
             ok = bool(result and result.get("ok"))
             status = media_send.SEND_STATUS_SENT if ok else media_send.SEND_STATUS_FAILED
@@ -671,6 +688,23 @@ async def _process_download_done() -> bool:
                 marker_status_line = "✓ ☑️ (complete)"
             else:
                 marker_status_line = f"✗ ☑️ — {marker_result.get('error') or 'not sent'}"
+
+        # Talent acknowledgement (Production feature) — attempted by the
+        # worker only when this run's own media+form all succeeded (see
+        # mark_scan.py's _run_send gating), so an ack_result present here
+        # is never a false "shared" claim. Deliberately does NOT affect
+        # SEND's own COMPLETE/PARTIAL header or media/form counts — the
+        # casting group already received everything correctly regardless
+        # of whether the courtesy message to the talent's own group landed;
+        # only logged so a silent, persistent ack failure is still visible
+        # somewhere, never silently swallowed.
+        ack_result = doc.get("ack_result")
+        if ack_result is not None and not ack_result.get("ok"):
+            logger.warning(
+                "media_assignment_worker: SEND completed for talent=%r project=%r but the talent "
+                "acknowledgement failed to send: %s — casting-group delivery is unaffected.",
+                talent_label, project_label, ack_result.get("error"),
+            )
 
         report = _report_send_result(
             talent_label, project_label, destination_group, sent_labels, failed_items, ctx.get("already") or [],

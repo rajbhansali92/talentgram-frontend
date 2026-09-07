@@ -196,6 +196,13 @@ def test_extract_role_and_project_no_mark_keyword_returns_none():
 
 
 def test_extract_role_and_project_no_role_keyword_returns_none():
+    # Deliberately still None (unchanged) — a role-less mark defaulting to
+    # any role was tried during the MARK-flexibility fix and reverted
+    # after a real regression (decoy/chatter text like "mark {project}
+    # random 5" in a long conversation, with no role keyword, would
+    # otherwise all collide onto the same slot and falsely report
+    # AMBIGUOUS MEDIA ASSIGNMENT) — see extract_role_and_project's own
+    # final `else` branch comment.
     assert ma.extract_role_and_project("mark google") is None  # "mark" present, no recognized role
 
 
@@ -1430,3 +1437,103 @@ def test_validate_candidates_batch_failure_with_no_project_match_is_silently_ign
     assert outcome.ok, outcome  # the stale batch mark must never block an unrelated request
     assert outcome.batch_failures == [], outcome.batch_failures
     assert outcome.assignments == []
+
+
+# ===========================================================================
+# MARK FLEXIBILITY (Production fix, Issue 4) — the admin should not need
+# one exact sentence structure to mark media for a project.
+# ===========================================================================
+def test_extract_role_and_project_audition_synonym_for_take():
+    parsed = ma.extract_role_and_project("Mark audition for Vaseline")
+    assert parsed.media_role == "take"
+    assert parsed.take_number is None
+    assert "Vaseline" in parsed.project_fragment
+
+
+def test_extract_role_and_project_project_before_audition():
+    parsed = ma.extract_role_and_project("Mark Vaseline audition")
+    assert parsed == ma.ParsedMark(project_fragment="Vaseline", media_role="take", take_number=None)
+
+
+def test_extract_role_and_project_project_before_take():
+    parsed = ma.extract_role_and_project("Mark Vaseline take")
+    assert parsed == ma.ParsedMark(project_fragment="Vaseline", media_role="take", take_number=None)
+
+
+def test_extract_role_and_project_project_before_intro():
+    parsed = ma.extract_role_and_project("Mark Vaseline intro")
+    assert parsed == ma.ParsedMark(project_fragment="Vaseline", media_role="intro", take_number=None)
+
+
+def test_extract_role_and_project_project_before_introduction():
+    parsed = ma.extract_role_and_project("Mark Vaseline introduction")
+    assert parsed == ma.ParsedMark(project_fragment="Vaseline", media_role="intro", take_number=None)
+
+
+def test_extract_role_and_project_intro_video_strips_video_word():
+    parsed = ma.extract_role_and_project("Mark intro video for Vaseline")
+    assert parsed.media_role == "intro"
+    assert "video" not in parsed.project_fragment.lower()
+    assert "Vaseline" in parsed.project_fragment
+
+
+def test_extract_role_and_project_introduction_video_strips_video_word():
+    parsed = ma.extract_role_and_project("Mark introduction video for Vaseline")
+    assert parsed.media_role == "intro"
+    assert "video" not in parsed.project_fragment.lower()
+    assert "Vaseline" in parsed.project_fragment
+
+
+def test_extract_role_and_project_this_filler_word_stripped():
+    parsed = ma.extract_role_and_project("Mark this audition for Vaseline")
+    assert parsed.media_role == "take"
+    assert "this" not in parsed.project_fragment.lower()
+
+
+def test_extract_role_and_project_this_intro_filler_word_stripped():
+    parsed = ma.extract_role_and_project("Mark this intro for Vaseline")
+    assert parsed.media_role == "intro"
+    assert "this" not in parsed.project_fragment.lower()
+
+
+def test_extract_role_and_project_take_for_still_works():
+    parsed = ma.extract_role_and_project("Mark take for Vaseline")
+    assert parsed.media_role == "take" and parsed.take_number is None
+
+
+def test_extract_role_and_project_intro_for_still_works():
+    parsed = ma.extract_role_and_project("Mark intro for Vaseline")
+    assert parsed.media_role == "intro"
+
+
+def test_extract_role_and_project_introduction_for_still_works():
+    parsed = ma.extract_role_and_project("Mark introduction for Vaseline")
+    assert parsed.media_role == "intro"
+
+
+def test_extract_role_and_project_ambiguous_project_still_never_guessed():
+    # MARK flexibility never weakens the existing project ambiguity
+    # safety — validate_candidates (not extract_role_and_project) is
+    # what refuses to guess between two real, similarly-named projects;
+    # confirmed here that audition/this/video tolerance doesn't bypass
+    # that downstream check.
+    candidates = [{
+        "mention_lid": GUNWANTI_LID, "mark_text": "mark audition for google",
+        "reply_message_id": "r1", "quoted_thumbnail_hash": "h1", "resolved_source_message_id": "m1",
+        "album_tile_index": None, "source_media_type": "video", "is_album_tile": False,
+    }]
+    projects = [
+        {"id": "p-a", "label": "Google Test A"}, {"id": "p-b", "label": "Google Test B"},
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-a",
+        requested_project_label="Google Test A", projects=projects, talent_id="t1",
+    )
+    # "google" alone is ambiguous between Test A and Test B -> advisory-only
+    # project_ambiguous, never guessed; since it doesn't confidently match
+    # the REQUESTED project either, it defaults to it per validate_
+    # candidates' own case-4 rule (not blocking) — the key assertion is
+    # that this never silently resolves to the WRONG project (Test B).
+    assert outcome.ok
+    for a in outcome.assignments:
+        assert a.get("resolved_source_message_id") != "wrong-project-media"

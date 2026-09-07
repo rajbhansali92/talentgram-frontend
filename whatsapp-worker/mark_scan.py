@@ -7403,7 +7403,16 @@ async def _send_one_target_native_forward(
         await page.mouse.click(cx, cy, button="left")
     except Exception as exc:
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"forward click failed: {exc}"}
-    await page.wait_for_timeout(1200)
+    # Speed fix — this used to be a blind 1200ms wait before the picker
+    # was even checked once. _select_forward_destination immediately below
+    # already does its OWN bounded poll for the picker's dialog (up to 10
+    # tries x 500ms, breaking the instant it appears — see that function's
+    # own docstring, added specifically because a fixed wait here was
+    # sometimes too short for a video source and always too long for a
+    # photo). This fixed sleep was pure dead weight on top of a strictly
+    # better check that already existed: removing it costs nothing in
+    # reliability (the same bounded poll still runs, unchanged) and saves
+    # up to 1.2s per forwarded item — 2.4s+ on a typical 2-item SEND.
 
     select_result = await _select_forward_destination(page, target["destination_group"])
     if not select_result.get("ok"):
@@ -7449,7 +7458,9 @@ async def _send_one_target_native_forward(
 _FORM_SEND_SUCCESS_STATES = {"MESSAGE_SENT_AND_VERIFIED", "MESSAGE_SENT_BUT_NOT_VERIFIED"}
 
 
-async def _send_text_message(page, destination_group: str, message: str) -> Dict[str, Any]:
+async def _send_text_message(
+    page, destination_group: str, message: str, *, destination_type: str = "group",
+) -> Dict[str, Any]:
     """Sends a plain text message via the existing, proven
     send_whatsapp_message — a genuinely different UI surface from native
     Forward's own dialog (this opens the destination chat directly and
@@ -7457,11 +7468,20 @@ async def _send_text_message(page, destination_group: str, message: str) -> Dict
     rather than duplicating compose/send logic. strict_send_confirmation=
     True means MESSAGE_NOT_SENT is the only reachable outcome when no real
     Send control is found — Enter is never a valid substitute for a
-    positively-clicked Send here either. Shared by the form-details message
-    and the ☑️ completion marker — both are the same "type text into the
-    destination chat and send" operation."""
+    positively-clicked Send here either. Shared by the form-details
+    message, the ☑️ completion marker, and the talent acknowledgement
+    (Production feature) — all three are the same "type text into a chat
+    and send" operation, just aimed at different destinations.
+
+    `destination_type` ("group" | "number", defaults to "group" so every
+    pre-existing caller — the form message and the ☑️ marker, both always
+    sent to destination_group — is completely unaffected): the talent
+    acknowledgement is the one caller that passes "number" when the
+    marked media's source was a direct phone (SEND Path B) rather than a
+    group, exactly the same group/phone distinction _open_source_chat
+    already makes for OPENING the source chat."""
     result = await sender.send_whatsapp_message(
-        page=page, destination_type="group", destination=destination_group,
+        page=page, destination_type=destination_type, destination=destination_group,
         message_body=message, strict_send_confirmation=True,
     )
     state = result.get("state")
@@ -7519,10 +7539,12 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     form_message = req.get("form_message")
     group_name = req["group_name"]
     source_type = req.get("source_type") or "group"
+    project_label = req.get("project_label") or ""
 
     results: List[Dict[str, Any]] = []
     form_send_result: Optional[Dict[str, Any]] = None
     marker_result: Optional[Dict[str, Any]] = None
+    ack_result: Optional[Dict[str, Any]] = None
 
     if send_targets:
         status = await _open_source_chat(page, source_type, group_name)
@@ -7570,6 +7592,34 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
 
     all_media_ok = all(r.get("ok") for r in results)
     form_ok = form_send_result is None or bool(form_send_result.get("ok"))
+
+    # Talent acknowledgement (Production feature) — ONLY after the casting
+    # group has genuinely received everything THIS run attempted, and only
+    # when this run actually attempted real media (send_targets non-empty)
+    # — never on a marker-only resume (send_targets already empty means
+    # the real media/form delivery, and its acknowledgement, already
+    # happened in an earlier run; re-sending it here would duplicate the
+    # talent-facing message on every later marker retry). A partial
+    # failure (all_media_ok/form_ok False) never sends this — the talent
+    # must never be told "shared" when something actually failed. Sent
+    # into the SAME source chat the marks were identified in (still open
+    # from the forward loop above), BEFORE the internal ☑️ completion
+    # marker — that marker is bookkeeping for THIS system, not something
+    # the talent should ever see.
+    if send_targets and all_media_ok and form_ok:
+        try:
+            ack_result = await asyncio.wait_for(
+                _send_text_message(
+                    page, group_name, f"Thanks, shared for {project_label}.",
+                    destination_type=("number" if source_type == "phone" else "group"),
+                ),
+                timeout=PER_ITEM_SEND_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            ack_result = {"ok": False, "error": f"timed out after {PER_ITEM_SEND_TIMEOUT}s"}
+        except Exception as exc:
+            ack_result = {"ok": False, "error": f"acknowledgement send failed: {exc}"}
+
     if req.get("send_marker_on_success") and all_media_ok and form_ok:
         try:
             marker_result = await asyncio.wait_for(
@@ -7580,7 +7630,10 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:
             marker_result = {"ok": False, "error": f"marker send failed: {exc}"}
 
-    return {"results": results, "form_send_result": form_send_result, "marker_result": marker_result}
+    return {
+        "results": results, "form_send_result": form_send_result,
+        "marker_result": marker_result, "ack_result": ack_result,
+    }
 
 
 def _strip_raw_bytes(obj: Any) -> Any:
@@ -7686,7 +7739,13 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                 n_send_targets = len(req.get("send_targets") or [])
                                 form_budget = PER_ITEM_SEND_TIMEOUT if req.get("form_message") else 0.0
                                 marker_budget = PER_ITEM_SEND_TIMEOUT if req.get("send_marker_on_success") else 0.0
-                                send_timeout = 60.0 + form_budget + marker_budget + PER_ITEM_SEND_TIMEOUT * max(1, n_send_targets)
+                                # ack_budget: the talent acknowledgement is only ever
+                                # attempted when there ARE send_targets this run (see
+                                # _run_send's own gating) — worst case it adds one
+                                # more PER_ITEM_SEND_TIMEOUT-bounded step beyond the
+                                # media/form/marker steps already budgeted below.
+                                ack_budget = PER_ITEM_SEND_TIMEOUT if n_send_targets > 0 else 0.0
+                                send_timeout = 60.0 + form_budget + marker_budget + ack_budget + PER_ITEM_SEND_TIMEOUT * max(1, n_send_targets)
                                 result = await asyncio.wait_for(_run_send(page, req), timeout=send_timeout)
                                 await http.post(
                                     f"{BASE}/scan-requests/{req['id']}/download-result",
@@ -7694,6 +7753,7 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
                                         "results": _strip_raw_bytes(result.get("results", [])), "error": result.get("error"),
                                         "form_send_result": result.get("form_send_result"),
                                         "marker_result": result.get("marker_result"),
+                                        "ack_result": result.get("ack_result"),
                                     },
                                     headers=_auth_headers(), timeout=30.0,
                                 )

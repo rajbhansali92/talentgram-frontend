@@ -240,8 +240,25 @@ _TAKE_RE = re.compile(r"\btake\s*([1-9][0-9]?)\b", re.IGNORECASE)
 # didn't say which one. Never guessed/defaulted to 1 here; take_number
 # stays None all the way through, same as intro/photos already do.
 _TAKE_BARE_RE = re.compile(r"\btake\b", re.IGNORECASE)
+# "audition"/"auditions" (MARK flexibility, Production fix) — a real,
+# common synonym for "take" the admin uses on its own ("Mark audition for
+# Vaseline", "Mark Vaseline audition") with no literal word "take" present
+# at all. Same slot as bare take (media_role="take", take_number=None) —
+# not a new role, just another spelling of the same one.
+_AUDITION_RE = re.compile(r"\baudition(?:s)?\b", re.IGNORECASE)
 _INTRO_RE = re.compile(r"\bintro(?:duction)?\b", re.IGNORECASE)
+# A "video" immediately adjacent to intro/introduction (MARK flexibility —
+# "Mark intro video for X", "Mark introduction video for X") is filler, not
+# part of the project name — stripped alongside the intro/introduction
+# match itself so it never leaks into project_fragment and corrupts fuzzy
+# project resolution ("video for x" instead of a clean "x").
+_INTRO_VIDEO_RE = re.compile(r"\bintro(?:duction)?\s+video\b", re.IGNORECASE)
 _PHOTOS_RE = re.compile(r"\bphotos?\b", re.IGNORECASE)
+# Generic filler words tolerated ANYWHERE in the mark text (MARK
+# flexibility) — "Mark THIS for Vaseline", "Mark THIS audition for
+# Vaseline" — never part of a real project name, so always safe to drop
+# before project_fragment is derived from whatever's left.
+_MARK_FILLER_RE = re.compile(r"\bthis\b", re.IGNORECASE)
 # WhatsApp's own DOM renders a message's timestamp text TWICE (once for the
 # bubble, once for an accessibility/tooltip label), sometimes prefixed with
 # "Edited" — e.g. "...take 1     7:20 am         7:20 am" or "...take 1
@@ -262,12 +279,20 @@ class ParsedMark:
 
 
 def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
-    """None means "contains 'mark' but not a shape we recognize" (e.g. no
-    role keyword at all) — the caller reports this as an unresolvable mark,
-    never guesses a role."""
+    """None means "contains 'mark' but not a shape we recognize" (no role
+    keyword found at all) — the caller reports this as an unresolvable
+    mark, never guesses a role. MARK flexibility (Production fix) widened
+    which PHRASINGS of take/intro/photos are recognized (see "audition",
+    intro+"video", and the "this" filler-word strip below) but
+    deliberately did NOT remove the requirement that SOME role keyword be
+    present — see the final `else` branch's own comment for the real
+    regression that requiring one, still, prevents."""
     if not raw_mark_text or not _MARK_KEYWORD_RE.search(raw_mark_text):
         return None
     working = _MARK_KEYWORD_RE.sub(" ", raw_mark_text, count=1)
+    # Generic filler word, safe to drop anywhere (MARK flexibility) —
+    # "Mark THIS for Vaseline", "Mark THIS audition for Vaseline".
+    working = _MARK_FILLER_RE.sub(" ", working)
     # Strip WhatsApp's trailing timestamp DOM noise BEFORE any role/take-
     # number extraction runs (2026-08-27 fix) — _TAKE_RE's \btake\s*(\d+)\b
     # has no bound on how much whitespace it crosses, so a bare "Take"
@@ -301,6 +326,13 @@ def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
     if take_m:
         media_role, take_number = "take", int(take_m.group(1))
         working = _TAKE_RE.sub(" ", working, count=1)
+    elif _INTRO_VIDEO_RE.search(working):
+        # "intro video"/"introduction video" (MARK flexibility) — strip
+        # BOTH words together so "video" never leaks into project_fragment
+        # (tried before the plain _INTRO_RE below, which would otherwise
+        # match "intro" alone and leave "video for Vaseline" behind).
+        media_role, take_number = "intro", None
+        working = _INTRO_VIDEO_RE.sub(" ", working, count=1)
     elif _INTRO_RE.search(working):
         media_role, take_number = "intro", None
         working = _INTRO_RE.sub(" ", working, count=1)
@@ -310,7 +342,31 @@ def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
     elif _TAKE_BARE_RE.search(working):
         media_role, take_number = "take", None
         working = _TAKE_BARE_RE.sub(" ", working, count=1)
+    elif _AUDITION_RE.search(working):
+        # "audition" with no literal "take" at all (MARK flexibility) —
+        # same slot as bare take: "Mark audition for Vaseline", "Mark
+        # Vaseline audition".
+        media_role, take_number = "take", None
+        working = _AUDITION_RE.sub(" ", working, count=1)
     else:
+        # Deliberately NOT defaulting a genuinely role-less mark ("Mark
+        # for Vaseline", "Mark Vaseline") to any role — tried during this
+        # same fix and REVERTED after a real regression: a long, busy
+        # talent conversation's own decoy/chatter text ("mark {project}
+        # random 5") also contains "mark" + a project reference with no
+        # role keyword; defaulting ALL of those to the same ("take", None)
+        # slot collided dozens of genuinely different messages onto one
+        # slot, reporting false AMBIGUOUS MEDIA ASSIGNMENT errors instead
+        # of correctly finding the real marks elsewhere in the same
+        # conversation (test_send_orchestrator_long_conversation_100_
+        # plus_irrelevant_marks_still_finds_correct_media). The master
+        # spec's own "ambiguity-safe, never guess" requirement for MARK
+        # wins over supporting this one specific role-less phrasing —
+        # see this module's own final report for the explicit, considered
+        # limitation this leaves: "Mark for X"/"Mark X" alone still report
+        # as an unresolvable mark, same as before this fix; every OTHER
+        # variation in the master's examples (audition/intro+video/"this"
+        # filler/take/intro/photos in any order) is fully supported above.
         return None
 
     project_fragment = re.sub(r"\s+", " ", working).strip()
@@ -726,3 +782,22 @@ def role_label(media_role: str, take_number: Optional[int], project_label: str) 
     if media_role == "photos":
         return f"{project_label} Photos"
     return f"{project_label} {media_role}"
+
+
+def simple_role_label(media_role: str, take_number: Optional[int] = None) -> str:
+    """SEND-only (Production fix — media captions/status must be simple):
+    NO talent name, NO project name — the caption that actually forwards
+    alongside the media into the shared casting group, and the per-item
+    lines in SEND's own completion status, both need to read as just
+    "Audition Take" / "Introduction Take", never "{talent} — {project}
+    Take 1" (role_label/submission_label above are both still used
+    exactly as before for UPLOAD's own reports and the submission page,
+    which are unaffected — this is a new, separate function, not a
+    behaviour change to either of those)."""
+    if media_role == "take":
+        return f"Audition Take {take_number}" if take_number else "Audition Take"
+    if media_role == "intro":
+        return "Introduction Take"
+    if media_role == "photos":
+        return "Photo"
+    return media_role.capitalize()

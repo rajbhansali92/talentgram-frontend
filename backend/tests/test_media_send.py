@@ -2373,3 +2373,194 @@ async def test_send_confirming_state_does_not_swallow_unrelated_query_command():
     finally:
         await _restore_config(original, agent_id="whatsapp-campaign-agent")
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+
+
+# ===========================================================================
+# ROUTING HARDENING (Production fix, Issue 1) — SEND's async completion
+# report must go to whatsapp-campaign-agent's own group ("Talentgram
+# Scouting Agent"), never the now-inactive casting-agent group
+# ("Talentgram Casting Pipeline") — real bug: _send_report was still
+# hardcoded to look up casting-agent's config, a leftover from before the
+# Scouting Agent consolidation moved SEND/UPLOAD onto whatsapp-campaign-
+# agent entirely.
+# ===========================================================================
+async def test_send_report_routes_to_scouting_agent_not_casting_pipeline():
+    from agents import registry as _registry
+
+    scouting_group = f"Test Scouting Report {uuid.uuid4().hex[:6]}"
+    casting_pipeline_group = f"Test Casting Pipeline {uuid.uuid4().hex[:6]}"
+    orig_scouting = await db[_registry.CONFIG_COLLECTION].find_one({"agent_id": "whatsapp-campaign-agent"})
+    orig_casting = await db[_registry.CONFIG_COLLECTION].find_one({"agent_id": "casting-agent"})
+    await db[_registry.CONFIG_COLLECTION].update_one(
+        {"agent_id": "whatsapp-campaign-agent"},
+        {"$set": {"group_names": [scouting_group], "active": True}}, upsert=True,
+    )
+    await db[_registry.CONFIG_COLLECTION].update_one(
+        {"agent_id": "casting-agent"},
+        {"$set": {"group_names": [casting_pipeline_group], "active": True}}, upsert=True,
+    )
+    captured = {}
+
+    async def _fake_create_batch(batch_in, admin):
+        captured["whatsapp_group_name"] = batch_in.source_params.contacts[0].whatsapp_group_name
+        return {"id": "fake-batch"}
+
+    async def _fake_service_admin():
+        return {"id": "fake-admin"}
+
+    orig_create_batch = orch.create_batch
+    orig_service_admin = orch._service_admin
+    orch.create_batch = _fake_create_batch
+    orch._service_admin = _fake_service_admin
+    # A real custom template must exist for _send_report to proceed at all.
+    existing_template = await db.whatsapp_templates.find_one({"slug": "custom"})
+    if not existing_template:
+        await db.whatsapp_templates.insert_one({"id": str(uuid.uuid4()), "slug": "custom", "name": "Custom"})
+    try:
+        await orch._send_report("SEND COMPLETE ✓\n\nTalent: X\nProject: Y")
+        assert captured.get("whatsapp_group_name") == scouting_group, captured
+        assert captured.get("whatsapp_group_name") != casting_pipeline_group, captured
+    finally:
+        orch.create_batch = orig_create_batch
+        orch._service_admin = orig_service_admin
+        if orig_scouting is None:
+            await db[_registry.CONFIG_COLLECTION].delete_one({"agent_id": "whatsapp-campaign-agent"})
+        else:
+            orig_scouting.pop("_id", None)
+            await db[_registry.CONFIG_COLLECTION].replace_one({"agent_id": "whatsapp-campaign-agent"}, orig_scouting)
+        if orig_casting is None:
+            await db[_registry.CONFIG_COLLECTION].delete_one({"agent_id": "casting-agent"})
+        else:
+            orig_casting.pop("_id", None)
+            await db[_registry.CONFIG_COLLECTION].replace_one({"agent_id": "casting-agent"}, orig_casting)
+
+
+# ===========================================================================
+# FORM EDITING NATURAL LANGUAGE (Production fix, Issue 2) — end-to-end via
+# the real dispatcher, not just unit-level parser checks.
+# ===========================================================================
+async def _seed_send_confirmation_for_edit(tag):
+    group = f"Test Send Edit {tag}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    email = f"edit.{tag}@example.com"
+    project_id = await _seed_project(f"Google Edit {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(
+        f"Edit Talent {tag}", whatsapp_group_name=f"Edit Talent {tag} x Talentgram", email=email,
+    )
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db.talents.update_one({"id": talent_id}, {"$set": {"instagram_handle": "edit.talent"}})
+    await db.submissions.update_one({"id": submission_id}, {"$set": {
+        "form_data": {"budget": {"status": "accept", "value": "30000"}},
+    }})
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    return group, original, project_id, talent_id, submission_id, tag
+
+
+async def test_send_edit_exclude_instagram_natural_language():
+    tag = uuid.uuid4().hex[:6]
+    group, original, project_id, talent_id, submission_id, tag = await _seed_send_confirmation_for_edit(tag)
+    try:
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text=f"send - Edit Talent {tag} - Google Edit {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r1.handled, r1.reply
+        assert "Instagram Link" in r1.reply, r1.reply  # present before the edit
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="Exclude Instagram Link",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r3.handled, r3.reply
+        assert "Instagram Link" not in r3.reply, r3.reply  # field entirely gone, not blank
+        assert "1 → Approve" in r3.reply, r3.reply  # still shows a fresh approval gate
+
+        # No send has actually happened yet.
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id}) is None
+    finally:
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+
+
+async def test_send_edit_budget_natural_language_change_to():
+    tag = uuid.uuid4().hex[:6]
+    group, original, project_id, talent_id, submission_id, tag = await _seed_send_confirmation_for_edit(tag)
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text=f"send - Edit Talent {tag} - Google Edit {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="Change budget to 45k",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "45k" in r.reply, r.reply
+    finally:
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+
+
+async def test_send_edit_multiple_directives_one_message():
+    tag = uuid.uuid4().hex[:6]
+    group, original, project_id, talent_id, submission_id, tag = await _seed_send_confirmation_for_edit(tag)
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text=f"send - Edit Talent {tag} - Google Edit {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text="Remove Instagram and change budget to 45k",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Instagram Link" not in r.reply, r.reply
+        assert "45k" in r.reply, r.reply
+        assert "1 → Approve" in r.reply, r.reply
+    finally:
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+
+
+# ===========================================================================
+# MEDIA LABELS (Production fix, Issue 3) — simple_role_label unit tests.
+# ===========================================================================
+def test_simple_role_label_take_no_number():
+    assert ma.simple_role_label("take", None) == "Audition Take"
+
+
+def test_simple_role_label_take_with_number():
+    assert ma.simple_role_label("take", 2) == "Audition Take 2"
+
+
+def test_simple_role_label_intro():
+    assert ma.simple_role_label("intro", None) == "Introduction Take"
+
+
+def test_simple_role_label_photos():
+    assert ma.simple_role_label("photos", None) == "Photo"
+
+
+def test_simple_role_label_never_includes_talent_or_project():
+    label = ma.simple_role_label("take", 1)
+    assert "KuHu" not in label
+    assert "Vaseline" not in label
+    assert label == "Audition Take 1"

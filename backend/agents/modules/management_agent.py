@@ -1180,7 +1180,7 @@ async def _resolve_talent_for_mark(collected: dict, ctx: ExecContext) -> Optiona
     """Shared resolution for both kinds — populates _resolved_* on
     success, returns an ExecResult to short-circuit on failure."""
     talent_q = collected.get("talent", "")
-    if not talent_q:
+    if not talent_q or not _is_plausible_name(talent_q):
         return ExecResult(ok=False, message='Which talent? e.g. "Mark Shivi payment cleared" or "Mark Shivi\'s costume trial completed".')
 
     project_q = collected.get("project", "")
@@ -1227,18 +1227,29 @@ async def _talent_status_try_auto_execute(collected: dict, ctx: ExecContext) -> 
         return None
 
     if collected.get("_kind") == "task_action":
-        task, _err = await _resolve_task_reference(collected.get("task_hint", ""), ctx)
+        hint = collected.get("task_hint", "")
+        task, err = await _resolve_task_reference(hint, ctx)
         if task:
             collected["_task_id"] = task["id"]
             collected["_task_title"] = task.get("title") or ""
             return None
-        # No real task matches — this was never a task command at all
-        # (e.g. a genuinely unrecognised "mark X complete" about
+        # "it"/"that task"/"the task" with nothing in session context is
+        # NEVER a plausible talent name — surface the real "which task?"
+        # error directly rather than letting a pronoun fall through into
+        # a talent-name search (found live in production testing:
+        # "Mark it complete." with no task in context was silently
+        # re-interpreted as a search for a talent literally named "it",
+        # which matched unrelated real talents via a bare substring
+        # regex — a genuine entity-resolution gap this closes).
+        if _clean_task_hint(hint) in _TASK_PRONOUNS:
+            return ExecResult(ok=False, message=err or 'Which task do you mean?')
+        # Otherwise: a genuine title-hint miss — this was never a task
+        # command at all (e.g. an unrecognised "mark X complete" about
         # something else); fall through to the ordinary payment-clear
         # handling below, exactly as an unrecognised "mark X ..." always
         # has, rather than surfacing a confusing "no task found" error.
         collected["_kind"] = "payment"
-        collected["talent"] = collected.get("task_hint", "")
+        collected["talent"] = hint
 
     err = await _resolve_talent_for_mark(collected, ctx)
     if err:
@@ -1898,6 +1909,11 @@ _ADD_TASK_TRIGGER_RE = re.compile(r"^add a task to\s+(.+)$", re.IGNORECASE)
 _REMIND_TRIGGER_RE = re.compile(r"^remind me to\s+(.+)$", re.IGNORECASE)
 _WITH_PROJECT_RE = re.compile(r"\bwith\s+(.+)$", re.IGNORECASE)
 _FOR_PROJECT_TAIL_RE = re.compile(r"\bfor\s+(.+)$", re.IGNORECASE)
+# "Add a task for Rahul to send the call sheet tomorrow." / "Create a task
+# for Shivi to confirm costume trial by 6 PM." — the project/talent-FIRST
+# word order the Phase H spec's own examples use, distinct from
+# _ADD_TASK_TRIGGER_RE's project/talent-LAST shape ("...to Y for X").
+_ADD_TASK_FOR_TRIGGER_RE = re.compile(r"^(?:add|create)\s+a\s+task\s+for\s+(.+?)\s+to\s+(.+)$", re.IGNORECASE)
 
 
 def _add_task_extract_fields(text: str) -> Dict[str, str]:
@@ -1922,6 +1938,20 @@ def _add_task_extract_fields(text: str) -> Dict[str, str]:
                 "project_hint": project_hint,
                 "_followup_date_raw": fu_m.group(2).strip(),
             }
+
+    # Project/talent-FIRST word order — "Add a task for Rahul to send the
+    # call sheet tomorrow." Checked before the project-LAST shape below
+    # since both share the "add/create a task" opener.
+    for_first_m = _ADD_TASK_FOR_TRIGGER_RE.match(text or "")
+    if for_first_m:
+        hint_candidate = _trim_trailing_stopwords(for_first_m.group(1).strip())
+        body = for_first_m.group(2)
+        remaining, due_at = _strip_date_phrase(body)
+        return {
+            "title": remaining.strip().rstrip("."),
+            "due_at": due_at or "",
+            "project_hint": hint_candidate if _is_plausible_name(hint_candidate) else "",
+        }
 
     m = _ADD_TASK_TRIGGER_RE.match(text or "") or _REMIND_TRIGGER_RE.match(text or "")
     if not m:
@@ -1969,16 +1999,28 @@ async def _add_task_try_auto_execute(collected: dict, ctx: ExecContext) -> Optio
         return ExecResult(ok=False, message='What should the task be? e.g. "Add a task to get the call sheet tomorrow."')
 
     project = None
+    talent_id = ""
     project_hint = collected.get("project_hint", "")
     if project_hint:
-        resolution = await _resolve_project(project_hint, ctx)
-        if resolution.ambiguous:
-            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
-        if resolution.project:
-            project = resolution.project
-        # A resolution error here is NOT fatal — "follow up" itself may
-        # just be a task with no resolvable project mention; fall through
-        # to the session fallback below rather than failing the whole command.
+        # Try the hint as a locked TALENT first — "Add a task for Shivi
+        # to confirm costume trial by 6 PM." names a talent, not a
+        # project; her own project is used directly, matching the same
+        # talent-first resolution pattern kickbacks/reimbursements
+        # already use.
+        match, project_hit, _others = await _find_talent_across_projects(project_hint)
+        if match and project_hit:
+            project = project_hit
+            talent_id = match["talent_id"]
+        else:
+            resolution = await _resolve_project(project_hint, ctx)
+            if resolution.ambiguous:
+                return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+            if resolution.project:
+                project = resolution.project
+            # A resolution error here is NOT fatal — "follow up" itself may
+            # just be a task with no resolvable project mention; fall
+            # through to the session fallback below rather than failing
+            # the whole command.
     if not project:
         session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
         last_id = (session or {}).get("last_project_id")
@@ -1987,6 +2029,7 @@ async def _add_task_try_auto_execute(collected: dict, ctx: ExecContext) -> Optio
 
     collected["_resolved_project_id"] = project["id"] if project else ""
     collected["_resolved_project_label"] = project["label"] if project else ""
+    collected["_resolved_talent_id"] = talent_id
     return None
 
 
@@ -2022,6 +2065,7 @@ async def _add_task_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         category="project" if pid else "general",
         project_id=pid,
         project_name=project_label,
+        talent_id=collected.get("_resolved_talent_id") or None,
         due_at=due_at,
         priority="normal",
     )
@@ -2036,7 +2080,7 @@ async def _add_task_executor(collected: dict, ctx: ExecContext) -> ExecResult:
 
 ADD_TASK_INTENT = IntentDefinition(
     intent_id="management.add_task",
-    triggers=["add a task", "remind me"],
+    triggers=["add a task", "create a task", "remind me"],
     fields=[
         FieldSpec(key="title", label="Task", question="What should the task be?", validate=lambda v: ValidationResult(ok=True, value=v) if v else ValidationResult(ok=False, error="Please describe the task.")),
         FieldSpec(key="due_at", label="Due", question="When is it due?", validate=lambda v: ValidationResult(ok=True, value=v), required=False),

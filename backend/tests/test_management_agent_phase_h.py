@@ -334,6 +334,56 @@ async def test_task_completed_task_gets_no_reminder_and_action_kind_falls_back_t
         await _cleanup(pid, [tname])
 
 
+@_aio
+async def test_pronoun_task_reference_with_empty_context_never_searches_talents(agents_ready):
+    """Found live in production testing: "Mark it complete." with NO
+    task in session context was silently re-interpreted as a search for
+    a talent literally named "it" — a bare substring regex that could
+    match unrelated real talents. "it"/"that task"/"the task" must
+    report "which task?" directly, never fall through to a talent-name
+    search."""
+    r = await _send("Mark it complete.")
+    assert r.handled
+    assert "which task" in r.reply.lower()
+    assert "locked on more than one project" not in r.reply.lower()
+
+    r2 = await _send("Reopen that task.")
+    assert r2.handled
+    assert "which task" in r2.reply.lower()
+
+
+@_aio
+async def test_add_task_project_first_word_order(agents_ready):
+    """"Add a task for X to Y." / "Create a task for X to Y." — the
+    Phase H spec's own example word order (project/talent BEFORE the
+    verb phrase), distinct from the pre-existing "Add a task to Y for
+    X." shape."""
+    pid, label = await _make_project()
+    try:
+        r = await _send(f"Add a task for {label} to send the call sheet tomorrow.")
+        assert "Reply 1 to confirm" in r.reply
+        assert "send the call sheet" in r.reply  # clean title, not the whole sentence
+        await _send("1")
+        task = await db.workflow_tasks.find_one({"project_id": pid}, {"_id": 0})
+        assert task["title"] == "send the call sheet"
+    finally:
+        await _cleanup(pid)
+
+
+@_aio
+async def test_create_task_for_talent_first_word_order_sets_talent_id(agents_ready):
+    pid, label = await _make_project()
+    tid, tname = await _make_locked_talent(pid)
+    try:
+        r = await _send(f"Create a task for {tname} to confirm costume trial.")
+        assert "Reply 1 to confirm" in r.reply
+        await _send("1")
+        task = await db.workflow_tasks.find_one({"project_id": pid}, {"_id": 0})
+        assert task["talent_id"] == tid
+    finally:
+        await _cleanup(pid, [tname])
+
+
 # ===========================================================================
 # 10. Needs-attention query
 # ===========================================================================

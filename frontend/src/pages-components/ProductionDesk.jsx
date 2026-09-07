@@ -690,7 +690,10 @@ export default function ProductionDesk({ projectId, project }) {
 
                 <SectionCard title="Shoot Details" icon={CalendarDays} testId="pd-shoot-details">
                     <div className="space-y-2.5 text-xs">
-                        <div className="flex justify-between"><span className="text-black/40">Shooting Dates</span><span className="text-black/70">{p.shoot_dates || "—"}</span></div>
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="text-black/40 shrink-0">Shooting Dates</span>
+                            <Input defaultValue={p.shoot_dates || ""} placeholder="e.g. 26th - 27th August" className="h-7 text-xs max-w-[220px]" onBlur={(e) => { if (e.target.value !== (p.shoot_dates || "")) patchProject({ shoot_dates: e.target.value }); }} />
+                        </div>
                         <div className="flex items-center justify-between gap-2">
                             <span className="text-black/40 shrink-0">Call Time</span>
                             <Input defaultValue={p.pd_call_time || ""} placeholder="e.g. 8:00 AM" className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_call_time || "")) patchProject({ call_time: e.target.value }); }} />

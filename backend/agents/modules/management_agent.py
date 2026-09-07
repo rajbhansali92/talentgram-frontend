@@ -65,6 +65,7 @@ docstring); autonomous time-based WhatsApp push reminders (see above).
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -120,6 +121,52 @@ _AGENT_ADMIN = {"id": "whatsapp:management-agent", "email": "management-agent@wh
 
 
 # ---------------------------------------------------------------------------
+# Entity-extraction stopwords — ROOT-CAUSE fix for a whole class of bug,
+# not a one-off "the" special case. Every function in this file that
+# extracts a talent/project NAME CANDIDATE from free text runs it through
+# `_is_plausible_name` before treating it as one. Without this guard, a
+# regex like "<verb> (.+?) <field keyword>" will happily capture an
+# ordinary function word sitting between the verb and the keyword — e.g.
+# "Set the shoot date for Google AI..." naturally captures "the" as
+# whatever sits between "set" and "shoot" once "set" is registered as a
+# trigger (confirmed by reproducing it: _TALENT_TOPIC_RE's non-greedy
+# `(.+?)` matches "the" as the shortest string before hitting the "shoot"
+# topic keyword). The fix is structural — reject ANY candidate that is
+# empty or consists ENTIRELY of stopwords/function-words — not a literal
+# denylist entry for "the" alone (a different sentence would just as
+# easily produce "for"/"to"/"is"/etc. as the captured span).
+# ---------------------------------------------------------------------------
+_ENTITY_STOPWORDS = {
+    "the", "a", "an", "for", "to", "on", "at", "in", "is", "are", "was",
+    "were", "be", "been", "set", "add", "mark", "make", "move", "show",
+    "please", "tomorrow", "today", "yesterday", "and", "or", "with",
+    "from", "of", "as", "her", "his", "their", "our", "it", "its", "this",
+    "that", "these", "those", "who", "what", "when", "where", "why",
+    "how", "we", "us", "you", "your", "i", "me", "my", "he", "she",
+    "will", "would", "can", "could", "should", "shall", "next", "then",
+    "another", "also", "has", "have", "had",
+    # Time/date words that otherwise superficially pass the bare
+    # "starts with a letter" name shape ("...3 PM and Rahul's..." would
+    # misparse "PM" as a plausible name candidate without this).
+    "am", "pm", "monday", "tuesday", "wednesday", "thursday", "friday",
+    "saturday", "sunday",
+}
+
+
+def _is_plausible_name(candidate: str) -> bool:
+    """True only if `candidate` contains at least one token that ISN'T a
+    stopword/function-word — the gate every talent/project/CRM name
+    extraction in this file runs a candidate through before using it."""
+    candidate = (candidate or "").strip()
+    if len(candidate) < 2:
+        return False
+    words = re.findall(r"[A-Za-z0-9']+", candidate.lower())
+    if not words:
+        return False
+    return any(w not in _ENTITY_STOPWORDS for w in words)
+
+
+# ---------------------------------------------------------------------------
 # Project resolution — reuses the exact fuzzy resolver ADD/MOVE/SHOW ME use,
 # plus session_context for "no project named this turn" continuity.
 # ---------------------------------------------------------------------------
@@ -128,7 +175,8 @@ _FOR_PROJECT_RE = re.compile(r"\bfor\s+(.+?)\s*[\?\.!]*$", re.IGNORECASE)
 
 def _extract_trailing_project(text: str) -> str:
     m = _FOR_PROJECT_RE.search(text or "")
-    return m.group(1).strip() if m else ""
+    candidate = m.group(1).strip() if m else ""
+    return candidate if _is_plausible_name(candidate) else ""
 
 
 @dataclass
@@ -212,7 +260,7 @@ def _extract_talent_before_payment(text: str) -> str:
     name = m.group(1).strip().strip('"\'')
     if name.lower().endswith("'s"):
         name = name[:-2].strip()
-    return name
+    return name if _is_plausible_name(name) else ""
 
 
 _TALENT_TOPIC_RE = re.compile(
@@ -232,6 +280,8 @@ def _extract_talent_and_topic(text: str) -> Tuple[str, Optional[str]]:
     name = m.group(1).strip().strip('"\'')
     if name.lower().endswith("'s"):
         name = name[:-2].strip()
+    if not _is_plausible_name(name):
+        return "", None
     topic_raw = m.group(2).lower()
     if "trial" in topic_raw or "fitting" in topic_raw or "look test" in topic_raw:
         topic = "trial"
@@ -976,10 +1026,11 @@ def _reimbursement_extract_fields(text: str) -> Dict[str, str]:
     amount = _extract_amount(text)
     reason_m = _REIMBURSEMENT_REASON_RE.search(text or "")
     talent_m = _REIMBURSEMENT_TALENT_RE.search(text or "")
+    talent_candidate = talent_m.group(1).strip() if talent_m else ""
     return {
         "amount": str(amount) if amount is not None else "",
         "reason": reason_m.group(1).strip() if reason_m else "expense",
-        "talent": talent_m.group(1).strip() if talent_m else "",
+        "talent": talent_candidate if _is_plausible_name(talent_candidate) else "",
     }
 
 
@@ -1013,7 +1064,7 @@ def _match_crew_role(raw: str) -> str:
 
 def _add_extract_fields(text: str) -> Dict[str, str]:
     crew_m = _ADD_CREW_RE.match(text or "")
-    if crew_m:
+    if crew_m and _is_plausible_name(crew_m.group(1)):
         return {
             "_kind": "crew",
             "name": crew_m.group(1).strip(),
@@ -1195,7 +1246,8 @@ def _add_task_extract_fields(text: str) -> Dict[str, str]:
     # the full original phrase (readable in the task list either way).
     tail_m = with_m or for_m
     if tail_m:
-        project_hint = tail_m.group(1).strip().rstrip(".")
+        candidate = tail_m.group(1).strip().rstrip(".")
+        project_hint = candidate if _is_plausible_name(candidate) else ""
 
     return {
         "title": remaining.strip().rstrip("."),
@@ -1279,6 +1331,903 @@ ADD_TASK_INTENT = IntentDefinition(
 )
 
 
+# ===========================================================================
+# SMART MULTI-ACTION UPDATE — natural, non-rigid coverage of every writable
+# Production Desk field, one OR MANY in a single free-text message
+# ("Google AI shoot is 26 and 27 August, call time 7:30 AM, reporting 7 AM,
+# location Mumbai. Shivi's costume trial is 25 August at 3 PM in Andheri.
+# Add a task to get the call sheet tomorrow and another to follow up
+# payment on Monday."). Reached via MANAGEMENT_AGENT.resolve_bare_reply —
+# the platform's EXISTING "no trigger matched this turn, give the agent
+# one more chance against session context" hook (agents/models.py) — not
+# a new dispatch mechanism. Still plain deterministic regex/keyword
+# matching throughout; no AI/LLM anywhere in this file.
+#
+# ROOT-CAUSE FIX this section exists to protect (see _is_plausible_name
+# above): every subject (project/talent) candidate this parser extracts
+# is run through that same stopword gate before being treated as an
+# entity — "Set the shoot date for Google AI..." must never resolve "the"
+# as a talent, because "the" fails the gate structurally, not because of
+# a denylist entry naming that one word.
+# ===========================================================================
+
+# --- Date-range protection + clause splitting --------------------------------
+_DATE_AND_RE = re.compile(
+    r"\d{1,2}(?:st|nd|rd|th)?(\s*(?:-|to|and)\s*)\d{1,2}(?:st|nd|rd|th)?(\s+(?:of\s+)?[A-Za-z]+)?",
+    re.IGNORECASE,
+)
+
+
+def _protect_date_ranges(text: str) -> str:
+    """"26 and 27 August" must survive clause-splitting as ONE date value,
+    not be mistaken for two separate clauses joined by "and"."""
+    return _DATE_AND_RE.sub(lambda m: m.group(0).replace(" and ", " \x00AND\x00 ").replace(" to ", " \x00TO\x00 "), text or "")
+
+
+# "Shivi and Rahul's costume trials..." — the clause splitter's own
+# capital-letter heuristic (a talent/project name starting a genuinely
+# NEW clause usually IS capitalized) would otherwise mistake "and Rahul's"
+# for a fresh sentence, same failure mode as _protect_date_ranges guards
+# against for dates — a two-name LIST sharing one trailing possessive is
+# the other structural shape "and" needs protecting inside.
+_NAME_AND_POSSESSIVE_RE = re.compile(r"\b([A-Za-z][\w'.]*)\s+and\s+([A-Za-z][\w'.]*)'s\b")
+
+
+def _protect_name_lists(text: str) -> str:
+    def _sub(m: "re.Match") -> str:
+        # Guard against a false positive like "...3 PM and Rahul's..." —
+        # "PM" superficially matches the bare capitalized-word shape too;
+        # only protect when BOTH sides are plausible names, the same
+        # gate used everywhere else an entity candidate is accepted.
+        if _is_plausible_name(m.group(1)) and _is_plausible_name(m.group(2)):
+            return f"{m.group(1)} \x00AND\x00 {m.group(2)}'s"
+        return m.group(0)
+    return _NAME_AND_POSSESSIVE_RE.sub(_sub, text or "")
+
+
+def _unprotect(text: str) -> str:
+    return text.replace("\x00AND\x00", "and").replace("\x00TO\x00", "to")
+
+
+_CLAUSE_SPLIT_RE = re.compile(r"\.\s+|;\s*|,\s+and\s+|,\s*(?=[a-z])|\s+and\s+(?=[A-Z])")
+
+
+def _split_into_clauses(text: str) -> List[str]:
+    protected = _protect_name_lists(_protect_date_ranges(text or ""))
+    parts = _CLAUSE_SPLIT_RE.split(protected)
+    return [_unprotect(p).strip().rstrip(".") for p in parts if _unprotect(p).strip()]
+
+
+# --- Date/time parsing for the few fields that need a REAL datetime
+# (costume_trial_at, expected_payment_date, next_follow_up_at) — every
+# other date-ish field (project.shoot_dates, pd_call_time,
+# pd_reporting_time) is stored as free text already and is captured
+# verbatim, per "preserve existing Production Desk semantics instead of
+# inventing a new date format". -----------------------------------------
+_MONTH_NAMES = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+_DATE_DM_RE = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(" + "|".join(sorted(_MONTH_NAMES, key=len, reverse=True)) + r")\b", re.IGNORECASE)
+_DATE_MD_RE = re.compile(r"\b(" + "|".join(sorted(_MONTH_NAMES, key=len, reverse=True)) + r")\s+(\d{1,2})(?:st|nd|rd|th)?\b", re.IGNORECASE)
+_TIME_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE)
+# Stricter than _TIME_RE — requires an explicit am/pm or a colon, so a
+# bare number ("2 weeks", "2 days") is never mistaken for a clock time.
+_EXPLICIT_TIME_RE = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b", re.IGNORECASE)
+
+
+def _parse_time_of_day(text: str) -> Optional[Tuple[int, int]]:
+    for m in _TIME_RE.finditer(text or ""):
+        hour = int(m.group(1))
+        if hour > 24:
+            continue
+        minute = int(m.group(2) or 0)
+        ampm = (m.group(3) or "").lower()
+        if hour == 0 and not ampm and minute == 0:
+            continue  # bare "0" isn't a time mention
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+        if hour > 23:
+            continue
+        if not ampm and hour == 24:
+            continue
+        return hour % 24, minute
+    return None
+
+
+def _parse_absolute_datetime(text: str) -> Optional[str]:
+    """"25 August at 3 PM" / "tomorrow" / "on Monday" / "30 August" ->
+    ISO datetime string. Returns None (never guesses) when nothing
+    recognisable is present."""
+    text = text or ""
+    word_m = _DATE_WORD_RE.search(text)
+    if word_m:
+        base = _parse_due_date(word_m.group(1))
+        if base:
+            t = _parse_time_of_day(text[word_m.end():])
+            if t:
+                dt = datetime.fromisoformat(base).replace(hour=t[0], minute=t[1])
+                return dt.isoformat()
+            return base
+
+    now = datetime.now(timezone.utc)
+    m = _DATE_DM_RE.search(text)
+    day_group, month_group = (1, 2) if m else (None, None)
+    if not m:
+        m = _DATE_MD_RE.search(text)
+        day_group, month_group = (2, 1) if m else (None, None)
+    if not m:
+        # No recognisable date word/number-month pattern anywhere — but a
+        # BARE time alone ("3 PM", "trial is 3 PM") is a common, natural
+        # way to state "today at that time" (the spec's own literal
+        # example — "Shivi's trial is 3 PM and Rahul's is 5 PM" — never
+        # mentions a date at all). Generic fallback, not a costume-trial
+        # special case: any date-value field goes through this same
+        # function. Gated on an EXPLICIT time marker (am/pm or a colon)
+        # so a bare number in an unrelated phrase ("in 2 weeks", "2
+        # days") is never misread as a clock time.
+        if _EXPLICIT_TIME_RE.search(text):
+            t = _parse_time_of_day(text)
+            if t:
+                return now.replace(hour=t[0], minute=t[1], second=0, microsecond=0).isoformat()
+        return None
+    try:
+        day = int(m.group(day_group))
+        month = _MONTH_NAMES[m.group(month_group).lower()]
+        candidate = datetime(now.year, month, day, 12, 0, 0, tzinfo=timezone.utc)
+    except (ValueError, KeyError):
+        return None
+    if candidate.date() < now.date():
+        candidate = candidate.replace(year=now.year + 1)
+    t = _parse_time_of_day(text[m.end():]) or _parse_time_of_day(text[:m.start()])
+    if t:
+        candidate = candidate.replace(hour=t[0], minute=t[1])
+    return candidate.isoformat()
+
+
+# --- Field keyword tables. Ordered most-specific-first WITHIN each list
+# (checked as a whole regex alternation is NOT used — see
+# _find_field_matches, which tries every phrase of every field and
+# resolves overlaps by position+length, so relative ORDER across
+# different fields' lists doesn't matter, only phrase specificity). -----
+# Each phrase is (text, forced_value). forced_value is None for a phrase
+# that INTRODUCES a value still to come afterward ("call time" -> value
+# follows); it is a literal string for a phrase that IS the value itself
+# ("fitting complete" doesn't need anything typed after it — the phrase
+# already says what fitting_status should become). Matched by
+# _find_field_matches/_slice_field_values below; not a special case, a
+# property of the phrase table any field can use.
+_PROJECT_FIELD_PHRASES: List[Tuple[str, List[Tuple[str, Optional[str]]]]] = [
+    ("shoot_dates", [("shooting dates are", None), ("shoot dates are", None), ("shooting dates", None), ("shoot dates", None), ("shooting date", None), ("shoot date", None), ("shoot is", None)]),
+    ("reporting_time", [("reporting time", None), ("reporting", None)]),
+    ("call_time", [("call time", None)]),
+    ("shoot_location", [("location is", None), ("location", None)]),
+    ("production_contact_client_id", [("production contact is", None), ("production contact", None)]),
+    ("shoot_status", [("shoot scheduled", "scheduled"), ("confirmed for the shoot", "scheduled"), ("shoot status is", None), ("shoot status", None)]),
+    ("shoot_notes", [("add note that", None), ("add note", None), ("notes are", None), ("note is", None), ("notes:", None), ("note:", None)]),
+    ("payment_terms", [("payment terms are", None), ("payment terms", None)]),
+    ("expected_payment_date", [("expected payment date is", None), ("expected payment date", None), ("payment is expected on", None), ("payment expected on", None), ("expected on", None)]),
+    # "follow up WITH X on Y" is handled by _FOLLOW_UP_WITH_RE (a
+    # dedicated structural pattern, checked before generic field
+    # matching) — "with" isn't listed as PART of this field's own
+    # keyword phrases, because it's what introduces the SUBJECT, not
+    # the value; if it were folded into the keyword span, subject
+    # extraction would have nothing left to find.
+    ("next_follow_up_at", [("next follow up on", None), ("next follow-up on", None), ("follow up on", None), ("follow-up on", None), ("next follow up date", None), ("needs follow up", None), ("needs follow-up", None)]),
+    ("payment_followup_notes", [("follow up note that", None), ("follow-up note that", None), ("follow up note", None), ("follow-up note", None)]),
+    ("payment_followup_status", [("payment follow up done", "done"), ("payment follow-up done", "done"), ("follow up done", "done"), ("follow-up done", "done")]),
+    ("production_budget_per_day", [("production budget per day is", None), ("production budget per day", None), ("production budget/day", None)]),
+    ("production_budget_total", [("production budget is", None), ("production budget", None)]),
+    ("shooting_days", [("shooting days", None), ("shoot days", None)]),
+    ("confirmation_mail_received", [("confirmation mail received", "true"), ("confirmation mail", "true")]),
+    ("invoice_raised", [("invoice raised", "true"), ("invoice has been raised", "true")]),
+    ("invoice_sent", [("invoice sent", "true"), ("invoice has been sent", "true")]),
+    ("payment_in_received", [("client payment received", "true"), ("client payment", "true"), ("payment received from", "true")]),
+    ("gst_component_received", [("gst component received", "true"), ("gst received", "true"), ("gst component", "true")]),
+]
+
+_TALENT_FIELD_PHRASES: List[Tuple[str, List[Tuple[str, Optional[str]]]]] = [
+    ("costume_trial_at", [("costume trial is", None), ("costume trial", None), ("costume fitting is", None), ("costume fitting", None), ("trial is", None), ("trial", None)]),
+    ("fitting_status", [("fitting is complete", "completed"), ("fitting complete", "completed"), ("fitting is done", "completed"), ("fitting done", "completed"), ("fitting", None)]),
+    ("look_test_status", [("look test is done", "completed"), ("look test done", "completed"), ("look test is complete", "completed"), ("look test complete", "completed"), ("look test", None)]),
+    ("grooming_requirements", [("grooming instructions are", None), ("grooming instructions", None), ("grooming requirements are", None), ("grooming requirements", None), ("grooming is", None), ("grooming", None)]),
+    ("special_instructions", [("special instructions are", None), ("special instructions", None)]),
+    ("shoot_status", [("confirmed for the shoot", "scheduled"), ("shoot status is", None), ("shoot status", None)]),
+    ("budget_per_day", [("per day", None), ("budget per day is", None), ("budget per day", None), ("budget/day", None)]),
+    ("shooting_days", [("shoot days", None), ("shooting days", None)]),
+    ("budget_total", [("budget is", None), ("budget", None)]),
+    ("commission_percent", [("commission is", None), ("commission", None)]),
+]
+
+_STATUS_ENUM_MAP = {
+    "shoot_status": {
+        "today": "today", "confirmed": "scheduled", "scheduled": "scheduled",
+        "complete": "completed", "completed": "completed", "done": "completed",
+        "cancelled": "cancelled", "canceled": "cancelled", "not scheduled": "not_scheduled",
+    },
+    "fitting_status": {
+        "complete": "completed", "completed": "completed", "done": "completed",
+        "scheduled": "scheduled", "not scheduled": "not_scheduled",
+    },
+    "look_test_status": {
+        "complete": "completed", "completed": "completed", "done": "completed",
+        "scheduled": "scheduled", "not scheduled": "not_scheduled",
+    },
+    "payment_followup_status": {
+        "done": "done", "complete": "done", "completed": "done",
+        "due": "due", "in progress": "in_progress", "not due": "not_due",
+    },
+}
+
+
+def _find_field_matches(clause: str, field_defs: List[Tuple[str, List[Tuple[str, Optional[str]]]]]) -> List[Tuple[int, int, str, Optional[str]]]:
+    """Every (phrase, field) pair is tried independently; overlapping
+    matches are resolved by picking the LEFTMOST, and among ties at the
+    same start position the LONGEST phrase — avoids needing one fragile
+    hand-ordered mega-regex alternation. Returns (start, end, field_key,
+    forced_value)."""
+    candidates = []
+    for field_key, phrases in field_defs:
+        for phrase, forced_value in phrases:
+            # Trailing "s?" tolerates simple plural/verb-agreement drift
+            # ("costume trial" also matching "costume trials", generic
+            # per the "singular/plural variations" requirement — not a
+            # per-word synonym dictionary, just one optional trailing
+            # letter on whatever phrase already matched.
+            for m in re.finditer(r"\b" + phrase + r"s?\b", clause, re.IGNORECASE):
+                candidates.append((m.start(), m.end(), field_key, forced_value))
+    candidates.sort(key=lambda c: (c[0], -(c[1] - c[0])))
+    resolved: List[Tuple[int, int, str, Optional[str]]] = []
+    last_end = -1
+    for start, end, key, forced_value in candidates:
+        if start >= last_end:
+            resolved.append((start, end, key, forced_value))
+            last_end = end
+    return resolved
+
+
+# Word-boundaried on BOTH sides of each word-alternative — without \b,
+# "to" as a bare substring alternative matches the first two letters of
+# "tomorrow", turning it into "morrow" (found live during testing).
+_LEADING_CONNECTOR_RE = re.compile(r"^(?:\b(?:is|are|to|as|that)\b|[=:,])\s*", re.IGNORECASE)
+_TRAILING_CONJUNCTION_RE = re.compile(r"[\s,]*(?:,|&|\band\b)\s*$", re.IGNORECASE)
+
+
+def _clean_extracted_text(text: str) -> str:
+    """Generic post-extraction cleanup applied to EVERY captured span
+    (task title, field value, subject-name candidate) — not a fix for
+    one sentence. Collapses repeated whitespace and strips a dangling
+    trailing conjunction/comma a clause or task-opener boundary can
+    leave behind (e.g. "...tomorrow AND" when the next item's own
+    opener match starts at "another", not at the "and" joining the
+    two)."""
+    text = re.sub(r"\s{2,}", " ", (text or "")).strip()
+    prev = None
+    while prev != text:
+        prev = text
+        text = _TRAILING_CONJUNCTION_RE.sub("", text).strip()
+    return text.strip(" .,")
+
+
+def _trim_trailing_stopwords(candidate: str) -> str:
+    """"Google AI to" -> "Google AI" — a multi-word "for X" capture can
+    run on into the next clause's connector word ("to"/"is"/"on"/...);
+    trim trailing stopword tokens rather than constraining the capture
+    regex itself, so a real (if unusual) trailing word is never silently
+    unreachable."""
+    words = (candidate or "").split()
+    while words and re.sub(r"[^a-z0-9']", "", words[-1].lower()) in _ENTITY_STOPWORDS:
+        words.pop()
+    return " ".join(words)
+
+
+def _slice_field_values(clause: str, matches: List[Tuple[int, int, str, Optional[str]]]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for i, (start, end, key, forced_value) in enumerate(matches):
+        if forced_value is not None:
+            # The matched phrase itself already IS the value ("fitting
+            # complete", "invoice sent") — nothing to slice from trailing
+            # text, and there may be nothing meaningful there anyway.
+            result.setdefault(key, forced_value)
+            continue
+        value_end = matches[i + 1][0] if i + 1 < len(matches) else len(clause)
+        raw = clause[end:value_end].strip()
+        raw = _LEADING_CONNECTOR_RE.sub("", raw).strip()
+        raw = _clean_extracted_text(raw)
+        if raw:
+            result.setdefault(key, raw)
+    return result
+
+
+def _normalize_status_value(field_key: str, raw: str) -> str:
+    mapping = _STATUS_ENUM_MAP.get(field_key, {})
+    low = raw.strip().lower()
+    return mapping.get(low, low.replace(" ", "_"))
+
+
+def _extract_subject_from_clause(clause: str, first_field_pos: Optional[int]) -> Tuple[str, str]:
+    """Returns (subject_candidate, clause_with_subject_removed). Tries, in
+    order: an explicit "for X" mention anywhere in the clause; then the
+    leading text before the first recognised field keyword (stripping a
+    leading imperative verb and a trailing possessive 's). Every
+    candidate is gated by _is_plausible_name before being returned —
+    this is the exact mechanism that keeps "Set the shoot date..." from
+    ever extracting "the". Shared by both project- and talent-scoped
+    clauses — the extraction shape is identical either way."""
+    for_m = re.search(r"\bfor\s+([A-Za-z][\w'.]*(?:\s+[A-Za-z][\w'.]*){0,4})", clause, re.IGNORECASE)
+    if for_m:
+        candidate = _trim_trailing_stopwords(for_m.group(1).strip().rstrip(",. "))
+        if _is_plausible_name(candidate):
+            remaining = clause[:for_m.start()] + " " + clause[for_m.end():]
+            return candidate, remaining.strip()
+
+    if first_field_pos and first_field_pos > 0:
+        candidate = clause[:first_field_pos].strip()
+        candidate = re.sub(r"^(?:mark|set|make|add note that|add note)\s+", "", candidate, flags=re.IGNORECASE).strip()
+        if candidate.endswith("'s"):
+            candidate = candidate[:-2].strip()
+        elif candidate.endswith("s'"):
+            candidate = candidate[:-1].strip()
+        candidate = _trim_trailing_stopwords(candidate)
+        if _is_plausible_name(candidate):
+            return candidate, clause[first_field_pos:]
+
+    return "", clause
+
+
+def _strip_possessive(name: str) -> str:
+    if name.endswith("'s"):
+        return name[:-2].strip()
+    if name.endswith("s'"):
+        return name[:-1].strip()
+    return name
+
+
+def _split_multi_names(candidate: str) -> List[str]:
+    """"Shivi and Rahul" -> ["Shivi", "Rahul"] — only splits on a bare
+    " and " (never inside a date range, which never reaches this
+    function — it only ever receives an already-isolated name span).
+    Each part also has a trailing possessive stripped, since a caller's
+    capture regex can end up including it ("Rahul's" whole, when the
+    optional "'s" group it expected to consume it separately already had
+    nothing left to match)."""
+    parts = [_strip_possessive(p.strip()) for p in re.split(r"\s+and\s+", candidate) if p.strip()]
+    candidate = _strip_possessive(candidate.strip())
+    return [p for p in parts if _is_plausible_name(p)] or ([candidate] if _is_plausible_name(candidate) else [])
+
+
+_TRAILING_LOCATION_RE = re.compile(r"\bin\s+([A-Za-z][\w\s]*)$", re.IGNORECASE)
+
+
+def _split_trial_value(raw: str) -> Tuple[str, str]:
+    """"25 August at 3 PM in Andheri" -> ("25 August at 3 PM", "Andheri").
+    Location is introduced by a trailing "in X" (time uses "at", so the
+    two don't collide)."""
+    loc_m = _TRAILING_LOCATION_RE.search(raw)
+    if loc_m:
+        return raw[:loc_m.start()].strip(), loc_m.group(1).strip()
+    return raw, ""
+
+
+_NUMERIC_RE = re.compile(r"[\d,]+(?:\.\d+)?")
+
+
+def _extract_numeric(raw: str) -> Optional[float]:
+    m = _NUMERIC_RE.search(raw or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+# --- Talent-scope disambiguation. Most talent-field keywords are UNIQUE
+# to talents (a project has no "costume trial"/"fitting"/"look test"/
+# "grooming"/"special instructions" concept at all) — a clause containing
+# any of these is unambiguously talent-scoped regardless of HOW the
+# subject is phrased (possessive, "mark X", or a bare leading name).
+# Only a handful of field KEYS exist at both levels (shoot_status,
+# shooting_days, and the rate-per-day shape below) — those default to
+# talent scope only when the clause also carries a possessive "'s" or a
+# "mark" opener; otherwise project (the more common bare phrasing).
+_TALENT_UNIQUE_FIELDS = {
+    "costume_trial_at", "fitting_status", "look_test_status",
+    "grooming_requirements", "special_instructions",
+}
+_TALENT_SIGNAL_RE = re.compile(r"'s\b|^\s*mark\b", re.IGNORECASE)
+
+# Structural "<Name> is <number> per day (for <N> days)?" shape — a value-
+# THEN-unit sentence order the generic keyword->value slicer (built for
+# keyword-THEN-value phrasing) can't parse directly. Generalises the
+# WHOLE pattern shape, not any one example's numbers.
+_TALENT_RATE_RE = re.compile(
+    r"^([A-Za-z][\w'.]*)\s+is\s+([\d,]+(?:\.\d+)?)\s*(?:per\s*day|/\s*day|a\s*day)\b(?:\s+for\s+(\d+)\s*days?)?",
+    re.IGNORECASE,
+)
+_PROJECT_RATE_RE = re.compile(
+    r"^(.*?)\bproduction\s+budget\s+is\s+([\d,]+(?:\.\d+)?)\s*(?:per\s*day|/\s*day|a\s*day)\b(?:\s+for\s+(\d+)\s*days?)?",
+    re.IGNORECASE,
+)
+
+# "Follow up WITH <project> on <date>" — "with" introduces the subject,
+# so it can't also be part of the field keyword (see next_follow_up_at's
+# phrase list above); handled as its own structural pattern instead.
+_FOLLOW_UP_WITH_RE = re.compile(r"\bfollow[\s-]?up\s+with\s+(.+?)\s+on\s+(.+)$", re.IGNORECASE)
+
+# "Rahul's is 5 PM" — bare subject + "is" + value, no field keyword of
+# its own (elided — see the carry-over comment in _parse_smart_message).
+_BARE_SUBJECT_IS_RE = re.compile(r"^([A-Za-z][\w'.]*)(?:'s)?\s+is\s+(.+)$", re.IGNORECASE)
+
+
+def _classify_and_parse_clause(clause: str) -> Optional[dict]:
+    """One clause -> {"scope": "project"|"talent", "subjects": [...],
+    "fields": {field_key: raw_value}} or None if nothing recognisable."""
+    fu_m = _FOLLOW_UP_WITH_RE.search(clause)
+    if fu_m:
+        subject = _trim_trailing_stopwords(fu_m.group(1).strip())
+        if _is_plausible_name(subject):
+            return {"scope": "project", "subjects": [subject], "fields": {"next_follow_up_at": fu_m.group(2).strip()}}
+
+    rate_m = _TALENT_RATE_RE.match(clause)
+    if rate_m and _is_plausible_name(rate_m.group(1)):
+        names = _split_multi_names(rate_m.group(1))
+        if names:
+            fields = {"budget_per_day": rate_m.group(2)}
+            if rate_m.group(3):
+                fields["shooting_days"] = rate_m.group(3)
+            return {"scope": "talent", "subjects": names, "fields": fields}
+
+    prate_m = _PROJECT_RATE_RE.match(clause)
+    if prate_m:
+        subject = _trim_trailing_stopwords(prate_m.group(1).strip())
+        subject = subject if _is_plausible_name(subject) else ""
+        fields = {"production_budget_per_day": prate_m.group(2)}
+        if prate_m.group(3):
+            fields["shooting_days"] = prate_m.group(3)
+        return {"scope": "project", "subjects": [subject] if subject else [], "fields": fields}
+
+    talent_matches = _find_field_matches(clause, _TALENT_FIELD_PHRASES)
+    project_matches = _find_field_matches(clause, _PROJECT_FIELD_PHRASES)
+    has_talent_unique = any(k in _TALENT_UNIQUE_FIELDS for _, _, k, _fv in talent_matches)
+    has_talent_signal = bool(_TALENT_SIGNAL_RE.search(clause))
+
+    if talent_matches and (has_talent_unique or (has_talent_signal and not project_matches)):
+        subject, remainder = _extract_subject_from_clause(clause, talent_matches[0][0])
+        names = _split_multi_names(subject) if subject else []
+        matches2 = _find_field_matches(remainder, _TALENT_FIELD_PHRASES)
+        values = _slice_field_values(remainder, matches2)
+        if values and names:
+            return {"scope": "talent", "subjects": names, "fields": values}
+
+    if project_matches:
+        subject, remainder = _extract_subject_from_clause(clause, project_matches[0][0])
+        matches2 = _find_field_matches(remainder, _PROJECT_FIELD_PHRASES)
+        values = _slice_field_values(remainder, matches2)
+        if values:
+            return {"scope": "project", "subjects": [subject] if subject else [], "fields": values}
+    return None
+
+
+# --- Task extraction — multiple "task ... to ..." mentions in one message
+_TASK_OPENER_RE = re.compile(r"\b(?:add\s+(?:a\s+|another\s+)?tasks?|another\s+task|tasks?)\s+(?:to|for)\b", re.IGNORECASE)
+
+
+def _extract_one_task(body: str) -> Optional[Dict[str, str]]:
+    body = body.strip().rstrip(",. ").lstrip(",. ")
+    if not body:
+        return None
+    hint = ""
+    for_to_m = re.match(r"^([A-Za-z][\w'.]*(?:\s+[A-Za-z][\w'.]*){0,3})\s+to\s+(.+)$", body, re.IGNORECASE)
+    if for_to_m and _is_plausible_name(for_to_m.group(1)):
+        hint = for_to_m.group(1).strip()
+        body = for_to_m.group(2).strip()
+    remaining, due_at = _strip_date_phrase(body)
+    # _clean_extracted_text (generic — used for every captured span, not
+    # just task titles) collapses the doubled space left where a date
+    # word was removed, and strips a dangling trailing conjunction a
+    # boundary can leave behind.
+    title = _clean_extracted_text(remaining) or _clean_extracted_text(body)
+    return {"title": title, "due_at": due_at or "", "hint": hint} if title else None
+
+
+def _extract_tasks_from_text(text: str) -> List[Dict[str, str]]:
+    openers = list(_TASK_OPENER_RE.finditer(text or ""))
+    tasks = []
+    for i, m in enumerate(openers):
+        end = openers[i + 1].start() if i + 1 < len(openers) else len(text)
+        body = text[m.end():end].strip()
+        if not body:
+            continue
+        # One opener ("add TASKS to ...") can introduce a comma/and-
+        # separated LIST of distinct tasks ("get the call sheet
+        # tomorrow, confirm Shivi's costume trial Monday, and follow up
+        # payment Tuesday") — reuses the SAME clause-splitting machinery
+        # (date-range and name-list protection included) rather than a
+        # second, bespoke list parser.
+        for item in _split_into_clauses(body):
+            task = _extract_one_task(item)
+            if task:
+                tasks.append(task)
+    return tasks
+
+
+def _parse_smart_message(text: str) -> dict:
+    """Top-level entry: splits a free-text message into project field
+    updates, talent field updates (grouped per subject, subject carried
+    forward across clauses that don't repeat it — "Google AI shoot is
+    26 and 27 August, call time 7:30 AM..." only names Google AI once),
+    and task creations. Deterministic regex/keyword matching throughout."""
+    text = text or ""
+    m0 = _TASK_OPENER_RE.search(text)
+    field_text = text[:m0.start()] if m0 else text
+    tasks_raw = _extract_tasks_from_text(text[m0.start():]) if m0 else []
+
+    clauses = _split_into_clauses(field_text)
+    project_updates: Dict[str, Dict[str, str]] = {}
+    talent_updates: List[Tuple[Tuple[str, ...], Dict[str, str]]] = []
+    current_project = ""
+    current_talents: Tuple[str, ...] = ()
+    last_talent_field: Optional[str] = None
+
+    for clause in clauses:
+        parsed = _classify_and_parse_clause(clause)
+        if not parsed:
+            # Elliptical follow-on clause — "Shivi's trial is 3 PM and
+            # RAHUL'S IS 5 PM" elides the field name the second time
+            # ("trial" isn't repeated); reuse whichever single field the
+            # immediately preceding talent clause set, generic carry-
+            # over rather than a rule about "trial" specifically.
+            bare_m = _BARE_SUBJECT_IS_RE.match(clause)
+            if bare_m and last_talent_field and _is_plausible_name(bare_m.group(1)):
+                names = _split_multi_names(bare_m.group(1))
+                value = _clean_extracted_text(bare_m.group(2))
+                if names and value:
+                    current_talents = tuple(names)
+                    talent_updates.append((current_talents, {last_talent_field: value}))
+            continue
+        if parsed["scope"] == "talent":
+            if parsed["subjects"]:
+                current_talents = tuple(parsed["subjects"])
+            if current_talents:
+                talent_updates.append((current_talents, parsed["fields"]))
+            last_talent_field = next(iter(parsed["fields"])) if len(parsed["fields"]) == 1 else None
+        else:
+            if parsed["subjects"] and parsed["subjects"][0]:
+                current_project = parsed["subjects"][0]
+            # Store even when current_project is still "" (no subject
+            # named anywhere in THIS message yet, e.g. a bare "Set the
+            # call time to 7:30 AM." context follow-up) — _resolve_project
+            # ("", ctx) already falls back to session_context's
+            # last-discussed project; dropping the update here instead
+            # would silently lose a legitimate contextual command.
+            project_updates.setdefault(current_project, {}).update(parsed["fields"])
+
+    return {"project_updates": project_updates, "talent_updates": talent_updates, "tasks": tasks_raw}
+
+
+# --- Value normalization + resolution — turns the parser's RAW string
+# plan into a fully-resolved plan (real project/talent ids, real CRM
+# contact ids, typed values matching production_desk.py's own Pydantic
+# models) ready to confirm and apply. -----------------------------------
+_PROJECT_FIELD_NORMALIZERS: Dict[str, Any] = {
+    "shoot_status": lambda v: _normalize_status_value("shoot_status", v),
+    "payment_followup_status": lambda v: _normalize_status_value("payment_followup_status", v),
+    "production_budget_per_day": _extract_numeric,
+    "production_budget_total": _extract_numeric,
+    "shooting_days": lambda v: (int(n) if (n := _extract_numeric(v)) is not None else None),
+    "expected_payment_date": _parse_absolute_datetime,
+    "next_follow_up_at": _parse_absolute_datetime,
+    "confirmation_mail_received": lambda v: True,
+    "invoice_raised": lambda v: True,
+    "invoice_sent": lambda v: True,
+    "payment_in_received": lambda v: True,
+    "gst_component_received": lambda v: True,
+}
+_TALENT_FIELD_NORMALIZERS: Dict[str, Any] = {
+    "fitting_status": lambda v: _normalize_status_value("fitting_status", v),
+    "look_test_status": lambda v: _normalize_status_value("look_test_status", v),
+    "shoot_status": lambda v: _normalize_status_value("shoot_status", v),
+    "budget_per_day": _extract_numeric,
+    "budget_total": _extract_numeric,
+    "commission_percent": _extract_numeric,
+    "shooting_days": lambda v: (int(n) if (n := _extract_numeric(v)) is not None else None),
+}
+_PROJECT_FIELD_LABELS = {
+    "shoot_dates": "Shoot dates", "call_time": "Call time", "reporting_time": "Reporting time",
+    "shoot_location": "Location", "shoot_status": "Shoot status", "shoot_notes": "Notes",
+    "payment_terms": "Payment terms", "expected_payment_date": "Expected payment date",
+    "next_follow_up_at": "Next follow-up", "payment_followup_notes": "Follow-up notes",
+    "payment_followup_status": "Payment follow-up status",
+    "production_budget_per_day": "Production budget/day", "production_budget_total": "Production budget",
+    "shooting_days": "Shooting days", "confirmation_mail_received": "Confirmation mail received",
+    "invoice_raised": "Invoice raised", "invoice_sent": "Invoice sent",
+    "payment_in_received": "Client payment received", "gst_component_received": "GST component received",
+    "production_contact_client_id": "Production contact",
+}
+_TALENT_FIELD_LABELS = {
+    "costume_trial_at": "Costume trial", "costume_trial_location": "Trial location",
+    "fitting_status": "Fitting", "look_test_status": "Look test",
+    "grooming_requirements": "Grooming", "special_instructions": "Special instructions",
+    "shoot_status": "Shoot status", "budget_per_day": "Budget/day", "budget_total": "Budget total",
+    "shooting_days": "Shoot days", "commission_percent": "Commission %",
+}
+_DATE_VALUE_FIELDS = {"expected_payment_date", "next_follow_up_at", "costume_trial_at"}
+
+
+async def _resolve_or_create_crm_contact(name: str) -> dict:
+    """Same lookup-or-create the crm-agent's own executor and ADD_INTENT's
+    crew flow use — an existing contact is reused, never duplicated."""
+    existing = await db.clients.find_one(
+        {"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}, "deleted": {"$ne": True}}
+    )
+    if existing:
+        return {"id": str(existing["_id"]), "name": existing["name"]}
+    doc = await insert_client_doc(name=name, contact_type=None, source=f"whatsapp_agent:{AGENT_ID}")
+    return {"id": doc["id"], "name": doc["name"]}
+
+
+def _display_value(key: str, value: Any) -> str:
+    if value is True:
+        return "Yes"
+    if key in _DATE_VALUE_FIELDS:
+        return _format_due(value)
+    return str(value)
+
+
+async def _resolve_smart_plan(text: str, ctx: ExecContext) -> dict:
+    """Turns _parse_smart_message's raw string plan into a fully-resolved
+    one: real project/talent ids (via the SAME fuzzy resolvers every
+    other intent in this file uses — never a second lookup system),
+    typed/normalised values, and a human-readable display line per
+    change. Non-fatal per-item failures (an unresolvable project/talent
+    name) are collected in "errors" rather than aborting the whole
+    message — a message with 5 valid changes and 1 typo still applies
+    the 5."""
+    raw_plan = _parse_smart_message(text)
+    resolved: Dict[str, Any] = {"projects": [], "talents": [], "tasks": [], "errors": []}
+
+    for label_hint, fields in raw_plan["project_updates"].items():
+        resolution = await _resolve_project(label_hint, ctx)
+        if resolution.ambiguous:
+            resolved["errors"].append(_ambiguous_project_message(resolution.ambiguous))
+            continue
+        if resolution.error:
+            resolved["errors"].append(resolution.error)
+            continue
+        project = resolution.project
+        applied_fields: Dict[str, Any] = {}
+        display: List[str] = []
+        for key, raw_value in fields.items():
+            if key == "production_contact_client_id":
+                client = await _resolve_or_create_crm_contact(raw_value)
+                applied_fields[key] = client["id"]
+                display.append(f"Production contact → {client['name']}")
+                continue
+            norm = _PROJECT_FIELD_NORMALIZERS.get(key)
+            value = norm(raw_value) if norm else raw_value
+            if value is None:
+                continue
+            applied_fields[key] = value
+            display.append(f"{_PROJECT_FIELD_LABELS.get(key, key)} → {_display_value(key, value)}")
+        if applied_fields:
+            resolved["projects"].append({
+                "project_id": project["id"], "label": project["label"],
+                "fields": applied_fields, "display": display,
+            })
+
+    for names, fields in raw_plan["talent_updates"]:
+        for name in names:
+            match, project_hit, others = await _find_talent_across_projects(name)
+            if not match:
+                if others:
+                    resolved["errors"].append(f'Found "{name}" locked on more than one project: {", ".join(others)}.')
+                else:
+                    resolved["errors"].append(f'Couldn\'t find a locked talent matching "{name}".')
+                continue
+            applied_fields = {}
+            display = []
+            for key, raw_value in dict(fields).items():
+                if key == "costume_trial_at":
+                    date_part, location = _split_trial_value(raw_value)
+                    dt = _parse_absolute_datetime(date_part)
+                    if dt:
+                        applied_fields["costume_trial_at"] = dt
+                        display.append(f"Costume trial → {_format_due(dt)}")
+                    if location:
+                        applied_fields["costume_trial_location"] = location
+                        display.append(f"Trial location → {location}")
+                    continue
+                norm = _TALENT_FIELD_NORMALIZERS.get(key)
+                value = norm(raw_value) if norm else raw_value
+                if value is None:
+                    continue
+                applied_fields[key] = value
+                display.append(f"{_TALENT_FIELD_LABELS.get(key, key)} → {_display_value(key, value)}")
+            if applied_fields:
+                resolved["talents"].append({
+                    "project_id": project_hit["id"], "project_label": project_hit["label"],
+                    "talent_id": match["talent_id"], "label": match["name"],
+                    "fields": applied_fields, "display": display,
+                })
+
+    for t in raw_plan["tasks"]:
+        project = None
+        task_talent_id = None
+        task_talent_label = ""
+        if t["hint"]:
+            match, project_hit, _others = await _find_talent_across_projects(t["hint"])
+            if match:
+                project = project_hit
+                task_talent_id = match["talent_id"]
+                task_talent_label = match["name"]
+            else:
+                hint_resolution = await _resolve_project(t["hint"], ctx)
+                project = hint_resolution.project
+        if not project and resolved["projects"]:
+            # Prefer a project already mentioned EARLIER IN THIS SAME
+            # MESSAGE over stale session history — "Google AI shoot is
+            # ... Add a task to get the call sheet tomorrow" must tie
+            # the task to Google AI without needing a repeated "for
+            # Google AI" hint, and without waiting for a future turn's
+            # session-remember to catch up.
+            last_proj = resolved["projects"][-1]
+            project = {"id": last_proj["project_id"], "label": last_proj["label"]}
+        if not project and resolved["talents"]:
+            last_tal = resolved["talents"][-1]
+            project = {"id": last_tal["project_id"], "label": last_tal["project_label"]}
+        if not project:
+            session = await session_context.get_session(AGENT_ID, ctx.sender_phone)
+            last_id = (session or {}).get("last_project_id")
+            if last_id:
+                project = {"id": last_id, "label": (session or {}).get("last_project_label") or ""}
+        due_txt = f" — due {_format_due(t['due_at'])}" if t["due_at"] else ""
+        who_txt = f" ({task_talent_label})" if task_talent_label else ""
+        resolved["tasks"].append({
+            "title": t["title"], "due_at": t["due_at"] or None,
+            "project_id": project["id"] if project else None,
+            "project_label": project["label"] if project else "",
+            "talent_id": task_talent_id,
+            "display": f"{t['title']}{who_txt}{due_txt}",
+        })
+
+    return resolved
+
+
+async def _smart_update_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    raw = collected.get("raw_text", "")
+    plan = await _resolve_smart_plan(raw, ctx)
+    total_items = len(plan["projects"]) + len(plan["talents"]) + len(plan["tasks"])
+    if total_items == 0:
+        if plan["errors"]:
+            return ExecResult(ok=False, message=plan["errors"][0])
+        # Only reachable via an EXPLICIT trigger match ("Set ..." with
+        # nothing parseable after it) — resolve_bare_reply never hands
+        # this intent a message unless the parser already found
+        # something, so a genuinely unrelated message never reaches
+        # here at all (it's silently ignored upstream, same as before).
+        return ExecResult(ok=False, message="I couldn't tell what to update from that — try naming the field and project, e.g. \"Set call time for Google AI to 7:30 AM.\"")
+    # Remember whichever project was touched, for a natural context
+    # follow-up next turn ("Set the call time to 7:30." after asking
+    # about Google AI).
+    if plan["projects"]:
+        await _remember_project(ctx, {"id": plan["projects"][0]["project_id"], "label": plan["projects"][0]["label"]})
+    elif plan["talents"]:
+        await _remember_project(ctx, {"id": plan["talents"][0]["project_id"], "label": plan["talents"][0]["project_label"]})
+    collected["_plan"] = json.dumps(plan)
+    return None  # proceed to the normal confirm/edit/cancel card
+
+
+async def _smart_update_build_confirmation(collected: dict, ctx: ExecContext) -> str:
+    plan = json.loads(collected.get("_plan") or "{}")
+    lines: List[str] = []
+    n = 0
+    for p in plan.get("projects", []):
+        lines.append(f"{p['label']}:")
+        for d in p["display"]:
+            n += 1
+            lines.append(f"  {n}. {d}")
+    for t in plan.get("talents", []):
+        lines.append(f"{t['label']} ({t['project_label']}):")
+        for d in t["display"]:
+            n += 1
+            lines.append(f"  {n}. {d}")
+    if plan.get("tasks"):
+        lines.append("Tasks:")
+        for t in plan["tasks"]:
+            n += 1
+            proj_txt = f" for {t['project_label']}" if t.get("project_label") else ""
+            lines.append(f"  {n}. {t['display']}{proj_txt}")
+
+    header = f"I found {n} change{'s' if n != 1 else ''}:\n\n"
+    body = "\n".join(lines)
+    errs = plan.get("errors") or []
+    err_txt = ("\n\n⚠ Couldn't understand:\n" + "\n".join(f"  • {e}" for e in errs)) if errs else ""
+    return header + body + err_txt + "\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
+
+
+async def _smart_update_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    from routers import workflow as workflow_router
+
+    plan = json.loads(collected.get("_plan") or "{}")
+    applied: List[str] = []
+    failed: List[str] = []
+
+    for p in plan.get("projects", []):
+        try:
+            await pd.update_production_desk_project(p["project_id"], pd.ProductionDeskProjectPatch(**p["fields"]), _AGENT_ADMIN)
+            applied.append(f"✓ {p['label']}: {', '.join(p['display'])}")
+        except (HTTPException, ValueError) as e:
+            failed.append(f"{p['label']}: {getattr(e, 'detail', e)}")
+
+    for t in plan.get("talents", []):
+        try:
+            await pd.update_locked_talent_production(t["project_id"], t["talent_id"], pd.TalentProductionPatch(**t["fields"]), _AGENT_ADMIN)
+            applied.append(f"✓ {t['label']}: {', '.join(t['display'])}")
+        except (HTTPException, ValueError) as e:
+            failed.append(f"{t['label']}: {getattr(e, 'detail', e)}")
+
+    for tk in plan.get("tasks", []):
+        try:
+            payload = workflow_router.TaskIn(
+                title=tk["title"],
+                category="project" if tk.get("project_id") else "general",
+                project_id=tk.get("project_id"),
+                project_name=tk.get("project_label") or "",
+                talent_id=tk.get("talent_id"),
+                due_at=tk.get("due_at"),
+                priority="normal",
+            )
+            await workflow_router.create_task(payload, {"id": _AGENT_ADMIN["id"], "role": "admin"})
+            applied.append(f"✓ Task: {tk['title']}")
+        except Exception as e:  # noqa: BLE001 — best-effort per-item, never abort the batch
+            failed.append(f"Task '{tk['title']}': {e}")
+
+    lines: List[str] = []
+    if applied:
+        lines.extend(applied)
+    if failed:
+        lines.append("⚠ Some items failed:")
+        lines.extend(f"  • {f}" for f in failed)
+    if not lines:
+        lines = ["Nothing was applied."]
+    return ExecResult(ok=bool(applied), message="\n".join(lines))
+
+
+SMART_UPDATE_INTENT = IntentDefinition(
+    intent_id="management.smart_update",
+    # A handful of explicit imperative openers ("Set the shoot date...")
+    # for messages that DO start with a fixed word; every other shape
+    # ("Google AI shoot is...", "shivi costume trial tomorrow...",
+    # "invoice sent for google ai") is reached via resolve_bare_reply
+    # below (the platform's own "no trigger matched, give the agent one
+    # more try" hook — not a second dispatch mechanism).
+    triggers=["set", "update", "please update", "please set", "can you set", "can you update", "need to set", "just note that", "note that", "save this", "put this in the project"],
+    fields=[FieldSpec(key="raw_text", label="Update", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False)],
+    extract_fields=lambda text: {"raw_text": text},
+    try_auto_execute=_smart_update_try_auto_execute,
+    build_confirmation=_smart_update_build_confirmation,
+    executor=_smart_update_executor,
+)
+
+
+async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[IntentDefinition, Dict[str, str]]]:
+    """The platform's existing "no trigger matched this turn, no active
+    conversation — give the agent one last chance" hook (agents/models.py
+    docstring). Runs the SAME smart parser a triggered "set..." message
+    would use; only claims the message when it actually found something
+    recognisable, so unrelated chatter in the group still falls through
+    to being silently ignored exactly as before."""
+    plan = _parse_smart_message(text)
+    if plan["project_updates"] or plan["talent_updates"] or plan["tasks"]:
+        return SMART_UPDATE_INTENT, {"raw_text": text}
+    return None
+
+
 HELP_TEXT = (
     "TALENTGRAM MANAGEMENT AGENT\n"
     "QUICK MANUAL\n\n"
@@ -1330,7 +2279,13 @@ MANAGEMENT_AGENT = AgentDefinition(
         MARK_TALENT_STATUS_INTENT,
         ADD_INTENT,
         ADD_TASK_INTENT,
+        SMART_UPDATE_INTENT,
     ],
+    # The natural-language multi-field/multi-action engine (Part 15-20 of
+    # the NLU pass) — most such messages don't start with any fixed
+    # trigger word ("Google AI shoot is...", "invoice sent for google
+    # ai"), so they're only ever reached here, not via detect_trigger.
+    resolve_bare_reply=_resolve_bare_reply,
     help_text=HELP_TEXT,
 )
 

@@ -584,6 +584,13 @@ class ProductionDeskProjectPatch(BaseModel):
     # Shoot Management (Phase 2)
     reporting_time: Optional[str] = None
     shoot_status: Optional[str] = None
+    # Reuses the PRE-EXISTING project.shoot_dates field (shown elsewhere —
+    # submission forms, the public client link — as free text like
+    # "24th - 30th August (ANY ONE DAY)") rather than adding a second,
+    # pd_-prefixed shoot-date field. Was read-only in Production Desk
+    # before Phase 3 (Management Agent NLU pass) added a write path here
+    # (and a matching inline-edit in the UI) for read/write parity.
+    shoot_dates: Optional[str] = None
     # Payment Follow-up Management (Phase 2) — operational tracking only,
     # not a Finance record. See module docstring.
     payment_terms: Optional[str] = None
@@ -625,6 +632,9 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         "next_follow_up_at": "pd_next_follow_up_at",
         "payment_followup_status": "pd_payment_followup_status",
         "payment_followup_notes": "pd_payment_followup_notes",
+        # Identity mapping — the existing project.shoot_dates field, not a
+        # new pd_* field. See ProductionDeskProjectPatch.shoot_dates above.
+        "shoot_dates": "shoot_dates",
     }
     updates = {field_map[k]: v for k, v in payload.model_dump(exclude_unset=True).items()}
     if updates:

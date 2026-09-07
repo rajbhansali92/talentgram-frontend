@@ -1064,6 +1064,39 @@ async def _status_query_executor(collected: dict, ctx: ExecContext) -> ExecResul
     if _NEEDS_ATTENTION_RE.search(raw) and not _extract_trailing_project(raw):
         return ExecResult(ok=True, message=await _global_needs_attention())
 
+    # "What is pending for Shivi?" — Phase I's own example phrasing for
+    # talent readiness. Checked BEFORE the ordinary project-scoped "for X"
+    # extraction below: "pending for X" is ALSO the pre-existing project-
+    # digest phrasing ("What's pending for Google AI?"), and when a
+    # talent's own name happens to be fuzzy-similar to a real project's
+    # name (e.g. a project "…PROD" and its talent "…TAL_PROD" — exactly
+    # the disposable test-data naming this phase's own production E2E
+    # uses), _resolve_project's fuzzy matcher can resolve the TALENT name
+    # as if it were that PROJECT, so a "project resolution definitively
+    # failed" fallback never even runs (found live in production E2E
+    # testing). Try talent resolution FIRST here instead, and only fall
+    # through to the untouched project-scoped path below when no locked
+    # talent actually matches — "What's pending for Google AI?" keeps
+    # resolving as a project exactly as before whenever no talent by
+    # that name exists.
+    pf_m = _TALENT_PENDING_FOR_RE.match(raw.strip())
+    if pf_m:
+        pf_name = pf_m.group(1).strip().strip('"\'')
+        if pf_name.lower().endswith("'s"):
+            pf_name = pf_name[:-2].strip()
+        if _is_plausible_name(pf_name):
+            pf_talent, pf_project, pf_others = await _find_talent_across_projects(pf_name)
+            if pf_talent and pf_project:
+                await _remember_project(ctx, pf_project)
+                proj_doc = await db.projects.find_one({"id": pf_project["id"]}, {"_id": 0, "pd_call_time": 1, "pd_reporting_time": 1})
+                call_time = (proj_doc or {}).get("pd_call_time")
+                reporting_time = (proj_doc or {}).get("pd_reporting_time")
+                return ExecResult(ok=True, message=_render_talent_reply(pf_talent, pf_project["label"], "readiness", call_time, reporting_time))
+            if pf_others:
+                return ExecResult(ok=False, message=f'Found "{pf_name}" locked on more than one project: {", ".join(pf_others)}. Please specify which one.')
+            # No locked talent by that name — fall through, treating it as
+            # the existing "pending for <project>" phrasing instead.
+
     # "What is the kickback for Rahul?" — checked first since "kickback"
     # is a specific, unambiguous keyword that can't collide with any
     # other query shape below.

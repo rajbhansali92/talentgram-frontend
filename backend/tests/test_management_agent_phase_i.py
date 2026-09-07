@@ -642,3 +642,28 @@ async def test_34e_pending_for_project_still_project_digest_not_talent_search(ag
         assert "Status:" in r2.reply
     finally:
         await _cleanup(pid, [tname])
+
+
+@_aio
+async def test_34f_pending_for_talent_wins_over_fuzzy_similar_project_name(agents_ready):
+    """Regression for a second, sharper form of the same bug: when the
+    TALENT's own name is fuzzy-similar enough to a real project's name
+    that _resolve_project's fuzzy matcher resolves it AS that project
+    (e.g. project "..._PROD" and its talent "..._TAL_PROD" — exactly the
+    disposable naming this phase's own production E2E is required to
+    use), project resolution never "definitively fails", so a fallback
+    gated on that failure never runs. "What is pending for X?" must still
+    render X's talent readiness, not the project's digest."""
+    tag = uuid.uuid4().hex[:6]
+    pid, label = await _make_project(brand_name=f"ZZZ_TEST_PHASE_I_PROD_{tag}")
+    tid, tname = await _make_locked_talent(pid, **{"pd_shoot_status": "scheduled", "pd_fitting_status": "pending"})
+    await db.talents.update_one({"id": tid}, {"$set": {"name": f"ZZZ_TEST_PHASE_I_TAL_PROD_{tag}"}})
+    tname = f"ZZZ_TEST_PHASE_I_TAL_PROD_{tag}"
+    try:
+        r = await _send(f"What is pending for {tname}?")
+        assert r.handled
+        assert tname in r.reply
+        assert "Status:" in r.reply
+        assert "Locked talents:" not in r.reply
+    finally:
+        await _cleanup(pid, [tname])

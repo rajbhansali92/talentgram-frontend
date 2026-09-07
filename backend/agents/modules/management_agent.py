@@ -430,11 +430,16 @@ def _parse_due_date(word: str) -> Optional[str]:
     return None
 
 
+_TIME_OF_DAY_WORD_RE = re.compile(r"\s*\b(?:morning|afternoon|evening|night)\b", re.IGNORECASE)
+
+
 def _strip_date_phrase(text: str) -> Tuple[str, Optional[str]]:
     """Finds the LAST date word in the text (matching how these commands
     are phrased — "...to get the call sheet tomorrow", "...on Monday"),
     parses it, and returns the text with that phrase (plus a leading "on"
-    if present) removed. (remaining_text, due_at_or_None)."""
+    if present, and a trailing time-of-day word if present — "tomorrow
+    morning" is one date phrase, not "tomorrow" + a dangling "morning" in
+    the title) removed. (remaining_text, due_at_or_None)."""
     matches = list(_DATE_WORD_RE.finditer(text or ""))
     if not matches:
         return (text or "").strip(), None
@@ -446,7 +451,11 @@ def _strip_date_phrase(text: str) -> Tuple[str, Optional[str]]:
     on_m = re.search(r"\bon\s*$", prefix, re.IGNORECASE)
     if on_m:
         start = on_m.start()
-    remaining = (text[:start] + text[m.end():]).strip().rstrip(".").strip()
+    tail = text[m.end():]
+    tod_m = _TIME_OF_DAY_WORD_RE.match(tail)
+    if tod_m:
+        tail = tail[tod_m.end():]
+    remaining = (text[:start] + tail).strip().rstrip(".").strip()
     return remaining, due_at
 
 
@@ -716,7 +725,7 @@ def _render_talent_reply(talent: dict, project_label: str, topic: Optional[str])
 
 
 _GLOBAL_DIGEST_RE = re.compile(
-    r"(?:happening|payment follow-?ups?(?:\s+are|\s+due)?|due)\s*.*?\b(today|tomorrow)\b",
+    r"(?:happening|payment follow-?ups?(?:\s+are|\s+due)?|due|reminders?)\s*.*?\b(today|tomorrow)\b",
     re.IGNORECASE,
 )
 
@@ -792,6 +801,10 @@ STATUS_QUERY_INTENT = IntentDefinition(
         "has the", "has invoice", "status", "pending for",
         "when is", "when's", "what's happening", "whats happening",
         "what payment", "payment follow-up", "payment followups", "payment follow-ups",
+        # Phase G (Production Reminders) — "what's due"/"what reminders"
+        # are the natural phrasing for reading the same due-today/
+        # due-tomorrow digest the reminder worker itself acts on.
+        "what's due", "whats due", "what is due", "what reminders", "reminders",
     ],
     fields=[FieldSpec(key="raw_text", label="Query", question="", validate=lambda v: ValidationResult(ok=True, value=v), required=False)],
     # Deliberately trivial extract_fields: the whole raw message IS the
@@ -1814,7 +1827,15 @@ def _classify_and_parse_clause(clause: str) -> Optional[dict]:
 
 
 # --- Task extraction — multiple "task ... to ..." mentions in one message
-_TASK_OPENER_RE = re.compile(r"\b(?:add\s+(?:a\s+|another\s+)?tasks?|another\s+task|tasks?)\s+(?:to|for)\b", re.IGNORECASE)
+_TASK_OPENER_RE = re.compile(
+    r"\b(?:add\s+(?:a\s+|another\s+)?tasks?|another\s+task|tasks?)\s+(?:to|for)\b"
+    # Phase G — "Remind me about/to X <date>" also creates a task, EXCEPT
+    # when it's really "remind me to follow up with X on Y" (a project
+    # payment-follow-up date, handled separately by _FOLLOW_UP_WITH_RE —
+    # the negative lookahead keeps that phrasing out of task-land).
+    r"|\bremind me (?:about|to)(?!\s+follow[\s-]?up)\b",
+    re.IGNORECASE,
+)
 
 
 def _extract_one_task(body: str) -> Optional[Dict[str, str]]:
@@ -2014,6 +2035,18 @@ async def _resolve_smart_plan(text: str, ctx: ExecContext) -> dict:
                 continue
             applied_fields[key] = value
             display.append(f"{_PROJECT_FIELD_LABELS.get(key, key)} → {_display_value(key, value)}")
+            if key == "shoot_dates":
+                # Phase G — alongside the free-text shoot_dates write
+                # (unchanged), ALSO derive the structured, reminder-only
+                # shoot_date when the value is a single, unambiguous day
+                # ("shoot is tomorrow", "shoot is 26 August") — never for
+                # a range/list ("26 and 27 August"), which stays
+                # deliberately un-derived rather than guessed at.
+                if not _DATE_AND_RE.search(raw_value):
+                    dt = _parse_absolute_datetime(raw_value)
+                    if dt:
+                        applied_fields["shoot_date"] = dt[:10]
+                        display.append(f"Shoot date (reminders) → {dt[:10]}")
         if applied_fields:
             resolved["projects"].append({
                 "project_id": project["id"], "label": project["label"],

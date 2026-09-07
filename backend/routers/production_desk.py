@@ -102,6 +102,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -475,6 +476,10 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             "status": project.get("status"),
             "commission_percent": project.get("commission_percent"),
             "shoot_dates": project.get("shoot_dates"),
+            # Phase G — the structured, reminder-only date (see
+            # ProductionDeskProjectPatch.shoot_date above). Independent of
+            # shoot_dates; None is the normal case for a multi-day/range shoot.
+            "pd_shoot_date": project.get("pd_shoot_date"),
             "medium_usage": project.get("medium_usage"),
             "director": project.get("director"),
             "production_house": project.get("production_house"),
@@ -591,6 +596,19 @@ class ProductionDeskProjectPatch(BaseModel):
     # before Phase 3 (Management Agent NLU pass) added a write path here
     # (and a matching inline-edit in the UI) for read/write parity.
     shoot_dates: Optional[str] = None
+    # Phase G (Production Reminders) — a genuinely NEW, small, additive
+    # field: project.shoot_dates above is deliberately free text (see its
+    # own comment — "24th - 30th August (ANY ONE DAY)" isn't reliably
+    # parseable, and this codebase's convention is never to guess). The
+    # reminder worker needs ONE unambiguous calendar date to compute
+    # "day before" / "morning of" windows, so this is a separate,
+    # explicitly-optional single ISO date (YYYY-MM-DD) that only powers
+    # shoot reminder scheduling — it never overwrites, and is never
+    # derived by guessing at, the free-text shoot_dates display field.
+    # Unset (the common case for a multi-day/range shoot) simply means no
+    # shoot reminder fires for this project — an honest degrade, not a
+    # guess. See services/production_reminder_worker.py.
+    shoot_date: Optional[str] = None
     # Payment Follow-up Management (Phase 2) — operational tracking only,
     # not a Finance record. See module docstring.
     payment_terms: Optional[str] = None
@@ -610,6 +628,11 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
     if payload.payment_followup_status is not None and payload.payment_followup_status not in PAYMENT_FOLLOWUP_STATUSES:
         raise HTTPException(400, f"payment_followup_status must be one of {PAYMENT_FOLLOWUP_STATUSES}")
+    if payload.shoot_date is not None and payload.shoot_date != "":
+        try:
+            date.fromisoformat(payload.shoot_date)
+        except ValueError:
+            raise HTTPException(400, "shoot_date must be an ISO date (YYYY-MM-DD)")
     field_map = {
         "production_budget_per_day": "pd_production_budget_per_day",
         "production_budget_total": "pd_production_budget_total",
@@ -635,8 +658,18 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         # Identity mapping — the existing project.shoot_dates field, not a
         # new pd_* field. See ProductionDeskProjectPatch.shoot_dates above.
         "shoot_dates": "shoot_dates",
+        "shoot_date": "pd_shoot_date",
     }
     updates = {field_map[k]: v for k, v in payload.model_dump(exclude_unset=True).items()}
+    # A shoot_date CHANGE invalidates any previously-sent shoot reminders —
+    # see services/production_reminder_worker.py's idempotency design
+    # (each reminder kind is only "sent for" a specific date value; clearing
+    # these here means a rescheduled date is immediately eligible again,
+    # and the OLD date's reminders can never re-fire since the worker only
+    # ever compares against the CURRENT pd_shoot_date).
+    if "pd_shoot_date" in updates:
+        updates["pd_shoot_reminder_day_before_sent_for"] = None
+        updates["pd_shoot_reminder_morning_of_sent_for"] = None
     if updates:
         updates["updated_at"] = _now()
         await db.projects.update_one({"id": pid}, {"$set": updates})

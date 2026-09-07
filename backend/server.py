@@ -13,6 +13,7 @@ from core import db, mongo_client, seed_admin, update_talent_cover_cache, valida
 from drive_backup import attach_db, drive_enabled, start_drive_worker
 from services.import_worker import start_import_worker
 from services.media_assignment_worker import start_media_assignment_worker
+from services.production_reminder_worker import start_production_reminder_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
 from request_context import generate_request_id, reset_request_id, set_request_id
 from routers import (
@@ -644,6 +645,15 @@ async def on_startup():
         from agents.modules import media_send as _media_send
         await _media_send.ensure_indexes()
         start_media_assignment_worker()
+
+        # Production Reminder Worker (Phase G, 2026-09-07) — see
+        # services/production_reminder_worker.py's module docstring for
+        # the full architecture. Non-fatal: a failure to start it must
+        # never take down the rest of the backend.
+        try:
+            start_production_reminder_worker()
+        except Exception as _e:
+            logger.warning("Production Reminder Worker startup failed (non-fatal): %s", _e)
 
         logger.info("Backend startup completed successfully")
 

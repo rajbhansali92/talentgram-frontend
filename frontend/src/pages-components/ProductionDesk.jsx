@@ -695,6 +695,10 @@ export default function ProductionDesk({ projectId, project }) {
                             <Input defaultValue={p.shoot_dates || ""} placeholder="e.g. 26th - 27th August" className="h-7 text-xs max-w-[220px]" onBlur={(e) => { if (e.target.value !== (p.shoot_dates || "")) patchProject({ shoot_dates: e.target.value }); }} />
                         </div>
                         <div className="flex items-center justify-between gap-2">
+                            <span className="text-black/40 shrink-0" title="A single date used only to schedule shoot reminders — independent of the free-text Shooting Dates above.">Shoot Date (reminders)</span>
+                            <Input type="date" defaultValue={p.pd_shoot_date || ""} className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_shoot_date || "")) patchProject({ shoot_date: e.target.value || null }); }} />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
                             <span className="text-black/40 shrink-0">Call Time</span>
                             <Input defaultValue={p.pd_call_time || ""} placeholder="e.g. 8:00 AM" className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_call_time || "")) patchProject({ call_time: e.target.value }); }} />
                         </div>

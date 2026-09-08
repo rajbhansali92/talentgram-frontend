@@ -1429,7 +1429,12 @@ async def test_send_includes_form_message_on_first_send_and_records_marked_row()
         )
         assert r.handled, r.reply
         assert "SEND FORM PREVIEW" in r.reply, r.reply
-        assert "Ahana FormSend" in r.reply
+        # Talentgram submission-name format (Production fix, 2026-09-08):
+        # the form's own Name: line shows "First L.", not the full name —
+        # computed dynamically since the last token here is the random
+        # test-isolation tag, not "FormSend".
+        expected_display_name = ms._format_talent_submission_name(f"Ahana FormSend {tag}")
+        assert f"Name:\n{expected_display_name}" in r.reply, r.reply
         assert "Google FormSend" in r.reply
         assert "5'6\"" in r.reply
 
@@ -1443,7 +1448,7 @@ async def test_send_includes_form_message_on_first_send_and_records_marked_row()
         req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
         assert req is not None
         assert req["form_message"], req
-        assert "Ahana FormSend" in req["form_message"]
+        assert expected_display_name in req["form_message"]
         assert "Google FormSend" in req["form_message"]
         assert req["submission_id"] == submission_id
         assert req["content_hash"]
@@ -1521,7 +1526,10 @@ def test_build_form_send_message_includes_populated_fields_skips_empty():
     }
     built = ms.build_form_send_message(sub, None, "Ahana Formatting", "Google Format Test")
     message = built["message"]
-    assert "Ahana Formatting" in message
+    # Talentgram submission-name format (Production fix, 2026-09-08):
+    # "First L.", never the talent's full name.
+    assert "Ahana F." in message, message
+    assert "Ahana Formatting" not in message, message
     assert "Google Format Test" in message
     assert "5'6\"" in message
     assert "Mumbai" in message
@@ -1568,6 +1576,123 @@ def test_build_form_send_message_content_hash_changes_when_fields_change():
     built_a = ms.build_form_send_message(sub_a, None, "Ahana Hash", "Google Hash Test")
     built_b = ms.build_form_send_message(sub_b, None, "Ahana Hash", "Google Hash Test")
     assert built_a["content_hash"] != built_b["content_hash"]
+
+
+# ===========================================================================
+# Talentgram submission-name format (Production fix, 2026-09-08) — "First
+# L." (first name + first letter of last name + period), the standard
+# Talentgram submission presentation, never the talent's full canonical
+# name. Applied ONLY at the single presentation boundary
+# (build_form_send_message's own "Name" line) — the underlying talent
+# record, talent_id, and every identity-matching path are untouched.
+# ===========================================================================
+def test_format_talent_submission_name_two_word_name():
+    assert ms._format_talent_submission_name("Manjary Manji") == "Manjary M."
+
+
+def test_format_talent_submission_name_shivi_rajput():
+    assert ms._format_talent_submission_name("Shivi Rajput") == "Shivi R."
+
+
+def test_format_talent_submission_name_sneha_varghese():
+    assert ms._format_talent_submission_name("Sneha Varghese") == "Sneha V."
+
+
+def test_format_talent_submission_name_three_word_name_uses_last_token():
+    assert ms._format_talent_submission_name("Ananya Priya Sharma") == "Ananya S."
+
+
+def test_format_talent_submission_name_single_name_unchanged():
+    """No surname at all — never fabricate an initial."""
+    assert ms._format_talent_submission_name("Madonna") == "Madonna"
+
+
+def test_format_talent_submission_name_extra_whitespace_normalized():
+    assert ms._format_talent_submission_name("  Shivi   Rajput  ") == "Shivi R."
+
+
+def test_format_talent_submission_name_empty_and_none_safe():
+    assert ms._format_talent_submission_name("") == ""
+    assert ms._format_talent_submission_name(None) == ""
+
+
+def test_build_form_send_message_uses_formatted_name_not_full_name():
+    """SEND preview / edit view / approval snapshot / actual outgoing
+    form all funnel through build_form_send_message — this proves the
+    single shared boundary applies the standard format, and the full
+    canonical name never leaks into the outgoing form when a surname
+    exists (Requirement #12)."""
+    sub = {"id": "sub-mj", "form_data": {}, "talent_name": "Manjary Manji", "media": []}
+    built = ms.build_form_send_message(sub, None, "Manjary Manji", "Lava")
+    assert "Name:\nManjary M." in built["message"], built["message"]
+    assert "Manjary Manji" not in built["message"], built["message"]
+
+
+async def test_send_end_to_end_talent_name_formatted_throughout_preview_edit_approval():
+    """Requirement #11's exact end-to-end scenario: canonical talent
+    "Manjary Manji", project "Lava" — SEND FORM PREVIEW, the EDIT view,
+    and the approved snapshot must ALL show "Manjary M." and NEVER
+    "Manjary Manji" anywhere in the submission form content, while
+    internal talent resolution still uses the canonical full name/
+    talent_id (Requirement #4 — proven by the command itself, "send
+    Manjary Manji for Lava", successfully resolving at all)."""
+    tag = uuid.uuid4().hex[:6]
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    # Tag inserted as a MIDDLE token (test-isolation uniqueness, same
+    # need every other test in this file has) so the first/last tokens
+    # stay exactly "Manjary"/"Manji" — the exact master-prompt scenario
+    # — giving the exact expected "Manjary M." regardless of the tag.
+    name = f"Manjary {tag} Manji"
+    project_label = f"Lava {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram")
+    submission_id = await _seed_submission(project_id, talent_id, f"manjary.manji.{tag}@example.com", decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        # 1. SEND FORM PREVIEW — canonical identity resolves correctly
+        # (the command itself uses the FULL canonical name, proving
+        # internal lookup still works on canonical identity), the
+        # form's own Name: field is formatted, and the full canonical
+        # name never appears inside the form content.
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600088",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r1.handled, r1.reply
+        assert "Name:\nManjary M." in r1.reply, r1.reply
+        # The full canonical name legitimately appears in the confirmation
+        # card's own outer "Talent:"/"Source:" context lines (admin-facing
+        # identification, out of this fix's scope) — but never inside the
+        # "Form:" section, which is the actual outgoing submission content.
+        form_section_1 = r1.reply.split("Form:", 1)[1]
+        assert name not in form_section_1, form_section_1
+
+        # 2. EDIT view — still formatted, never the full name.
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600088", text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600088", text="Budget = 45k",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r3.handled, r3.reply
+        assert "Name:\nManjary M." in r3.reply, r3.reply
+        form_section_3 = r3.reply.split("Form:", 1)[1]
+        assert name not in form_section_3, form_section_3
+
+        # 3. Approval — the frozen snapshot must carry the formatted name.
+        approval = await ms.get_send_approval(talent_id, project_id, DESTINATION_GROUP)
+        assert approval is not None, "approval draft must exist after the edit turn"
+        assert "Name:\nManjary M." in approval["message"], approval["message"]
+        assert name not in approval["message"], approval["message"]
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 
 # ---------------------------------------------------------------------------

@@ -648,6 +648,31 @@ def _format_instagram_link(handle: Any) -> str:
     return f"https://instagram.com/{h.lstrip('@')}"
 
 
+def _format_talent_submission_name(name: str) -> str:
+    """Talentgram's standard submission-name presentation format
+    (Production fix, 2026-09-08): "First L." — the first token of the
+    talent's full name, a space, the first letter of the LAST token,
+    and a period. Applied ONLY here, at the single presentation
+    boundary build_form_send_message already is for every SEND form
+    surface (preview, edit view, approval snapshot, and the actual
+    outgoing message all funnel through this one function) — never
+    touches the talent's canonical name in the database, never used for
+    identity/lookup (talent_id/canonical name resolution happens
+    entirely upstream of this, in _resolve_send_target, unaffected).
+
+    A single-token name ("Madonna" — no surname at all) is returned
+    unchanged, never fabricating a surname initial. Deterministic and
+    whitespace-tolerant: `.split()` with no argument collapses any
+    amount of internal whitespace and strips leading/trailing, so
+    "  Shivi   Rajput  " normalizes the same as "Shivi Rajput" before
+    formatting. Never crashes on an empty/missing name."""
+    tokens = (name or "").split()
+    if len(tokens) <= 1:
+        return (name or "").strip()
+    first, last = tokens[0], tokens[-1]
+    return f"{first} {last[0].upper()}."
+
+
 # Canonical override keys an admin's edit can target (Phase 2/4) — every
 # fixed field of the outgoing form except the two identity fields (Project
 # Name / Name), which are resolved from the command itself, not editable
@@ -710,7 +735,7 @@ def build_form_send_message(
         lines.append(f"{label}:\n{value}" if value else f"{label}:")
 
     _add("Project Name", project_label)
-    _add("Name", talent_label)
+    _add("Name", _format_talent_submission_name(talent_label))
     _add("Age", shape.get("age"), "age")
     _add("Height", shape.get("height"), "height")
     _add("Current Location", _format_location(shape.get("location")), "location")

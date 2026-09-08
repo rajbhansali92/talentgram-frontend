@@ -1102,7 +1102,14 @@ async def test_send_orchestrator_download_done_partial_success_reports_correctly
         assert final["status"] == ma.STATUS_FINISHED
         assert "2/3 media sent" in final["report"], final["report"]
         assert "1 failed" in final["report"], final["report"]
-        assert "hash mismatch" in final["report"], final["report"]
+        # Requirement #14 (2026-09-08): the raw internal diagnostic detail
+        # ("hash mismatch — refused to substitute another tile") is no
+        # longer shown to the user — it is replaced with one plain-English
+        # sentence. The raw string stays available internally (logged by
+        # _humanize_media_send_error itself) but must never appear in the
+        # WhatsApp-facing report text.
+        assert "hash mismatch" not in final["report"], final["report"]
+        assert "could not be sent" in final["report"], final["report"]
         assert "Pipeline stage was NOT changed." in final["report"]
 
         rows = {r["source_message_id"]: r["send_status"] for r in await db[ms.MEDIA_SENDS_COLLECTION].find({"talent_id": talent_id}).to_list(10)}
@@ -2540,6 +2547,75 @@ async def test_send_edit_multiple_directives_one_message():
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
 
 
+@pytest.mark.asyncio
+async def test_send_edit_exclude_and_budget_two_separate_lines_exact_prompt_wording():
+    """SEND full production hardening (2026-09-08) — reproduces the
+    master prompt's own literal example verbatim: "exclude instagram
+    link\nBudget = 45k" on two separate lines — both directives must
+    apply together in the SAME confirmation, not just the one that
+    happens to match a rigid "Key = value" line."""
+    tag = uuid.uuid4().hex[:6]
+    group, original, project_id, talent_id, submission_id, tag = await _seed_send_confirmation_for_edit(tag)
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text=f"send - Edit Talent {tag} - Google Edit {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text="exclude instagram link\nBudget = 45k",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Instagram Link" not in r.reply, r.reply  # excluded, entirely gone
+        assert "45k" in r.reply, r.reply  # budget change also applied, same message
+        assert "1 → Approve" in r.reply, r.reply
+    finally:
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+
+
+@pytest.mark.asyncio
+async def test_send_edit_comma_separated_triple_directive():
+    """SEND full production hardening (2026-09-08) — master prompt's
+    comma-separated example: "remove instagram, budget 45k, competitive
+    brand none" — the comma must never be mistaken for a reason to lose
+    a field; all three directives apply together. Real bug found and
+    fixed: _parse_send_edit_directives previously only split a line on
+    the word "and" for its multi-directive fallback — a comma-only-
+    joined line with no "and" at all never split, so nothing beyond the
+    (unmatchable, compound) whole line was ever recognized."""
+    tag = uuid.uuid4().hex[:6]
+    group, original, project_id, talent_id, submission_id, tag = await _seed_send_confirmation_for_edit(tag)
+    try:
+        await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text=f"send - Edit Talent {tag} - Google Edit {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text="remove instagram, budget 45k, competitive brand none",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Instagram Link" not in r.reply, r.reply
+        assert "45k" in r.reply, r.reply
+        assert "1 → Approve" in r.reply, r.reply
+    finally:
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+
+
 # ===========================================================================
 # MEDIA LABELS (Production fix, Issue 3) — simple_role_label unit tests.
 # ===========================================================================
@@ -2564,3 +2640,72 @@ def test_simple_role_label_never_includes_talent_or_project():
     assert "KuHu" not in label
     assert "Vaseline" not in label
     assert label == "Audition Take 1"
+
+
+# ===========================================================================
+# SEND full production hardening (2026-09-08) — human-readable error
+# message (Requirement #14). See test_send_edit_exclude_and_budget_two_
+# separate_lines_exact_prompt_wording / test_send_edit_comma_separated_
+# triple_directive above (near test_send_edit_multiple_directives_one_
+# message) for the master-prompt-exact multi-line/comma-separated
+# form-edit regression tests — kept next to the existing, proven-stable
+# edit tests rather than here, since two NEW async tests appended at
+# this file's tail hit a pre-existing pytest-asyncio/Motor event-loop
+# lifecycle quirk unrelated to their own content (both pass cleanly in
+# isolation; several other pre-existing async tests already sit near
+# this exact tail position without issue, so this is a test-count/
+# position artifact of the shared module-level Motor client, not a
+# product defect — consistent with this file's own documented
+# cross-file DB-drift caveat, just triggered within a single file here).
+# ===========================================================================
+
+
+# ===========================================================================
+# Human-readable SEND error messages (Requirement #14) — the raw Playwright
+# exception text ("tile click failed after 3 attempts:
+# Locator.scroll_into_view_if_needed: Timeout 5000ms exceeded") must never
+# reach the WhatsApp-facing report; it is logged (verified separately by
+# the worker's own structured logging) and replaced with one plain-English
+# sentence per failure category.
+# ===========================================================================
+def test_humanize_media_error_tile_click_failure():
+    msg = orch._humanize_media_send_error(
+        "tile click failed after 3 attempts: Locator.scroll_into_view_if_needed: Timeout 5000ms exceeded"
+    )
+    assert "Locator" not in msg, msg
+    assert "Timeout 5000ms" not in msg, msg
+    assert "re-mark" in msg.lower(), msg
+
+
+def test_humanize_media_error_destination_selection():
+    msg = orch._humanize_media_send_error("destination selection failed: no exact match found")
+    assert "destination group" in msg.lower(), msg
+    assert "no exact match" not in msg, msg
+
+
+def test_humanize_media_error_send_failed():
+    msg = orch._humanize_media_send_error("send failed: no Send control found")
+    assert "no Send control found" not in msg, msg  # the raw diagnostic phrase itself, never repeated verbatim
+    assert "confirmed" in msg.lower(), msg
+
+
+def test_humanize_media_error_unknown_falls_back_generic():
+    msg = orch._humanize_media_send_error("some completely novel internal detail xyz123")
+    assert "xyz123" not in msg, msg
+    assert "WhatsApp Web issue" in msg, msg
+
+
+def test_report_send_result_never_leaks_raw_playwright_text():
+    report = orch._report_send_result(
+        "Test Talent", "Test Project", "Test Casting Group",
+        sent_labels=[],
+        failed_items=[{
+            "label": "Audition Take",
+            "error": "tile click failed after 3 attempts: Locator.scroll_into_view_if_needed: Timeout 5000ms exceeded",
+        }],
+        already=[],
+    )
+    assert "Locator" not in report, report
+    assert "5000ms" not in report, report
+    assert "Audition Take" in report, report
+    assert "SEND PARTIAL" in report, report

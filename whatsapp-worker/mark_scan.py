@@ -7257,13 +7257,27 @@ async def _ensure_message_content_rendered(page, message_locator, max_rounds: in
         await message_locator.scroll_into_view_if_needed(timeout=5000)
     except Exception:
         pass
-    for _ in range(max_rounds):
+    for round_num in range(max_rounds):
         try:
             html_len = await message_locator.evaluate("(el) => el.outerHTML.length")
         except Exception:
             break
         if html_len > 300:
             return
+        # Production fix — a single scroll attempt before the FIRST poll
+        # isn't always enough for a message far from the current viewport
+        # (proven pattern: _wait_for_quoted_message_block/
+        # _restore_message_to_viewport already retry the SAME scroll call
+        # across multiple rounds for the identical "still a virtualized
+        # stub" symptom on the reply-resolution side). A mid-loop re-nudge
+        # costs nothing when the element is already hydrating and gives a
+        # genuinely stuck one more real chance to settle before this
+        # function gives up silently.
+        if round_num > 0 and round_num % 2 == 0:
+            try:
+                await message_locator.scroll_into_view_if_needed(timeout=5000)
+            except Exception:
+                pass
         await page.wait_for_timeout(interval_ms)
 
 
@@ -7330,6 +7344,26 @@ async def _open_media_and_get_forward_button(
                 return {"ok": False, "reason": f"photo click failed: {exc}"}
             await page.wait_for_timeout(1000)
         else:
+            # Production fix — real SEND failure ("Shivi Rajput / Vaseline",
+            # 0/2 media sent, both failed with "tile click failed:
+            # Locator.scroll_into_view_if_needed: Timeout 5000ms exceeded"
+            # at conv-msg-46/conv-msg-47). Root-caused via direct comparison
+            # against UPLOAD's own equivalent tile-click path
+            # (_open_tile_viewer_and_download, above) — that path ALREADY
+            # (a) swallows a scroll_into_view_if_needed failure instead of
+            # treating it as fatal (Playwright's own .click() performs its
+            # own actionability wait, including auto-scroll, so a best-
+            # effort nudge failing here does not mean the click itself
+            # will), and (b) retries on ANY click exception, not just ones
+            # whose text happens to contain the literal substrings "not
+            # stable"/"detached" — Playwright's own timeout-error text for
+            # a virtualized/not-yet-settled element varies by exact cause
+            # and version, so matching two hardcoded substrings is
+            # inherently brittle and was silently skipping every retry
+            # opportunity whenever the real message didn't happen to say
+            # those exact words. SEND's OWN tile-click path never had
+            # either fix — this reuses UPLOAD's already-proven pattern
+            # verbatim rather than inventing a new one.
             click_error: Optional[str] = None
             for attempt in range(MAX_TILE_CLICK_ATTEMPTS):
                 idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
@@ -7346,15 +7380,25 @@ async def _open_media_and_get_forward_button(
                     break
                 try:
                     await tile.scroll_into_view_if_needed(timeout=5000)
+                except Exception:
+                    pass  # best-effort nudge only — .click() below performs its own actionability wait
+                try:
                     await tile.click(timeout=10000)
                     click_error = None
                     break
                 except Exception as exc:
                     click_error = str(exc)
-                    if "not stable" not in str(exc) and "detached" not in str(exc):
-                        break
+                    logger.info(
+                        "mark_scan: SEND tile click attempt %d/%d failed for source_message_id=%s: %s",
+                        attempt + 1, MAX_TILE_CLICK_ATTEMPTS, source_message_id, exc,
+                    )
+                    # Unconditional retry (never gated on the exception's
+                    # exact wording) — re-acquisition by source_message_id
+                    # is always safe: it either finds the SAME exact
+                    # message again, or reports it genuinely missing (idx
+                    # is None above), never a different message/tile.
             if click_error:
-                return {"ok": False, "reason": f"tile click failed: {click_error}"}
+                return {"ok": False, "reason": f"tile click failed after {MAX_TILE_CLICK_ATTEMPTS} attempts: {click_error}"}
             mounted = False
             for _ in range(30):
                 try:
@@ -7761,6 +7805,11 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     marker_result: Optional[Dict[str, Any]] = None
     ack_result: Optional[Dict[str, Any]] = None
 
+    logger.info(
+        "SEND_START group=%s source_type=%s n_media=%d has_form=%s",
+        group_name, source_type, len(send_targets), bool(form_message),
+    )
+
     if send_targets:
         status = await _open_source_chat(page, source_type, group_name)
         if status != "OPENED":
@@ -7791,6 +7840,12 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:
             result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"item failed: {exc}"}
         results.append(result)
+        logger.info(
+            "%s item=%s source_message_id=%s role=%s%s",
+            "FORWARD_SENT" if result.get("ok") else "FORWARD_FAILED", item_label,
+            target.get("source_message_id"), target.get("media_role"),
+            "" if result.get("ok") else f" error={result.get('error')}",
+        )
 
     # form_insert_index == len(send_targets) covers both "no media at all"
     # and "form goes after every media item this run" — either way, if the
@@ -7845,6 +7900,12 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:
             marker_result = {"ok": False, "error": f"marker send failed: {exc}"}
 
+    logger.info(
+        "SEND_%s group=%s n_ok=%d n_failed=%d form_ok=%s ack_ok=%s",
+        "COMPLETE" if (all_media_ok and form_ok) else "PARTIAL", group_name,
+        sum(1 for r in results if r.get("ok")), sum(1 for r in results if not r.get("ok")),
+        form_ok, (ack_result or {}).get("ok"),
+    )
     return {
         "results": results, "form_send_result": form_send_result,
         "marker_result": marker_result, "ack_result": ack_result,

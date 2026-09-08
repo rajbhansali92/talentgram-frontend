@@ -243,6 +243,34 @@ def _report_already_sent(talent_label: str, project_label: str, destination_grou
     )
 
 
+def _humanize_media_send_error(raw_error: str) -> str:
+    """Production fix (Requirement #14) — the worker's own per-item error
+    string is a genuinely useful, detailed diagnostic (a raw Playwright
+    exception, e.g. "tile click failed after 3 attempts:
+    Locator.scroll_into_view_if_needed: Timeout 5000ms exceeded") — exactly
+    right for Railway logs, never appropriate as the primary WhatsApp
+    user-facing text. This maps the worker's own small, closed set of
+    failure-reason PREFIXES (see mark_scan.py's
+    _open_media_and_get_forward_button/_send_one_target_native_forward,
+    the only producers of this string) to one plain-English sentence each
+    — never inventing a new reason, never hiding that something failed.
+    The raw string is still logged verbatim by the caller before this
+    runs, so nothing diagnostic is lost, only kept out of the chat."""
+    logger.info("media_assignment_worker: raw SEND item error: %s", raw_error)
+    low = (raw_error or "").lower()
+    if "tile click failed" in low or "forward not ready" in low or "no <video> mounted" in low or "no clickable" in low or "no longer found in window" in low or "message not found in current window" in low:
+        return "could not be sent because WhatsApp Web could not reopen the marked media. Please re-mark the media and try SEND again."
+    if "destination selection failed" in low:
+        return "could not be sent because the destination group could not be selected in WhatsApp Web. Please try SEND again."
+    if "send failed" in low or "forward click failed" in low:
+        return "could not be sent because WhatsApp Web's Send control could not be confirmed. Please try SEND again."
+    if "source group not open" in low or "source message not open" in low:
+        return "could not be sent because the source WhatsApp chat could not be opened. Please try SEND again."
+    if "timed out after" in low:
+        return "could not be sent because WhatsApp Web did not respond in time. Please try SEND again."
+    return "could not be sent due to a WhatsApp Web issue. Please try SEND again."
+
+
 def _report_send_result(
     talent_label: str, project_label: str, destination_group: str,
     sent_labels: List[str], failed_items: List[Dict[str, str]], already: List[Dict[str, Any]],
@@ -254,7 +282,7 @@ def _report_send_result(
     ]
     total = len(already_labels) + len(sent_labels) + len(failed_items)
     body_lines = ([form_status_line] if form_status_line else []) + [f"✓ {l}" for l in already_labels + sent_labels]
-    body_lines += [f"✗ {i['label']} — {i['error']}" for i in failed_items]
+    body_lines += [f"✗ {i['label']} {_humanize_media_send_error(i['error'])}" for i in failed_items]
     if marker_status_line:
         body_lines.append(marker_status_line)
     body = "\n".join(body_lines)
@@ -616,7 +644,7 @@ async def _process_download_done() -> bool:
                 await media_send.mark_form_send_status(
                     talent_id, project_id, destination_group, ctx["content_hash"], status, **extra,
                 )
-            form_status_line = "✓ Submission details" if form_ok else f"✗ Submission details — {extra.get('error')}"
+            form_status_line = "✓ Submission details" if form_ok else f"✗ Submission details {_humanize_media_send_error(extra.get('error') or '')}"
         elif ctx.get("content_hash"):
             form_status_line = "✓ Submission details (already sent)"
 
@@ -687,7 +715,7 @@ async def _process_download_done() -> bool:
                         )
                 marker_status_line = "✓ ☑️ (complete)"
             else:
-                marker_status_line = f"✗ ☑️ — {marker_result.get('error') or 'not sent'}"
+                marker_status_line = f"✗ ☑️ {_humanize_media_send_error(marker_result.get('error') or 'not sent')}"
 
         # Talent acknowledgement (Production feature) — attempted by the
         # worker only when this run's own media+form all succeeded (see

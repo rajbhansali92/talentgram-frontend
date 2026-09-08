@@ -3327,6 +3327,173 @@ def main():
 
     mark_scan.sender = orig_sender_for_run_scan
 
+    # ------------------------------------------------------------------
+    # 104-107: REAL PRODUCTION FAILURE ("Shivi Rajput / Vaseline", SEND
+    # PARTIAL, 0/2 media sent, both failed with "tile click failed:
+    # Locator.scroll_into_view_if_needed: Timeout 5000ms exceeded" at
+    # conv-msg-46/conv-msg-47). Root cause, found via direct comparison
+    # against UPLOAD's own equivalent tile-click path
+    # (_open_tile_viewer_and_download, tests 36-54 above): THAT path
+    # already (a) swallows a scroll_into_view_if_needed failure as a
+    # best-effort nudge only (Playwright's own .click() performs its own
+    # actionability wait, including auto-scroll) and (b) retries on ANY
+    # click exception, not just ones whose text happens to contain the
+    # literal substrings "not stable"/"detached". SEND's OWN tile-click
+    # path (_open_media_and_get_forward_button) never had either fix —
+    # a scroll failure with different wording (exactly what a real
+    # virtualized/far-off-screen element produces) broke the retry loop
+    # on the FIRST attempt, exhausting zero of the 3 available retries.
+    # These tests were previously entirely absent — this exact code path
+    # had no direct regression coverage before this recurrence.
+    # ------------------------------------------------------------------
+
+    class _FakeTileVideo:
+        def __init__(self, fail_scroll_times=0, fail_click_times=0, scroll_error="Locator.scroll_into_view_if_needed: Timeout 5000ms exceeded"):
+            self.fail_scroll_times = fail_scroll_times
+            self.fail_click_times = fail_click_times
+            self.scroll_error = scroll_error
+            self.scroll_calls = 0
+            self.click_calls = 0
+
+        async def scroll_into_view_if_needed(self, timeout=None):
+            self.scroll_calls += 1
+            if self.scroll_calls <= self.fail_scroll_times:
+                raise Exception(self.scroll_error)
+
+        async def click(self, timeout=None):
+            self.click_calls += 1
+            if self.click_calls <= self.fail_click_times:
+                raise Exception("Locator.click: Timeout 10000ms exceeded waiting for element to be visible")
+
+    class _FakeVideoCountLocator:
+        def __init__(self, n):
+            self.n = n
+        async def count(self):
+            return self.n
+
+    class _FakeGenericMessageLocator104:
+        def nth(self, idx):
+            return self
+        async def evaluate(self, js, timeout=None):
+            return 1000  # arbitrary "hydrated" outerHTML length, unused since _ensure_message_content_rendered is mocked
+
+    class _FakeSendPage104:
+        def __init__(self, video_count=1):
+            self.video_count = video_count
+        def locator(self, sel):
+            if sel == "video":
+                return _FakeVideoCountLocator(self.video_count)
+            return _FakeGenericMessageLocator104()
+        async def wait_for_timeout(self, ms):
+            pass
+
+    orig_find_idx_104 = mark_scan._find_message_index_by_data_id
+    orig_resolve_scope_104 = mark_scan.sender._resolve_scope
+    orig_ensure_rendered_104 = mark_scan._ensure_message_content_rendered
+    orig_resolve_tile_104 = mark_scan._resolve_video_tile_locator
+    orig_wait_readiness_104 = mark_scan._wait_for_video_readiness
+    orig_find_forward_btn_104 = mark_scan._find_onscreen_forward_button
+    orig_evaluate_104 = mark_scan._evaluate
+
+    find_idx_calls_104: list = []
+
+    async def _fake_find_idx_104(page, group_name, data_id):
+        find_idx_calls_104.append(data_id)
+        return 0
+
+    async def _fake_resolve_scope_104(page):
+        return "#main"
+
+    async def _fake_ensure_rendered_104(page, message, max_rounds=8, interval_ms=500):
+        pass
+
+    async def _fake_wait_readiness_104(page, min_ready_state=3, timeout_s=60.0):
+        return {"ok": True}
+
+    async def _fake_evaluate_104(page, js, arg=None, timeout=10.0):
+        return {}
+
+    def _install_tile_104(tile):
+        async def fake_resolve(page, group_name, source_message_id, tile_index):
+            return tile, None
+        mark_scan._resolve_video_tile_locator = fake_resolve
+
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_104
+    mark_scan.sender._resolve_scope = _fake_resolve_scope_104
+    mark_scan._ensure_message_content_rendered = _fake_ensure_rendered_104
+    mark_scan._wait_for_video_readiness = _fake_wait_readiness_104
+    mark_scan._find_onscreen_forward_button = lambda dump: {"rect": [0, 0, 10, 10]}
+    mark_scan._evaluate = _fake_evaluate_104
+
+    # 104: scroll_into_view_if_needed fails with the EXACT real production
+    # wording (no "not stable"/"detached" substring at all) -> swallowed
+    # as a best-effort nudge, click still proceeds and succeeds
+    # immediately -> forward ready, only ONE click attempt needed.
+    tile_104 = _FakeTileVideo(fail_scroll_times=1, fail_click_times=0)
+    _install_tile_104(tile_104)
+    find_idx_calls_104.clear()
+    result_104 = asyncio.run(mark_scan._open_media_and_get_forward_button(
+        _FakeSendPage104(), "Shivi Rajput", "SRC46", 0, False,
+    ))
+    assert result_104["ok"] is True, result_104
+    assert tile_104.click_calls == 1, tile_104.click_calls
+    print("104. SEND tile scroll failure swallowed -> real 'Timeout 5000ms exceeded' scroll error (no special substring) never blocks the click, forward becomes ready")
+
+    # 105: the click itself fails on attempt 1 with a GENERIC timeout
+    # error (the exact real production shape — no "not stable"/"detached"
+    # substring) -> the OLD code would have broken immediately, reporting
+    # 0/2 sent exactly as happened in production; the NEW code retries
+    # unconditionally and succeeds on attempt 2 via fresh re-resolution.
+    tile_105 = _FakeTileVideo(fail_scroll_times=0, fail_click_times=1)
+    _install_tile_104(tile_105)
+    find_idx_calls_104.clear()
+    result_105 = asyncio.run(mark_scan._open_media_and_get_forward_button(
+        _FakeSendPage104(), "Shivi Rajput", "SRC46", 0, False,
+    ))
+    assert result_105["ok"] is True, result_105
+    assert tile_105.click_calls == 2, tile_105.click_calls  # failed once, retried, succeeded
+    assert len(find_idx_calls_104) == 2, find_idx_calls_104  # re-resolved fresh by identity on the retry, never reused a stale index
+    print("105. SEND tile click retries on a generic (non-'not stable'/'detached') failure -> re-acquires by identity and succeeds on attempt 2, exactly the production recurrence now fixed")
+
+    # 106: click fails on EVERY attempt -> bounded failure after
+    # MAX_TILE_CLICK_ATTEMPTS, never an infinite retry, and the reported
+    # reason names the attempt count for diagnosability.
+    tile_106 = _FakeTileVideo(fail_scroll_times=0, fail_click_times=99)
+    _install_tile_104(tile_106)
+    find_idx_calls_104.clear()
+    result_106 = asyncio.run(mark_scan._open_media_and_get_forward_button(
+        _FakeSendPage104(), "Shivi Rajput", "SRC47", 0, False,
+    ))
+    assert result_106["ok"] is False, result_106
+    assert tile_106.click_calls == mark_scan.MAX_TILE_CLICK_ATTEMPTS, tile_106.click_calls
+    assert f"after {mark_scan.MAX_TILE_CLICK_ATTEMPTS} attempts" in result_106["reason"], result_106
+    print("106. SEND tile click bounded -> a persistently failing tile is retried exactly MAX_TILE_CLICK_ATTEMPTS times, never more, and fails cleanly with a diagnosable reason")
+
+    # 107: the source message is genuinely not found (idx is None) ->
+    # immediate clean failure, never wastes retries re-searching for a
+    # message that isn't there.
+    async def _fake_find_idx_107(page, group_name, data_id):
+        find_idx_calls_104.append(data_id)
+        return None
+
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_107
+    find_idx_calls_104.clear()
+    result_107 = asyncio.run(mark_scan._open_media_and_get_forward_button(
+        _FakeSendPage104(), "Shivi Rajput", "SRC_GONE", 0, False,
+    ))
+    assert result_107["ok"] is False, result_107
+    assert "no longer found" in result_107["reason"], result_107
+    assert len(find_idx_calls_104) == 1, find_idx_calls_104  # exactly one lookup, never a wasted retry against nothing
+    print("107. SEND tile resolution: source message genuinely gone -> clean immediate failure, no wasted retry attempts")
+
+    mark_scan._find_message_index_by_data_id = orig_find_idx_104
+    mark_scan.sender._resolve_scope = orig_resolve_scope_104
+    mark_scan._ensure_message_content_rendered = orig_ensure_rendered_104
+    mark_scan._resolve_video_tile_locator = orig_resolve_tile_104
+    mark_scan._wait_for_video_readiness = orig_wait_readiness_104
+    mark_scan._find_onscreen_forward_button = orig_find_forward_btn_104
+    mark_scan._evaluate = orig_evaluate_104
+
 
 if __name__ == "__main__":
     main()

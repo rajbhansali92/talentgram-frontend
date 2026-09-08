@@ -9158,13 +9158,21 @@ def _classify_send_edit_line(line: str, label_to_key: Dict[str, str]) -> Optiona
     return None
 
 
+_SEND_EDIT_MULTI_SPLIT_RE = re.compile(r"(?i)\band\b|,")
+
+
 def _parse_send_edit_directives(text: str, label_to_key: Dict[str, str]) -> Dict[str, Optional[str]]:
-    """Multiple edits in one message (Issue 2) — one directive per LINE
-    (existing behaviour, unchanged), PLUS a same-line "and"-joined fallback
-    ("Remove Instagram and change budget to 45k") tried only when the
-    whole line doesn't already parse as one clean directive, so it can
-    never interfere with a value that legitimately contains the word
-    "and" in a single "Key = value" line."""
+    """Multiple edits in one message (Issue 2, then Requirement #2's
+    comma-separated/sentence-style extension) — one directive per LINE
+    (existing behaviour, unchanged), PLUS a same-line "and"-joined AND/OR
+    comma-joined fallback ("Remove Instagram and change budget to 45k",
+    "remove instagram, budget 45k, competitive brand none") tried ONLY
+    when the whole line doesn't already parse as one clean directive —
+    so a comma that's genuinely part of a single field's own value
+    ("Location = Mumbai, India") is never split apart: the whole-line
+    "Key = value" classify always gets first refusal, and _EDIT_LINE_RE's
+    value capture already takes everything after "=" as one string,
+    comma included, before this fallback is ever reached."""
     results: Dict[str, Optional[str]] = {}
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
@@ -9175,7 +9183,7 @@ def _parse_send_edit_directives(text: str, label_to_key: Dict[str, str]) -> Dict
             key, value = parsed
             results[key] = value
             continue
-        for part in re.split(r"(?i)\band\b", line):
+        for part in _SEND_EDIT_MULTI_SPLIT_RE.split(line):
             part = part.strip(" ,")
             if not part:
                 continue

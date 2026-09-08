@@ -38,11 +38,13 @@ import asyncio
 import os
 import sys
 import time
+from datetime import timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("MONGO_URL", "mongodb://x")
 
 import pytest
+from pymongo.errors import DuplicateKeyError
 
 import inbound  # noqa: E402
 import sender  # noqa: E402
@@ -79,8 +81,49 @@ class FakeCollection:
     async def update_many(self, filt, update, **kwargs):
         pass
 
+    async def delete_one(self, filt):
+        key = filt.get("message_id")
+        doc = self._docs.get(key)
+        if doc is None:
+            return
+        for k2, v in filt.items():
+            if doc.get(k2) != v:
+                return  # filter didn't match (e.g. status changed underneath us) -- delete nothing
+        del self._docs[key]
+
     async def insert_one(self, doc):
+        # Simulates the real unique index on message_id (Production fix,
+        # 2026-09-08 — the atomic-claim rework relies on this exact
+        # DuplicateKeyError contract) — a doc with a message_id already
+        # present in this collection raises, exactly like the real
+        # unique index does; any other doc (e.g. whatsapp_dispatch_
+        # failures, never keyed this way) is stored unconditionally.
+        key = doc.get("message_id")
+        if key is not None:
+            if key in self._docs:
+                raise DuplicateKeyError("E11000 duplicate key (fake)")
+            self._docs[key] = dict(doc)
         self.inserted.append(doc)
+
+    async def find_one_and_update(self, filt, update, **kwargs):
+        """Minimal conditional-update stand-in for the bounded stale-claim
+        recovery path: matches only when EVERY key in `filt` equals the
+        stored doc's own value (mirrors Mongo's real match semantics,
+        including the exact-claimed_at check that makes concurrent
+        recovery attempts race safely) — returns the PRE-update doc on a
+        match (Mongo's own default without return_document=AFTER), None
+        otherwise. Never invents a match."""
+        key = filt.get("message_id")
+        doc = self._docs.get(key)
+        if doc is None:
+            return None
+        for k2, v in filt.items():
+            if doc.get(k2) != v:
+                return None
+        before = dict(doc)
+        for k2, v in (update.get("$set") or {}).items():
+            doc[k2] = v
+        return before
 
     def find(self, *a, **k):
         class _EmptyCursor:
@@ -344,23 +387,22 @@ async def test_reply_send_skipped_gracefully_if_page_vanishes_mid_flight(_setup,
 # ─────────────────────────────────────────────────────────────────────────
 
 async def test_same_message_id_is_recognized_as_already_processed(_setup):
-    assert await inbound._already_processed("wamid-idem-1") is False
-    await inbound._mark_processed("wamid-idem-1")
-    assert await inbound._already_processed("wamid-idem-1") is True
+    assert await inbound._claim_message("wamid-idem-1") is True
+    assert await inbound._claim_message("wamid-idem-1") is False
 
 
 async def test_different_message_id_is_not_deduped_by_another_ids_processed_state(_setup):
     await inbound._mark_processed("wamid-idem-A")
-    assert await inbound._already_processed("wamid-idem-B") is False
+    assert await inbound._claim_message("wamid-idem-B") is True
 
 
 async def test_poll_once_never_redispatches_a_message_already_marked_processed(_setup, monkeypatch):
     """Simulates two independent poll cycles scanning a message that is
     STILL visible in WhatsApp Web's DOM (nothing hides a processed
-    message there) — the real _already_processed/_mark_processed
-    primitives (not a stub) must ensure the second cycle dispatches
-    nothing for it, exactly the 'same inbound message ID encountered
-    again -> do NOTHING' contract in the master prompt."""
+    message there) — the real _claim_message primitive (not a stub)
+    must ensure the second cycle dispatches nothing for it, exactly the
+    'same inbound message ID encountered again -> do NOTHING' contract
+    in the master prompt."""
     session = FakeSession(generation=1)
     groups_cache = _groups_cache(["G"])
     participants_cache = inbound.GroupParticipantsCache()
@@ -373,8 +415,10 @@ async def test_poll_once_never_redispatches_a_message_already_marked_processed(_
     }
 
     async def fake_scan(page, group_name, participants_cache):
-        # Mirrors the real _scan_group_for_new_messages' own dedup gate.
-        if await inbound._already_processed(raw_message["message_id"]):
+        # Mirrors the real _scan_group_for_new_messages' own ATOMIC
+        # CLAIM gate (Production fix, 2026-09-08) — a plain read-only
+        # check here would not reproduce the real behavior at all.
+        if not await inbound._claim_message(raw_message["message_id"]):
             return [], 0.0, 0.0
         return [dict(raw_message)], 0.0, 0.0
 
@@ -406,6 +450,172 @@ async def test_poll_once_never_redispatches_a_message_already_marked_processed(_
     assert dispatch_calls == ["wamid-fixed-1"], (
         "the same message_id must never be dispatched to the backend a "
         "second time once it has been marked processed"
+    )
+
+
+async def test_same_message_observed_ten_times_still_one_ack_and_one_execution(_setup, monkeypatch):
+    """Master prompt test #2: the same message observed 10 times (10
+    separate poll cycles, all still finding it visible in the DOM) must
+    still produce exactly one acknowledgement/execution — never once per
+    cycle. Directly reproduces the Anushka incident's shape (6 repeated
+    acks over ~10 minutes), just with more cycles."""
+    session = FakeSession(generation=1)
+    groups_cache = _groups_cache(["G"])
+    participants_cache = inbound.GroupParticipantsCache()
+    monkeypatch.setattr(sender, "_open_group_chat", _fake_open_opened)
+
+    raw_message = {
+        "message_id": "wamid-tenpoll-1", "text": "send anushka for lava", "sender_name": "Raj",
+        "sender_phone": "919198765222", "sender_is_group_member": True,
+        "raw_pre_plain_text": None, "media_type": None, "reply_context": None,
+    }
+
+    async def fake_scan(page, group_name, participants_cache):
+        if not await inbound._claim_message(raw_message["message_id"]):
+            return [], 0.0, 0.0
+        return [dict(raw_message)], 0.0, 0.0
+
+    monkeypatch.setattr(inbound, "_scan_group_for_new_messages", fake_scan)
+
+    dispatch_calls = []
+
+    async def fake_post_inbound(http, **kwargs):
+        dispatch_calls.append(kwargs["message_id"])
+        return {"reply": "SEND FORM PREVIEW", "operation_id": None, "handled": True}
+
+    monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
+
+    ack_calls = []
+
+    async def fake_send_reply(page, group_name, text):
+        ack_calls.append(text)
+        return 0.0, {}, "sent-1"
+
+    monkeypatch.setattr(inbound, "_send_reply", fake_send_reply)
+
+    for _ in range(10):
+        await inbound.poll_once(session, http=object(), groups_cache=groups_cache,
+                                 participants_cache=participants_cache)
+
+    assert dispatch_calls == ["wamid-tenpoll-1"], (
+        f"expected exactly one backend dispatch across 10 poll cycles, got {len(dispatch_calls)}"
+    )
+    assert ack_calls == ["SEND FORM PREVIEW"], (
+        f"expected exactly one reply send across 10 poll cycles, got {ack_calls}"
+    )
+
+
+async def test_message_observed_while_execution_still_in_flight_is_ignored(_setup, monkeypatch):
+    """Master prompt test #3: the same message observed by a SECOND poll
+    cycle while the FIRST cycle's backend dispatch is still genuinely
+    in-flight (not yet resolved) must be ignored entirely — no second
+    claim, no second ack, no second dispatch. Models the exact Anushka
+    shape: a slow backend call, with the scan loop revisiting the
+    message on every subsequent poll before that call ever resolves."""
+    session = FakeSession(generation=1)
+    groups_cache = _groups_cache(["G"])
+    participants_cache = inbound.GroupParticipantsCache()
+    monkeypatch.setattr(sender, "_open_group_chat", _fake_open_opened)
+
+    raw_message = {
+        "message_id": "wamid-inflight-1", "text": "send anushka for lava", "sender_name": "Raj",
+        "sender_phone": "919198765333", "sender_is_group_member": True,
+        "raw_pre_plain_text": None, "media_type": None, "reply_context": None,
+    }
+
+    async def fake_scan(page, group_name, participants_cache):
+        if not await inbound._claim_message(raw_message["message_id"]):
+            return [], 0.0, 0.0
+        return [dict(raw_message)], 0.0, 0.0
+
+    monkeypatch.setattr(inbound, "_scan_group_for_new_messages", fake_scan)
+
+    # A DIRECT test of the claim itself standing in for "still in flight":
+    # the message is claimed once (as poll_once's own scan phase would),
+    # and while that claim is outstanding (no completion/release yet —
+    # exactly the state a slow, still-running backend call leaves it in),
+    # further claim attempts for the SAME message_id must all fail.
+    assert await inbound._claim_message(raw_message["message_id"]) is True
+    for _ in range(5):
+        assert await inbound._claim_message(raw_message["message_id"]) is False, (
+            "a message whose claim is still in_progress must never be claimable again"
+        )
+
+
+async def test_two_concurrent_claims_exactly_one_wins(_setup):
+    """Master prompt test #4: two 'workers' (here, two concurrent asyncio
+    tasks racing the same atomic claim, standing in for two overlapping
+    tasks or two worker processes sharing the same Mongo collection)
+    attempting to claim the SAME message_id — exactly one must win."""
+    results = await asyncio.gather(
+        inbound._claim_message("wamid-race-1"),
+        inbound._claim_message("wamid-race-1"),
+        inbound._claim_message("wamid-race-1"),
+    )
+    assert sorted(results) == [False, False, True], (
+        f"exactly one of N concurrent claims for the same message_id must win, got {results}"
+    )
+
+
+async def test_worker_restart_after_claim_does_not_blindly_reexecute(_setup, monkeypatch):
+    """Master prompt test #5: a message is claimed, then the in-memory
+    cache is wiped (simulating a worker process restart — _seen_cache is
+    a plain in-process set, gone on restart) WHILE the claim is still
+    genuinely fresh (not stale enough for recovery). The durable Mongo
+    record must still reject a second claim — the fix must not rely
+    solely on the in-memory set, exactly the master prompt's explicit
+    'do NOT rely only on an in-memory Python set' requirement."""
+    assert await inbound._claim_message("wamid-restart-1") is True
+    inbound._seen_cache.clear()  # simulates a fresh process — nothing remembered in-memory
+    assert await inbound._claim_message("wamid-restart-1") is False, (
+        "a fresh in-memory cache must not cause a durable Mongo claim to be re-issued"
+    )
+
+
+async def test_legitimate_second_command_different_message_id_executes_normally(_setup, monkeypatch):
+    """Master prompt test #6: identical TEXT sent at different times
+    (genuinely different WhatsApp message_id each time) must remain two
+    separate, independently-executable commands — deduplication is keyed
+    on message identity, never on text."""
+    session = FakeSession(generation=1)
+    groups_cache = _groups_cache(["G"])
+    participants_cache = inbound.GroupParticipantsCache()
+    monkeypatch.setattr(sender, "_open_group_chat", _fake_open_opened)
+
+    text = "send anushka dhaka for lava"
+    first = {
+        "message_id": "wamid-dup-text-1", "text": text, "sender_name": "Raj",
+        "sender_phone": "919198765444", "sender_is_group_member": True,
+        "raw_pre_plain_text": None, "media_type": None, "reply_context": None,
+    }
+    second = {**first, "message_id": "wamid-dup-text-2"}
+
+    queue = [first, second]
+
+    async def fake_scan(page, group_name, participants_cache):
+        if not queue:
+            return [], 0.0, 0.0
+        msg = queue.pop(0)
+        if not await inbound._claim_message(msg["message_id"]):
+            return [], 0.0, 0.0
+        return [dict(msg)], 0.0, 0.0
+
+    monkeypatch.setattr(inbound, "_scan_group_for_new_messages", fake_scan)
+
+    dispatch_calls = []
+
+    async def fake_post_inbound(http, **kwargs):
+        dispatch_calls.append(kwargs["message_id"])
+        return {"reply": None, "operation_id": None, "handled": True}
+
+    monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
+    monkeypatch.setattr(inbound, "_send_reply", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no reply expected")))
+
+    await inbound.poll_once(session, http=object(), groups_cache=groups_cache, participants_cache=participants_cache)
+    await inbound.poll_once(session, http=object(), groups_cache=groups_cache, participants_cache=participants_cache)
+
+    assert dispatch_calls == ["wamid-dup-text-1", "wamid-dup-text-2"], (
+        "two genuinely distinct WhatsApp messages with identical text must both execute"
     )
 
 
@@ -445,12 +655,13 @@ async def test_genuinely_new_message_with_new_id_still_processes_normally(_setup
 
 
 async def test_failed_backend_dispatch_is_retried_on_the_next_poll_cycle(_setup, monkeypatch):
-    """Master prompt section 7 ('backend retry' / 'worker retry'): a
-    transient backend failure (exception, timeout — _post_inbound
-    returns None either way) must leave the message unmarked so the
-    NEXT poll cycle retries it from scratch; once the backend actually
-    succeeds, it must be dispatched exactly once more and then marked
-    processed — never left retrying forever, never double-processed."""
+    """Master prompt section 7 / test #12 ('a failed command can still be
+    retried intentionally'): a transient backend failure (exception,
+    timeout — _post_inbound returns None either way) must RELEASE the
+    claim taken during the scan phase so the NEXT poll cycle retries it
+    from scratch; once the backend actually succeeds, it must be
+    dispatched exactly once more and then completed — never left
+    retrying forever, never double-processed."""
     session = FakeSession(generation=1)
     groups_cache = _groups_cache(["G"])
     participants_cache = inbound.GroupParticipantsCache()
@@ -463,7 +674,7 @@ async def test_failed_backend_dispatch_is_retried_on_the_next_poll_cycle(_setup,
     }
 
     async def fake_scan(page, group_name, participants_cache):
-        if await inbound._already_processed(raw_message["message_id"]):
+        if not await inbound._claim_message(raw_message["message_id"]):
             return [], 0.0, 0.0
         return [dict(raw_message)], 0.0, 0.0
 
@@ -479,25 +690,141 @@ async def test_failed_backend_dispatch_is_retried_on_the_next_poll_cycle(_setup,
 
     monkeypatch.setattr(inbound, "_post_inbound", flaky_post_inbound)
 
-    # Cycle 1: backend fails -> must NOT be marked processed.
+    # Cycle 1: backend fails -> claim must be RELEASED (not left dangling).
     await inbound.poll_once(session, http=object(), groups_cache=groups_cache,
                              participants_cache=participants_cache)
     assert attempts["n"] == 1
-    assert await inbound._already_processed("wamid-retry-1") is False, (
-        "a failed backend dispatch must leave the message unmarked so it "
-        "is retried, not silently dropped"
+    assert await inbound._claim_message("wamid-retry-1") is True, (
+        "a failed backend dispatch must release the claim so it can be "
+        "claimed again on the next poll, not silently dropped or stuck forever"
     )
+    # That direct claim call itself just claimed it again for this test's
+    # own purposes — release it once more so poll_once's own retry below
+    # (which does its own claim via fake_scan) starts from a clean slate.
+    await inbound._release_claim("wamid-retry-1")
 
-    # Cycle 2: backend succeeds -> dispatched exactly once more, then marked.
+    # Cycle 2: backend succeeds -> dispatched exactly once more, then completed.
     await inbound.poll_once(session, http=object(), groups_cache=groups_cache,
                              participants_cache=participants_cache)
     assert attempts["n"] == 2, "must retry exactly once on the next cycle, not loop within one cycle"
-    assert await inbound._already_processed("wamid-retry-1") is True
+    assert await inbound._claim_message("wamid-retry-1") is False, "must be completed (claimed) after a successful dispatch"
 
     # Cycle 3: already processed -> must never be dispatched again.
     await inbound.poll_once(session, http=object(), groups_cache=groups_cache,
                              participants_cache=participants_cache)
     assert attempts["n"] == 2, "must never be dispatched again once successfully processed"
+
+
+async def test_long_running_send_remains_claimed_throughout_execution(_setup):
+    """Master prompt test #8: a long-running SEND's claim must remain
+    'in_progress' — and therefore un-claimable by anyone else — for the
+    entire duration of its (bounded, but potentially many-seconds)
+    synchronous dispatch, never expiring or becoming re-claimable merely
+    because time has passed, as long as it stays within the recovery
+    window."""
+    assert await inbound._claim_message("wamid-longsend-1") is True
+    # Simulate a genuinely long (but not yet recovery-eligible) dispatch
+    # by backdating claimed_at short of the recovery threshold.
+    db = inbound.get_db()
+    doc = db[inbound.SEEN_COLLECTION]._docs["wamid-longsend-1"]
+    doc["claimed_at"] = inbound._now() - timedelta(seconds=inbound._CLAIM_RECOVERY_TIMEOUT_SEC - 5)
+    assert await inbound._claim_message("wamid-longsend-1") is False, (
+        "a claim still within the recovery window must never be reissued, "
+        "no matter how long the legitimate operation is taking"
+    )
+    await inbound._complete_claim("wamid-longsend-1")
+
+
+async def test_send_approval_message_is_independently_idempotent(_setup, monkeypatch):
+    """Master prompt test #9: the SEND approval reply ('1') is itself a
+    NEW inbound WhatsApp message with its own message_id — it must be
+    claimed/deduped exactly like any other command, independent of the
+    original SEND command's own message_id, so a repeated observation of
+    the approval message never re-approves or re-dispatches media."""
+    session = FakeSession(generation=1)
+    groups_cache = _groups_cache(["G"])
+    participants_cache = inbound.GroupParticipantsCache()
+    monkeypatch.setattr(sender, "_open_group_chat", _fake_open_opened)
+
+    approval_message = {
+        "message_id": "wamid-approve-1", "text": "1", "sender_name": "Raj",
+        "sender_phone": "919198765555", "sender_is_group_member": True,
+        "raw_pre_plain_text": None, "media_type": None, "reply_context": None,
+    }
+
+    async def fake_scan(page, group_name, participants_cache):
+        if not await inbound._claim_message(approval_message["message_id"]):
+            return [], 0.0, 0.0
+        return [dict(approval_message)], 0.0, 0.0
+
+    monkeypatch.setattr(inbound, "_scan_group_for_new_messages", fake_scan)
+
+    approve_calls = []
+
+    async def fake_post_inbound(http, **kwargs):
+        approve_calls.append(kwargs["message_id"])
+        return {"reply": "✅ Approved — now sending...", "operation_id": None, "handled": True}
+
+    monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
+
+    async def fake_send_reply(page, group_name, text):
+        return 0.0, {}, "sent"
+
+    monkeypatch.setattr(inbound, "_send_reply", fake_send_reply)
+
+    for _ in range(3):
+        await inbound.poll_once(session, http=object(), groups_cache=groups_cache,
+                                 participants_cache=participants_cache)
+
+    assert approve_calls == ["wamid-approve-1"], (
+        f"the approval message must be dispatched (approved) exactly once, got {approve_calls}"
+    )
+
+
+async def test_abandoned_in_progress_claim_is_recovered_after_timeout(_setup):
+    """Master prompt's recovery requirement: a claim genuinely abandoned
+    (worker crashed mid-dispatch, claimed_at far older than
+    _CLAIM_RECOVERY_TIMEOUT_SEC, in-memory cache gone) IS eligible for a
+    bounded recovery — the system must not create a permanent deadlock."""
+    assert await inbound._claim_message("wamid-abandoned-1") is True
+    inbound._seen_cache.clear()  # the crashed process's memory is gone
+    db = inbound.get_db()
+    doc = db[inbound.SEEN_COLLECTION]._docs["wamid-abandoned-1"]
+    doc["claimed_at"] = inbound._now() - timedelta(seconds=inbound._CLAIM_RECOVERY_TIMEOUT_SEC + 30)
+    assert await inbound._claim_message("wamid-abandoned-1") is True, (
+        "a genuinely stale in_progress claim (older than the recovery timeout) must be recoverable"
+    )
+
+
+async def test_healthy_claim_not_stale_is_never_recovered(_setup):
+    """The other half of the recovery contract: a claim that is
+    in_progress but NOT yet stale enough must NEVER be 'recovered' —
+    this is the master prompt's explicit warning ('a healthy long-running
+    command must NOT be started again merely because it has been running
+    for several minutes')."""
+    assert await inbound._claim_message("wamid-healthy-1") is True
+    inbound._seen_cache.clear()
+    db = inbound.get_db()
+    doc = db[inbound.SEEN_COLLECTION]._docs["wamid-healthy-1"]
+    doc["claimed_at"] = inbound._now() - timedelta(seconds=inbound._CLAIM_RECOVERY_TIMEOUT_SEC - 30)
+    assert await inbound._claim_message("wamid-healthy-1") is False, (
+        "a claim well within the recovery window must never be recovered/reissued"
+    )
+
+
+async def test_completed_claim_is_never_recovered_regardless_of_age(_setup):
+    """A 'completed' claim (the command genuinely finished) must never be
+    recovered/reprocessed even if it happens to look 'old' — only
+    'in_progress' claims are ever recovery-eligible."""
+    assert await inbound._claim_message("wamid-done-1") is True
+    await inbound._complete_claim("wamid-done-1")
+    inbound._seen_cache.clear()
+    db = inbound.get_db()
+    doc = db[inbound.SEEN_COLLECTION]._docs["wamid-done-1"]
+    doc["claimed_at"] = inbound._now() - timedelta(seconds=inbound._CLAIM_RECOVERY_TIMEOUT_SEC * 10)
+    assert await inbound._claim_message("wamid-done-1") is False, (
+        "a completed claim must never be reprocessed, regardless of how old it is"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -514,6 +841,28 @@ def test_inbound_dispatch_timeout_has_real_headroom_over_backend_worst_case():
     'message never marked processed, redispatched from scratch'."""
     assert inbound._INBOUND_DISPATCH_TIMEOUT_SEC >= 30.0
     assert inbound._INBOUND_DISPATCH_TIMEOUT_SEC > 20.0 + 10.0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Agent self-messages (master prompt test #7)
+# ─────────────────────────────────────────────────────────────────────────
+
+async def test_agent_own_acknowledgement_never_reingested_as_a_command(_setup):
+    """The real _scan_group_for_new_messages marks an OUTGOING message
+    (direction is True — our own "Got it — processing...", a form
+    preview, a completion/error message, a HELP response, an ambiguity
+    prompt) processed via this exact _mark_processed call, without ever
+    adding it to new_messages (see the `if direction is True:` branch) —
+    this proves that once marked this way, it is durably claimed and can
+    never subsequently be claimed again, i.e. can never re-enter the
+    dispatch path as if it were a new inbound command, regardless of how
+    many more times the same outgoing bubble is observed in later scans."""
+    own_message_id = "wamid-own-ack-1"
+    await inbound._mark_processed(own_message_id)  # the exact call the direction=True branch makes
+    assert await inbound._claim_message(own_message_id) is False, (
+        "an agent's own outgoing message, once marked via the direction=True "
+        "path, must never be claimable again as if it were a fresh inbound command"
+    )
 
 
 if __name__ == "__main__":

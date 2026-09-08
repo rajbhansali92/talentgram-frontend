@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
 import httpx
+from pymongo.errors import DuplicateKeyError
 
 import config
 import sender
@@ -57,6 +58,43 @@ SEEN_COLLECTION = "whatsapp_inbound_seen"
 # every poll of an already-scanned chat. The Mongo collection (TTL-indexed)
 # is the durable backstop across restarts.
 _seen_cache: set[str] = set()
+
+# Command-ingestion idempotency (Production fix, 2026-09-08 — real
+# incident: "Send Anushka Dhaka for Lava" produced SIX repeated "Got it
+# — processing..." acknowledgements over ~10 minutes before the SEND
+# FORM PREVIEW finally arrived). Root cause: the OLD design checked
+# "already processed?" (a plain read) at scan time, but only recorded a
+# message as processed AFTER its full backend round trip completed —
+# for any command whose backend call runs long (slow WhatsApp scan,
+# backend under load, or simply the network), that message stays
+# "not yet processed" for the ENTIRE duration, so it is re-detected as
+# brand new on every subsequent poll cycle, re-acknowledged, and
+# re-dispatched — even piling up redundant backend work with each retry,
+# making the underlying slowness worse. The fix: an ATOMIC claim
+# (Mongo's unique index on message_id + insert_one, the same durable
+# TTL-backed collection that already existed) taken the MOMENT a message
+# is first identified as a genuine new candidate — strictly BEFORE any
+# acknowledgement or dispatch — so a message can only ever be claimed
+# once, no matter how many times it is subsequently observed or how long
+# its processing takes. See _claim_message/_release_claim/_complete_claim
+# below.
+_STATUS_IN_PROGRESS = "in_progress"
+_STATUS_COMPLETED = "completed"
+
+# How long an "in_progress" claim is trusted before being eligible for
+# bounded recovery (a worker process that crashed/restarted mid-dispatch,
+# genuinely abandoning its claim forever otherwise). Every legitimate
+# synchronous inbound dispatch — for EVERY command, SEND included — is
+# itself hard-bounded by _INBOUND_DISPATCH_TIMEOUT_SEC (35s): the actual
+# long-running work for something like SEND happens asynchronously,
+# AFTER this synchronous call already returned (see
+# services/media_assignment_worker.py's own poll loop on the backend
+# side) — so no HEALTHY claim is ever "in_progress" for anywhere close
+# to this long. 180s (~5x that ceiling) is a comfortable, still-tight
+# margin: long enough that a claim is truly, unambiguously abandoned
+# before recovery ever triggers, never so long that a real incident goes
+# undiagnosed for the better part of an hour.
+_CLAIM_RECOVERY_TIMEOUT_SEC = 180.0
 
 # Sender identity: WhatsApp Web renders "[10:30 AM, 21/07/2026] John Doe: "
 # into data-pre-plain-text on group messages — this regex pulls the display
@@ -115,6 +153,19 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """This driver's MongoDB client is not configured tz_aware — a
+    datetime read back from a document (e.g. a claim's own claimed_at)
+    comes back naive, while _now() is always timezone-aware. Comparing/
+    subtracting a naive and an aware datetime raises TypeError; this
+    normalizes a value read from Mongo to aware-UTC (Mongo always stores
+    UTC regardless of driver tz-awareness) before any such comparison,
+    regardless of which awareness the driver happens to hand back."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 async def _ensure_indexes() -> None:
     db = get_db()
     try:
@@ -126,36 +177,162 @@ async def _ensure_indexes() -> None:
         logger.exception("inbound: failed to create whatsapp_inbound_seen indexes (non-fatal)")
 
 
-async def _already_processed(message_id: str) -> bool:
+def _cap_seen_cache() -> None:
+    # Cap unbounded in-memory growth over a long-lived process; the Mongo
+    # collection remains the source of truth once this cache rotates.
+    if len(_seen_cache) > 5000:
+        _seen_cache.clear()
+
+
+async def _claim_message(message_id: str) -> bool:
+    """Atomic claim (Production fix, 2026-09-08 — see the module-level
+    comment above _STATUS_IN_PROGRESS for the full incident/reasoning).
+    Returns True iff THIS call is the one that newly claimed
+    `message_id` — the caller must proceed with exactly one
+    acknowledgement + dispatch. Returns False for every other case
+    (already in progress, already completed) — the caller must do
+    nothing: no ack, no dispatch, no new job, no state change.
+
+    The in-memory cache is checked first (cheap, and correctly blocks
+    re-entry within the SAME still-running process — including the
+    common case where a message is simply still visible in the DOM many
+    polls after this same process already claimed it). The Mongo insert
+    is what makes the claim atomic AND durable: message_id carries a
+    unique index (_ensure_indexes), so two concurrent callers — two
+    overlapping tasks, two worker processes, or the same process before
+    vs. after a restart — can never both succeed; exactly one insert
+    wins, the other hits DuplicateKeyError and is treated as
+    ALREADY_CLAIMED. A duplicate whose existing claim is "in_progress"
+    and old enough to be genuinely abandoned (see
+    _CLAIM_RECOVERY_TIMEOUT_SEC) is recovered via a conditional
+    find_one_and_update keyed to the EXACT stale claimed_at observed —
+    so if two callers race to recover the same stale claim, only one
+    update actually matches and wins; the loser correctly sees itself as
+    still a duplicate. A "completed" claim is NEVER recovered, regardless
+    of age, until the whole record naturally expires via the existing
+    TTL index."""
     if message_id in _seen_cache:
-        return True
-    db = get_db()
-    try:
-        doc = await db[SEEN_COLLECTION].find_one({"message_id": message_id}, {"_id": 1})
-    except Exception:
-        logger.exception("inbound: dedup lookup failed for %s (treating as unseen)", message_id)
+        logger.info("inbound: COMMAND_DUPLICATE_IGNORED message_id=%r (in-memory)", message_id)
         return False
-    if doc:
+    db = get_db()
+    now = _now()
+    try:
+        await db[SEEN_COLLECTION].insert_one({
+            "message_id": message_id, "status": _STATUS_IN_PROGRESS,
+            "claimed_at": now, "created_at": now,
+        })
         _seen_cache.add(message_id)
+        _cap_seen_cache()
+        logger.info("inbound: COMMAND_CLAIMED message_id=%r", message_id)
         return True
+    except DuplicateKeyError:
+        pass
+    except Exception:
+        # An infra hiccup on the claim attempt itself (not a duplicate
+        # key) must NOT be treated as "claimed" — fail closed, let the
+        # next poll cycle retry the claim from scratch rather than
+        # silently dropping a command no one ever actually claimed.
+        logger.exception("inbound: claim insert failed for %s (treating as unclaimed; will retry)", message_id)
+        return False
+
+    try:
+        existing = await db[SEEN_COLLECTION].find_one({"message_id": message_id})
+    except Exception:
+        logger.exception("inbound: post-duplicate-key lookup failed for %s (treating as duplicate, not guessing)", message_id)
+        return False
+    if not existing:
+        # Existed a moment ago (the insert just told us so), gone now —
+        # extremely unlikely (manual cleanup racing us); safest to treat
+        # as still claimed-by-someone rather than risk a double-claim.
+        logger.warning("inbound: claim record for %s vanished between insert and lookup — treating as duplicate", message_id)
+        return False
+    if existing.get("status") == _STATUS_IN_PROGRESS:
+        # Two forms of the SAME value: `raw_claimed_at` is exactly what's
+        # stored in Mongo (whatever tz-awareness the driver hands back —
+        # this MUST be used, unmodified, in the query filter below, or
+        # the filter would never match the stored value at all);
+        # `claimed_at` is the aware-UTC form used for the local math.
+        raw_claimed_at = existing.get("claimed_at")
+        claimed_at = _as_aware_utc(raw_claimed_at)
+        stale_for = (now - claimed_at).total_seconds() if claimed_at else None
+        if claimed_at and stale_for > _CLAIM_RECOVERY_TIMEOUT_SEC:
+            recovered = await db[SEEN_COLLECTION].find_one_and_update(
+                {"message_id": message_id, "claimed_at": raw_claimed_at},
+                {"$set": {"status": _STATUS_IN_PROGRESS, "claimed_at": now}},
+            )
+            if recovered is not None:
+                _seen_cache.add(message_id)
+                _cap_seen_cache()
+                logger.warning(
+                    "inbound: COMMAND_RECOVERY message_id=%r recovered an in_progress claim stale for %.0fs "
+                    "(abandoned worker, not a healthy long-running command)",
+                    message_id, stale_for,
+                )
+                return True
+            # Someone else's recovery attempt won the race first.
+            logger.info("inbound: COMMAND_DUPLICATE_IGNORED message_id=%r (lost the recovery race)", message_id)
+            return False
+    logger.info("inbound: COMMAND_DUPLICATE_IGNORED message_id=%r (status=%s)", message_id, existing.get("status"))
     return False
 
 
-async def _mark_processed(message_id: str) -> None:
+async def _release_claim(message_id: str) -> None:
+    """Releases a claim after a genuine dispatch failure (network error,
+    client-side timeout — see _post_inbound) so the message can be
+    legitimately retried on the very next poll cycle, rather than
+    sitting claimed until the much longer _CLAIM_RECOVERY_TIMEOUT_SEC
+    window lapses. Only ever releases an "in_progress" claim — never
+    touches one that has already reached "completed" (a late/duplicate
+    release call must never un-complete a message that a DIFFERENT,
+    successful attempt already finished)."""
+    _seen_cache.discard(message_id)
+    db = get_db()
+    try:
+        await db[SEEN_COLLECTION].delete_one({"message_id": message_id, "status": _STATUS_IN_PROGRESS})
+    except Exception:
+        logger.exception(
+            "inbound: failed to release claim for %s (will remain claimed until the recovery timeout)", message_id,
+        )
+
+
+async def _complete_claim(message_id: str) -> None:
+    """Marks a claim's dispatch as genuinely finished — success or a
+    handled-but-declined-to-dispatch outcome (no phone resolved,
+    textless, undeterminable direction, our own outgoing message).
+    Permanently protects the message from ever being reprocessed,
+    including by the bounded stale-claim recovery path (a "completed"
+    status is never recovered, unlike "in_progress"). Idempotent/safe to
+    call on a message_id this process never itself claimed (harmless
+    no-op update) — every real caller below only ever calls this after a
+    successful _claim_message, but this function doesn't need to trust
+    that to stay correct."""
     _seen_cache.add(message_id)
-    # Cap unbounded in-memory growth over a long-lived process; the Mongo
-    # TTL collection remains the source of truth once this cache rotates.
-    if len(_seen_cache) > 5000:
-        _seen_cache.clear()
+    _cap_seen_cache()
     db = get_db()
     try:
         await db[SEEN_COLLECTION].update_one(
             {"message_id": message_id},
-            {"$setOnInsert": {"message_id": message_id, "created_at": _now()}},
+            {
+                "$set": {"status": _STATUS_COMPLETED, "completed_at": _now()},
+                "$setOnInsert": {"message_id": message_id, "created_at": _now()},
+            },
             upsert=True,
         )
     except Exception:
-        logger.exception("inbound: failed to persist dedup record for %s", message_id)
+        logger.exception("inbound: failed to persist completed claim for %s", message_id)
+
+
+async def _mark_processed(message_id: str) -> None:
+    """Fast-path 'never examine this again' marker for messages that are
+    never actually dispatched to the backend at all (our own outgoing
+    messages, direction-undeterminable, textless/non-voice chatter) —
+    claims and immediately completes in one step, since nothing async
+    ever happens for these (no in-progress window, no ack, no retry
+    concern) — kept as a single convenience call so these existing,
+    already-correct call sites need no changes."""
+    claimed = await _claim_message(message_id)
+    if claimed:
+        await _complete_claim(message_id)
 
 
 def _fallback_message_id(group_name: str, text: str, pre_plain: Optional[str]) -> str:
@@ -564,8 +741,15 @@ async def _scan_group_for_new_messages(
         if not message_id:
             message_id = _fallback_message_id(group_name, text, pre_plain)
 
-        already_seen = await _already_processed(message_id)
-        if already_seen:
+        # ATOMIC CLAIM (Production fix, 2026-09-08) — happens HERE,
+        # strictly before this message can ever reach an acknowledgement
+        # or a backend dispatch (both happen only in the dispatch loop
+        # below, over `new_messages`, which this claim gates entry
+        # into). A message claimed by an earlier poll cycle — including
+        # one whose backend dispatch is still in flight — is never
+        # added to new_messages again, no matter how many more times it
+        # remains visible in the DOM.
+        if not await _claim_message(message_id):
             continue
 
         media_type = None
@@ -1109,7 +1293,13 @@ async def poll_once(
                     })
                 except Exception:
                     logger.exception("inbound: failed to persist dispatch-failure record")
-                await _mark_processed(msg["message_id"])
+                # This message was already claimed in the scan phase
+                # above — _complete_claim (not _mark_processed, which
+                # would see it in _seen_cache and short-circuit without
+                # ever completing it) finishes that claim so it is
+                # never retried, but also never left "in_progress"
+                # forever.
+                await _complete_claim(msg["message_id"])
                 continue
 
             t_detected = time.monotonic()
@@ -1170,12 +1360,25 @@ async def poll_once(
             t_backend_done = time.monotonic()
 
             if result is None:
-                # Backend call failed — do NOT mark as processed, so a
-                # transient outage gets a chance to be retried on the
-                # next poll (the message is still "new" in the DOM).
+                # Backend call genuinely failed (network error, or the
+                # client-side _INBOUND_DISPATCH_TIMEOUT_SEC ceiling was
+                # exceeded — see _post_inbound). This message was already
+                # claimed in the scan phase; RELEASE that claim (rather
+                # than leaving it "in_progress" until the recovery
+                # timeout) so a transient outage gets a genuine, prompt
+                # retry on the next poll — never a second silent
+                # dispatch of a call that might actually still be
+                # running on the backend, and never an indefinite wait.
+                await _release_claim(msg["message_id"])
                 continue
 
-            await _mark_processed(msg["message_id"])
+            # This message was already claimed in the scan phase above —
+            # _complete_claim (not _mark_processed, which would see it
+            # in _seen_cache and short-circuit without completing it)
+            # finishes the claim now that the backend has genuinely
+            # responded, permanently protecting it from ever being
+            # reprocessed.
+            await _complete_claim(msg["message_id"])
             await _update_worker_status(last_processed_at=_now().isoformat())
 
             reply = result.get("reply")

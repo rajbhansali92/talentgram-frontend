@@ -758,6 +758,56 @@ def main():
     assert picked is not None and picked["ariaLabel"] == "Forward", picked
     print("35c. Forward-media decoy excluded  -> exact 'Forward' preferred, decoy never picked even when on-screen")
 
+    # 35d: SEND performance fix (Production, 2026-09-08) — the destination
+    # search filter used to be a flat 1000ms wait_for_timeout before ever
+    # checking the results once. Now bounded-polled (5 x 200ms, same
+    # 1000ms ceiling) — proves the function returns as soon as a match
+    # appears, WITHOUT exhausting every attempt, and that the ceiling
+    # behavior (genuinely zero matches even after the full window) is
+    # unchanged from before.
+    match_on_attempt = {"n": 0}
+
+    async def _fake_evaluate_match_on_third_attempt(page, js, arg=None, timeout=10.0):
+        match_on_attempt["n"] += 1
+        if match_on_attempt["n"] < 3:
+            return _dialog_dump([{"testid": "list-item-1", "role": "listitem", "text": "Recent chats", "rect": [422, 228, 436, 72]}])
+        return _dialog_dump([
+            {"testid": "list-item-2", "role": "listitem",
+             "text": "ic-checkdefault-group-refreshedTalentgram Casting TestMyself, Raj, You", "rect": [422, 300, 436, 72]},
+        ])
+
+    mark_scan._evaluate = _fake_evaluate_match_on_third_attempt
+    page_35d = _FakeForwardPage()
+    try:
+        result_35d = asyncio.run(mark_scan._select_forward_destination(page_35d, "Talentgram Casting Test"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_fs
+    assert result_35d["ok"] is True, result_35d
+    # 3 dump attempts total, but only 2 waits BETWEEN them (never a wait
+    # after the match is finally found) — proves the early-break, never
+    # the full 5-attempt/1000ms ceiling once a match genuinely appears.
+    assert match_on_attempt["n"] == 3, match_on_attempt
+    assert page_35d.wait_calls == 2, page_35d.wait_calls
+    print("35d. SEND performance: destination search bounded-polled -> returns as soon as a match appears, never waits out the full ceiling once found")
+
+    # 35e: the ceiling itself is unchanged — genuinely zero matches even
+    # after every bounded attempt still fails cleanly exactly as before
+    # (never an infinite retry, never a longer wait than the original
+    # 1000ms fixed budget).
+    async def _fake_evaluate_never_matches(page, js, arg=None, timeout=10.0):
+        return _dialog_dump([{"testid": "list-item-1", "role": "listitem", "text": "Recent chats", "rect": [422, 228, 436, 72]}])
+
+    mark_scan._evaluate = _fake_evaluate_never_matches
+    page_35e = _FakeForwardPage()
+    try:
+        result_35e = asyncio.run(mark_scan._select_forward_destination(page_35e, "Talentgram Casting Test"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_fs
+    assert result_35e["ok"] is False, result_35e
+    assert "found 0" in result_35e["reason"], result_35e
+    assert page_35e.wait_calls == 5, page_35e.wait_calls  # 5 bounded attempts, one wait after each — never more, never unbounded
+    print("35e. SEND performance: destination search ceiling unchanged -> genuinely zero matches still fails cleanly after the same bounded budget, never longer")
+
     # ------------------------------------------------------------------
     # 36-40: video-tile re-resolution fix (2026-08-24). Real finding: a
     # live SEND's Playwright error referenced index 3; a diagnostic

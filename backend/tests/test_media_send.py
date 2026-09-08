@@ -1555,6 +1555,125 @@ def test_build_form_send_message_always_shows_fixed_field_list():
         assert f"{label}:" in built["message"], built["message"]
 
 
+# ===========================================================================
+# Competitive Brand value preservation (Production fix, 2026-09-08) — the
+# submission form asks this as TWO fields: has_competitive_brand_experience
+# (True/False/unanswered) and competitive_brand (free text, only populated
+# when the answer is True). An explicit "No, I have none"
+# (has_competitive_brand_experience=False) is itself a complete, valid
+# answer, distinct from the question never being answered at all — the OLD
+# shaping code only ever looked at the free-text value (empty either way
+# when the answer is False), collapsing both into the same blank form line.
+# ===========================================================================
+def test_build_form_send_message_competitive_brand_explicit_none():
+    sub = {
+        "id": "sub-cb-none", "talent_name": "Ahana CB",
+        "form_data": {"has_competitive_brand_experience": False, "competitive_brand": ""},
+        "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana CB", "Google CB Test")
+    assert "Competitive Brand:\nNone" in built["message"], built["message"]
+
+
+def test_build_form_send_message_competitive_brand_actual_value():
+    sub = {
+        "id": "sub-cb-val", "talent_name": "Ahana CB",
+        "form_data": {"has_competitive_brand_experience": True, "competitive_brand": "Lakme"},
+        "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana CB", "Google CB Test")
+    assert "Competitive Brand:\nLakme" in built["message"], built["message"]
+
+
+def test_build_form_send_message_competitive_brand_multi_value_preserved():
+    sub = {
+        "id": "sub-cb-multi", "talent_name": "Ahana CB",
+        "form_data": {"has_competitive_brand_experience": True, "competitive_brand": "Nykaa, Mamaearth"},
+        "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana CB", "Google CB Test")
+    assert "Competitive Brand:\nNykaa, Mamaearth" in built["message"], built["message"]
+
+
+def test_build_form_send_message_competitive_brand_missing_stays_blank():
+    """Genuinely unanswered (has_competitive_brand_experience never set at
+    all) must render as a blank line — never fabricated as "None"."""
+    sub = {"id": "sub-cb-missing", "talent_name": "Ahana CB", "form_data": {}, "media": []}
+    built = ms.build_form_send_message(sub, None, "Ahana CB", "Google CB Test")
+    assert "Competitive Brand:\nNone" not in built["message"], built["message"]
+    lines = built["message"].splitlines()
+    assert "Competitive Brand:" in lines, built["message"]
+    idx = lines.index("Competitive Brand:")
+    assert idx == len(lines) - 1 or lines[idx + 1] == "", (
+        f"a genuinely unanswered Competitive Brand must have no value on the next line: {built['message']!r}"
+    )
+
+
+def test_build_form_send_message_competitive_brand_empty_string_stays_blank():
+    """has_competitive_brand_experience explicitly True but the free-text
+    itself is empty (an incomplete answer) — still blank, never "None"
+    (only an explicit False answer means "None")."""
+    sub = {
+        "id": "sub-cb-empty", "talent_name": "Ahana CB",
+        "form_data": {"has_competitive_brand_experience": True, "competitive_brand": ""},
+        "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana CB", "Google CB Test")
+    assert "Competitive Brand:\nNone" not in built["message"], built["message"]
+    lines = built["message"].splitlines()
+    idx = lines.index("Competitive Brand:")
+    assert idx == len(lines) - 1 or lines[idx + 1] == "", built["message"]
+
+
+async def test_send_competitive_brand_none_shown_in_preview_edit_and_approval():
+    """End-to-end: a talent who explicitly answered "no competitive
+    brand" must see "Competitive Brand:\\nNone" consistently in the SEND
+    FORM PREVIEW, after an unrelated EDIT (budget), and in the frozen
+    approval snapshot — never blank, never regenerated differently at
+    any stage."""
+    tag = uuid.uuid4().hex[:6]
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    name = f"Priya CBNone {tag}"
+    project_label = f"Google CBNone {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram")
+    submission_id = await _seed_submission(project_id, talent_id, f"priya.cbnone.{tag}@example.com", decision="approved")
+    await db.submissions.update_one(
+        {"id": submission_id},
+        {"$set": {"form_data.has_competitive_brand_experience": False, "form_data.competitive_brand": ""}},
+    )
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r1.handled, r1.reply
+        assert "Competitive Brand:\nNone" in r1.reply, r1.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="2",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600099", text="Budget = 45k",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r3.handled, r3.reply
+        assert "Competitive Brand:\nNone" in r3.reply, r3.reply
+
+        approval = await ms.get_send_approval(talent_id, project_id, DESTINATION_GROUP)
+        assert approval is not None
+        assert "Competitive Brand:\nNone" in approval["message"], approval["message"]
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
 def test_build_form_send_message_instagram_handle_becomes_full_url():
     sub = {"id": "sub-z", "form_data": {"instagram_handle": "ahana.actor"}, "talent_name": "Ahana IG", "media": []}
     built = ms.build_form_send_message(sub, None, "Ahana IG", "Google IG Test")

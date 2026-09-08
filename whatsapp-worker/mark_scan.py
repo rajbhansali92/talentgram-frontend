@@ -7472,16 +7472,29 @@ async def _select_forward_destination(page, destination_group: str) -> Dict[str,
         sy = search_box["rect"][1] + search_box["rect"][3] / 2
         await page.mouse.click(sx, sy, button="left")
         await page.keyboard.type(destination_group, delay=30)
-        await page.wait_for_timeout(1000)
     except Exception as exc:
         return {"ok": False, "reason": f"search typing failed: {exc}"}
-    try:
-        dump2 = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
-    except Exception as exc:
-        return {"ok": False, "reason": f"post-search dump failed: {exc}"}
-    list_items = (dump2 or {}).get("listItems") or []
+    # Speed fix (Production, 2026-09-08) — this used to be a flat 1000ms
+    # wait_for_timeout before ever checking the filtered results once.
+    # Bounded-polled instead, over the SAME 1000ms ceiling (5 x 200ms) —
+    # worst case is byte-for-byte identical to before (still waits out
+    # the full second if the filter genuinely takes that long), but the
+    # common case — WhatsApp's own search filter responding well under a
+    # second, which real per-item SEND timing showed is typical — no
+    # longer pays the full fixed cost on every single forwarded item.
     needle = destination_group.strip().lower()
-    raw_matches = [li for li in list_items if needle in (li.get("text") or "").strip().lower()]
+    dump2: Optional[Dict[str, Any]] = None
+    raw_matches: List[Dict[str, Any]] = []
+    for _ in range(5):
+        try:
+            dump2 = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+        except Exception as exc:
+            return {"ok": False, "reason": f"post-search dump failed: {exc}"}
+        list_items = (dump2 or {}).get("listItems") or []
+        raw_matches = [li for li in list_items if needle in (li.get("text") or "").strip().lower()]
+        if raw_matches:
+            break
+        await page.wait_for_timeout(200)
     deduped: Dict[int, Dict[str, Any]] = {}
     for li in raw_matches:
         rect = li.get("rect") or [0, 0, 0, 0]
@@ -7643,8 +7656,18 @@ async def _send_one_target_native_forward(
 
     `source_type` ("group" | "phone", SEND Path B, Production fix
     2026-09-03) — see _open_source_chat; `group_name` holds the phone
-    digits when source_type=="phone"."""
+    digits when source_type=="phone".
+
+    SEND_TIMING (Production fix, 2026-09-08 — performance audit): one
+    structured log line per item, timing exactly the stages a real SEND
+    E2E showed noticeable per-item delay across (source open, media
+    prepare/readiness, forward-button click, destination select, caption
+    +send) — never spammy (one line per item, not per sub-step), so a
+    future "SEND feels slow" report can be diagnosed from Railway logs
+    instead of guessed at again."""
+    t_start = time.monotonic()
     status = await _open_source_chat(page, source_type, group_name)
+    t_source_open = time.monotonic()
     if status != "OPENED":
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"source group not open (status={status})"}
 
@@ -7652,7 +7675,12 @@ async def _send_one_target_native_forward(
     tile_index = target.get("album_tile_index") or 0
 
     ready = await _open_media_and_get_forward_button(page, group_name, target["source_message_id"], tile_index, is_photo)
+    t_media_ready = time.monotonic()
     if not ready.get("ok"):
+        logger.info(
+            "SEND_TIMING item=%s source_message_id=%s source_open=%.2fs media_prepare=%.2fs FAILED=media_not_ready",
+            item_label, target["source_message_id"], t_source_open - t_start, t_media_ready - t_source_open,
+        )
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"forward not ready: {ready.get('reason')}"}
 
     forward_btn = ready["forward_button"]
@@ -7662,6 +7690,7 @@ async def _send_one_target_native_forward(
         await page.mouse.click(cx, cy, button="left")
     except Exception as exc:
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"forward click failed: {exc}"}
+    t_forward_click = time.monotonic()
     # Speed fix — this used to be a blind 1200ms wait before the picker
     # was even checked once. _select_forward_destination immediately below
     # already does its OWN bounded poll for the picker's dialog (up to 10
@@ -7674,6 +7703,7 @@ async def _send_one_target_native_forward(
     # up to 1.2s per forwarded item — 2.4s+ on a typical 2-item SEND.
 
     select_result = await _select_forward_destination(page, target["destination_group"])
+    t_dest_select = time.monotonic()
     if not select_result.get("ok"):
         closed = await _ensure_forward_dialog_closed(page)
         reason = select_result.get("reason")
@@ -7682,6 +7712,7 @@ async def _send_one_target_native_forward(
         return {"ok": False, "source_message_id": target["source_message_id"], "error": f"destination selection failed: {reason}"}
 
     send_result = await _enter_forward_caption_and_send(page, target.get("caption") or "")
+    t_send = time.monotonic()
     if not send_result.get("ok"):
         # Verified cleanup on failure (2026-08-27 fix) — mirrors the
         # destination-selection failure path above. A real production SEND
@@ -7711,6 +7742,13 @@ async def _send_one_target_native_forward(
     # next (the next forward, the form, or the marker).
     await _ensure_forward_dialog_closed(page)
 
+    logger.info(
+        "SEND_TIMING item=%s source_message_id=%s source_open=%.2fs media_prepare=%.2fs "
+        "forward_click=%.2fs destination_select=%.2fs form_send=%.2fs total=%.2fs",
+        item_label, target["source_message_id"],
+        t_source_open - t_start, t_media_ready - t_source_open, t_forward_click - t_media_ready,
+        t_dest_select - t_forward_click, t_send - t_dest_select, time.monotonic() - t_start,
+    )
     return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT", "selector_used": send_result.get("selector_used")}
 
 

@@ -3300,10 +3300,34 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
     out["image_url"] = _resolve_cover_url(out) or None
 
     # Competitive brand — only when explicitly enabled.
+    #
+    # Production fix, 2026-09-08: the submission form asks this as TWO
+    # separate fields — has_competitive_brand_experience (True="yes,
+    # I have one" / False="No, I have none" / missing="unanswered") and
+    # competitive_brand (the free-text name, only meaningful when the
+    # answer is True; see routers/submissions.py's own required-field
+    # validation for the same has_competitive_brand_experience is False
+    # is itself a complete, valid answer" rule). The OLD code only ever
+    # looked at the free-text value — has_competitive_brand_experience
+    # is False legitimately leaves that text EMPTY (there's nothing to
+    # type when the answer is "no brand"), so an explicit, valid "None"
+    # answer and a genuinely unanswered question both produced an empty
+    # string here, collapsing "FIELD PROVIDED AS None" into "FIELD NOT
+    # PROVIDED" — the exact bug: the SEND form showed a blank
+    # "Competitive Brand:" line for a talent who explicitly said they
+    # have none, instead of "Competitive Brand:\nNone".
     if fv.get("competitive_brand"):
-        cb = (fd.get("competitive_brand") or "").strip()
-        if cb:
-            out["competitive_brand"] = cb
+        has_brand_exp = fd.get("has_competitive_brand_experience")
+        if has_brand_exp is False:
+            out["competitive_brand"] = "None"
+        else:
+            cb = (fd.get("competitive_brand") or "").strip()
+            if cb:
+                out["competitive_brand"] = cb
+            # else: has_brand_exp is True but the text is empty (an
+            # incomplete answer the required-field check should already
+            # catch) or has_brand_exp is missing entirely (genuinely
+            # unanswered) — stays unset, correctly blank either way.
 
     # Custom answers — support both bool and per-question dict shapes.
     # Build a question-ID → question-text lookup from the project's custom_questions

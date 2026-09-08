@@ -3494,6 +3494,86 @@ def main():
     mark_scan._find_onscreen_forward_button = orig_find_forward_btn_104
     mark_scan._evaluate = orig_evaluate_104
 
+    # 108: MIXED-SOURCE SEND (Production fix, 2026-09-08) — one target's
+    # marked media lives in the talent's individual WhatsApp chat, the
+    # other in their WhatsApp group, in the SAME send_targets list (see
+    # casting_pipeline.build_send_targets/media_assignment_worker.
+    # _finish_multi_source_scan_sibling on the backend side, which is
+    # what actually produces a mixed send_targets list like this in
+    # production). _run_send must (a) open EACH item's own correct
+    # source chat, never assuming the request-level group_name/
+    # source_type applies to every item, and (b) SKIP the single upfront
+    # "open once, abort the whole send if it fails" gate when targets
+    # span more than one distinct source — since _send_one_target_
+    # native_forward already re-opens the correct source per item
+    # regardless, that upfront open is a redundant optimization for the
+    # single-source case only, never a correctness requirement, and for
+    # a mixed send it would incorrectly abort a working source's items
+    # just because a DIFFERENT source failed to open upfront.
+    calls_108: list = []
+
+    async def _fake_open_group_108(page, group_name):
+        calls_108.append(("open_group", group_name))
+        return "OPENED"
+
+    async def _fake_open_phone_108(page, phone):
+        calls_108.append(("open_phone", phone))
+        return "OPENED"
+
+    async def _fake_forward_108(page, group_name, target, item_label="", source_type="group"):
+        calls_108.append(("forward", group_name, source_type, target["source_message_id"]))
+        return {"source_message_id": target["source_message_id"], "ok": True}
+
+    async def _fake_text_108(page, destination_group, message, *, destination_type="group"):
+        calls_108.append(("text", message))
+        return {"ok": True}
+
+    orig_open_group_108 = sender._open_group_chat
+    orig_open_phone_108 = sender._open_chat_by_phone
+    orig_forward_108 = mark_scan._send_one_target_native_forward
+    orig_text_108 = mark_scan._send_text_message
+    sender._open_group_chat = _fake_open_group_108
+    sender._open_chat_by_phone = _fake_open_phone_108
+    mark_scan._send_one_target_native_forward = _fake_forward_108
+    mark_scan._send_text_message = _fake_text_108
+    try:
+        req_108 = {
+            "group_name": "Shivi Rajput x Talentgram", "source_type": "group",
+            "destination_group": "Dest Group", "project_label": "Vaseline",
+            "send_targets": [
+                {
+                    "source_message_id": "phone-take1", "media_role": "take", "take_number": 1,
+                    "source_media_type": "video", "destination_group": "Dest Group", "caption": "Audition Take",
+                    "source_type": "phone", "source_group_name": "919990000111",
+                },
+                {
+                    "source_message_id": "group-intro1", "media_role": "intro", "take_number": None,
+                    "source_media_type": "video", "destination_group": "Dest Group", "caption": "Introduction Take",
+                    "source_type": "group", "source_group_name": "Shivi Rajput x Talentgram",
+                },
+            ],
+            "form_insert_index": 2, "form_message": None, "send_marker_on_success": False,
+        }
+        result_108 = asyncio.run(mark_scan._run_send(object(), req_108))
+    finally:
+        sender._open_group_chat = orig_open_group_108
+        sender._open_chat_by_phone = orig_open_phone_108
+        mark_scan._send_one_target_native_forward = orig_forward_108
+        mark_scan._send_text_message = orig_text_108
+
+    assert all(r["ok"] for r in result_108["results"]), result_108
+    # The upfront single-source gate never ran at all (neither open_group
+    # nor open_phone appears before the per-item forwards) — only the
+    # per-item forwards, each carrying its OWN correct source.
+    assert ("open_group", "Shivi Rajput x Talentgram") not in calls_108, calls_108
+    assert ("open_phone", "919990000111") not in calls_108, calls_108
+    assert calls_108 == [
+        ("forward", "919990000111", "phone", "phone-take1"),
+        ("forward", "Shivi Rajput x Talentgram", "group", "group-intro1"),
+        ("text", "Thanks, shared for Vaseline."),
+    ], calls_108
+    print("108. SEND mixed-source per-target routing -> Take opened via the individual WhatsApp chat, Introduction via the WhatsApp group, in ONE send — upfront single-source gate correctly skipped")
+
 
 if __name__ == "__main__":
     main()

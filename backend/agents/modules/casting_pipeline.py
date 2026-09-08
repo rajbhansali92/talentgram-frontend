@@ -8442,74 +8442,44 @@ _SEND_PREVIEW_POLL_INTERVAL_SEC = float(os.environ.get("SEND_PREVIEW_POLL_INTERV
 _SEND_PREVIEW_MAX_WAIT_SEC = float(os.environ.get("SEND_PREVIEW_MAX_WAIT_SEC", "20"))
 
 
-async def _preview_send_marks(
+async def _scan_raw_candidates_for_source(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str,
-    group_name: str, source_type: str, destination_group: str,
+    source_type: str, group_name: str, destination_group: str,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """SEND confirmation's own pre-approval media-identification pass
-    (Production fix, 2026-09-03 — Part 10/11's explicit "show the admin
-    exactly which marked media will be forwarded, never a bare count").
-    Creates a preview_only=True scan request — the SAME real WhatsApp
-    scan _send_one_pair's own execution-time scan performs (identical
-    worker path, identical validate_candidates call), but one that NEVER
-    writes to media_assignments/media_sends and NEVER proceeds to an
-    actual download/send (see services/media_assignment_worker.py's
-    _process_scan_done preview_only branch) — purely informational, safe
-    to re-trigger on every confirmation-card render (e.g. after an edit).
-
-    Returns (assignments, error):
-      - (list, None) — 0+ resolved marks; an empty list genuinely means
-        "no marked media found for this project" (the caller renders
-        that honestly, never as if it were a failure)
-      - (None, message) — the scan found a REAL problem (ambiguous mark,
-        unresolved mark, unresolvable batch) and SEND must stop, exactly
-        as the real execution-time scan would
-      - (None, None) — a timeout/infra failure; the confirmation still
-        shows Project/Talent/Source/Destination/Form, only the Marked
-        media line degrades to an honest "couldn't verify in time" note
-        (Part 22's speed requirement — this is a best-effort preview,
-        never a hard gate: the REAL scan at execution time is what's
-        authoritative and always re-verifies from scratch regardless of
-        what this preview did or didn't find)."""
+    """Scans exactly ONE source (a talent's group OR their individual
+    chat) and returns its RAW, unvalidated candidates — never runs
+    validate_candidates itself (see create_send_scan_request's own
+    skip_validation docstring for why: that must run once, on every
+    configured source's candidates MERGED together, never once per
+    source in isolation). Each returned candidate is tagged with
+    `source_type`/`source_group_name` = exactly this call's own
+    parameters, so a later merge across sources never loses track of
+    which chat a given mark actually came from. Returns (candidates,
+    error): (list, None) on success (possibly empty — no marks found in
+    THIS source is not an error), (None, message) on a genuine scan
+    failure, (None, None) on a timeout (best-effort, never a hard
+    block — mirrors _preview_send_marks' own timeout handling)."""
     from agents.modules import media_send
 
     req_id = await media_send.create_send_scan_request(
         talent_id=talent_id, talent_label=talent_label,
         project_id=project_id, project_label=project_label,
         group_name=group_name, source_type=source_type,
-        destination_group=destination_group, preview_only=True,
+        destination_group=destination_group, preview_only=True, skip_validation=True,
     )
     deadline = time.monotonic() + _SEND_PREVIEW_MAX_WAIT_SEC
     try:
         while True:
             doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
-                {"id": req_id}, {"_id": 0, "status": 1, "preview_result": 1, "scan_error": 1},
+                {"id": req_id}, {"_id": 0, "status": 1, "candidates": 1, "scan_error": 1},
             )
             status = (doc or {}).get("status")
             if status == media_assignment.STATUS_FINISHED:
-                result = (doc or {}).get("preview_result") or {}
-                if result.get("batch_failures"):
-                    names = "; ".join(
-                        (b.get("mark_text") or "").strip() for b in result["batch_failures"]
-                    )
-                    return None, (
-                        f"Some marked media couldn't be resolved to exact WhatsApp source "
-                        f"items: {names}. Re-check the mark and album, then retry."
-                    )
-                if result.get("ambiguous"):
-                    amb = result["ambiguous"]
-                    role, take = amb.get("media_role"), amb.get("take_number")
-                    slot = f"Take {take}" if role == "take" else (role or "media").capitalize()
-                    return None, (
-                        f"{project_label} {slot} has been marked twice, pointing to two "
-                        f"different source items — please resolve the duplicate mark before sending."
-                    )
-                if result.get("unresolved"):
-                    return None, (
-                        "Some marked media could not be matched to an exact WhatsApp source "
-                        "message — please re-check the mark."
-                    )
-                return result.get("assignments") or [], None
+                if doc.get("scan_error"):
+                    return None, doc["scan_error"]
+                raw = doc.get("candidates") or []
+                tagged = [{**c, "source_type": source_type, "source_group_name": group_name} for c in raw]
+                return tagged, None
             if status == media_assignment.SCAN_STATUS_FAILED:
                 return None, (doc.get("scan_error") or "The WhatsApp scan failed.")
             if time.monotonic() >= deadline:
@@ -8517,6 +8487,119 @@ async def _preview_send_marks(
             await asyncio.sleep(_SEND_PREVIEW_POLL_INTERVAL_SEC)
     finally:
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+async def _scan_and_validate_multi_source(
+    *, talent_id: str, talent_label: str, project_id: str, project_label: str, destination_group: str,
+    sources: List[Tuple[str, str]],
+) -> Tuple[Optional["media_assignment.ValidationOutcome"], Optional[str]]:
+    """The full mixed-source resolution pass (Production fix, 2026-09-08):
+    scans EVERY configured source for this talent (group AND phone, when
+    both exist — never just one), tags each source's own candidates with
+    where they came from, merges everything into ONE list, and calls
+    media_assignment.validate_candidates EXACTLY ONCE on the combined
+    set — so a role marked in both sources is correctly caught as
+    real ambiguity (never silently picking one), and a role marked in
+    only one source resolves normally regardless of which one. Returns
+    (outcome, error): (ValidationOutcome, None) on success (an outcome
+    with assignments=[] genuinely means nothing marked anywhere), (None,
+    message) when NO source could even be identified (no WhatsApp group
+    or phone configured at all) or when every configured source's scan
+    itself hard-failed, (None, None) on a pure timeout (mirrors
+    _scan_raw_candidates_for_source's own timeout contract — the caller
+    degrades to its existing "couldn't verify in time" handling)."""
+    if not sources:
+        return None, (
+            f"{talent_label} has no WhatsApp group or phone number configured — "
+            "the mark-based send workflow requires one. Add it in Talentgram first."
+        )
+    merged: List[Dict[str, Any]] = []
+    hard_errors: List[str] = []
+    saw_timeout = False
+    for source_type, group_name in sources:
+        candidates, err = await _scan_raw_candidates_for_source(
+            talent_id=talent_id, talent_label=talent_label,
+            project_id=project_id, project_label=project_label,
+            source_type=source_type, group_name=group_name, destination_group=destination_group,
+        )
+        if candidates is not None:
+            merged.extend(candidates)
+        elif err is not None:
+            hard_errors.append(err)
+        else:
+            saw_timeout = True
+    if hard_errors and not merged:
+        # Every source that was tried hard-failed and NONE produced even
+        # an empty-but-successful scan — a real infra problem, not "no
+        # marks found". A partial success (one source failed, another
+        # succeeded, even with zero candidates) still proceeds below —
+        # unrelated marks in the working source must never be blocked by
+        # an unrelated source's own trouble.
+        return None, "; ".join(hard_errors)
+    if not merged and saw_timeout and not hard_errors:
+        return None, None  # pure timeout, no source produced any result at all
+    identity = await media_assignment.get_gunwanti_identity()
+    projects = await _fetch_ongoing_projects()
+    outcome = media_assignment.validate_candidates(
+        merged, gunwanti_lid=(identity or {}).get("lid") or "",
+        requested_project_id=project_id, requested_project_label=project_label,
+        projects=projects, talent_id=talent_id,
+    )
+    return outcome, None
+
+
+async def _preview_send_marks(
+    *, talent_id: str, talent_label: str, project_id: str, project_label: str,
+    destination_group: str, sources: List[Tuple[str, str]],
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """SEND confirmation's own pre-approval media-identification pass
+    (Production fix, 2026-09-03 — Part 10/11's explicit "show the admin
+    exactly which marked media will be forwarded, never a bare count";
+    extended 2026-09-08 to scan every configured source, not just one —
+    see _scan_and_validate_multi_source). Purely informational, never
+    writes to media_assignments/media_sends, safe to re-trigger on every
+    confirmation-card render (e.g. after an edit).
+
+    Returns (assignments, error):
+      - (list, None) — 0+ resolved marks; an empty list genuinely means
+        "no marked media found for this project" (the caller renders
+        that honestly, never as if it were a failure)
+      - (None, message) — the scan found a REAL problem (ambiguous mark,
+        unresolved mark, unresolvable batch, no source configured) and
+        SEND must stop, exactly as the real execution-time scan would
+      - (None, None) — a timeout/infra failure; the confirmation still
+        shows Project/Talent/Source/Destination/Form, only the Marked
+        media line degrades to an honest "couldn't verify in time" note
+        (Part 22's speed requirement — this is a best-effort preview,
+        never a hard gate: the REAL scan at execution time is what's
+        authoritative and always re-verifies from scratch regardless of
+        what this preview did or didn't find)."""
+    outcome, error = await _scan_and_validate_multi_source(
+        talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label, destination_group=destination_group,
+        sources=sources,
+    )
+    if outcome is None:
+        return None, error
+    if outcome.batch_failures:
+        names = "; ".join((b.get("mark_text") or "").strip() for b in outcome.batch_failures)
+        return None, (
+            f"Some marked media couldn't be resolved to exact WhatsApp source "
+            f"items: {names}. Re-check the mark and album, then retry."
+        )
+    if outcome.ambiguous:
+        role, take = outcome.ambiguous.get("media_role"), outcome.ambiguous.get("take_number")
+        slot = f"Take {take}" if role == "take" else (role or "media").capitalize()
+        return None, (
+            f"{project_label} {slot} has been marked twice, pointing to two "
+            f"different source items — please resolve the duplicate mark before sending."
+        )
+    if outcome.unresolved:
+        return None, (
+            "Some marked media could not be matched to an exact WhatsApp source "
+            "message — please re-check the mark."
+        )
+    return outcome.assignments or [], None
 
 
 async def _narrow_send_ambiguous_talent_by_whatsapp_identity(
@@ -8710,37 +8793,66 @@ async def _resolve_send_target(
         {"id": {"$in": candidate_ids}}, {"_id": 0, "id": 1, "whatsapp_group_name": 1, "phone": 1},
     ).to_list(20)
     by_id = {d["id"]: d for d in candidate_docs}
-    auth_group = ((by_id.get(authoritative_talent_id) or {}).get("whatsapp_group_name") or "").strip()
-    auth_phone = ((by_id.get(authoritative_talent_id) or {}).get("phone") or "").strip()
-    if auth_group:
-        group_name, source_type = auth_group, "group"
-    elif auth_phone:
-        group_name, source_type = auth_phone, "phone"
-    else:
-        group_names = {(d.get("whatsapp_group_name") or "").strip() for d in candidate_docs if (d.get("whatsapp_group_name") or "").strip()}
-        if group_names:
-            if len(group_names) > 1:
-                return None, ExecResult(
-                    ok=False, error="ambiguous_whatsapp_group",
-                    message=f"Multiple different WhatsApp groups are configured across talent records named "
-                            f"{candidate_label} — please resolve the duplicate talent records first.",
-                )
-            group_name, source_type = next(iter(group_names)), "group"
-        else:
-            phones = {(d.get("phone") or "").strip() for d in candidate_docs if (d.get("phone") or "").strip()}
-            if not phones:
-                return None, ExecResult(
-                    ok=False, error="no_whatsapp_source",
-                    message=f"{authoritative_talent_label} has no WhatsApp group or phone number configured — "
-                            "the mark-based send workflow requires one. Add it in Talentgram first.",
-                )
-            if len(phones) > 1:
-                return None, ExecResult(
-                    ok=False, error="ambiguous_whatsapp_phone",
-                    message=f"Multiple different phone numbers are configured across talent records named "
-                            f"{candidate_label} — please resolve the duplicate talent records first.",
-                )
-            group_name, source_type = next(iter(phones)), "phone"
+
+    def _resolve_one_source_field(field: str, label: str) -> Tuple[Optional[str], Optional[ExecResult]]:
+        # PREFERS the now-resolved authoritative talent's OWN configured
+        # value; only falls back to searching the FULL original
+        # candidate set (Production fix, 2026-09-03) when the
+        # authoritative record's own value is empty — the exact "Dia
+        # Malik" shape: her real Airtel Kick Boxing submission belongs
+        # to one duplicate talent record with NO WhatsApp group
+        # configured at all, while her actual marks live in the group
+        # configured on the OTHER duplicate record for the same real
+        # person. Never a second, competing source of truth when the
+        # authoritative record DOES have its own value — that one
+        # always wins outright.
+        auth_val = ((by_id.get(authoritative_talent_id) or {}).get(field) or "").strip()
+        if auth_val:
+            return auth_val, None
+        values = {(d.get(field) or "").strip() for d in candidate_docs if (d.get(field) or "").strip()}
+        if not values:
+            return None, None
+        if len(values) > 1:
+            return None, ExecResult(
+                ok=False, error=f"ambiguous_whatsapp_{field}",
+                message=f"Multiple different {label} are configured across talent records named "
+                        f"{candidate_label} — please resolve the duplicate talent records first.",
+            )
+        return next(iter(values)), None
+
+    # Mixed-source SEND (Production fix, 2026-09-08, Requirement #10):
+    # a talent's marked media can legitimately live in EITHER their
+    # WhatsApp group OR their individual WhatsApp chat — having BOTH
+    # configured does NOT mean the group is automatically the only
+    # source. Both are resolved INDEPENDENTLY (each with its own Dia-
+    # Malik-style duplicate-record fallback and its own
+    # multiple-distinct-values ambiguity check) rather than the OLD
+    # exclusive "group wins outright if present, phone never even
+    # checked" chain.
+    resolved_group, group_err = _resolve_one_source_field("whatsapp_group_name", "WhatsApp groups")
+    if group_err is not None:
+        return None, group_err
+    resolved_phone, phone_err = _resolve_one_source_field("phone", "phone numbers")
+    if phone_err is not None:
+        return None, phone_err
+    all_sources: List[Tuple[str, str]] = []
+    if resolved_group:
+        all_sources.append(("group", resolved_group))
+    if resolved_phone:
+        all_sources.append(("phone", resolved_phone))
+    if not all_sources:
+        return None, ExecResult(
+            ok=False, error="no_whatsapp_source",
+            message=f"{authoritative_talent_label} has no WhatsApp group or phone number configured — "
+                    "the mark-based send workflow requires one. Add it in Talentgram first.",
+        )
+    # group_name/source_type (unchanged field names, kept for every
+    # EXISTING single-source consumer of `target` — form building,
+    # submission resolution, none of which care about source at all)
+    # take the FIRST resolved source, preferring group over phone —
+    # exactly the original preference order, now just one entry of the
+    # full all_sources list rather than the only thing ever computed.
+    source_type, group_name = all_sources[0]
 
     identity = await media_assignment.get_gunwanti_identity()
     if not identity or not identity.get("lid"):
@@ -8803,6 +8915,14 @@ async def _resolve_send_target(
         "authoritative_talent_label": authoritative_talent_label,
         "group_name": group_name, "source_type": source_type, "destination_group": destination_group,
         "submission": submission,
+        # Mixed-source SEND (Production fix, 2026-09-08): every WhatsApp
+        # source this talent's marked media could genuinely come from
+        # (both group AND phone, when both are configured — see
+        # _resolve_one_source_field above) — group_name/source_type
+        # above remain the single preferred one for backward-compatible
+        # consumers; all_sources is what the multi-source scan actually
+        # uses.
+        "all_sources": all_sources,
     }, None
 
 
@@ -8879,9 +8999,16 @@ def _send_selector_pairs(collected: dict) -> List[Tuple[str, str]]:
 _SEND_ROLE_DISPLAY_ORDER = {"take": 0, "intro": 1, "photos": 2}
 
 
-def _format_marked_media_lines(assignments: List[Dict[str, Any]], project_label: str) -> List[str]:
+def _format_marked_media_lines(assignments: List[Dict[str, Any]], project_label: str, talent_label: str = "") -> List[str]:
     """Numbered "1 - Take 1" / "2 - Introduction" lines for the SEND
-    confirmation card (Part 11 — never collapsed into a bare count)."""
+    confirmation card (Part 11 — never collapsed into a bare count).
+    Each item's own source is shown on an indented line beneath it
+    (Production fix — mixed-source SEND, 2026-09-08, Requirement #17:
+    "the source for every marked media must be visible") — a talent's
+    Take and Introduction can genuinely come from two different WhatsApp
+    chats (their group vs their individual number) in the SAME send, so
+    a single shared "Source:" line for the whole confirmation is no
+    longer sufficient to show the admin what will actually happen."""
     ordered = sorted(
         assignments,
         key=lambda m: (
@@ -8890,10 +9017,15 @@ def _format_marked_media_lines(assignments: List[Dict[str, Any]], project_label:
             m.get("take_number") or 0,
         ),
     )
-    return [
-        f"{i} - {media_assignment.submission_label(m.get('media_role'), m.get('take_number'))}"
-        for i, m in enumerate(ordered, start=1)
-    ]
+    lines = []
+    for i, m in enumerate(ordered, start=1):
+        lines.append(f"{i} - {media_assignment.submission_label(m.get('media_role'), m.get('take_number'))}")
+        src_type, src_name = m.get("source_type"), m.get("source_group_name")
+        if src_type == "phone":
+            lines.append(f"   {talent_label} — Individual WhatsApp")
+        elif src_type == "group" and src_name:
+            lines.append(f"   {src_name} — WhatsApp group")
+    return lines
 
 
 async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
@@ -8946,8 +9078,7 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
         assignments, marks_error = await _preview_send_marks(
             talent_id=talent_id, talent_label=talent_label,
             project_id=project_id, project_label=project["label"],
-            group_name=target["group_name"], source_type=target.get("source_type") or "group",
-            destination_group=destination_group,
+            destination_group=destination_group, sources=target["all_sources"],
         )
         # A bare timeout (assignments=None, marks_error=None) is never
         # cached — it's an infrastructure hiccup, not a stable result;
@@ -8964,19 +9095,30 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
             f"{marks_error}\n\nNothing has been sent."
         )
     if assignments is not None and not assignments:
+        checked_sources = target["all_sources"]
+        checked_desc = " or ".join(
+            f"{name} ({'their individual WhatsApp' if st == 'phone' else 'WhatsApp group'})"
+            for st, name in checked_sources
+        ) or f"{talent_label}'s WhatsApp"
         return (
             f"SEND — No Marked Media Found\n\n"
             f"Project: {project['label']}\nTalent: {talent_label}\n\n"
-            f"No @Gunwanti + mark for {project['label']} was found in "
-            f"{talent_label}'s WhatsApp {'number' if target.get('source_type') == 'phone' else 'group'}. "
+            f"No @Gunwanti + mark for {project['label']} was found in {checked_desc}. "
             f"Nothing has been sent.\n\n"
             f"Mark the media first, then retry."
         )
     marked_media_lines = (
-        _format_marked_media_lines(assignments, project["label"]) if assignments is not None
+        _format_marked_media_lines(assignments, project["label"], talent_label) if assignments is not None
         else ["Couldn't verify marked media within a reasonable time — approving will scan "
               "fresh and report exactly what was found/sent."]
     )
+    # Multi-source (Production fix, 2026-09-08): a single "Source:" line
+    # can no longer describe the whole send when marked media spans BOTH
+    # a talent's group and their individual chat — each item's own
+    # source is now shown inline via marked_media_lines above instead.
+    # This line stays only as a fallback for the "couldn't verify in
+    # time" / no-assignments-known-yet render, describing every source
+    # that WOULD be checked.
     source_line = (
         f"{target['group_name']} (WhatsApp number)" if target.get("source_type") == "phone"
         else f"{target['group_name']} (WhatsApp group)"
@@ -9385,13 +9527,32 @@ async def _send_one_pair(
         )
         form_message = form_built["message"]
 
-    await media_send.create_send_scan_request(
-        talent_id=talent_id, talent_label=talent_label,
-        project_id=project["id"], project_label=project["label"],
-        group_name=target["group_name"], destination_group=destination_group,
-        form_message=form_message, submission_id=submission["id"], content_hash=form_built["content_hash"],
-        source_type=target.get("source_type") or "group",
-    )
+    # Mixed-source SEND (Production fix, 2026-09-08) — approval must stay
+    # fast and non-blocking (ack immediately, resolve asynchronously —
+    # a synchronous scan-and-wait here was tried and reverted: it turns
+    # a normal multi-second WhatsApp scan, or a worker that's merely busy
+    # with something else, into a hard approval FAILURE instead of the
+    # async design's graceful eventual completion). One scan request per
+    # configured source (only ever >1 when the talent genuinely has both
+    # a group AND a phone) is dispatched, all sharing one
+    # multi_scan_group_id — the orchestrator
+    # (media_assignment_worker._process_scan_done) waits until every
+    # sibling has been individually scanned before merging their
+    # candidates and validating once (see create_send_scan_request's own
+    # multi_scan_group_id docstring). A single-source talent (the common
+    # case) dispatches exactly ONE request, byte-for-byte the same call
+    # this always made — completely unaffected.
+    sources = target["all_sources"]
+    multi_scan_group_id = str(uuid.uuid4()) if len(sources) > 1 else None
+    for src_type, src_group_name in sources:
+        await media_send.create_send_scan_request(
+            talent_id=talent_id, talent_label=talent_label,
+            project_id=project["id"], project_label=project["label"],
+            group_name=src_group_name, destination_group=destination_group,
+            form_message=form_message, submission_id=submission["id"], content_hash=form_built["content_hash"],
+            source_type=src_type, skip_validation=(multi_scan_group_id is not None),
+            multi_scan_group_id=multi_scan_group_id, total_sources=len(sources) if multi_scan_group_id else None,
+        )
     return ExecResult(
         ok=True,
         message=f"✅ Approved by {ctx.sender_phone} — now sending {talent_label}'s marked "

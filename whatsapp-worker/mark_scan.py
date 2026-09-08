@@ -7810,7 +7810,22 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
         group_name, source_type, len(send_targets), bool(form_message),
     )
 
-    if send_targets:
+    # Mixed-source SEND (Production fix, 2026-09-08): a talent's marked
+    # media can legitimately come from BOTH their WhatsApp group AND
+    # their individual chat in the SAME send (one item marked in each) —
+    # each target below now carries its OWN source_type/source_group_name
+    # (Production fix, casting_pipeline.build_send_targets) and
+    # _send_one_target_native_forward already re-opens the correct
+    # source chat itself before every single item regardless (see its
+    # own docstring), so this upfront open is a pure "fail fast with one
+    # clear message" optimization for the common single-source case —
+    # never a correctness requirement. It is SKIPPED when targets span
+    # more than one distinct source: one source failing to open must
+    # never abort items that belong to a DIFFERENT, perfectly openable
+    # source (a real correctness gap a single upfront gate would
+    # otherwise introduce for a mixed-source send).
+    distinct_sources = {(t.get("source_type") or source_type, t.get("source_group_name") or group_name) for t in send_targets}
+    if send_targets and len(distinct_sources) <= 1:
         status = await _open_source_chat(page, source_type, group_name)
         if status != "OPENED":
             return {
@@ -7830,9 +7845,11 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
                 form_send_result = {"ok": False, "error": f"form send failed: {exc}"}
 
         item_label = f"{i + 1}/{len(send_targets)}"
+        target_group_name = target.get("source_group_name") or group_name
+        target_source_type = target.get("source_type") or source_type
         try:
             result = await asyncio.wait_for(
-                _send_one_target_native_forward(page, group_name, target, item_label, source_type=source_type),
+                _send_one_target_native_forward(page, target_group_name, target, item_label, source_type=target_source_type),
                 timeout=PER_ITEM_SEND_TIMEOUT,
             )
         except asyncio.TimeoutError:

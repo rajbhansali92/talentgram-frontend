@@ -36,6 +36,8 @@ from agents.modules.media_assignment import (
     SCAN_REQUESTS_COLLECTION,
     SCAN_STATUS_PENDING,
     _now,
+    build_send_targets,
+    slot_key,
 )
 
 MEDIA_SENDS_COLLECTION = "media_sends"
@@ -124,7 +126,8 @@ async def create_send_scan_request(
     group_name: str, destination_group: str,
     form_message: Optional[str] = None, submission_id: Optional[str] = None,
     content_hash: Optional[str] = None, source_type: str = "group",
-    preview_only: bool = False,
+    preview_only: bool = False, skip_validation: bool = False,
+    multi_scan_group_id: Optional[str] = None, total_sources: Optional[int] = None,
 ) -> str:
     """Same shape/lifecycle as media_assignment.create_scan_request — mode
     stays "scan" (the worker's scan logic is 100% shared/unchanged between
@@ -157,7 +160,47 @@ async def create_send_scan_request(
     _process_scan_done — a preview_only request finishes directly once
     scanned, never proceeds to mode="download"/"send", and never writes
     to media_assignments/media_sends. Defaults to False; every real send
-    (the only other caller of this function) is unaffected."""
+    (the only other caller of this function) is unaffected.
+
+    `skip_validation` (Production fix — mixed-source SEND, 2026-09-08):
+    a talent's marked media can legitimately live in EITHER their
+    WhatsApp group OR their individual WhatsApp chat, and a single SEND
+    can require BOTH in the same operation (one item marked in each).
+    validate_candidates' own ambiguity/dedup logic only works correctly
+    across a talent/project's FULL set of marks scanned together — a
+    per-source request that ran validate_candidates on its own slice in
+    isolation could never detect "this role was marked twice, once in
+    each source" (real ambiguity) or correctly dedupe/order a mixed set.
+    Used two ways: (a) casting_pipeline._preview_send_marks' own
+    synchronous multi-source preview scan (bounded wait, purely
+    informational, deleted immediately after reading), and (b) the REAL
+    async execution dispatch's per-source scan requests (see
+    `multi_scan_group_id` below) — both need the worker's raw,
+    unvalidated `candidates` returned rather than a per-source
+    validate_candidates call (mirroring the existing scan_probe
+    diagnostic short-circuit's shape, but for real production use).
+    Defaults to False; every existing caller (single-source preview and
+    the real worker-driven post-scan validation in
+    media_assignment_worker.py) is unaffected.
+
+    `multi_scan_group_id`/`total_sources` (Production fix — mixed-source
+    SEND execution, 2026-09-08): a real SEND approval must stay fast and
+    non-blocking (ack immediately, resolve asynchronously — the whole
+    reason this worker/orchestrator poll-loop architecture exists at
+    all; a synchronous scan-and-wait at approval time was tried and
+    reverted — it turns a worker hiccup or a normal multi-second scan
+    into a hard approval failure instead of the async design's graceful
+    eventual completion). For a talent with MULTIPLE configured sources,
+    _send_one_pair creates one scan request PER source, all sharing the
+    same `multi_scan_group_id` and each knowing `total_sources` — the
+    orchestrator (media_assignment_worker._process_scan_done) waits
+    until every sibling has been individually scanned before merging
+    their candidates and validating once, exactly mirroring what the
+    synchronous preview path does inline, just spread safely across
+    multiple async poll-loop passes instead of one blocking wait. None
+    for a normal single-source send (every existing caller) — that path
+    is completely unaffected, still transitions directly scan->send on
+    its own doc exactly as before."""
     req_id = str(uuid.uuid4())
     await db[SCAN_REQUESTS_COLLECTION].insert_one({
         "id": req_id,
@@ -167,6 +210,9 @@ async def create_send_scan_request(
         "group_name": group_name,
         "source_type": source_type,
         "preview_only": preview_only,
+        "skip_validation": skip_validation,
+        "multi_scan_group_id": multi_scan_group_id,
+        "total_sources": total_sources,
         "destination_group": destination_group,
         "talent_id": talent_id,
         "talent_label": talent_label,
@@ -341,6 +387,51 @@ async def already_sent_marker(talent_id: str, project_id: str, destination_group
         {"_id": 0},
     )
     return doc is not None
+
+
+async def prepare_send_targets(
+    *, talent_id: str, project_id: str, destination_group: str,
+    assignments: List[Dict[str, Any]],
+    default_source_type: str = "group", default_group_name: Optional[str] = None,
+    created_by: str = "whatsapp-agent",
+) -> Tuple[List[Dict[str, Any]], int, bool, List[Dict[str, Any]]]:
+    """The complete "turn validated assignments into a dispatchable SEND
+    request" step — record_send bookkeeping, already-sent filtering,
+    build_send_targets' ordering/caption/per-target-source logic, and the
+    completion-marker gate — extracted into ONE shared function
+    (Production fix — mixed-source SEND, 2026-09-08) so BOTH the async
+    worker-orchestrator path (media_assignment_worker._process_scan_done,
+    single source) and the synchronous multi-source approval path
+    (casting_pipeline._send_one_pair, where assignments may span BOTH a
+    talent's group and their individual chat) share identical logic —
+    never two competing implementations of this bookkeeping.
+
+    Each assignment's own `source_group_name` (present when it came from
+    the multi-source scan) is used for its own record_send row; a
+    single-source assignment (no source_group_name of its own) falls
+    back to `default_group_name`, preserving the exact original
+    single-source behavior unchanged.
+
+    Returns (send_targets, form_insert_index, send_marker_on_success,
+    already)."""
+    already = await already_sent(talent_id, project_id, destination_group)
+    already_slots = {
+        slot_key(a["media_role"], a.get("take_number"), a.get("source_message_id"), a.get("source_thumbnail_hash"))
+        for a in already
+    }
+    for m in assignments:
+        await record_send(
+            talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+            group_name=m.get("source_group_name") or default_group_name, group_id=None,
+            mark=m, created_by=created_by,
+        )
+    send_targets, form_insert_index = build_send_targets(
+        assignments, already_slots, destination_group, talent_id, project_id,
+        default_source_type=default_source_type, default_source_group_name=default_group_name,
+    )
+    marker_already_sent = await already_sent_marker(talent_id, project_id, destination_group)
+    send_marker_on_success = not marker_already_sent
+    return send_targets, form_insert_index, send_marker_on_success, already
 
 
 async def record_marker_sent(talent_id: str, project_id: str, destination_group: str, created_by: str) -> None:

@@ -298,6 +298,128 @@ def _report_send_result(
     )
 
 
+SCAN_STATUS_AWAITING_SIBLINGS = "scan_awaiting_siblings"
+
+
+async def _finish_multi_source_scan_sibling(doc: Dict[str, Any]) -> None:
+    """One of N sibling scan requests (one per configured WhatsApp
+    source) for a single mixed-source SEND — see create_send_scan_
+    request's own multi_scan_group_id docstring for the full design.
+    Marks THIS sibling individually finished-and-waiting, then checks
+    whether every sibling has now reached that same state; if not,
+    simply returns (the next poll-loop pass over whichever sibling
+    finishes next will re-check). Only the call that observes the LAST
+    sibling reaching that state proceeds to merge every sibling's raw
+    candidates (each tagged with its OWN source_type/group_name — never
+    a single shared source assumed), validate once, and either report a
+    failure or dispatch the real mode="send" execution — reusing
+    media_send.prepare_send_targets and the exact same report/dispatch
+    shapes the single-source path already uses. This poll loop is a
+    single sequential asyncio loop, never concurrent with itself, so
+    this "check if I'm last" pattern needs no additional locking."""
+    group_id = doc["multi_scan_group_id"]
+    await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+        {"id": doc["id"]},
+        {"$set": {"status": SCAN_STATUS_AWAITING_SIBLINGS, "updated_at": _now()}},
+    )
+    siblings = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find(
+        {"multi_scan_group_id": group_id},
+    ).sort("created_at", 1).to_list(20)
+    total_sources = doc.get("total_sources") or len(siblings)
+    ready = [s for s in siblings if s.get("status") == SCAN_STATUS_AWAITING_SIBLINGS]
+    if len(siblings) < total_sources or len(ready) < total_sources:
+        return  # not every sibling has individually finished scanning yet
+
+    primary = siblings[0]
+    primary_id = primary["id"]
+    others = [s["id"] for s in siblings[1:]]
+
+    talent_id, project_id = primary["talent_id"], primary["project_id"]
+    talent_label, project_label = primary["talent_label"], primary["project_label"]
+    destination_group = primary["destination_group"]
+
+    identity = await media_assignment.get_gunwanti_identity()
+    if not identity or not identity.get("lid"):
+        await _finish(
+            primary_id,
+            f"SEND FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
+            "The Gunwanti agent identity is not configured (missing WhatsApp LID) — "
+            "cannot validate @mentions. Contact an admin before retrying.",
+        )
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
+        return
+
+    merged: List[Dict[str, Any]] = []
+    hard_errors: List[str] = []
+    for s in ready:
+        if s.get("scan_error"):
+            hard_errors.append(s["scan_error"])
+            continue
+        raw = s.get("candidates") or []
+        merged.extend({**c, "source_type": s.get("source_type") or "group", "source_group_name": s.get("group_name")} for c in raw)
+
+    if hard_errors and not merged:
+        await _finish(
+            primary_id,
+            f"SEND FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
+            f"Could not inspect WhatsApp: {'; '.join(hard_errors)}\n\nNothing has been sent.",
+        )
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
+        return
+
+    projects = await _fetch_ongoing_projects_raw()
+    outcome = media_assignment.validate_candidates(
+        merged, gunwanti_lid=identity["lid"],
+        requested_project_id=project_id, requested_project_label=project_label,
+        projects=projects, talent_id=talent_id,
+    )
+
+    if outcome.batch_failures:
+        await _finish(primary_id, _report_batch_failed(talent_label, project_label, outcome.batch_failures))
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
+        return
+    if outcome.ambiguous:
+        await _finish(primary_id, _report_ambiguous(talent_label, project_label, outcome.ambiguous))
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
+        return
+    if outcome.unresolved:
+        await _finish(primary_id, _report_unresolved(talent_label, project_label, outcome.unresolved))
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
+        return
+
+    send_targets, form_insert_index, send_marker_on_success, already = await media_send.prepare_send_targets(
+        talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+        assignments=outcome.assignments,
+        default_source_type=primary.get("source_type") or "group", default_group_name=primary.get("group_name"),
+    )
+    if not send_targets and not primary.get("form_message") and not send_marker_on_success:
+        await _finish(primary_id, _report_already_sent(talent_label, project_label, destination_group, already))
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
+        return
+
+    await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+        {"id": primary_id},
+        {"$set": {
+            "mode": "send",
+            "status": media_assignment.DOWNLOAD_STATUS_PENDING,
+            "send_dispatched_at": _now(),
+            "send_targets": send_targets,
+            "form_insert_index": form_insert_index,
+            "send_marker_on_success": send_marker_on_success,
+            "form_message": primary.get("form_message"),
+            "pending_report_context": {
+                "talent_label": talent_label, "project_label": project_label,
+                "destination_group": destination_group, "already": already,
+                "submission_id": primary.get("submission_id"), "content_hash": primary.get("content_hash"),
+                "form_message_included": bool(primary.get("form_message")),
+                "marker_attempted": send_marker_on_success,
+            },
+            "updated_at": _now(),
+        }},
+    )
+    await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
+
+
 async def _process_scan_done() -> bool:
     # mode != "resolve_recipient" (2026-09-03 — real production race found
     # via live verification): this collection is also used by
@@ -333,6 +455,38 @@ async def _process_scan_done() -> bool:
         # _process_download_done. Marks finished directly; the candidates/
         # debug fields the worker already wrote stay on the doc for
         # inspection.
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": doc["id"]},
+            {"$set": {"status": media_assignment.STATUS_FINISHED, "completed_at": _now()}},
+        )
+        return True
+
+    if doc.get("skip_validation"):
+        if doc.get("multi_scan_group_id"):
+            # Mixed-source SEND EXECUTION dispatch (Production fix,
+            # 2026-09-08) — this is one of N sibling scan requests (one
+            # per configured source) created together by
+            # casting_pipeline._send_one_pair. validate_candidates must
+            # run EXACTLY ONCE, on every sibling's candidates merged
+            # together — never once per sibling in isolation (a role
+            # marked in both sources would never be caught as real
+            # ambiguity otherwise). This poll loop is a single sequential
+            # asyncio loop (never concurrent with itself), so "check
+            # whether every sibling has individually finished, and if so,
+            # become the merger" is safe without extra locking — each
+            # call to this function fully completes before the next one
+            # starts.
+            await _finish_multi_source_scan_sibling(doc)
+            return True
+        # Non-multi-source skip_validation request (the synchronous
+        # single-source preview scan, casting_pipeline.
+        # _scan_raw_candidates_for_source) — see media_send.
+        # create_send_scan_request's own skip_validation docstring.
+        # Finishes directly with whatever the worker wrote back (raw
+        # `candidates` on success, `scan_error` on failure) untouched —
+        # never runs validate_candidates here; the caller
+        # (casting_pipeline._scan_and_validate_multi_source) merges
+        # every source's own raw scan and validates once itself.
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
             {"id": doc["id"]},
             {"$set": {"status": media_assignment.STATUS_FINISHED, "completed_at": _now()}},
@@ -422,51 +576,29 @@ async def _process_scan_done() -> bool:
         # (send_targets, never download_targets/Cloudinary), same shared
         # candidate validation above.
         destination_group = doc["destination_group"]
-        already = await media_send.already_sent(talent_id, project_id, destination_group)
-        already_slots = {
-            media_assignment.slot_key(a["media_role"], a.get("take_number"), a.get("source_message_id"), a.get("source_thumbnail_hash"))
-            for a in already
-        }
-        for m in outcome.assignments:
-            await media_send.record_send(
-                talent_id=talent_id, project_id=project_id, destination_group=destination_group,
-                group_name=group_name, group_id=doc.get("group_id"), mark=m, created_by="whatsapp-agent",
-            )
-        to_send = [
-            m for m in outcome.assignments
-            if media_assignment.slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) not in already_slots
-        ]
-        # Fixed ordering (Phase 5, 2026-08-26) — Takes (ascending take
-        # number) -> Introduction -> Pictures, never scan/discovery order.
-        # The FORM itself is not a "target" in this list at all; its
-        # position is carried separately as form_insert_index (the count
-        # of items below that belong BEFORE it), so it always lands
-        # between Intro and Pictures regardless of which of those two
-        # groups is present or empty.
-        _role_order = {"take": 0, "intro": 1, "photos": 2}
-        # An unnumbered take ("Mark <project> Take" with no digit — see
-        # media_assignment.py's extract_role_and_project) sorts AFTER every
-        # numbered take, never before (2026-08-27 fix) — `m.get("take_number")
-        # or 0` previously treated None the same as an explicit 0, which
-        # would have jumped an unnumbered take ahead of "Take 1" whenever
-        # both existed for the same talent/project. Sorting on
-        # "is it unnumbered" first, then the number, keeps Take 1/2/3...
-        # in strict ascending order with the unknown one trailing.
-        to_send.sort(key=lambda m: (
-            _role_order.get(m["media_role"], 99),
-            m.get("take_number") is None,
-            m.get("take_number") or 0,
-        ))
-        form_insert_index = sum(1 for m in to_send if m["media_role"] in ("take", "intro"))
-
-        marker_already_sent = await media_send.already_sent_marker(talent_id, project_id, destination_group)
-        # This run closes the gap to full completion exactly when every
-        # remaining media item (to_send) and the form (if not already
-        # sent) are about to be attempted — nothing marked for this
-        # talent/project is ever left outside to_send ∪ already, so
-        # succeeding at all of to_send + form is equivalent to succeeding
-        # at everything.
-        send_marker_on_success = not marker_already_sent
+        # prepare_send_targets (Production fix — mixed-source SEND,
+        # 2026-09-08) — the record_send/already-sent/build_send_targets/
+        # marker-gate bookkeeping extracted into ONE shared function
+        # (agents.modules.media_send) so BOTH this single-source worker-
+        # driven path and the synchronous multi-source approval path
+        # (casting_pipeline._send_one_pair, where assignments may span
+        # BOTH a talent's group and their individual chat) share
+        # identical logic. This request's own candidates were all scanned
+        # from ONE source (group_name/source_type at the top of this
+        # doc), so every assignment here falls through to the default_*
+        # values — behavior is byte-for-byte identical to the inline
+        # block this replaced. `send_marker_on_success` (returned here)
+        # closes the gap to full completion exactly when every remaining
+        # media item and the form (if not already sent) are about to be
+        # attempted this run — nothing marked for this talent/project is
+        # ever left outside send_targets ∪ already, so succeeding at all
+        # of send_targets + form is equivalent to succeeding at
+        # everything.
+        send_targets, form_insert_index, send_marker_on_success, already = await media_send.prepare_send_targets(
+            talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+            assignments=outcome.assignments,
+            default_source_type=doc.get("source_type") or "group", default_group_name=group_name,
+        )
 
         # A pending form_message must still reach the worker even when
         # every media item is already sent — SEND's own spec requires the
@@ -474,28 +606,9 @@ async def _process_scan_done() -> bool:
         # dropped because there was nothing new to forward. Likewise, the
         # ☑️ marker alone (nothing left to forward, form already sent)
         # still needs one more worker pass if it hasn't gone out yet.
-        if not to_send and not doc.get("form_message") and marker_already_sent:
+        if not send_targets and not doc.get("form_message") and not send_marker_on_success:
             await _finish(doc["id"], _report_already_sent(talent_label, project_label, destination_group, already))
             return True
-        send_targets = [{
-            "source_message_id": m["resolved_source_message_id"],
-            "media_role": m["media_role"], "take_number": m["take_number"],
-            "source_media_type": m.get("source_media_type"),
-            "source_thumbnail_hash": m.get("quoted_thumbnail_hash"),
-            "album_tile_index": m.get("album_tile_index"),
-            "mark_reply_message_id": m.get("reply_message_id"), "mark_reply_text": m.get("mark_text"),
-            "mark_target_contact_id": m.get("mention_lid"),
-            "destination_group": destination_group,
-            # simple_role_label (Production fix — media captions must be
-            # simple): the caption that actually lands in the shared
-            # casting group next to the forwarded video/photo is now just
-            # "Audition Take" / "Introduction Take" — no talent name, no
-            # project name (the casting group already knows both from
-            # context; this used to be "{talent} — {project} Take 1",
-            # unnecessarily identifying/exposing both in every caption).
-            "caption": media_assignment.simple_role_label(m["media_role"], m["take_number"]),
-            "talent_id": talent_id, "project_id": project_id,
-        } for m in to_send]
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
             {"id": doc["id"]},
             {"$set": {

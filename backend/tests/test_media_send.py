@@ -732,6 +732,201 @@ async def _insert_send_scan_done(*, talent_id, talent_label, project_id, project
     return req_id
 
 
+async def _insert_multi_source_sibling(
+    *, group_id, talent_id, talent_label, project_id, project_label,
+    source_type, group_name, destination_group, candidates=None, scan_error=None, created_offset_s=0,
+):
+    """One sibling of a mixed-source SEND scan — mirrors exactly what
+    _send_one_pair now dispatches (create_send_scan_request with
+    multi_scan_group_id set), already at status=SCAN_STATUS_DONE as if
+    the worker had just reported back, so _process_scan_done can claim
+    and process it immediately without a real worker."""
+    req_id = str(uuid.uuid4())
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "scan", "workflow": "send", "status": ma.SCAN_STATUS_DONE,
+        "group_name": group_name, "source_type": source_type, "destination_group": destination_group,
+        "talent_id": talent_id, "talent_label": talent_label,
+        "project_id": project_id, "project_label": project_label,
+        "skip_validation": True, "multi_scan_group_id": group_id, "total_sources": 2,
+        "candidates": candidates or [], "scan_error": scan_error,
+        "form_message": None, "submission_id": None, "content_hash": None,
+        "created_at": _now(), "updated_at": _now(),
+    })
+    return req_id
+
+
+# ---------------------------------------------------------------------------
+# Mixed-source SEND (Production fix, 2026-09-08) — a talent's marked media
+# can legitimately come from EITHER their WhatsApp group OR their
+# individual WhatsApp chat, including BOTH in the same send. Orchestrator-
+# level tests mirroring the style above, exercising
+# media_assignment_worker._finish_multi_source_scan_sibling directly via
+# hand-inserted sibling scan_request docs — no real WhatsApp Worker needed.
+# ---------------------------------------------------------------------------
+async def test_send_orchestrator_mixed_source_take_from_phone_intro_from_group():
+    """Requirement #11's exact scenario: Take marked in the talent's
+    individual WhatsApp chat, Introduction marked in their WhatsApp group
+    — ONE send must resolve and dispatch BOTH, each remembering its OWN
+    source, never assuming a single shared source for the whole send."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Shivi {tag}"
+    group_id = str(uuid.uuid4())
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    req_phone = await _insert_multi_source_sibling(
+        group_id=group_id, talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        source_type="phone", group_name="919990000111", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="src-phone-take1")],
+    )
+    req_group = await _insert_multi_source_sibling(
+        group_id=group_id, talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        source_type="group", group_name=f"{talent_label} x Talentgram", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} intro", source_message_id="src-group-intro", media_type="video")],
+    )
+    try:
+        # First sibling processed: not dispatched yet — still waiting on its sibling.
+        assert await orch._process_scan_done()
+        one = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_phone})
+        assert one["status"] == "scan_awaiting_siblings", one
+        assert one.get("mode") == "scan", one  # never transitioned early
+
+        # Second sibling processed: now the merge happens.
+        assert await orch._process_scan_done()
+
+        primary = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_phone})  # phone was created first
+        assert primary["mode"] == "send", primary
+        assert primary["status"] == ma.DOWNLOAD_STATUS_PENDING, primary
+        targets_by_role = {t["media_role"]: t for t in primary["send_targets"]}
+        assert set(targets_by_role) == {"take", "intro"}
+        assert targets_by_role["take"]["source_type"] == "phone", targets_by_role["take"]
+        assert targets_by_role["take"]["source_group_name"] == "919990000111", targets_by_role["take"]
+        assert targets_by_role["intro"]["source_type"] == "group", targets_by_role["intro"]
+        assert targets_by_role["intro"]["source_group_name"] == f"{talent_label} x Talentgram", targets_by_role["intro"]
+
+        # The OTHER sibling doc is cleaned up, never left dangling/reprocessed.
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_group}) is None
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": [req_phone, req_group]}})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+async def test_send_orchestrator_mixed_source_ambiguous_across_sources_never_guesses():
+    """The SAME role marked once in each source (e.g. Take marked in BOTH
+    the group and the individual chat) must be caught as real ambiguity
+    across the merged set — never silently picking whichever source
+    happened to be scanned/processed last."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Shivi {tag}"
+    group_id = str(uuid.uuid4())
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    req_phone = await _insert_multi_source_sibling(
+        group_id=group_id, talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        source_type="phone", group_name="919990000111", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="src-phone-take1")],
+    )
+    req_group = await _insert_multi_source_sibling(
+        group_id=group_id, talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        source_type="group", group_name=f"{talent_label} x Talentgram", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="src-group-take1")],
+    )
+    try:
+        assert await orch._process_scan_done()
+        assert await orch._process_scan_done()
+        primary = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_phone})
+        assert primary["mode"] == "scan", primary  # never transitioned to send
+        assert primary["status"] == ma.STATUS_FINISHED, primary
+        assert "AMBIGUOUS" in (primary.get("report") or ""), primary
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_group}) is None
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": [req_phone, req_group]}})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+async def test_send_orchestrator_mixed_source_one_source_scan_failed_other_still_sends():
+    """One source's scan hard-fails (e.g. the individual chat couldn't be
+    opened) while the OTHER source scanned fine — the working source's
+    marks must still be sent, never blocked entirely by an unrelated
+    source's own trouble."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Shivi {tag}"
+    group_id = str(uuid.uuid4())
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    req_phone = await _insert_multi_source_sibling(
+        group_id=group_id, talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        source_type="phone", group_name="919990000111", destination_group=DESTINATION_GROUP,
+        scan_error="Could not open WhatsApp chat",
+    )
+    req_group = await _insert_multi_source_sibling(
+        group_id=group_id, talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        source_type="group", group_name=f"{talent_label} x Talentgram", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} intro", source_message_id="src-group-intro", media_type="video")],
+    )
+    try:
+        assert await orch._process_scan_done()
+        assert await orch._process_scan_done()
+        primary = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_phone})
+        assert primary["mode"] == "send", primary
+        assert len(primary["send_targets"]) == 1, primary
+        assert primary["send_targets"][0]["media_role"] == "intro", primary
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": [req_phone, req_group]}})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+async def test_send_orchestrator_mixed_source_gunwanti_mention_never_becomes_talent():
+    """Requirement #5's explicit regression: the @Gunwanti mention inside
+    a mark is ONLY notification metadata — it must never override, become,
+    or contaminate the talent identity, which is bound once at the
+    talent/project resolution step, never re-derived from anything inside
+    the scanned WhatsApp content."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Google {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Shivi {tag}"
+    group_id = str(uuid.uuid4())
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    req_phone = await _insert_multi_source_sibling(
+        group_id=group_id, talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        source_type="phone", group_name="919990000111", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1", source_message_id="src-phone-take1")],
+    )
+    req_group = await _insert_multi_source_sibling(
+        group_id=group_id, talent_id=talent_id, talent_label=talent_label,
+        project_id=project_id, project_label=project_label,
+        source_type="group", group_name=f"{talent_label} x Talentgram", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} intro", source_message_id="src-group-intro", media_type="video")],
+    )
+    try:
+        assert await orch._process_scan_done()
+        assert await orch._process_scan_done()
+        primary = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_phone})
+        assert primary["talent_id"] == talent_id, primary  # never became GUNWANTI_LID or anything else
+        for t in primary["send_targets"]:
+            assert t["talent_id"] == talent_id, t
+        rows = await db[ms.MEDIA_SENDS_COLLECTION].find({"project_id": project_id}).to_list(10)
+        assert len(rows) == 2
+        assert all(r["talent_id"] == talent_id for r in rows), rows
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": [req_phone, req_group]}})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
 # ---------------------------------------------------------------------------
 # 2/3: only marked media is selected — two marks in, exactly two send
 # targets out, never more (nothing "extra" is ever inferred).

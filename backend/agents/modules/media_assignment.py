@@ -475,6 +475,69 @@ def slot_key(
     return (media_role, take_number)
 
 
+def build_send_targets(
+    assignments: List[Dict[str, Any]], already_slots: set, destination_group: str,
+    talent_id: str, project_id: str,
+    *, default_source_type: str = "group", default_source_group_name: Optional[str] = None,
+) -> tuple:
+    """SEND target-list builder — fixed ordering (Takes ascending ->
+    Introduction -> Pictures, never scan/discovery order), extracted
+    (Production fix — mixed-source SEND, 2026-09-08) from
+    media_assignment_worker._process_scan_done's SEND branch into a
+    single shared function so BOTH the async worker-orchestrator path
+    (single source, group_name/source_type shared for the whole request)
+    and the synchronous multi-source scan-and-validate path
+    (casting_pipeline._scan_and_validate_multi_source, where each
+    assignment may carry its OWN source_type/source_group_name — one
+    mark found in the talent's group, another in their individual chat)
+    build an identical send_targets shape from identical logic, never
+    two competing implementations.
+
+    Each assignment's own `source_type`/`source_group_name` (present
+    only when it came from the multi-source path) wins when set;
+    `default_source_type`/`default_source_group_name` (the request's own
+    single shared values) are the fallback — so a single-source
+    assignment (every assignment the worker-orchestrator path has ever
+    produced) resolves to EXACTLY the same values as before this
+    function existed. Returns (send_targets, form_insert_index)."""
+    to_send = [
+        m for m in assignments
+        if slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) not in already_slots
+    ]
+    # An unnumbered take ("Mark <project> Take" with no digit) sorts
+    # AFTER every numbered take, never before — `m.get("take_number") or 0`
+    # would treat None the same as an explicit 0, jumping an unnumbered
+    # take ahead of "Take 1" whenever both existed for the same talent/
+    # project.
+    _role_order = {"take": 0, "intro": 1, "photos": 2}
+    to_send.sort(key=lambda m: (
+        _role_order.get(m["media_role"], 99),
+        m.get("take_number") is None,
+        m.get("take_number") or 0,
+    ))
+    form_insert_index = sum(1 for m in to_send if m["media_role"] in ("take", "intro"))
+    send_targets = [{
+        "source_message_id": m["resolved_source_message_id"],
+        "media_role": m["media_role"], "take_number": m["take_number"],
+        "source_media_type": m.get("source_media_type"),
+        "source_thumbnail_hash": m.get("quoted_thumbnail_hash"),
+        "album_tile_index": m.get("album_tile_index"),
+        "mark_reply_message_id": m.get("reply_message_id"), "mark_reply_text": m.get("mark_text"),
+        "mark_target_contact_id": m.get("mention_lid"),
+        "destination_group": destination_group,
+        # simple_role_label — media captions must be simple: "Audition
+        # Take" / "Introduction Take", no talent name, no project name.
+        "caption": simple_role_label(m["media_role"], m["take_number"]),
+        "talent_id": talent_id, "project_id": project_id,
+        # Per-target source (Production fix — mixed-source SEND): each
+        # target remembers exactly which chat its own mark was found in
+        # — never a single shared source assumed for the whole request.
+        "source_type": m.get("source_type") or default_source_type,
+        "source_group_name": m.get("source_group_name") or default_source_group_name,
+    } for m in to_send]
+    return send_targets, form_insert_index
+
+
 def validate_candidates(
     candidates: List[Dict[str, Any]],
     *,

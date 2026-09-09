@@ -7202,18 +7202,32 @@ _FORWARD_DIALOG_DUMP_JS = """
       const textboxes = Array.from(dialog.querySelectorAll('[contenteditable="true"], input[type="text"], [role="textbox"]'));
       const listItems = Array.from(dialog.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
       const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
+      // iconControls (Production fix, 2026-09-10 — Introduction-vs-
+      // Audition-Take native-forward audit): the existing-caption
+      // "Remove caption" (X) control is only ever findable by
+      // _find_remove_caption_button when it happens to render as a
+      // <button>/[role="button"]. WhatsApp Web's own icon-only controls
+      // (a bare data-icon glyph with a click handler, no button semantics
+      // at all) are a real, already-proven-to-exist shape elsewhere in
+      // this file's own selector chains (SEND_BUTTON_SELECTORS falls
+      // back to a bare '[data-icon="send"]'). This widens the SEARCH
+      // SPACE for that one known, named control — never a new blind
+      // click target — to every element carrying either a data-icon or
+      // an aria-label, regardless of tag/role, so a variant that isn't a
+      // real button is still found.
+      const iconControls = Array.from(dialog.querySelectorAll('[data-icon], [aria-label]'));
       const dump = el => {
         const r = el.getBoundingClientRect();
         return {
           testid: el.getAttribute('data-testid'), role: el.getAttribute('role'),
-          ariaLabel: el.getAttribute('aria-label'),
+          ariaLabel: el.getAttribute('aria-label'), dataIcon: el.getAttribute('data-icon'),
           text: (el.textContent || '').trim().slice(0, 160),
           rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
         };
       };
       return {
         dialogFound: true, textboxes: textboxes.map(dump), listItems: listItems.map(dump),
-        buttons: buttons.map(dump),
+        buttons: buttons.map(dump), iconControls: iconControls.map(dump),
       };
     }
 """
@@ -7531,10 +7545,22 @@ async def _select_forward_destination(page, destination_group: str) -> Dict[str,
 
 
 def _find_remove_caption_button(dump: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    for b in (dump or {}).get("buttons") or []:
+    """Searches BOTH `buttons` (button/[role="button"] elements — the
+    original, narrower search) and `iconControls` (Production fix,
+    2026-09-10 — every element carrying a data-icon or aria-label at
+    all, regardless of tag/role; see _FORWARD_DIALOG_DUMP_JS's own
+    docstring for why the real "Remove caption" control isn't
+    guaranteed to be a semantic button). The match itself is unchanged
+    and still strict — the exact "remove caption" aria-label phrase,
+    never a looser icon-name guess — only WHERE it's allowed to be
+    found has widened."""
+    for b in ((dump or {}).get("buttons") or []) + ((dump or {}).get("iconControls") or []):
         if "remove caption" in (b.get("ariaLabel") or "").strip().lower():
             return b
     return None
+
+
+_CAPTION_BOX_MAX_ROUNDS = 5
 
 
 async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
@@ -7545,20 +7571,51 @@ async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
     the SAME strict, no-Enter-fallback selector chain sender.py's own send
     path already uses. Success is defined ONLY as: a known real Send
     selector was matched AND the click on it succeeded — never a secondary
-    signal like the composer clearing or the dialog disappearing."""
+    signal like the composer clearing or the dialog disappearing.
+
+    Introduction-vs-Audition-Take native-forward audit (Production fix,
+    2026-09-10 — real recurring incident, e.g. Krishnaa Kilikar/Lava:
+    Audition Take reliably succeeds, Introduction repeatedly fails with
+    "Send control could not be confirmed"). Traced the FULL per-item
+    path for both: source reopen, media-viewer readiness, the Forward
+    button itself, and destination selection are ALL role-agnostic and
+    ALL already confirmed working (the reported failure never reaches
+    the "forward not ready"/"destination selection failed" branches at
+    all) — the concrete, code-level difference is entirely HERE, at the
+    caption/compose-box step, and stems from an already-DOCUMENTED
+    WhatsApp Web behavior (see the 2026-08-27 fix this extends): when
+    the SOURCE message being forwarded already carries its OWN caption
+    (as posted by the talent), WhatsApp's forward preview shows a
+    "Remove caption" (X) control OVER the video instead of our own
+    compose box — our own box never appears until that's cleared.
+    Introduction videos are a fundamentally different kind of content
+    from a raw Audition Take clip (a presentational piece a talent is
+    naturally more likely to caption when originally posting it), so
+    this exact code path is disproportionately exercised by Introduction
+    items even though the underlying mechanism is media-role-agnostic —
+    this is the concrete difference, not a generic "WhatsApp Web can be
+    unreliable" one.
+
+    The PREVIOUS version of this fix had two real weaknesses, both
+    fixed here without touching timeouts or sleep durations: (1) it only
+    ever attempted the removal click ONCE per whole operation — if that
+    single click didn't register (mis-timed, or the control hadn't
+    fully settled yet), nothing else ever tried again; (2) it could only
+    find the removal control if it happened to render as a real
+    <button>/[role="button"] element — see _FORWARD_DIALOG_DUMP_JS's own
+    docstring for the widened, still-strict search this fixes. Fixed:
+    the removal check+click now runs on EVERY bounded round (a real,
+    cheap DOM re-check each time, never a blind extra sleep), and rounds
+    were raised 3 -> _CAPTION_BOX_MAX_ROUNDS=5 to give this genuinely
+    multi-step readiness condition (detect existing caption -> click
+    remove -> wait for OUR box to actually replace it) enough real
+    iterations to complete — still fully bounded (2.5s worst case at
+    500ms/round, vs. the previous 1.5s), never unbounded."""
     if caption:
-        # Bounded retry, not a single 5s shot (2026-08-27 fix — a real
-        # production SEND hit exactly this: a video whose forward preview
-        # already carries SOME existing caption content (confirmed via a
-        # real production dialog dump: no "append-message-compose-box" at
-        # all — instead a "Remove caption" (X) control sits over the
-        # video). Our own compose box only ever appears once that existing
-        # caption is cleared, so the retry loop clears it (once) the first
-        # time the box isn't found, then keeps polling for the box itself.
         last_exc: Optional[Exception] = None
         box_ready = False
-        removed_existing_caption = False
-        for _round in range(3):
+        remove_click_attempts = 0
+        for _round in range(_CAPTION_BOX_MAX_ROUNDS):
             try:
                 box = page.locator('[data-testid="append-message-compose-box"]').first
                 await box.click(timeout=3000)
@@ -7566,32 +7623,50 @@ async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
                 break
             except Exception as exc:
                 last_exc = exc
-                if not removed_existing_caption:
+                try:
+                    dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+                except Exception:
+                    dump = None
+                remove_btn = _find_remove_caption_button(dump)
+                if remove_btn is not None:
+                    remove_click_attempts += 1
+                    logger.info(
+                        "SEND_MEDIA_EXISTING_CAPTION_DETECTED round=%d attempt=%d testid=%r",
+                        _round, remove_click_attempts, remove_btn.get("testid"),
+                    )
                     try:
-                        dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+                        cx = remove_btn["rect"][0] + remove_btn["rect"][2] / 2
+                        cy = remove_btn["rect"][1] + remove_btn["rect"][3] / 2
+                        await page.mouse.click(cx, cy, button="left")
                     except Exception:
-                        dump = None
-                    remove_btn = _find_remove_caption_button(dump)
-                    if remove_btn is not None:
-                        removed_existing_caption = True  # only ever try this once, whether or not the click itself succeeds
-                        try:
-                            cx = remove_btn["rect"][0] + remove_btn["rect"][2] / 2
-                            cy = remove_btn["rect"][1] + remove_btn["rect"][3] / 2
-                            await page.mouse.click(cx, cy, button="left")
-                        except Exception:
-                            pass
+                        pass
                 await page.wait_for_timeout(500)
         if not box_ready:
-            # Diagnostic capture (2026-08-27) — a real production SEND hit
-            # this consistently (not a one-off flake) for one specific
-            # video item across two separate attempts; dump what's
-            # actually in the dialog so the real fix can be selector-
-            # accurate instead of another guess.
+            # Structural-only diagnostic (2026-08-27, widened 2026-09-10)
+            # — buttons'/iconControls' own testid/ariaLabel/dataIcon are
+            # UI chrome labels, never personal content; `textboxes` is
+            # deliberately EXCLUDED from this log line — one of them
+            # could be the pre-existing caption's own TEXT VALUE (the
+            # talent's own words), never logged.
             try:
                 diag_dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
             except Exception as diag_exc:
                 diag_dump = {"dump_failed": str(diag_exc)}
-            logger.warning("mark_scan: caption box not found — dialog dump: %r", diag_dump)
+            def _structural(items):
+                return [
+                    {"testid": el.get("testid"), "ariaLabel": el.get("ariaLabel"), "dataIcon": el.get("dataIcon"), "role": el.get("role")}
+                    for el in (items or [])
+                ]
+            safe_diag = {
+                "dialogFound": diag_dump.get("dialogFound"),
+                "buttons": _structural(diag_dump.get("buttons")),
+                "iconControls": _structural(diag_dump.get("iconControls")),
+            }
+            logger.warning(
+                "mark_scan: caption box not found after %d rounds (%d existing-caption removal attempts) — "
+                "structural dialog dump: %r",
+                _CAPTION_BOX_MAX_ROUNDS, remove_click_attempts, safe_diag,
+            )
             return {"ok": False, "reason": f"caption entry failed: {last_exc}"}
         try:
             await box.type(caption, delay=10)

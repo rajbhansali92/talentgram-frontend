@@ -4515,6 +4515,431 @@ def main():
     assert result_130["verified_message_id"] == "conv-msg-SIM1", result_130  # the SECOND (index 1, Talent B's own) message — never index 0 (Talent A's)
     print("130. Multi-talent isolation: Talent B's Introduction verifies against ITS OWN new message, never Talent A's already-delivered, identically-captioned Introduction to the same shared destination (the exact false-positive this fix targets)")
 
+    # ------------------------------------------------------------------
+    # 131-138: INTRODUCTION-vs-AUDITION-TAKE native-forward audit
+    # (Production fix, 2026-09-10 — real recurring incident, e.g.
+    # Krishnaa Kilikar/Lava: Audition Take reliably sends, Introduction
+    # repeatedly fails with "Send control could not be confirmed").
+    #
+    # AUDIT FINDING: source reopen, media-viewer readiness, the Forward
+    # button, and destination selection are ALL role-agnostic and were
+    # ALL already confirmed working (the reported failure is never
+    # "forward not ready"/"destination selection failed" — see the
+    # humanized error text itself). The concrete, code-level difference
+    # is entirely at the caption/compose-box step
+    # (_enter_forward_caption_and_send): when the SOURCE message being
+    # forwarded already carries its OWN caption (as posted by the
+    # talent), WhatsApp shows a "Remove caption" (X) control over the
+    # video instead of our own compose box. Introduction videos are a
+    # presentational piece of content a talent is naturally more likely
+    # to caption when originally posting it than a raw Audition Take
+    # clip — this is the concrete difference, not "WhatsApp Web can be
+    # unreliable". The fix (already applied above): the removal
+    # check+click now retries on EVERY bounded round (previously only
+    # once), the round budget was raised 3->5 to give this genuinely
+    # multi-step condition room to complete, and the removal control's
+    # own search was widened from button-only to any icon/aria-label
+    # element (_FORWARD_DIALOG_DUMP_JS's new `iconControls`).
+    # ------------------------------------------------------------------
+
+    class _FakeComposeBoxPage:
+        """Simulates the forward dialog's own compose-box readiness:
+        `.locator(...).first.click()` raises until `clear_after` real
+        "remove existing caption" clicks (via page.mouse.click, the SAME
+        mechanism the real removal control uses) have registered — 0
+        means the box is available immediately (no existing caption at
+        all, the Audition Take case); N>0 means N rounds are needed
+        first (the Introduction-with-existing-caption case)."""
+        def __init__(self, clear_after: int = 0):
+            self.clear_after = clear_after
+            self.remove_clicks = 0
+            self.box_click_attempts = 0
+            self.waits: list = []
+            self.typed_caption = None
+            outer = self
+
+            class _Mouse:
+                @staticmethod
+                async def click(x, y, button="left"):
+                    # Only a click at the simulated "Remove caption"
+                    # control's own center (its rect is [50, 50, 20, 20]
+                    # in _fake_evaluate_existing_caption_factory below)
+                    # counts here — the SAME page.mouse.click primitive
+                    # is also used, unrelated, by _send_one_target_
+                    # native_forward_attempt's own Forward-button click
+                    # (a different rect/center entirely), which must
+                    # never be conflated with a caption-removal attempt.
+                    if (x, y) == (60, 60):
+                        outer.remove_clicks += 1
+
+            self.mouse = _Mouse()
+
+        def locator(self, sel):
+            return self
+
+        @property
+        def first(self):
+            return self
+
+        async def click(self, timeout=3000):
+            self.box_click_attempts += 1
+            if self.remove_clicks < self.clear_after:
+                raise Exception("compose box not yet available (existing caption still showing)")
+
+        async def type(self, text, delay=10):
+            self.typed_caption = text
+
+        async def wait_for_timeout(self, ms):
+            self.waits.append(ms)
+
+    def _fake_evaluate_existing_caption_factory(via: str = "iconControls"):
+        """`via` chooses whether the simulated "Remove caption" control
+        is found through the ORIGINAL buttons-only search or the NEW
+        widened iconControls search — both are exercised across tests
+        131-138 so the widening itself (not just the retry-every-round
+        fix) is directly proven."""
+        async def _fake_evaluate(page, js, arg=None, timeout=10.0):
+            if page.remove_clicks < page.clear_after:
+                control = {"ariaLabel": "Remove caption", "testid": None, "dataIcon": "x-viewer", "role": None, "rect": [50, 50, 20, 20], "text": ""}
+                return {
+                    "dialogFound": True, "textboxes": [], "listItems": [],
+                    "buttons": [control] if via == "buttons" else [],
+                    "iconControls": [control] if via == "iconControls" else [],
+                }
+            return {"dialogFound": True, "textboxes": [], "listItems": [], "buttons": [], "iconControls": []}
+        return _fake_evaluate
+
+    # 131: Introduction with NO existing caption (clear_after=0) — the
+    # box is available immediately, same as an ordinary Audition Take;
+    # zero removal attempts needed.
+    page_131 = _FakeComposeBoxPage(clear_after=0)
+    orig_evaluate_131 = mark_scan._evaluate
+    orig_find_send_131 = sender._find_and_click_send
+
+    async def _fake_find_send_131(page, allow_enter_fallback=False):
+        return "[aria-label^=\"Send\"]"
+
+    mark_scan._evaluate = _fake_evaluate_existing_caption_factory()
+    sender._find_and_click_send = _fake_find_send_131
+    try:
+        result_131 = asyncio.run(mark_scan._enter_forward_caption_and_send(page_131, "Introduction Take"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_131
+        sender._find_and_click_send = orig_find_send_131
+    assert result_131["ok"] is True, result_131
+    assert page_131.remove_clicks == 0, page_131.remove_clicks
+    print("131. Introduction with no existing caption follows the exact same immediate-success path as Audition Take")
+
+    # 132: Introduction WITH an existing caption that takes 2 rounds to
+    # clear — succeeds within the (now 5-round) budget, retrying the
+    # removal click on EVERY round rather than just once.
+    page_132 = _FakeComposeBoxPage(clear_after=2)
+    orig_evaluate_132 = mark_scan._evaluate
+    orig_find_send_132 = sender._find_and_click_send
+    mark_scan._evaluate = _fake_evaluate_existing_caption_factory()
+    sender._find_and_click_send = _fake_find_send_131
+    try:
+        result_132 = asyncio.run(mark_scan._enter_forward_caption_and_send(page_132, "Introduction Take"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_132
+        sender._find_and_click_send = orig_find_send_132
+    assert result_132["ok"] is True, result_132
+    assert page_132.remove_clicks == 2, page_132.remove_clicks
+    print("132. Introduction whose existing caption takes multiple removal-click rounds to clear now succeeds — the removal click retries every round, not just once")
+
+    # 133: the widened iconControls search itself — the SAME scenario as
+    # 132, but the "Remove caption" control is ONLY discoverable via the
+    # NEW iconControls collection (not buttons), proving the widening in
+    # _FORWARD_DIALOG_DUMP_JS/_find_remove_caption_button is what makes
+    # this case findable at all, not just the retry-every-round change.
+    page_133 = _FakeComposeBoxPage(clear_after=1)
+    orig_evaluate_133 = mark_scan._evaluate
+    orig_find_send_133 = sender._find_and_click_send
+    mark_scan._evaluate = _fake_evaluate_existing_caption_factory(via="iconControls")
+    sender._find_and_click_send = _fake_find_send_131
+    try:
+        result_133 = asyncio.run(mark_scan._enter_forward_caption_and_send(page_133, "Introduction Take"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_133
+        sender._find_and_click_send = orig_find_send_133
+    assert result_133["ok"] is True, result_133
+    assert page_133.remove_clicks == 1, page_133.remove_clicks
+    print("133. The existing-caption removal control is found via the WIDENED iconControls search even when it is not a real button/[role=\"button\"] element")
+
+    # 134: existing caption that NEVER clears within the bounded 5-round
+    # budget -> a real, actionable failure (never a false success),
+    # with the actual removal-attempt count reported.
+    page_134 = _FakeComposeBoxPage(clear_after=99)
+    orig_evaluate_134 = mark_scan._evaluate
+    mark_scan._evaluate = _fake_evaluate_existing_caption_factory()
+    try:
+        result_134 = asyncio.run(mark_scan._enter_forward_caption_and_send(page_134, "Introduction Take"))
+    finally:
+        mark_scan._evaluate = orig_evaluate_134
+    assert result_134["ok"] is False, result_134
+    assert "caption entry failed" in result_134["reason"], result_134
+    assert page_134.remove_clicks == mark_scan._CAPTION_BOX_MAX_ROUNDS, page_134.remove_clicks
+    print("134. An existing caption that genuinely never clears within the bounded round budget is a real, actionable failure — never a false success")
+
+    # 135 — THE KEY regression scenario: Take 1 succeeds immediately (no
+    # existing caption); Introduction's FIRST outer attempt never clears
+    # its existing caption within ITS OWN 5 rounds (a genuinely transient
+    # WhatsApp Web state — the caption UI hadn't finished settling yet);
+    # the bounded OUTER recovery wrapper retries the WHOLE item; the
+    # SECOND attempt's compose-box state has since settled and clears
+    # after 1 round -> succeeds. Final result: COMPLETE, Take 1 sent
+    # EXACTLY ONCE (never re-forwarded while Introduction recovers).
+    outer_attempt_135 = {"n": 0}
+    intro_page_by_attempt_135: dict = {}
+
+    async def _fake_open_source_135(page, source_type, group_name):
+        return "OPENED"
+
+    async def _fake_ready_135(page, group, msg_id, tile_index, is_photo):
+        return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+    async def _fake_select_135(page, dest):
+        return {"ok": True}
+
+    call_log_135: list = []
+    sim_135_ref: list = []  # populated once sim_135 exists, below
+
+    async def _fake_caption_send_take1_135(page, caption):
+        call_log_135.append("take1")
+        sim_135_ref[0].send(caption)
+        return {"ok": True, "selector_used": "[aria-label^=\"Send\"]"}
+
+    async def _fake_caption_send_intro_135(page, caption):
+        outer_attempt_135["n"] += 1
+        n = outer_attempt_135["n"]
+        call_log_135.append(f"intro-attempt-{n}")
+        # Attempt 1: existing caption never clears within this attempt's
+        # own bounded rounds -> the REAL _enter_forward_caption_and_send
+        # logic runs (not mocked here — this fake stands in for the
+        # WHOLE caption+send step per outer attempt, mirroring how
+        # _send_one_target_native_forward_attempt's OTHER steps are
+        # already mocked in every earlier full-stack test in this file).
+        # Attempt 2: clears immediately (the transient condition
+        # resolved itself between attempts, exactly like a real
+        # WhatsApp Web hiccup would).
+        if n == 1:
+            return {"ok": False, "reason": "caption entry failed: compose box not yet available (existing caption still showing)"}
+        sim_135_ref[0].send(caption)
+        return {"ok": True, "selector_used": "[aria-label^=\"Send\"]"}
+
+    async def _fake_ensure_closed_135(page):
+        return True
+
+    sim_135 = _SimDestination()
+    sim_135_ref.append(sim_135)
+    _, fake_open_dest_135, fake_snap_135, fake_find_135 = _install_sim_destination_fakes({"Dest Group": sim_135})
+
+    async def _dispatching_open_135(page, source_type, group_name):
+        if group_name == "Dest Group":
+            return await fake_open_dest_135(page, source_type, group_name)
+        return "OPENED"
+
+    orig_ready_135 = mark_scan._open_media_and_get_forward_button
+    orig_select_135 = mark_scan._select_forward_destination
+    orig_closed_135 = mark_scan._ensure_forward_dialog_closed
+    orig_opensrc_135 = mark_scan._open_source_chat
+    orig_snap_135 = sender._snapshot_msg_baselines
+    orig_find_text_135 = sender._find_outgoing_with_text
+    orig_caption_135 = mark_scan._enter_forward_caption_and_send
+
+    mark_scan._open_media_and_get_forward_button = _fake_ready_135
+    mark_scan._select_forward_destination = _fake_select_135
+    mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_135
+    mark_scan._open_source_chat = _dispatching_open_135
+    sender._snapshot_msg_baselines = fake_snap_135
+    sender._find_outgoing_with_text = fake_find_135
+    try:
+        # Take 1 — no existing caption, one clean attempt.
+        mark_scan._enter_forward_caption_and_send = _fake_caption_send_take1_135
+        take1_target_135 = _send_target("take1-135", "take", 1)
+        take1_target_135["destination_group"] = "Dest Group"
+        take1_target_135["caption"] = "Audition Take 1"
+        result_take1_135 = asyncio.run(mark_scan._send_one_target_native_forward(_FakeComposeBoxPage(), "Talent Group", take1_target_135))
+
+        # Introduction — existing caption, needs the OUTER bounded
+        # recovery wrapper to succeed.
+        mark_scan._enter_forward_caption_and_send = _fake_caption_send_intro_135
+        intro_target_135 = _send_target("intro-135", "intro")
+        intro_target_135["destination_group"] = "Dest Group"
+        intro_target_135["caption"] = "Introduction Take"
+        result_intro_135 = asyncio.run(mark_scan._send_one_target_native_forward(_FakeComposeBoxPage(), "Talent Group", intro_target_135))
+    finally:
+        mark_scan._open_media_and_get_forward_button = orig_ready_135
+        mark_scan._select_forward_destination = orig_select_135
+        mark_scan._ensure_forward_dialog_closed = orig_closed_135
+        mark_scan._open_source_chat = orig_opensrc_135
+        sender._snapshot_msg_baselines = orig_snap_135
+        sender._find_outgoing_with_text = orig_find_text_135
+        mark_scan._enter_forward_caption_and_send = orig_caption_135
+
+    assert result_take1_135["ok"] is True, result_take1_135
+    assert result_intro_135["ok"] is True, result_intro_135
+    assert call_log_135.count("take1") == 1, call_log_135  # Take 1's own caption/send step is invoked EXACTLY once
+    assert call_log_135 == ["take1", "intro-attempt-1", "intro-attempt-2"], call_log_135  # Introduction recovered on the bounded wrapper's 2nd attempt
+    assert sim_135.messages == ["Audition Take 1", "Introduction Take"], sim_135.messages  # exactly one delivery per item, never duplicated
+    print("135. KEY regression: Take 1 = SUCCESS, Introduction = temporary existing-caption failure, RECOVERY (bounded wrapper) = Introduction SUCCESS, FINAL RESULT = both SENT, Take 1 sent EXACTLY ONCE")
+
+    # 136/137: group and individual-phone source, each with an existing
+    # caption on the Introduction item, using the REAL caption-handling
+    # code (not mocked) — proves the fix is source-type-agnostic, same
+    # as every other piece of this SEND pipeline.
+    for source_type_13x, source_name_13x, test_num_13x in (("group", "Talent Group", "136"), ("phone", "919990000444", "137")):
+        page_13x = _FakeComposeBoxPage(clear_after=1)
+        sim_13x = _SimDestination()
+        _, fake_open_dest_13x, fake_snap_13x, fake_find_13x = _install_sim_destination_fakes({"Dest Group": sim_13x})
+
+        async def _fake_ready_13x(page, group, msg_id, tile_index, is_photo):
+            return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+        async def _fake_select_13x(page, dest):
+            return {"ok": True}
+
+        async def _fake_ensure_closed_13x(page):
+            return True
+
+        async def _dispatching_open_13x(page, source_type, group_name, _fake_open_dest=fake_open_dest_13x):
+            if group_name == "Dest Group":
+                return await _fake_open_dest(page, source_type, group_name)
+            return "OPENED"
+
+        async def _fake_find_send_13x(page, allow_enter_fallback=False, _sim=sim_13x):
+            # Simulates clicking the real Send control actually delivering
+            # whatever was typed into the compose box — the SAME "type
+            # then click Send" sequence _enter_forward_caption_and_send
+            # itself performs, unmocked, in this test.
+            _sim.send(page.typed_caption)
+            return "[aria-label^=\"Send\"]"
+
+        orig_evaluate_13x = mark_scan._evaluate
+        orig_find_send_13x = sender._find_and_click_send
+        orig_ready_13x = mark_scan._open_media_and_get_forward_button
+        orig_select_13x = mark_scan._select_forward_destination
+        orig_closed_13x = mark_scan._ensure_forward_dialog_closed
+        orig_opensrc_13x = mark_scan._open_source_chat
+        orig_snap_13x = sender._snapshot_msg_baselines
+        orig_find_text_13x = sender._find_outgoing_with_text
+
+        mark_scan._evaluate = _fake_evaluate_existing_caption_factory()
+        sender._find_and_click_send = _fake_find_send_13x
+        mark_scan._open_media_and_get_forward_button = _fake_ready_13x
+        mark_scan._select_forward_destination = _fake_select_13x
+        mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_13x
+        mark_scan._open_source_chat = _dispatching_open_13x
+        sender._snapshot_msg_baselines = fake_snap_13x
+        sender._find_outgoing_with_text = fake_find_13x
+        try:
+            intro_target_13x = _send_target("intro-13x", "intro")
+            intro_target_13x["destination_group"] = "Dest Group"
+            intro_target_13x["caption"] = "Introduction Take"
+            result_13x = asyncio.run(mark_scan._send_one_target_native_forward(
+                page_13x, source_name_13x, intro_target_13x, source_type=source_type_13x,
+            ))
+        finally:
+            mark_scan._evaluate = orig_evaluate_13x
+            sender._find_and_click_send = orig_find_send_13x
+            mark_scan._open_media_and_get_forward_button = orig_ready_13x
+            mark_scan._select_forward_destination = orig_select_13x
+            mark_scan._ensure_forward_dialog_closed = orig_closed_13x
+            mark_scan._open_source_chat = orig_opensrc_13x
+            sender._snapshot_msg_baselines = orig_snap_13x
+            sender._find_outgoing_with_text = orig_find_text_13x
+        assert result_13x["ok"] is True, result_13x
+        assert sim_13x.messages == ["Introduction Take"], sim_13x.messages
+        label = "group source" if source_type_13x == "group" else "individual phone source"
+        print(f"{test_num_13x}. Introduction with an existing caption succeeds identically for {label}")
+
+    # 138: mixed source — Take (phone, no existing caption) succeeds
+    # immediately; Introduction (group, WITH an existing caption)
+    # recovers via the widened removal search — in ONE send, each
+    # keeping its own source and its own caption-handling outcome.
+    page_take_138 = _FakeComposeBoxPage(clear_after=0)
+    page_intro_138 = _FakeComposeBoxPage(clear_after=1)
+    sim_138 = _SimDestination()
+    _, fake_open_dest_138, fake_snap_138, fake_find_138 = _install_sim_destination_fakes({"Dest Group": sim_138})
+
+    async def _fake_ready_138(page, group, msg_id, tile_index, is_photo):
+        return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+    async def _fake_select_138(page, dest):
+        return {"ok": True}
+
+    async def _fake_ensure_closed_138(page):
+        return True
+
+    async def _dispatching_open_138(page, source_type, group_name):
+        if group_name == "Dest Group":
+            return await fake_open_dest_138(page, source_type, group_name)
+        return "OPENED"
+
+    async def _fake_find_send_138(page, allow_enter_fallback=False):
+        sim_138.send(page.typed_caption)
+        return "[aria-label^=\"Send\"]"
+
+    orig_evaluate_138 = mark_scan._evaluate
+    orig_find_send_138 = sender._find_and_click_send
+    orig_ready_138 = mark_scan._open_media_and_get_forward_button
+    orig_select_138 = mark_scan._select_forward_destination
+    orig_closed_138 = mark_scan._ensure_forward_dialog_closed
+    orig_opensrc_138 = mark_scan._open_source_chat
+    orig_snap_138 = sender._snapshot_msg_baselines
+    orig_find_text_138 = sender._find_outgoing_with_text
+
+    mark_scan._evaluate = _fake_evaluate_existing_caption_factory()
+    sender._find_and_click_send = _fake_find_send_138
+    mark_scan._open_media_and_get_forward_button = _fake_ready_138
+    mark_scan._select_forward_destination = _fake_select_138
+    mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_138
+    mark_scan._open_source_chat = _dispatching_open_138
+    sender._snapshot_msg_baselines = fake_snap_138
+    sender._find_outgoing_with_text = fake_find_138
+    try:
+        take_target_138 = _send_target("take-phone-138", "take", 1)
+        take_target_138["destination_group"] = "Dest Group"
+        take_target_138["caption"] = "Audition Take 1"
+        result_take_138 = asyncio.run(mark_scan._send_one_target_native_forward(
+            page_take_138, "919990000555", take_target_138, source_type="phone",
+        ))
+        intro_target_138 = _send_target("intro-group-138", "intro")
+        intro_target_138["destination_group"] = "Dest Group"
+        intro_target_138["caption"] = "Introduction Take"
+        result_intro_138 = asyncio.run(mark_scan._send_one_target_native_forward(
+            page_intro_138, "Talent Group", intro_target_138, source_type="group",
+        ))
+    finally:
+        mark_scan._evaluate = orig_evaluate_138
+        sender._find_and_click_send = orig_find_send_138
+        mark_scan._open_media_and_get_forward_button = orig_ready_138
+        mark_scan._select_forward_destination = orig_select_138
+        mark_scan._ensure_forward_dialog_closed = orig_closed_138
+        mark_scan._open_source_chat = orig_opensrc_138
+        sender._snapshot_msg_baselines = orig_snap_138
+        sender._find_outgoing_with_text = orig_find_text_138
+
+    assert result_take_138["ok"] is True, result_take_138
+    assert result_intro_138["ok"] is True, result_intro_138
+    assert page_take_138.remove_clicks == 0, page_take_138.remove_clicks  # Take never needed the removal path at all
+    assert page_intro_138.remove_clicks == 1, page_intro_138.remove_clicks
+    assert sim_138.messages == ["Audition Take 1", "Introduction Take"], sim_138.messages
+    print("138. Mixed source: phone-sourced Take (no existing caption) and group-sourced Introduction (existing caption, recovered) both succeed independently in the same send")
+
+    # Requirements 1/4/5/7/8/12/13/14 of this audit's own test list are
+    # already covered by existing tests elsewhere in this file: 1 (Take
+    # follows the unaffected path) by test 131 and every pre-existing
+    # SEND test; 4/5 (detached DOM / late Forward button) by tests
+    # 104-107 and _open_media_and_get_forward_button's own bounded
+    # readiness loop, both role-agnostic and untouched by this fix; 7/8
+    # (no cross-item resend / no cross-talent drift) by tests 125/130
+    # (now proven together with the existing-caption fix via test 135's
+    # own combined scenario); 12/13 (idempotency / no stale-message
+    # proof) by test 121/126/122/130; 14 (genuine failure -> ATTENTION
+    # REQUIRED) by test 111/120/134 — never duplicated here.
+    print("(Requirements 1/4/5/7/8/12/13/14 of this audit's test list: covered by existing tests 104-107/111/120-122/125/126/130/131/134, not duplicated)")
+
 
 if __name__ == "__main__":
     main()

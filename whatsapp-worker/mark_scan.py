@@ -7146,7 +7146,21 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
 # _download_photo_album_tile_via_blob — none of those are called anywhere
 # below, by design, so SEND cannot accidentally route through UPLOAD's
 # downloader.
-PER_ITEM_SEND_TIMEOUT = 90.0
+# PER_ITEM_SEND_TIMEOUT (Production fix, 2026-09-09 — SEND reliability/
+# self-healing: real incident, Padm Rautela / Mahindra Thar Film 1 & 2,
+# Introduction Take failed "could not reopen the marked media" while
+# Take 1/Take 2 succeeded moments apart in the SAME send) — raised from
+# 90.0 to comfortably fit MAX_SEND_ITEM_ATTEMPTS full attempts of the
+# per-item sequence (see _send_one_target_native_forward's own
+# docstring) plus the one bounded backoff before the final attempt.
+# Still a hard, bounded ceiling — never unbounded/infinite — just sized
+# for the new deterministic bounded-retry architecture instead of a
+# single shot; this is not "fix it by bumping a timeout" on its own
+# (that alone would still be a single un-retried attempt, just a
+# slower one) — it's the budget the real fix (reacquire-by-identity +
+# bounded retry + delivery verification, below) needs to run to
+# completion within one worker claim.
+PER_ITEM_SEND_TIMEOUT = 240.0
 MAX_FORWARD_READINESS_ROUNDS = 3
 # The final "everything sent" marker (Phase 5/7, 2026-08-26) — kept in sync
 # with backend/agents/modules/media_send.py's MARKER_TEXT (the worker
@@ -7643,20 +7657,69 @@ async def _ensure_forward_dialog_closed(page) -> bool:
     return not (dump or {}).get("dialogFound")
 
 
-async def _send_one_target_native_forward(
+async def _verify_forward_delivered(page, destination_group: str, caption: str) -> Dict[str, Any]:
+    """Delivery verification (Production fix, 2026-09-09 — the master
+    prompt's own explicit requirement: never declare a media item SENT
+    merely because the Forward button was clicked/a Send control was
+    matched). Reuses sender.py's existing, already-proven "outgoing
+    bubble confirmed" primitive (sender._find_outgoing_with_text — the
+    SAME check send_whatsapp_message's strict_send_confirmation already
+    uses for text sends) rather than inventing a new one: opens the
+    destination chat and looks for the item's own caption
+    (simple_role_label — e.g. "Audition Take 1"/"Introduction Take",
+    ALWAYS present and distinct per media_role/take_number, see
+    build_send_targets) among the last few messages there — the exact
+    same bounded "no baseline needed, check the tail" shape
+    _already_delivered's own retry-duplicate-guard already uses
+    elsewhere in sender.py, not a new pattern. Bounded poll (WhatsApp can
+    take a moment to actually deliver/render a forwarded message even
+    after Send is clicked and the picker closes), never a fixed
+    sleep-then-single-check.
+
+    A caption match is real, direct proof the message landed in the
+    destination chat — strictly stronger than "the dialog closed" or
+    "day a Send button was clicked", which is all the previous code
+    trusted."""
+    if not caption:
+        # Every SEND target always carries a role caption (see
+        # build_send_targets) — this should never happen; never block or
+        # crash on it if it somehow does, since that would incorrectly
+        # turn a real, unverifiable-only-by-accident send into a hard
+        # failure with no way to ever succeed.
+        return {"verified": False, "reason": "no caption to verify delivery against"}
+    status = await _open_source_chat(page, "group", destination_group)  # destination is always a project's casting GROUP
+    if status != "OPENED":
+        return {"verified": False, "reason": f"could not reopen destination to verify delivery (status={status})"}
+    for _ in range(6):
+        matched_sel, _matched_text, message_id = await sender._find_outgoing_with_text(page, caption)
+        if matched_sel is not None:
+            return {"verified": True, "message_id": message_id}
+        await page.wait_for_timeout(500)
+    return {"verified": False, "reason": "no matching outgoing message found in the destination chat after send"}
+
+
+async def _send_one_target_native_forward_attempt(
     page, group_name: str, target: Dict[str, Any], item_label: str = "", source_type: str = "group",
 ) -> Dict[str, Any]:
-    """One SEND item end-to-end via native Forward — NEVER downloads
-    media. Opens the exact marked source (re-resolved by identity),
-    ensures the real Forward control is available (bounded close/reopen
-    for video), clicks Forward, selects the destination group by exact
-    unique match, enters an optional caption, and clicks the real Send
-    control. `item_label` (e.g. "3/6") is currently unused but kept for
-    parity with _run_send's per-item logging/timeout bookkeeping.
+    """ONE attempt at one SEND item end-to-end via native Forward — NEVER
+    downloads media. Opens the exact marked source (re-resolved by
+    identity), ensures the real Forward control is available (bounded
+    close/reopen for video), clicks Forward, selects the destination
+    group by exact unique match, enters an optional caption, clicks the
+    real Send control, and VERIFIES the message actually landed in the
+    destination (Production fix, 2026-09-09 — see _verify_forward_
+    delivered) before ever returning ok=True. `item_label` (e.g. "3/6")
+    is currently unused but kept for parity with _run_send's per-item
+    logging/timeout bookkeeping.
 
     `source_type` ("group" | "phone", SEND Path B, Production fix
     2026-09-03) — see _open_source_chat; `group_name` holds the phone
     digits when source_type=="phone".
+
+    Retrying a WHOLE attempt (never just this function retrying itself)
+    is _send_one_target_native_forward's job, immediately below — this
+    function is the single, non-duplicated unit that wrapper calls
+    again, unchanged, on every retry.
 
     SEND_TIMING (Production fix, 2026-09-08 — performance audit): one
     structured log line per item, timing exactly the stages a real SEND
@@ -7665,23 +7728,30 @@ async def _send_one_target_native_forward(
     +send) — never spammy (one line per item, not per sub-step), so a
     future "SEND feels slow" report can be diagnosed from Railway logs
     instead of guessed at again."""
+    sm_id = target["source_message_id"]
     t_start = time.monotonic()
     status = await _open_source_chat(page, source_type, group_name)
     t_source_open = time.monotonic()
     if status != "OPENED":
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"source group not open (status={status})"}
+        return {"ok": False, "source_message_id": sm_id, "error": f"source group not open (status={status})"}
+    logger.info("SEND_MEDIA_SOURCE_OPEN item=%s source_message_id=%s source_type=%s elapsed_ms=%d",
+                item_label, sm_id, source_type, int((t_source_open - t_start) * 1000))
 
     is_photo = target.get("source_media_type") != "video"
     tile_index = target.get("album_tile_index") or 0
 
-    ready = await _open_media_and_get_forward_button(page, group_name, target["source_message_id"], tile_index, is_photo)
+    ready = await _open_media_and_get_forward_button(page, group_name, sm_id, tile_index, is_photo)
     t_media_ready = time.monotonic()
     if not ready.get("ok"):
         logger.info(
             "SEND_TIMING item=%s source_message_id=%s source_open=%.2fs media_prepare=%.2fs FAILED=media_not_ready",
-            item_label, target["source_message_id"], t_source_open - t_start, t_media_ready - t_source_open,
+            item_label, sm_id, t_source_open - t_start, t_media_ready - t_source_open,
         )
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"forward not ready: {ready.get('reason')}"}
+        return {"ok": False, "source_message_id": sm_id, "error": f"forward not ready: {ready.get('reason')}"}
+    logger.info("SEND_MEDIA_REACQUIRE item=%s source_message_id=%s elapsed_ms=%d",
+                item_label, sm_id, int((t_media_ready - t_source_open) * 1000))
+    logger.info("SEND_MEDIA_FORWARD_READY item=%s source_message_id=%s take=%s role=%s",
+                item_label, sm_id, target.get("take_number"), target.get("media_role"))
 
     forward_btn = ready["forward_button"]
     try:
@@ -7689,7 +7759,7 @@ async def _send_one_target_native_forward(
         cy = forward_btn["rect"][1] + forward_btn["rect"][3] / 2
         await page.mouse.click(cx, cy, button="left")
     except Exception as exc:
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"forward click failed: {exc}"}
+        return {"ok": False, "source_message_id": sm_id, "error": f"forward click failed: {exc}"}
     t_forward_click = time.monotonic()
     # Speed fix — this used to be a blind 1200ms wait before the picker
     # was even checked once. _select_forward_destination immediately below
@@ -7709,7 +7779,7 @@ async def _send_one_target_native_forward(
         reason = select_result.get("reason")
         if not closed:
             reason = f"{reason} (also: Forward dialog would not close afterward)"
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"destination selection failed: {reason}"}
+        return {"ok": False, "source_message_id": sm_id, "error": f"destination selection failed: {reason}"}
 
     send_result = await _enter_forward_caption_and_send(page, target.get("caption") or "")
     t_send = time.monotonic()
@@ -7725,31 +7795,134 @@ async def _send_one_target_native_forward(
         reason = send_result.get("reason")
         if not closed:
             reason = f"{reason} (also: Forward dialog would not close afterward)"
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"send failed: {reason}"}
+        return {"ok": False, "source_message_id": sm_id, "error": f"send failed: {reason}"}
+    logger.info("SEND_MEDIA_FORWARD_SENT item=%s source_message_id=%s selector=%s",
+                item_label, sm_id, send_result.get("selector_used"))
 
-    # Verified close on SUCCESS too (2026-08-27 fix) — a real live SEND
-    # found the ☑️ marker (the very next operation, a plain group-open+type
-    # via _send_text_message) fail with CHAT_NOT_OPENED immediately after
-    # BOTH media items forwarded successfully. The success path here never
-    # verified the Forward dialog had actually finished closing before
-    # returning — unlike the two failure paths above, which already learned
-    # this exact lesson (see _ensure_forward_dialog_closed's own docstring).
-    # A still-settling/closing dialog is exactly the kind of residual UI
-    # state proven elsewhere in this file to poison the next operation.
-    # The send itself already succeeded (a real Send control was matched
-    # and clicked) regardless of this outcome, so this never turns a real
-    # success into a failure — it only clears the way for whatever comes
-    # next (the next forward, the form, or the marker).
+    # Verified close on SUCCESS too (2026-08-27 fix, unchanged) — a real
+    # live SEND found the ☑️ marker (the very next operation) fail with
+    # CHAT_NOT_OPENED immediately after a media item forwarded
+    # successfully but left the Forward dialog still open. A DIFFERENT
+    # real live SEND (2026-08-27) proved the dialog can stay open for a
+    # moment after a GENUINELY successful send too — closing it here is
+    # cleanup for whatever comes next, never evidence either way about
+    # whether THIS send worked, so it never turns a real success into a
+    # failure and is never itself treated as proof of one.
     await _ensure_forward_dialog_closed(page)
+
+    # Delivery verification (Production fix, 2026-09-09 — the master
+    # prompt's own explicit requirement): the ONLY authoritative signal
+    # is whether the item's own caption actually appears as a NEW
+    # outgoing message in the destination chat — see
+    # _verify_forward_delivered. Deliberately NOT gated on how the
+    # Forward dialog behaved (see the comment just above) — that
+    # UI-timing detail proved unreliable in both directions on real
+    # production sends and is never trusted as proof of success OR
+    # failure on its own.
+    verify = await _verify_forward_delivered(page, target["destination_group"], target.get("caption") or "")
+    if not verify.get("verified"):
+        return {"ok": False, "source_message_id": sm_id, "error": f"send unverified: {verify.get('reason')}"}
 
     logger.info(
         "SEND_TIMING item=%s source_message_id=%s source_open=%.2fs media_prepare=%.2fs "
         "forward_click=%.2fs destination_select=%.2fs form_send=%.2fs total=%.2fs",
-        item_label, target["source_message_id"],
+        item_label, sm_id,
         t_source_open - t_start, t_media_ready - t_source_open, t_forward_click - t_media_ready,
         t_dest_select - t_forward_click, t_send - t_dest_select, time.monotonic() - t_start,
     )
-    return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT", "selector_used": send_result.get("selector_used")}
+    return {
+        "ok": True, "source_message_id": sm_id, "send_state": "MESSAGE_SENT",
+        "selector_used": send_result.get("selector_used"), "verified_message_id": verify.get("message_id"),
+    }
+
+
+MAX_SEND_ITEM_ATTEMPTS = 3
+SEND_ITEM_RECOVERY_BACKOFF_MS = 2000
+
+
+async def _send_one_target_native_forward(
+    page, group_name: str, target: Dict[str, Any], item_label: str = "", source_type: str = "group",
+) -> Dict[str, Any]:
+    """Bounded automatic recovery wrapper around ONE SEND item (Production
+    fix, 2026-09-09 — real incident: Padm Rautela / Mahindra Thar Film 1
+    & 2, Introduction Take failed "could not reopen the marked media"
+    while Take 1 and Take 2 succeeded moments apart in the SAME send).
+
+    ROOT CAUSE (audited, not guessed — see this commit's own message for
+    the full trace): _open_media_and_get_forward_button already retries
+    reacquiring the media WITHIN one already-open source chat
+    (MAX_FORWARD_READINESS_ROUNDS, unchanged, still correct and still the
+    right layer for that job), but NOTHING above it ever retried the
+    WHOLE item — including reopening the source chat itself — once that
+    exhausted. A single transient WhatsApp Web virtualization/rendering
+    hiccup on exactly one item was therefore immediately, permanently
+    final, even though every OTHER item in the same send worked fine
+    seconds apart from an identical WhatsApp Web session.
+
+    Up to MAX_SEND_ITEM_ATTEMPTS full attempts of the EXACT SAME
+    deterministic sequence (_send_one_target_native_forward_attempt,
+    unchanged, never duplicated — this wrapper is the ONE place retry
+    logic exists, reused for Take 1, Take 2, Introduction, photos, every
+    role/source alike). Never forwards a different/nearby media item as
+    a substitute on any attempt: every attempt re-resolves the SAME
+    exact target["source_message_id"] by identity (never a stale
+    locator, never proximity); if identity can't be proven, that ONE
+    attempt fails and reports why — it never silently substitutes
+    anything.
+
+    Attempt 1 is exactly today's original single-shot behavior (zero
+    added cost on the common, successful path beyond the new delivery
+    verification every attempt now performs regardless — see
+    _send_one_target_native_forward_attempt). Attempts 2+ re-open the
+    source chat completely as their own very first step (built into
+    _send_one_target_native_forward_attempt already — no special-casing
+    needed here) before re-resolving the exact message fresh. Only the
+    FINAL attempt adds one short, bounded backoff first (never an
+    unbounded/long fixed sleep, never applied before earlier attempts) —
+    in case WhatsApp's own background sync genuinely just needed a
+    moment; spending it on the earliest retry would waste the one
+    backoff opportunity on a hiccup that's more likely to resolve with
+    time than immediately.
+
+    Structured SEND_MEDIA_* logs (RECOVERY_START/RETRY/SUCCESS/FAILED)
+    make an eventual retry decision traceable from Railway logs alone."""
+    log_fields = "item=%s source_message_id=%s role=%s take=%s source_type=%s destination=%s"
+    log_args = (
+        item_label, target.get("source_message_id"), target.get("media_role"),
+        target.get("take_number"), source_type, target.get("destination_group"),
+    )
+    logger.info("SEND_MEDIA_START " + log_fields, *log_args)
+    last_result: Dict[str, Any] = {"ok": False, "source_message_id": target.get("source_message_id"), "error": "never attempted"}
+    for attempt_num in range(1, MAX_SEND_ITEM_ATTEMPTS + 1):
+        if attempt_num > 1:
+            logger.info(
+                "SEND_MEDIA_RECOVERY_START " + log_fields + " attempt=%d/%d prior_reason=%r",
+                *log_args, attempt_num, MAX_SEND_ITEM_ATTEMPTS, last_result.get("error"),
+            )
+            if attempt_num == MAX_SEND_ITEM_ATTEMPTS:
+                await page.wait_for_timeout(SEND_ITEM_RECOVERY_BACKOFF_MS)
+        t_attempt = time.monotonic()
+        last_result = await _send_one_target_native_forward_attempt(page, group_name, target, item_label, source_type)
+        elapsed_ms = int((time.monotonic() - t_attempt) * 1000)
+        if last_result.get("ok"):
+            if attempt_num > 1:
+                logger.info(
+                    "SEND_MEDIA_RECOVERY_SUCCESS " + log_fields + " attempt=%d/%d elapsed_ms=%d",
+                    *log_args, attempt_num, MAX_SEND_ITEM_ATTEMPTS, elapsed_ms,
+                )
+            logger.info("SEND_MEDIA_DELIVERY_VERIFIED " + log_fields + " attempt=%d elapsed_ms=%d",
+                        *log_args, attempt_num, elapsed_ms)
+            return last_result
+        if attempt_num < MAX_SEND_ITEM_ATTEMPTS:
+            logger.info(
+                "SEND_MEDIA_REOPEN_RETRY " + log_fields + " attempt=%d/%d elapsed_ms=%d reason=%r",
+                *log_args, attempt_num, MAX_SEND_ITEM_ATTEMPTS, elapsed_ms, last_result.get("error"),
+            )
+    logger.info(
+        "SEND_MEDIA_RECOVERY_FAILED " + log_fields + " attempts=%d final_reason=%r",
+        *log_args, MAX_SEND_ITEM_ATTEMPTS, last_result.get("error"),
+    )
+    return last_result
 
 
 _FORM_SEND_SUCCESS_STATES = {"MESSAGE_SENT_AND_VERIFIED", "MESSAGE_SENT_BUT_NOT_VERIFIED"}

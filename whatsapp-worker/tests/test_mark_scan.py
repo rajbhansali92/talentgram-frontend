@@ -2655,6 +2655,7 @@ def main():
     orig_select_84 = mark_scan._select_forward_destination
     orig_caption_84 = mark_scan._enter_forward_caption_and_send
     orig_closed_84 = mark_scan._ensure_forward_dialog_closed
+    orig_find_text_84 = sender._find_outgoing_with_text
 
     close_calls_84 = []
 
@@ -2674,11 +2675,19 @@ def main():
         close_calls_84.append(True)
         return True
 
+    async def _fake_find_text_84(page, needle, baselines=None):
+        # Delivery verification's own destination-chat check — simulates
+        # the forwarded photo's caption having landed, so this test keeps
+        # proving its OWN original point (dialog-close verification)
+        # rather than failing on the newer, separate verification step.
+        return "SCOPE conv-msg", needle, "conv-msg-VERIFIED84"
+
     sender._open_group_chat = _fake_open_group_84
     mark_scan._open_media_and_get_forward_button = _fake_ready_84
     mark_scan._select_forward_destination = _fake_select_84
     mark_scan._enter_forward_caption_and_send = _fake_caption_send_84
     mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_84
+    sender._find_outgoing_with_text = _fake_find_text_84
     try:
         target_84 = _send_target("photo1", "photos")
         result_84 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage84(), "Source Group", target_84))
@@ -2688,6 +2697,7 @@ def main():
         mark_scan._select_forward_destination = orig_select_84
         mark_scan._enter_forward_caption_and_send = orig_caption_84
         mark_scan._ensure_forward_dialog_closed = orig_closed_84
+        sender._find_outgoing_with_text = orig_find_text_84
 
     assert result_84["ok"] is True, result_84
     assert len(close_calls_84) == 1, "dialog-close verification must run exactly once after a successful send"
@@ -3623,6 +3633,417 @@ def main():
         ("text", "Thanks, shared for Vaseline."),
     ], calls_108
     print("108. SEND mixed-source per-target routing -> Take opened via the individual WhatsApp chat, Introduction via the WhatsApp group, in ONE send — upfront single-source gate correctly skipped")
+
+    # ------------------------------------------------------------------
+    # 109-121: SEND self-healing (Production fix, 2026-09-09) — real
+    # incident: Padm Rautela / Mahindra Thar Film 1 & 2, Introduction
+    # Take failed "could not reopen the marked media" while Take 1/Take
+    # 2 succeeded moments apart in the SAME send. Root cause: nothing
+    # above _open_media_and_get_forward_button's own internal
+    # MAX_FORWARD_READINESS_ROUNDS ever retried the WHOLE item once that
+    # exhausted. _send_one_target_native_forward is now a bounded
+    # (MAX_SEND_ITEM_ATTEMPTS) retry wrapper around
+    # _send_one_target_native_forward_attempt (the exact original
+    # per-item logic, now with delivery verification appended) — these
+    # tests exercise the wrapper's own orchestration directly (mocking
+    # the attempt function, mirroring test 73's own style of mocking
+    # _send_one_target_native_forward to test _run_send's orchestration
+    # in isolation), plus one deeper integration test using REAL attempt
+    # internals (mirroring test 84's mocking style) for the closest
+    # available proxy to a live reproduction in this environment.
+    # ------------------------------------------------------------------
+
+    class _FakePageWithWait:
+        def __init__(self):
+            self.waits: list = []
+
+        async def wait_for_timeout(self, ms):
+            self.waits.append(ms)
+
+    # 109 (Requirement A): reopen fails ONCE, second attempt succeeds.
+    calls_109: list = []
+
+    async def _fake_attempt_109(page, group_name, target, item_label="", source_type="group"):
+        calls_109.append(target["source_message_id"])
+        if len(calls_109) == 1:
+            return {"ok": False, "source_message_id": target["source_message_id"], "error": "forward not ready: tile click failed after 3 attempts"}
+        return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT"}
+
+    orig_attempt_109 = mark_scan._send_one_target_native_forward_attempt
+    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_109
+    try:
+        target_109 = _send_target("intro1", "intro")
+        result_109 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage73(), "Source Group", target_109))
+    finally:
+        mark_scan._send_one_target_native_forward_attempt = orig_attempt_109
+
+    assert result_109["ok"] is True, result_109
+    assert len(calls_109) == 2, calls_109
+    assert all(c == "intro1" for c in calls_109), calls_109  # exact same identity every attempt, never a substitute
+    print("109. SEND self-healing: reopen fails once -> second attempt succeeds -> item ultimately SENT (Requirement A)")
+
+    # 110 (Requirement B): reopen fails TWICE, third (final) attempt succeeds.
+    calls_110: list = []
+
+    async def _fake_attempt_110(page, group_name, target, item_label="", source_type="group"):
+        calls_110.append(target["source_message_id"])
+        if len(calls_110) < 3:
+            return {"ok": False, "source_message_id": target["source_message_id"], "error": "forward not ready: no <video> mounted within 15s of click"}
+        return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT"}
+
+    orig_attempt_110 = mark_scan._send_one_target_native_forward_attempt
+    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_110
+    try:
+        target_110 = _send_target("intro1", "intro")
+        result_110 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePageWithWait(), "Source Group", target_110))
+    finally:
+        mark_scan._send_one_target_native_forward_attempt = orig_attempt_110
+
+    assert result_110["ok"] is True, result_110
+    assert len(calls_110) == mark_scan.MAX_SEND_ITEM_ATTEMPTS == 3, calls_110
+    print("110. SEND self-healing: reopen fails twice -> third/final attempt succeeds -> item ultimately SENT (Requirement B)")
+
+    # 111 (Requirement C): permanently unavailable -> every attempt fails,
+    # exhausted, reports a real actionable failure — never silently drops
+    # the item, never claims success.
+    calls_111: list = []
+
+    async def _fake_attempt_111(page, group_name, target, item_label="", source_type="group"):
+        calls_111.append(target["source_message_id"])
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": "forward not ready: source message no longer found in window"}
+
+    orig_attempt_111 = mark_scan._send_one_target_native_forward_attempt
+    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_111
+    try:
+        target_111 = _send_target("intro1", "intro")
+        result_111 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePageWithWait(), "Source Group", target_111))
+    finally:
+        mark_scan._send_one_target_native_forward_attempt = orig_attempt_111
+
+    assert result_111["ok"] is False, result_111
+    assert len(calls_111) == mark_scan.MAX_SEND_ITEM_ATTEMPTS == 3, calls_111
+    assert "no longer found" in result_111["error"], result_111  # the real, diagnosable reason survives, never genericized away
+    print("111. SEND self-healing: permanently unavailable -> all bounded attempts exhausted -> real actionable failure reported, never a false success (Requirement C)")
+
+    # 112: identity never drifts across attempts — every attempt is asked
+    # for the EXACT SAME source_message_id, take_number, and media_role;
+    # the wrapper itself carries no opportunity to substitute a different/
+    # nearby item (Requirement Q).
+    calls_112: list = []
+
+    async def _fake_attempt_112(page, group_name, target, item_label="", source_type="group"):
+        calls_112.append((target["source_message_id"], target["media_role"], target["take_number"]))
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": "forward not ready: tile click failed"} if len(calls_112) < 3 else {"ok": True, "source_message_id": target["source_message_id"]}
+
+    orig_attempt_112 = mark_scan._send_one_target_native_forward_attempt
+    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_112
+    try:
+        target_112 = _send_target("take2-msgid", "take", 2)
+        result_112 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePageWithWait(), "Source Group", target_112))
+    finally:
+        mark_scan._send_one_target_native_forward_attempt = orig_attempt_112
+
+    assert result_112["ok"] is True, result_112
+    assert calls_112 == [("take2-msgid", "take", 2)] * 3, calls_112
+    print("112. SEND self-healing: every recovery attempt targets the EXACT same source message/role/take — never a substitute nearby item (Requirement Q)")
+
+    # 113: bounded backoff — a real page.wait_for_timeout(SEND_ITEM_RECOVERY_
+    # BACKOFF_MS) happens exactly once, only before the FINAL attempt, never
+    # before the first retry and never an unbounded/repeated wait.
+    calls_113: list = []
+
+    async def _fake_attempt_113(page, group_name, target, item_label="", source_type="group"):
+        calls_113.append(1)
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": "x"} if len(calls_113) < 3 else {"ok": True, "source_message_id": target["source_message_id"]}
+
+    orig_attempt_113 = mark_scan._send_one_target_native_forward_attempt
+    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_113
+    try:
+        page_113 = _FakePageWithWait()
+        target_113 = _send_target("intro1", "intro")
+        result_113 = asyncio.run(mark_scan._send_one_target_native_forward(page_113, "Source Group", target_113))
+    finally:
+        mark_scan._send_one_target_native_forward_attempt = orig_attempt_113
+
+    assert result_113["ok"] is True, result_113
+    assert page_113.waits == [mark_scan.SEND_ITEM_RECOVERY_BACKOFF_MS], page_113.waits
+    print("113. SEND self-healing: exactly one bounded backoff, only before the final attempt — never on the first retry, never unbounded")
+
+    # 114: the normal, successful-on-first-try path pays ZERO extra
+    # cost — no backoff wait at all when attempt 1 already succeeds
+    # (Requirement 21 — do not slow down the common path).
+    async def _fake_attempt_114(page, group_name, target, item_label="", source_type="group"):
+        return {"ok": True, "source_message_id": target["source_message_id"]}
+
+    orig_attempt_114 = mark_scan._send_one_target_native_forward_attempt
+    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_114
+    try:
+        page_114 = _FakePageWithWait()
+        target_114 = _send_target("intro1", "intro")
+        result_114 = asyncio.run(mark_scan._send_one_target_native_forward(page_114, "Source Group", target_114))
+    finally:
+        mark_scan._send_one_target_native_forward_attempt = orig_attempt_114
+
+    assert result_114["ok"] is True, result_114
+    assert page_114.waits == [], page_114.waits
+    print("114. SEND self-healing: a first-attempt success pays zero recovery overhead -> no backoff wait at all")
+
+    # 115-117: source-type-agnostic recovery (Requirements E/F/G) — the
+    # wrapper itself never inspects source_type at all; it just retries
+    # whatever _send_one_target_native_forward_attempt is given, so group,
+    # phone, and mixed-source items all recover identically. Proven here
+    # by driving the SAME fails-once-then-succeeds sequence through each
+    # source_type value.
+    for source_type_11x, group_name_11x, test_num in (("group", "Talent Group", "115"), ("phone", "919990000222", "116")):
+        calls_11x: list = []
+
+        async def _fake_attempt_11x(page, group_name, target, item_label="", source_type="group"):
+            calls_11x.append(source_type)
+            return {"ok": False, "source_message_id": target["source_message_id"], "error": "x"} if len(calls_11x) == 1 else {"ok": True, "source_message_id": target["source_message_id"]}
+
+        orig_attempt_11x = mark_scan._send_one_target_native_forward_attempt
+        mark_scan._send_one_target_native_forward_attempt = _fake_attempt_11x
+        try:
+            target_11x = _send_target("intro1", "intro")
+            result_11x = asyncio.run(mark_scan._send_one_target_native_forward(
+                _FakePage73(), group_name_11x, target_11x, source_type=source_type_11x,
+            ))
+        finally:
+            mark_scan._send_one_target_native_forward_attempt = orig_attempt_11x
+        assert result_11x["ok"] is True, result_11x
+        assert calls_11x == [source_type_11x, source_type_11x], calls_11x
+        label = "group source" if source_type_11x == "group" else "individual phone source"
+        print(f"{test_num}. SEND self-healing recovers identically for {label} (Requirement " + ("E)" if source_type_11x == "group" else "F)"))
+
+    # 117 (Requirement G, mixed-source): each item in a mixed-source send
+    # carries its OWN source_type — a Take marked in the phone chat that
+    # needs recovery must reopen the PHONE source, never the group, and
+    # vice versa for an Introduction marked in the group. Exercised via
+    # _run_send's own real per-target source_type threading (unchanged),
+    # with _send_one_target_native_forward itself mocked at the OUTER
+    # level (as test 108 already does) plus a nested real-wrapper check:
+    # this test instead drives the wrapper directly per item, mirroring
+    # _run_send's own call shape for each of the two source types.
+    calls_117: list = []
+
+    async def _fake_attempt_117(page, group_name, target, item_label="", source_type="group"):
+        calls_117.append((source_type, group_name, target["source_message_id"]))
+        # The PHONE item fails once then recovers; the GROUP item
+        # succeeds immediately — independent recovery per item, per
+        # source, never conflated.
+        if target["source_message_id"] == "phone-take1" and calls_117.count(("phone", "919990000111", "phone-take1")) == 1:
+            return {"ok": False, "source_message_id": target["source_message_id"], "error": "x"}
+        return {"ok": True, "source_message_id": target["source_message_id"]}
+
+    orig_attempt_117 = mark_scan._send_one_target_native_forward_attempt
+    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_117
+    try:
+        phone_target_117 = _send_target("phone-take1", "take", 1)
+        group_target_117 = _send_target("group-intro1", "intro")
+        result_phone_117 = asyncio.run(mark_scan._send_one_target_native_forward(
+            _FakePage73(), "919990000111", phone_target_117, source_type="phone",
+        ))
+        result_group_117 = asyncio.run(mark_scan._send_one_target_native_forward(
+            _FakePage73(), "Shivi Rajput x Talentgram", group_target_117, source_type="group",
+        ))
+    finally:
+        mark_scan._send_one_target_native_forward_attempt = orig_attempt_117
+
+    assert result_phone_117["ok"] is True, result_phone_117
+    assert result_group_117["ok"] is True, result_group_117
+    assert calls_117[0] == ("phone", "919990000111", "phone-take1"), calls_117
+    assert calls_117[1] == ("phone", "919990000111", "phone-take1"), calls_117  # phone item recovered on its OWN source
+    assert calls_117[2] == ("group", "Shivi Rajput x Talentgram", "group-intro1"), calls_117  # group item independent, never touched the phone recovery
+    print("117. SEND self-healing: mixed-source recovery reopens each item's OWN correct source, independently (Requirement G)")
+
+    # 118: delivery verification unit tests — _verify_forward_delivered
+    # itself, in isolation (Requirement O — delivery verification failure
+    # must not be silently accepted).
+    async def _fake_open_118(page, source_type, group):
+        return "OPENED"
+
+    async def _fake_find_text_verified_118(page, needle, baselines=None):
+        return "SCOPE conv-msg", needle, "conv-msg-REAL118"
+
+    orig_open_118 = mark_scan._open_source_chat
+    orig_find_118 = sender._find_outgoing_with_text
+    mark_scan._open_source_chat = _fake_open_118
+    sender._find_outgoing_with_text = _fake_find_text_verified_118
+    try:
+        result_118 = asyncio.run(mark_scan._verify_forward_delivered(_FakePage73(), "Dest Group", "Introduction Take"))
+    finally:
+        mark_scan._open_source_chat = orig_open_118
+        sender._find_outgoing_with_text = orig_find_118
+    assert result_118["verified"] is True, result_118
+    assert result_118["message_id"] == "conv-msg-REAL118", result_118
+    print("118. SEND delivery verification: caption found in destination -> verified=True with the matched message id")
+
+    async def _fake_find_text_never_118b(page, needle, baselines=None):
+        return None, "", None
+
+    class _FakePage118b:
+        async def wait_for_timeout(self, ms):
+            pass
+
+    orig_open_118b = mark_scan._open_source_chat
+    orig_find_118b = sender._find_outgoing_with_text
+    mark_scan._open_source_chat = _fake_open_118
+    sender._find_outgoing_with_text = _fake_find_text_never_118b
+    try:
+        result_118b = asyncio.run(mark_scan._verify_forward_delivered(_FakePage118b(), "Dest Group", "Introduction Take"))
+    finally:
+        mark_scan._open_source_chat = orig_open_118b
+        sender._find_outgoing_with_text = orig_find_118b
+    assert result_118b["verified"] is False, result_118b
+    assert "no matching outgoing message" in result_118b["reason"], result_118b
+    print("118b. SEND delivery verification: caption never found in destination -> verified=False, never assumed sent")
+
+    # 119: a real, full-stack recovery reproduction — the closest available
+    # proxy to a live test in this environment (no live WhatsApp browser
+    # access here — see this task's final report). Uses REAL attempt
+    # internals (mirroring test 84's own mocking style, one level lower
+    # than the pure-wrapper tests above): _open_media_and_get_forward_button
+    # fails ONCE (reproducing "could not reopen the marked media" exactly
+    # as reported for Padm Rautela's Introduction) then succeeds, proving
+    # the REAL _send_one_target_native_forward (source reopen + reacquire
+    # + forward + destination-select + caption/send + delivery
+    # verification) recovers end-to-end, not just the mocked-attempt
+    # orchestration tested above.
+    class _FakePage119:
+        async def wait_for_timeout(self, ms):
+            pass
+
+        class mouse:
+            @staticmethod
+            async def click(x, y, button="left"):
+                pass
+
+    ready_calls_119: list = []
+
+    async def _fake_open_group_119(page, group):
+        return "OPENED"
+
+    async def _fake_ready_119(page, group, msg_id, tile_index, is_photo):
+        ready_calls_119.append(msg_id)
+        if len(ready_calls_119) == 1:
+            return {"ok": False, "reason": "tile click failed after 3 attempts: Locator.scroll_into_view_if_needed: Timeout 5000ms exceeded"}
+        return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+    async def _fake_select_119(page, dest):
+        return {"ok": True}
+
+    async def _fake_caption_send_119(page, caption):
+        return {"ok": True, "selector_used": "[aria-label^=\"Send\"]"}
+
+    async def _fake_ensure_closed_119(page):
+        return True
+
+    async def _fake_find_text_119(page, needle, baselines=None):
+        return "SCOPE conv-msg", needle, "conv-msg-VERIFIED119"
+
+    orig_open_119 = sender._open_group_chat
+    orig_ready_119 = mark_scan._open_media_and_get_forward_button
+    orig_select_119 = mark_scan._select_forward_destination
+    orig_caption_119 = mark_scan._enter_forward_caption_and_send
+    orig_closed_119 = mark_scan._ensure_forward_dialog_closed
+    orig_find_119 = sender._find_outgoing_with_text
+    sender._open_group_chat = _fake_open_group_119
+    mark_scan._open_media_and_get_forward_button = _fake_ready_119
+    mark_scan._select_forward_destination = _fake_select_119
+    mark_scan._enter_forward_caption_and_send = _fake_caption_send_119
+    mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_119
+    sender._find_outgoing_with_text = _fake_find_text_119
+    try:
+        target_119 = _send_target("intro-padm-rautela", "intro")
+        result_119 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage119(), "Padm Rautela x Talentgram", target_119))
+    finally:
+        sender._open_group_chat = orig_open_119
+        mark_scan._open_media_and_get_forward_button = orig_ready_119
+        mark_scan._select_forward_destination = orig_select_119
+        mark_scan._enter_forward_caption_and_send = orig_caption_119
+        mark_scan._ensure_forward_dialog_closed = orig_closed_119
+        sender._find_outgoing_with_text = orig_find_119
+
+    assert result_119["ok"] is True, result_119
+    assert len(ready_calls_119) == 2, ready_calls_119  # exactly one failed reacquisition, one successful retry
+    assert all(m == "intro-padm-rautela" for m in ready_calls_119), ready_calls_119
+    print("119. SEND self-healing FULL-STACK reproduction (Padm Rautela / Mahindra Thar) — Introduction's exact reported failure now recovers on retry via the REAL attempt path, not just the mocked wrapper")
+
+    # 120: the SAME full-stack scenario, but the media genuinely never
+    # becomes available (every attempt's own _open_media_and_get_forward_
+    # button fails) -> exhausted, real actionable failure, never a false
+    # SENT.
+    ready_calls_120: list = []
+
+    async def _fake_ready_120(page, group, msg_id, tile_index, is_photo):
+        ready_calls_120.append(msg_id)
+        return {"ok": False, "reason": "source message no longer found in window"}
+
+    orig_open_120 = sender._open_group_chat
+    orig_ready_120 = mark_scan._open_media_and_get_forward_button
+    sender._open_group_chat = _fake_open_group_119
+    mark_scan._open_media_and_get_forward_button = _fake_ready_120
+    try:
+        target_120 = _send_target("intro-gone", "intro")
+        result_120 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage119(), "Some Group", target_120))
+    finally:
+        sender._open_group_chat = orig_open_120
+        mark_scan._open_media_and_get_forward_button = orig_ready_120
+
+    assert result_120["ok"] is False, result_120
+    assert len(ready_calls_120) == mark_scan.MAX_SEND_ITEM_ATTEMPTS == 3, ready_calls_120
+    assert "no longer found" in result_120["error"], result_120
+    print("120. SEND self-healing FULL-STACK: media genuinely never available -> all bounded attempts exhausted, real reason reported, no false success")
+
+    # 121: idempotency/RETRY behavior — already-sent items are resumed
+    # correctly by the EXISTING architecture (Requirement D/P), proven at
+    # the backend level in backend/tests/test_media_send.py's own
+    # test_send_orchestrator_partial_failure_resumes_only_missing_item —
+    # this worker-side test only confirms the piece that lives here:
+    # _run_send never re-attempts an item that mode="send" dispatch
+    # (backend-computed send_targets) simply never included in the first
+    # place — i.e. this worker trusts send_targets completely and adds no
+    # SECOND, competing notion of "already done" of its own.
+    calls_121: list = []
+
+    async def _fake_forward_121(page, group_name, target, item_label="", source_type="group"):
+        calls_121.append(target["source_message_id"])
+        return {"source_message_id": target["source_message_id"], "ok": True}
+
+    async def _fake_text_121(page, destination_group, message, *, destination_type="group"):
+        calls_121.append(("text", message))
+        return {"ok": True}
+
+    async def _fake_open_group_121(page, group):
+        return "OPENED"
+
+    orig_open_121 = sender._open_group_chat
+    orig_forward_121 = mark_scan._send_one_target_native_forward
+    orig_text_121 = mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = (
+        _fake_open_group_121, _fake_forward_121, _fake_text_121,
+    )
+    try:
+        # Backend already excluded "take1"/"take2" from send_targets
+        # (already SENT) — only "intro1" (previously FAILED/unverified)
+        # is present, exactly what a RETRY re-dispatch of the SAME
+        # approved plan produces via media_send.prepare_send_targets's
+        # existing already_sent() filtering (backend/tests/test_media_
+        # send.py's own idempotency tests cover THAT filtering directly).
+        req_121 = {
+            "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Vaseline",
+            "send_targets": [_send_target("intro1", "intro")],
+            "form_insert_index": 1, "form_message": None, "send_marker_on_success": True,
+        }
+        result_121 = asyncio.run(mark_scan._run_send(_FakePage73(), req_121))
+    finally:
+        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = (
+            orig_open_121, orig_forward_121, orig_text_121,
+        )
+    assert all(r["ok"] for r in result_121["results"]), result_121
+    forward_calls_121 = [c for c in calls_121 if c == "intro1" or (isinstance(c, tuple) and c[0] != "text")]
+    assert forward_calls_121 == ["intro1"], calls_121  # take1/take2 never re-appear here — RETRY only ever touches what the backend re-includes
+    print("121. SEND self-healing/RETRY: the worker only ever forwards what send_targets actually contains — a RETRY re-dispatch (backend-filtered to just the failed item) never re-touches already-sent media (Requirement D/P)")
 
 
 if __name__ == "__main__":

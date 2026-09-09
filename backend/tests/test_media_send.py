@@ -3940,4 +3940,25 @@ def test_report_send_result_never_leaks_raw_playwright_text():
     assert "Locator" not in report, report
     assert "5000ms" not in report, report
     assert "Audition Take" in report, report
+    # SEND self-healing (2026-09-09) — a real, exhausted media failure now
+    # gets the stronger "SEND ATTENTION REQUIRED" header + RETRY hint,
+    # never the plain "SEND PARTIAL" a form/marker-only failure still
+    # gets (see the two form/marker-only tests just above, unchanged).
+    assert "SEND ATTENTION REQUIRED" in report, report
+    assert "SEND PARTIAL" not in report, report
+    assert "Reply RETRY" in report, report
+    assert "No duplicate media were sent" in report, report
+
+
+def test_report_send_result_form_only_failure_stays_send_partial():
+    """A form-only failure (every media item succeeded) is NOT a media
+    recovery-exhausted case — keeps the original "SEND PARTIAL" wording,
+    never the media-specific RETRY hint."""
+    report = orch._report_send_result(
+        "Test Talent", "Test Project", "Test Casting Group",
+        sent_labels=["Audition Take"], failed_items=[], already=[],
+        form_status_line="✗ Submission details could not be sent",
+    )
     assert "SEND PARTIAL" in report, report
+    assert "SEND ATTENTION REQUIRED" not in report, report
+    assert "Reply RETRY" not in report, report

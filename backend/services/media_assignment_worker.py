@@ -276,6 +276,30 @@ def _report_send_result(
     sent_labels: List[str], failed_items: List[Dict[str, str]], already: List[Dict[str, Any]],
     *, form_status_line: Optional[str] = None, marker_status_line: Optional[str] = None,
 ) -> str:
+    """SEND ATTENTION REQUIRED (Production fix, 2026-09-09 — SEND
+    self-healing/reliability master prompt, item 14) — a genuinely
+    FAILED media item, at this point, has already exhausted
+    mark_scan.py's own bounded automatic recovery (MAX_SEND_ITEM_ATTEMPTS
+    full attempts per item, each with fresh source reacquisition-by-
+    identity and real destination-chat delivery verification — see
+    _send_one_target_native_forward's own docstring); this report is the
+    ONE-TIME final word on it, never a mid-recovery status (recovery is
+    fully synchronous inside the worker's single per-item call, so there
+    is nothing "in progress" left to narrate by the time any report is
+    posted at all — satisfying the master prompt's own "one processing
+    acknowledgement only, never a status message per retry cycle"
+    requirement trivially, since no retry-cycle message is ever sent).
+
+    Distinct from a form-only or marker-only failure (send_targets could
+    be empty, or every media item could have succeeded) — those keep the
+    existing "SEND PARTIAL" header and wording exactly as before; only a
+    real, exhausted, actionable MEDIA failure gets the stronger header,
+    the explicit "no duplicate media were sent" reassurance (true by
+    construction — media_send's own idempotency, unchanged, means a
+    later RETRY re-dispatch — literally just re-running the same SEND
+    command — naturally excludes every already-SENT item via
+    prepare_send_targets' existing already_sent() filtering; nothing new
+    was built for this), and the RETRY hint."""
     already_labels = [
         media_assignment.simple_role_label(a["media_role"], a.get("take_number"))
         for a in already
@@ -288,13 +312,26 @@ def _report_send_result(
     body = "\n".join(body_lines)
     form_failed = bool(form_status_line and form_status_line.startswith("✗"))
     marker_failed = bool(marker_status_line and marker_status_line.startswith("✗"))
-    header = "SEND COMPLETE ✓" if not (failed_items or form_failed or marker_failed) else "SEND PARTIAL"
+    if not (failed_items or form_failed or marker_failed):
+        header = "SEND COMPLETE ✓"
+        footer = "Pipeline stage was NOT changed."
+    elif failed_items:
+        header = "SEND ATTENTION REQUIRED"
+        footer = (
+            "Pipeline stage was NOT changed.\n\n"
+            "Automatic recovery exhausted.\n\n"
+            "No duplicate media were sent.\n\n"
+            "Reply RETRY to attempt only the failed media."
+        )
+    else:
+        header = "SEND PARTIAL"
+        footer = "Pipeline stage was NOT changed."
     return (
         f"{header}\n\nTalent: {talent_label}\nProject: {project_label}\n"
         f"Destination: {destination_group}\n\n"
         f"{len(already_labels) + len(sent_labels)}/{total} media sent"
         + (f", {len(failed_items)} failed" if failed_items else "")
-        + f"\n\n{body}\n\nPipeline stage was NOT changed."
+        + f"\n\n{body}\n\n{footer}"
     )
 
 

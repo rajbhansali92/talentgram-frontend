@@ -8233,7 +8233,8 @@ def _extract_send_fields(text: str) -> Dict[str, str]:
     """"send - Talent - Project" (hyphen), "SEND Talent for Project" /
     "SEND Talent the casting call for Project" (canonical natural
     language — the explicit "for" connector checked first, same regex the
-    compound-plan SEND step uses), or "send Talent Project" (space-
+    compound-plan SEND step uses), "Send A for X, B for Y[, C for Z]"
+    (explicit multi-pair — see below), or "send Talent Project" (space-
     separated, boundary resolved later via the DB-aware
     _resolve_freeform_talent_project) — own trigger ("send")."""
     _, remainder = nlu._strip_leading_trigger(text or "", ["send"])
@@ -8247,6 +8248,39 @@ def _extract_send_fields(text: str) -> Dict[str, str]:
     remainder = _strip_send_object_filler(remainder)
     if not remainder:
         return {}
+
+    # Explicit multi-pair SEND (master prompt Issue 2 — Production fix,
+    # 2026-09-09): "Send A for X, B for Y[, C for Z]" must resolve to
+    # EXACTLY those pairs, never the cross-product every comma-separated
+    # talent/project list otherwise gets (see _send_selector_pairs'
+    # explicit-pairing docstring). Reuses nlu.split_multi_segment_pairs —
+    # the SAME generic "2+ comma segments, every one carries its own
+    # connector" check ADD/MOVE already use for "Add A to X, B to Y" —
+    # rather than a new parser. That check alone only requires to/in/for
+    # somewhere in each segment; re-validated here against SEND's own
+    # stricter " for " pattern so a segment that merely contains "to"/"in"
+    # as part of ordinary wording (not a real per-segment project
+    # connector) can never produce a bogus pair — any segment that fails
+    # this stricter re-check abandons the WHOLE split (never a partial/
+    # garbled result), falling through to the single-pair/freeform
+    # handling below exactly as before this fix.
+    segments = nlu.split_multi_segment_pairs(f"send {remainder}", ["send"])
+    if segments and len(segments) >= 2:
+        pairs: List[Tuple[str, str]] = []
+        for seg in segments:
+            _, seg_remainder = nlu._strip_leading_trigger(seg, ["send"])
+            seg_remainder = _strip_send_object_filler((seg_remainder or "").strip())
+            seg_match = _SEND_STEP_FOR_PROJECT_RE.match(seg_remainder)
+            if not seg_match:
+                pairs = []
+                break
+            pairs.append((seg_match.group(1).strip(), seg_match.group(2).strip()))
+        if pairs:
+            return {
+                "talent_selector": _SEND_EXPLICIT_PAIR_SEP.join(t for t, _ in pairs),
+                "project_query": _SEND_EXPLICIT_PAIR_SEP.join(p for _, p in pairs),
+            }
+
     m = _SEND_STEP_FOR_PROJECT_RE.match(remainder)
     if m:
         return {"talent_selector": m.group(1).strip(), "project_query": m.group(2).strip()}
@@ -8936,12 +8970,73 @@ def _send_approval_overrides(existing: Optional[Dict[str, Any]]) -> Dict[str, st
     return dict(existing.get("overrides") or {})
 
 
+async def _preview_one_bulk_target(target: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[List[Dict[str, Any]]], Optional[str]]:
+    """One target's marked-media preview — identical logic to the single-
+    send confirmation's own pre-approval scan (_preview_send_marks), and
+    critically PERSISTED the same way (media_send.save_send_preview_cache)
+    so this target's later approval dispatch reuses this exact resolved
+    plan (media_send.create_send_dispatch_from_approved_plan) instead of
+    re-scanning live — the SAME Issue-1 root-cause fix single sends
+    already get, now extended to bulk/multi-target sends too (see
+    _send_one_pair's own docstring for the full root-cause writeup).
+    Returns (target, assignments, error) unchanged in shape from
+    _preview_send_marks' own contract, just carrying `target` alongside
+    so a caller running several of these concurrently (asyncio.gather)
+    can still tell results apart."""
+    talent_id = target["authoritative_talent_id"]
+    project_id = target["project"]["id"]
+    destination_group = target["destination_group"]
+    assignments, marks_error = await _preview_send_marks(
+        talent_id=talent_id, talent_label=target["authoritative_talent_label"],
+        project_id=project_id, project_label=target["project"]["label"],
+        destination_group=destination_group, sources=target["all_sources"],
+    )
+    if not (assignments is None and marks_error is None):
+        await media_send.save_send_preview_cache(
+            talent_id, project_id, destination_group, assignments=assignments, error=marks_error,
+        )
+    return target, assignments, marks_error
+
+
 async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected: dict) -> str:
     """Resolves every (talent, project) pair independently — a single
     ambiguous/unresolvable pair reports that exact problem and stops the
     ENTIRE bulk request (never dispatches the pairs that DID resolve while
     silently dropping the ones that didn't; never guesses). Only once
-    every pair resolves cleanly does this show the combined preview."""
+    every pair resolves cleanly does this show the combined preview —
+    numbered per target (master prompt Issue 2's own worked example
+    format), each with its own marked-media list, exactly like the
+    single-target confirmation shows, never a bare "N pairs will be sent"
+    summary.
+
+    Marked-media previews for every resolved target run CONCURRENTLY
+    (asyncio.gather) — each is an independent WhatsApp scan_request the
+    worker already processes without blocking on any other, so this adds
+    no serialization the single-target path doesn't already pay per
+    target; it only avoids needlessly summing N sequential scan
+    round-trips into one bulk confirmation's latency. This is scanning
+    (cheap, already-async backend/worker bookkeeping), never native
+    WhatsApp Forward — the master prompt's "do not parallelize native
+    forwarding" rule is about the ACTUAL SEND (mark_scan.py's
+    _run_send/_send_one_target_native_forward, still fully sequential per
+    target — see _send_executor's own bulk branch), not the read-only
+    preview scan.
+
+    A real, resolved problem (ambiguous/unresolved/unresolvable-batch
+    mark) for ANY one target stops the WHOLE bulk request, mirroring the
+    existing talent/project-resolution behavior above — never silently
+    dispatching the targets that DID resolve cleanly while dropping a
+    genuinely problematic one. A bare TIMEOUT on one target's preview
+    does NOT block the others (matches the single-target confirmation's
+    own non-blocking timeout handling) — that target's line shows the
+    same honest "couldn't verify in time" note, and its later approval
+    dispatch falls back to a live re-scan at execution time (the
+    documented Issue-1 fallback path) rather than the approved-plan reuse.
+
+    Per-target field EDITING (the master prompt's "4 → Aahana P. —
+    Mahindra" numbered-target picker) is NOT implemented in this pass —
+    see this task's final report for why, and cancel + re-run a single
+    "send - Talent - Project" to edit one target's form before sending."""
     resolved: List[Dict[str, Any]] = []
     for talent_sel, project_q in pairs:
         target, err = await _resolve_send_target({"talent_selector": talent_sel, "project_query": project_q})
@@ -8953,24 +9048,63 @@ async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected:
             )
         resolved.append(target)
 
+    previews = await asyncio.gather(*(_preview_one_bulk_target(t) for t in resolved))
+
+    for target, assignments, marks_error in previews:
+        if marks_error is not None:
+            return (
+                f"SEND — Marked Media Problem\n\n"
+                f"Project: {target['project']['label']}\nTalent: {target['authoritative_talent_label']}\n\n"
+                f"{marks_error}\n\nNothing in this bulk send request has been sent — fix this "
+                f"target and re-run the full command."
+            )
+        if assignments is not None and not assignments:
+            checked_sources = target["all_sources"]
+            checked_desc = " or ".join(
+                f"{name} ({'their individual WhatsApp' if st == 'phone' else 'WhatsApp group'})"
+                for st, name in checked_sources
+            ) or f"{target['authoritative_talent_label']}'s WhatsApp"
+            return (
+                f"SEND — No Marked Media Found\n\n"
+                f"Project: {target['project']['label']}\nTalent: {target['authoritative_talent_label']}\n\n"
+                f"No @Gunwanti + mark for {target['project']['label']} was found in {checked_desc}. "
+                f"Nothing in this bulk send request has been sent.\n\n"
+                f"Mark the media first, then retry the full command."
+            )
+
     lines = [
         "SEND FORM PREVIEW (BULK) — 🚫 Nothing Has Been Sent Yet", "",
         f"{len(resolved)} independent sends will be prepared, each using that talent's own "
         f"submission form. Nothing has gone out, and nothing will, until you explicitly "
         f"approve below.", "",
     ]
-    for t in resolved:
-        lines.append(f"• {t['authoritative_talent_label']} → {t['project']['label']} → {t['destination_group']}")
+    for i, (target, assignments, marks_error) in enumerate(previews, start=1):
+        lines.append(f"TARGET {i}")
+        lines.append(f"Talent: {target['authoritative_talent_label']}")
+        lines.append(f"Project: {target['project']['label']}")
+        marked_media_lines = (
+            _format_marked_media_lines(assignments, target["project"]["label"], target["authoritative_talent_label"])
+            if assignments is not None
+            else ["Couldn't verify marked media within a reasonable time — approving will scan "
+                  "fresh and report exactly what was found/sent."]
+        )
+        lines.append("Marked media:")
+        lines.extend(marked_media_lines)
+        lines.append(f"Destination: {target['destination_group']}")
+        lines.append("")
     lines += [
-        "",
-        "Editing an individual form isn't supported for a bulk send — cancel and re-run a "
-        "single \"send - Talent - Project\" first if you need to edit one before sending.",
+        "Editing an individual target's form isn't supported for a bulk send — cancel and "
+        "re-run a single \"send - Talent - Project\" first if you need to edit one before "
+        "sending.",
         "",
         "Reply:",
-        "1 → Approve all (starts sending every pair above: Takes → Introduction → Form → Pictures → ☑️, one after another)",
+        "1 → Approve all (starts sending every target above: Takes → Introduction → Form → Pictures → ☑️, one after another)",
         "3 → Cancel",
     ]
     return "\n".join(lines)
+
+
+_SEND_EXPLICIT_PAIR_SEP = "\x1f"  # ASCII unit separator — never appears in real WhatsApp text
 
 
 def _send_selector_pairs(collected: dict) -> List[Tuple[str, str]]:
@@ -8982,13 +9116,55 @@ def _send_selector_pairs(collected: dict) -> List[Tuple[str, str]]:
     project_query) pair UNCHANGED (no split at all) whenever neither field
     contains a comma — the space-separated freeform shape (talent_selector
     == project_query, resolved later by _resolve_freeform_talent_project)
-    never contains one either, so it is also completely unaffected."""
+    never contains one either, so it is also completely unaffected.
+
+    Explicit pairing (master prompt Issue 2 — Production fix, 2026-09-09):
+    "Send A for X, B for Y[, C for Z]" must resolve to EXACTLY those
+    pairs, never the full cross-product (A->X, A->Y, B->X, B->Y). This
+    shape is detected upstream, in _extract_send_fields (reusing
+    nlu.split_multi_segment_pairs — the SAME generic "every comma-
+    segment carries its own connector" check ADD/MOVE already use for
+    "Add A to X, B to Y"), which encodes the already-paired talents/
+    projects into these two fields joined by _SEND_EXPLICIT_PAIR_SEP (a
+    control character that can never appear in real chat text) INSTEAD
+    of an ordinary comma — so this function can tell "explicit pairs,
+    zip 1:1" apart from "two independent lists, cross-product" purely by
+    which separator is present, with zero risk of an ordinary
+    comma-separated multi-name/multi-project command being misread as
+    paired."""
     talent_selector = (collected.get("talent_selector") or "").strip()
     project_query = (collected.get("project_query") or "").strip()
-    if "," not in talent_selector and "," not in project_query:
+    if _SEND_EXPLICIT_PAIR_SEP in talent_selector or _SEND_EXPLICIT_PAIR_SEP in project_query:
+        talents = talent_selector.split(_SEND_EXPLICIT_PAIR_SEP)
+        projects = project_query.split(_SEND_EXPLICIT_PAIR_SEP)
+        if len(talents) == len(projects) and len(talents) >= 2:
+            return list(zip((t.strip() for t in talents), (p.strip() for p in projects)))
+        # Malformed/mismatched encoding (should never happen from
+        # _extract_send_fields itself) — fall through to the ordinary
+        # cross-product handling below rather than silently dropping
+        # pairs, using the separator-stripped text.
+        talent_selector = talent_selector.replace(_SEND_EXPLICIT_PAIR_SEP, ",")
+        project_query = project_query.replace(_SEND_EXPLICIT_PAIR_SEP, ",")
+    if talent_selector == project_query:
+        # The space-separated freeform shape — both fields hold the SAME
+        # raw text, resolved later via the DB-aware
+        # _resolve_freeform_talent_project. An "and" inside it is not
+        # necessarily a name separator (could be ordinary freeform
+        # wording) and there is no second, independent field to pair it
+        # against — never split here, exactly the original behavior.
         return [(talent_selector, project_query)]
+    # "and"-only lists (Production fix, 2026-09-09 — master prompt's own
+    # "Send Aahana Pocha and Alia Khan for Mahindra" example has NO comma
+    # at all) must split exactly like a comma list does — split_multi_names
+    # already normalizes "and" to "," internally and returns a 1-item list
+    # unchanged for an ordinary single name/project, so always computing
+    # the split (rather than gating on a literal "," being present first)
+    # covers both shapes with one path and changes nothing for the
+    # single-pair case.
     talents = nlu.split_multi_names(talent_selector) or [talent_selector]
     projects = nlu.split_multi_names(project_query) or [project_query]
+    if len(talents) <= 1 and len(projects) <= 1:
+        return [(talent_selector, project_query)]
     return [(t, p) for t in talents for p in projects]
 
 
@@ -9527,10 +9703,58 @@ async def _send_one_pair(
         )
         form_message = form_built["message"]
 
-    # Mixed-source SEND (Production fix, 2026-09-08) — approval must stay
-    # fast and non-blocking (ack immediately, resolve asynchronously —
-    # a synchronous scan-and-wait here was tried and reverted: it turns
-    # a normal multi-second WhatsApp scan, or a worker that's merely busy
+    # Reuse the APPROVED media plan (Production fix — Issue 1, 2026-09-09:
+    # "two marked audition takes but only one was sent"). `existing` (just
+    # fetched above) carries `preview_assignments` — the EXACT resolved
+    # marked-media list _build_send_confirmation showed the admin in the
+    # SEND FORM PREVIEW (persisted by save_send_preview_cache on every
+    # confirmation render/re-render, always <=SEND_PREVIEW_CACHE_TTL_SEC
+    # old by the time an approval reply can even be sent — a confirmation
+    # is a hard prerequisite for "1" to reach this executor at all). The
+    # OLD code re-dispatched a BRAND NEW WhatsApp scan here and re-ran
+    # validate_candidates a SECOND time, independent of the preview — two
+    # live scans of the same chat have no guarantee of finding an
+    # identical set of replies (WhatsApp Web's virtualized message list;
+    # see mark_scan.py's _dump_window docstring), so a mark the preview
+    # found could legitimately be missing from this second scan through
+    # no fault of any key/identity logic. Dispatching straight from the
+    # already-resolved plan instead means execution can never see a
+    # DIFFERENT set of marked media than what the admin actually approved
+    # — see media_send.create_send_dispatch_from_approved_plan's own
+    # docstring for the full root-cause writeup. Each item's own
+    # source_type/source_group_name (set by the multi-source preview
+    # scan when the talent has both a group and a phone) already rides
+    # along on every assignment, so mixed-source sends need no special
+    # casing here at all — build_send_targets threads per-item source
+    # through exactly as before.
+    preview_assignments = existing.get("preview_assignments") if existing else None
+    preview_error = existing.get("preview_error") if existing else None
+    if preview_assignments is not None and not preview_error:
+        sources = target["all_sources"]
+        default_source_type, default_group_name = sources[0] if sources else (target.get("source_type") or "group", target.get("group_name"))
+        await media_send.create_send_dispatch_from_approved_plan(
+            talent_id=talent_id, project_id=project["id"], talent_label=talent_label, project_label=project["label"],
+            destination_group=destination_group, assignments=preview_assignments,
+            default_source_type=default_source_type, default_group_name=default_group_name,
+            form_message=form_message, submission_id=submission["id"], content_hash=form_built["content_hash"],
+        )
+        return ExecResult(
+            ok=True,
+            message=f"✅ Approved by {ctx.sender_phone} — now sending {talent_label}'s marked "
+                    f"{project['label']} media to {destination_group}\n\n"
+                    f"Order: Takes → Introduction → Form → Pictures → ☑️ (skipping any stage with nothing marked).\n\n"
+                    f"I'll report back here once it's done.",
+        )
+
+    # Fallback (preview never resolved — e.g. a genuine timeout at
+    # confirmation time, "Couldn't verify marked media within a
+    # reasonable time — approving will scan fresh") — the ONLY case that
+    # still re-scans WhatsApp live at approval time, exactly as the code
+    # always did, since there is no approved plan yet to reuse. Mixed-
+    # source SEND (Production fix, 2026-09-08) — approval must stay fast
+    # and non-blocking (ack immediately, resolve asynchronously — a
+    # synchronous scan-and-wait here was tried and reverted: it turns a
+    # normal multi-second WhatsApp scan, or a worker that's merely busy
     # with something else, into a hard approval FAILURE instead of the
     # async design's graceful eventual completion). One scan request per
     # configured source (only ever >1 when the talent genuinely has both

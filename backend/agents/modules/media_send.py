@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core import db, _submission_to_client_shape
 from agents.modules.media_assignment import (
+    DOWNLOAD_STATUS_PENDING,
     MAX_SCAN_MESSAGES,
     SCAN_REQUESTS_COLLECTION,
     SCAN_STATUS_PENDING,
@@ -432,6 +433,99 @@ async def prepare_send_targets(
     marker_already_sent = await already_sent_marker(talent_id, project_id, destination_group)
     send_marker_on_success = not marker_already_sent
     return send_targets, form_insert_index, send_marker_on_success, already
+
+
+async def create_send_dispatch_from_approved_plan(
+    *, talent_id: str, project_id: str, talent_label: str, project_label: str,
+    destination_group: str, assignments: List[Dict[str, Any]],
+    default_source_type: str, default_group_name: Optional[str],
+    form_message: Optional[str], submission_id: Optional[str], content_hash: Optional[str],
+    created_by: str = "whatsapp-agent",
+) -> str:
+    """Dispatch a REAL SEND execution directly from an ALREADY-RESOLVED
+    assignments list — no fresh WhatsApp scan, no second
+    validate_candidates pass (Production fix — Issue 1, 2026-09-09: "two
+    marked audition takes but only one was sent"). `assignments` is
+    exactly the list casting_pipeline._preview_send_marks resolved and
+    showed the admin in the SEND confirmation card (persisted on the
+    approval row via save_send_preview_cache as `preview_assignments`) —
+    the SAME immutable plan the admin approved, never rebuilt from
+    scratch at execution time.
+
+    ROOT CAUSE this replaces: the OLD approval path
+    (casting_pipeline._send_one_pair) dispatched a BRAND NEW
+    mode="scan" request per configured source, which the worker
+    re-scanned live and the backend re-validated via validate_candidates
+    a SECOND time, independent of whatever the confirmation preview had
+    found moments earlier. Two independent live WhatsApp scans of the
+    same chat have no guarantee of finding an identical set of replies
+    (WhatsApp Web's virtualized message list, scroll-position/timing —
+    see mark_scan.py's _dump_window docstring for the exact mechanism);
+    a mark visible to the FIRST scan (preview) could legitimately be
+    missing from the SECOND (execution) scan's rendered window through
+    no fault of any key/identity logic — every key used throughout this
+    module (slot_key, the media_sends unique index) already keys
+    correctly on (media_role, take_number), so Take 1 and Take 2 were
+    never at risk of colliding/overwriting each other ONCE both were
+    captured as candidates; the loss happened one level up, at "was Take
+    1 even in this scan's window at all" — a question the OLD code asked
+    TWICE, independently, with no guarantee of the same answer both
+    times.
+
+    Fix: ask it ONCE (at confirmation-preview time) and REUSE that exact
+    answer for execution — this function is the reuse path.
+    `prepare_send_targets` still runs (idempotency bookkeeping,
+    already-sent filtering, ordering) — nothing about correctness there
+    was ever the issue; only the redundant live re-scan is skipped.
+    Mixed-source assignments (each item's own source_type/
+    source_group_name, set by the multi-source preview scan) pass
+    through build_send_targets exactly as before — per-item source is
+    never collapsed to one shared value.
+
+    Inserts the scan_requests doc directly in the SAME "ready for the
+    worker's mode=\"send\" pickup" shape media_assignment_worker.py's own
+    scan-done branches already produce (status=DOWNLOAD_STATUS_PENDING),
+    so the ENTIRE downstream pipeline — claim endpoint, mark_scan.py's
+    _run_send, /download-result, _process_download_done's report/
+    idempotency/marker/post-approval logic — is reused completely
+    unchanged. Returns the new request's id."""
+    send_targets, form_insert_index, send_marker_on_success, already = await prepare_send_targets(
+        talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+        assignments=assignments, default_source_type=default_source_type,
+        default_group_name=default_group_name, created_by=created_by,
+    )
+    req_id = str(uuid.uuid4())
+    now = _now()
+    await db[SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id,
+        "mode": "send",
+        "workflow": "send",
+        "status": DOWNLOAD_STATUS_PENDING,
+        "group_name": default_group_name,
+        "source_type": default_source_type,
+        "destination_group": destination_group,
+        "talent_id": talent_id, "project_id": project_id,
+        "talent_label": talent_label, "project_label": project_label,
+        "send_targets": send_targets,
+        "form_insert_index": form_insert_index,
+        "send_marker_on_success": send_marker_on_success,
+        "form_message": form_message,
+        "submission_id": submission_id,
+        "content_hash": content_hash,
+        "send_dispatched_at": now,  # phase-timing instrumentation, diagnostic only
+        "pending_report_context": {
+            "talent_label": talent_label, "project_label": project_label,
+            "destination_group": destination_group, "already": already,
+            "submission_id": submission_id, "content_hash": content_hash,
+            "form_message_included": bool(form_message),
+            "marker_attempted": send_marker_on_success,
+        },
+        "download_results": None,
+        "created_at": now,
+        "updated_at": now,
+        "completed_at": None,
+    })
+    return req_id
 
 
 async def record_marker_sent(talent_id: str, project_id: str, destination_group: str, created_by: str) -> None:

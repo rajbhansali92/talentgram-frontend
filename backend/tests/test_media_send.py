@@ -1227,6 +1227,459 @@ async def test_send_repeated_approve_reply_never_creates_a_second_scan_request()
 
 
 # ---------------------------------------------------------------------------
+# Issue 1 root-cause fix (2026-09-09) — "two marked audition takes but only
+# one was sent" (Areyan Dcosta / Mahindra Thar production screenshot): the
+# OLD approval path re-dispatched a BRAND NEW live WhatsApp scan at "1 ->
+# Approve" time, independent of whatever the confirmation preview had just
+# found — two live scans of the same chat have no guarantee of finding an
+# identical set of replies, so a mark visible to the preview could
+# legitimately be missing from the execution-time re-scan. These tests
+# prove execution now reuses the EXACT preview_assignments the admin
+# approved (media_send.create_send_dispatch_from_approved_plan) rather than
+# re-scanning, so Take 1 can never be dropped between confirmation and
+# dispatch regardless of any live-WhatsApp timing/window nondeterminism.
+# ---------------------------------------------------------------------------
+async def test_send_two_takes_and_intro_all_dispatched_from_approved_plan_no_second_scan():
+    """The exact reported failure, reproduced structurally: MARK Take 1,
+    MARK Take 2, MARK Introduction, SEND, Approve — must result in ALL
+    THREE items becoming send_targets, dispatched directly from the
+    preview's own resolved plan, with NO second live-scan request ever
+    created for the real execution."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Areyan TwoTakes {tag}"
+    email = f"areyan.twotakes.{tag}@example.com"
+    project_label = f"Mahindra Thar {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        worker = _with_simulated_send_preview(talent_id, project_id, [
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 1 for {project_label}", source_message_id="areyan-take1", media_type="video"),
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 2 for {project_label}", source_message_id="areyan-take2", media_type="video"),
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark introduction video for {project_label}", source_message_id="areyan-intro", media_type="video"),
+        ])
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600040",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert r.handled, r.reply
+        assert "1 - Take 1" in r.reply, r.reply
+        assert "2 - Take 2" in r.reply, r.reply
+        assert "3 - Introduction" in r.reply, r.reply
+
+        # Exactly one scan_request exists at this point (the preview scan,
+        # already finished and its own doc deleted by
+        # _scan_raw_candidates_for_source's own cleanup — see its
+        # docstring). Nothing pending yet.
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600040", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Approved" in r1.reply, r1.reply
+
+        # Exactly ONE new request exists — dispatched straight to
+        # mode="send"/DOWNLOAD_STATUS_PENDING, never a mode="scan" request
+        # (which would mean a second, independent live re-scan was
+        # triggered — the exact behavior this fix removes).
+        reqs = await db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id}).to_list(10)
+        assert len(reqs) == 1, reqs
+        req = reqs[0]
+        assert req["mode"] == "send", req
+        assert req["status"] == ma.DOWNLOAD_STATUS_PENDING, req
+
+        targets = {(t["media_role"], t["take_number"]): t for t in req["send_targets"]}
+        assert set(targets) == {("take", 1), ("take", 2), ("intro", None)}, targets
+        assert targets[("take", 1)]["source_message_id"] == "areyan-take1"
+        assert targets[("take", 2)]["source_message_id"] == "areyan-take2"
+        assert targets[("intro", None)]["source_message_id"] == "areyan-intro"
+        # Fixed ordering preserved: Take 1 -> Take 2 -> Introduction.
+        ordered = [(t["media_role"], t["take_number"]) for t in req["send_targets"]]
+        assert ordered == [("take", 1), ("take", 2), ("intro", None)], ordered
+
+        # Simulate the worker's own send-result report for all three
+        # succeeding, then let the orchestrator finish the request —
+        # confirms Take 1 survives all the way to the final report, never
+        # silently dropped anywhere downstream either.
+        await db[ma.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": req["id"]},
+            {"$set": {
+                "status": ma.DOWNLOAD_STATUS_DONE,
+                "download_results": [
+                    {"ok": True, "source_message_id": "areyan-take1"},
+                    {"ok": True, "source_message_id": "areyan-take2"},
+                    {"ok": True, "source_message_id": "areyan-intro"},
+                ],
+                "form_send_result": {"ok": True} if req.get("form_message") else None,
+                "marker_result": {"ok": True} if req.get("send_marker_on_success") else None,
+            }},
+        )
+        assert await orch._process_download_done()
+        final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req["id"]})
+        assert "SEND COMPLETE" in final["report"], final["report"]
+        assert "3/3 media sent" in final["report"], final["report"]
+        assert "✓ Audition Take" in final["report"], final["report"]
+        assert "✓ Introduction Take" in final["report"], final["report"]
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_take2_only_marked_dispatches_take2_alone():
+    """If only Take 2 is marked (no Take 1), send ONLY Take 2 — never
+    inferred/backfilled/renumbered."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Talent Take2Only {tag}"
+    email = f"take2only.{tag}@example.com"
+    project_label = f"Google Take2Only {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        worker = _with_simulated_send_preview(talent_id, project_id, [
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 2 for {project_label}", source_message_id="take2only-take2", media_type="video"),
+        ])
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600041",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert "1 - Take 2" in r.reply, r.reply
+        assert "Take 1" not in r.reply, r.reply
+
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600041", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Approved" in r1.reply, r1.reply
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id, "mode": "send"})
+        assert req is not None
+        targets = {(t["media_role"], t["take_number"]) for t in req["send_targets"]}
+        assert targets == {("take", 2)}, targets
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def _with_simulated_mixed_source_send_preview(talent_id: str, project_id: str, by_source: dict, *, timeout: float = 3.0):
+    """Mixed-source counterpart of _with_simulated_send_preview — a
+    mixed-source preview creates ONE preview_only scan request PER
+    configured source (see casting_pipeline._scan_raw_candidates_for_source),
+    each deleted the instant it's read, so this answers as many distinct
+    (source_type, group_name) pending docs as `by_source` describes,
+    keyed by (source_type, group_name) -> candidates list."""
+    async def _run():
+        remaining = dict(by_source)
+        deadline = asyncio.get_event_loop().time() + timeout
+        while remaining and asyncio.get_event_loop().time() < deadline:
+            doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({
+                "talent_id": talent_id, "project_id": project_id,
+                "preview_only": True, "status": ma.SCAN_STATUS_PENDING,
+            })
+            if doc:
+                key = (doc.get("source_type") or "group", doc.get("group_name"))
+                candidates = remaining.pop(key, [])
+                await db[ma.SCAN_REQUESTS_COLLECTION].update_one(
+                    {"id": doc["id"]}, {"$set": {"candidates": candidates, "status": ma.SCAN_STATUS_DONE}},
+                )
+                processed = await orch._process_scan_done()
+                assert processed, f"orchestrator did not pick up preview scan for {key}"
+            else:
+                await asyncio.sleep(0.02)
+        assert not remaining, f"never saw a pending preview request for sources: {list(remaining)}"
+    return asyncio.create_task(_run())
+
+
+async def test_send_mixed_source_take_from_phone_intro_from_group_dispatched_from_approved_plan():
+    """Requirement #11's mixed-source scenario, exercised through the NEW
+    approved-plan dispatch path (not the old sibling-scan-merge mechanism
+    — that mechanism is now only the timeout fallback): Take marked in the
+    talent's individual WhatsApp chat, Introduction marked in their
+    WhatsApp group, ONE send resolves and dispatches BOTH, each keeping
+    its own source."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Shivi Mixed {tag}"
+    email = f"shivi.mixed.{tag}@example.com"
+    project_label = f"Google Mixed {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_group = f"{name} x Talentgram"
+    talent_phone = "919990000222"
+    talent_id = f"test-ma-tal-{uuid.uuid4().hex[:8]}"
+    await db.talents.insert_one({
+        "id": talent_id, "name": name, "tags": [], "notes": "",
+        "phone": talent_phone, "whatsapp_group_name": talent_group,
+        "email": email, "normalized_email": email.strip().lower(),
+    })
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        worker = await _with_simulated_mixed_source_send_preview(talent_id, project_id, {
+            ("group", talent_group): [
+                _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark introduction video for {project_label}", source_message_id="mixed-intro", media_type="video"),
+            ],
+            ("phone", talent_phone): [
+                _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 1 for {project_label}", source_message_id="mixed-take1", media_type="video"),
+            ],
+        })
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600042",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert "1 - Take 1" in r.reply, r.reply
+        assert "2 - Introduction" in r.reply, r.reply
+
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600042", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Approved" in r1.reply, r1.reply
+
+        reqs = await db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id}).to_list(10)
+        assert len(reqs) == 1, reqs  # no scan siblings dispatched — the approved plan is reused directly
+        req = reqs[0]
+        assert req["mode"] == "send", req
+        targets_by_role = {t["media_role"]: t for t in req["send_targets"]}
+        assert set(targets_by_role) == {"take", "intro"}
+        assert targets_by_role["take"]["source_type"] == "phone", targets_by_role["take"]
+        assert targets_by_role["take"]["source_group_name"] == talent_phone, targets_by_role["take"]
+        assert targets_by_role["intro"]["source_type"] == "group", targets_by_role["intro"]
+        assert targets_by_role["intro"]["source_group_name"] == talent_group, targets_by_role["intro"]
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+async def test_send_preview_timeout_falls_back_to_live_scan_dispatch():
+    """When the preview genuinely times out (assignments=None, never
+    cached — see _build_send_confirmation's own docstring), approval must
+    still work via the ORIGINAL live-scan dispatch — the only case that
+    still re-scans WhatsApp at approval time, since there is no approved
+    plan yet to reuse. This is the existing, unmodified behavior every
+    other test in this file already exercises (none of them simulate a
+    preview response before approving) — asserted explicitly here so the
+    fallback contract itself is never silently lost."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name = f"Talent Timeout {tag}"
+    email = f"timeout.{tag}@example.com"
+    project_label = f"Google Timeout {tag}"
+    project_id = await _seed_project(project_label, whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(name, whatsapp_group_name=f"{name} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        # No _with_simulated_send_preview here — the preview scan request
+        # is left unanswered and genuinely times out.
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600043",
+            text=f"send - {name} - {project_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "couldn't verify" in r.reply.lower(), r.reply
+        assert "1 → Approve" in r.reply, r.reply
+
+        approval = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": talent_id, "project_id": project_id})
+        assert approval is not None
+        assert approval.get("preview_assignments") is None, approval  # never cached on a bare timeout
+
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600043", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Approved" in r1.reply, r1.reply
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"talent_id": talent_id})
+        assert req is not None
+        assert req["mode"] == "scan", req  # the fallback path — a real live scan, exactly as before
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+# ---------------------------------------------------------------------------
+# Issue 2 (master prompt, 2026-09-09) — multi-talent/multi-project SEND.
+# _extract_send_fields/_send_selector_pairs are pure (no DB) — covered
+# directly. Full end-to-end bulk-dispatch behavior (destination/media/form
+# isolation, explicit-pairing preservation) is covered below via
+# handle_inbound_message.
+# ---------------------------------------------------------------------------
+def test_send_explicit_pairing_never_becomes_a_cross_product():
+    """"Send A for X, B for Y" must resolve to EXACTLY those two pairs —
+    never the 4-pair cross product a plain comma-list would otherwise
+    produce (the master prompt's own explicit "highest priority" rule)."""
+    fields = cp._extract_send_fields("send Aahana Pocha for Mahindra, Alia Khan for Fair & Lovely")
+    pairs = cp._send_selector_pairs(fields)
+    assert pairs == [("Aahana Pocha", "Mahindra"), ("Alia Khan", "Fair & Lovely")], pairs
+
+
+def test_send_explicit_pairing_three_plus_pairs():
+    fields = cp._extract_send_fields("send A for X, B for Y, C for Z")
+    pairs = cp._send_selector_pairs(fields)
+    assert pairs == [("A", "X"), ("B", "Y"), ("C", "Z")], pairs
+
+
+def test_send_multiple_talents_one_project_no_comma():
+    """"Send A and B for Project" (no comma at all) must still split into
+    two targets sharing the SAME project — previously only a literal
+    comma triggered any split at all."""
+    fields = cp._extract_send_fields("send Aahana Pocha and Alia Khan for Mahindra")
+    pairs = cp._send_selector_pairs(fields)
+    assert pairs == [("Aahana Pocha", "Mahindra"), ("Alia Khan", "Mahindra")], pairs
+
+
+def test_send_one_talent_multiple_projects():
+    fields = cp._extract_send_fields("send Aahana Pocha for Mahindra and Fair & Lovely")
+    pairs = cp._send_selector_pairs(fields)
+    assert pairs == [("Aahana Pocha", "Mahindra"), ("Aahana Pocha", "Fair & Lovely")], pairs
+
+
+def test_send_hyphen_comma_lists_still_cross_product():
+    """The ORIGINAL bulk syntax ("send - A,B - X,Y") is a genuine
+    cross-product request, not explicit pairing — unaffected by the
+    Issue-2 fix."""
+    fields = cp._extract_send_fields("send - Talent A, Talent B - Project A,Project B")
+    pairs = cp._send_selector_pairs(fields)
+    assert set(pairs) == {
+        ("Talent A", "Project A"), ("Talent A", "Project B"),
+        ("Talent B", "Project A"), ("Talent B", "Project B"),
+    }, pairs
+
+
+def test_send_freeform_space_separated_never_split():
+    """The ambiguous space-separated freeform shape (talent_selector ==
+    project_query, boundary resolved later via
+    _resolve_freeform_talent_project) must never be pre-split on "and" —
+    there is no second, independent field to pair it against."""
+    fields = cp._extract_send_fields("send rahul and priya nike")
+    pairs = cp._send_selector_pairs(fields)
+    assert pairs == [(fields["talent_selector"], fields["project_query"])], pairs
+
+
+def _with_simulated_bulk_send_preview(specs: list, *, timeout: float = 5.0):
+    """Bulk counterpart of _with_simulated_send_preview — `specs` is a
+    list of (talent_id, project_id, candidates); answers each target's
+    OWN preview_only scan request as it appears (targets are scanned
+    CONCURRENTLY — see _build_bulk_send_confirmation's own
+    asyncio.gather), until every spec has been serviced once."""
+    async def _run():
+        remaining = {(t, p): c for t, p, c in specs}
+        deadline = asyncio.get_event_loop().time() + timeout
+        while remaining and asyncio.get_event_loop().time() < deadline:
+            doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({
+                "talent_id": {"$in": [k[0] for k in remaining]},
+                "project_id": {"$in": [k[1] for k in remaining]},
+                "preview_only": True, "status": ma.SCAN_STATUS_PENDING,
+            })
+            key = (doc["talent_id"], doc["project_id"]) if doc else None
+            if doc and key in remaining:
+                candidates = remaining.pop(key)
+                await db[ma.SCAN_REQUESTS_COLLECTION].update_one(
+                    {"id": doc["id"]}, {"$set": {"candidates": candidates, "status": ma.SCAN_STATUS_DONE}},
+                )
+                processed = await orch._process_scan_done()
+                assert processed, f"orchestrator did not pick up preview scan for {key}"
+            else:
+                await asyncio.sleep(0.02)
+        assert not remaining, f"never saw a pending preview request for: {list(remaining)}"
+    return asyncio.create_task(_run())
+
+
+async def test_send_multi_target_bulk_dispatches_each_pair_to_its_own_destination_with_isolated_media():
+    """Requirement TEST B/C/D's essence in one end-to-end run: explicit
+    pairing "Send A for X, B for Y" — each target's OWN marked media goes
+    ONLY to its OWN project's casting group, never cross-contaminated,
+    and each dispatch reuses its OWN approved plan (Issue-1 fix), not a
+    shared/rebuilt one."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    name_a, email_a = f"Aahana Bulk {tag}", f"aahana.bulk.{tag}@example.com"
+    name_b, email_b = f"Alia Bulk {tag}", f"alia.bulk.{tag}@example.com"
+    project_a_label = f"Mahindra Bulk {tag}"
+    project_b_label = f"FairLovely Bulk {tag}"
+    dest_a, dest_b = f"Mahindra Group {tag}", f"FairLovely Group {tag}"
+    project_a = await _seed_project(project_a_label, whatsapp_casting_group_name=dest_a)
+    project_b = await _seed_project(project_b_label, whatsapp_casting_group_name=dest_b)
+    talent_a = await _seed_talent(name_a, whatsapp_group_name=f"{name_a} x Talentgram", email=email_a)
+    talent_b = await _seed_talent(name_b, whatsapp_group_name=f"{name_b} x Talentgram", email=email_b)
+    sub_a = await _seed_submission(project_a, talent_a, email_a, decision="approved")
+    sub_b = await _seed_submission(project_b, talent_b, email_b, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        worker = _with_simulated_bulk_send_preview([
+            (talent_a, project_a, [
+                _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark take 1 for {project_a_label}", source_message_id="bulk-a-take1", media_type="video"),
+            ]),
+            (talent_b, project_b, [
+                _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark take 1 for {project_b_label}", source_message_id="bulk-b-take1", media_type="video"),
+            ]),
+        ])
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600050",
+            text=f"send {name_a} for {project_a_label}, {name_b} for {project_b_label}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert r.handled, r.reply
+        assert "SEND FORM PREVIEW (BULK)" in r.reply, r.reply
+        assert "TARGET 1" in r.reply and "TARGET 2" in r.reply, r.reply
+        assert name_a in r.reply and project_a_label in r.reply, r.reply
+        assert name_b in r.reply and project_b_label in r.reply, r.reply
+        assert "1 - Take 1" in r.reply, r.reply
+
+        r1 = await handle_inbound_message(
+            group_name=group, sender_phone="917000600050", text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r1.handled, r1.reply
+        assert "independent sends dispatched" in r1.reply, r1.reply
+
+        reqs = await db[ma.SCAN_REQUESTS_COLLECTION].find({
+            "talent_id": {"$in": [talent_a, talent_b]}, "mode": "send",
+        }).to_list(10)
+        assert len(reqs) == 2, reqs
+        by_talent = {r_["talent_id"]: r_ for r_ in reqs}
+
+        # Destination isolation — each dispatch's destination is its OWN
+        # project's casting group, never the other's.
+        assert by_talent[talent_a]["destination_group"] == dest_a, by_talent[talent_a]
+        assert by_talent[talent_b]["destination_group"] == dest_b, by_talent[talent_b]
+
+        # Media isolation — each dispatch's send_targets carry ONLY that
+        # talent's own marked source, never the other's.
+        assert [t["source_message_id"] for t in by_talent[talent_a]["send_targets"]] == ["bulk-a-take1"]
+        assert [t["source_message_id"] for t in by_talent[talent_b]["send_targets"]] == ["bulk-b-take1"]
+
+        # Both dispatched straight from their own approved plan (Issue-1
+        # fix extended to bulk) — never a mode="scan" re-scan request.
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents(
+            {"talent_id": {"$in": [talent_a, talent_b]}, "mode": "scan"}
+        ) == 0
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": {"$in": [talent_a, talent_b]}})]
+        await _cleanup_send(talent_ids=[talent_a, talent_b], project_ids=[project_a, project_b], scan_request_ids=req_ids, submission_ids=[sub_a, sub_b])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+# ---------------------------------------------------------------------------
 # 11: partial-failure resume — one item already `sent`, one previously
 # `failed` (or never attempted) -> only the missing one becomes a target.
 # ---------------------------------------------------------------------------

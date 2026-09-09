@@ -3660,6 +3660,11 @@ def main():
         async def wait_for_timeout(self, ms):
             self.waits.append(ms)
 
+        class mouse:
+            @staticmethod
+            async def click(x, y, button="left"):
+                pass
+
     # 109 (Requirement A): reopen fails ONCE, second attempt succeeds.
     calls_109: list = []
 
@@ -3895,7 +3900,7 @@ def main():
         mark_scan._open_source_chat = orig_open_118b
         sender._find_outgoing_with_text = orig_find_118b
     assert result_118b["verified"] is False, result_118b
-    assert "no matching outgoing message" in result_118b["reason"], result_118b
+    assert "no NEW matching outgoing message" in result_118b["reason"], result_118b
     print("118b. SEND delivery verification: caption never found in destination -> verified=False, never assumed sent")
 
     # 119: a real, full-stack recovery reproduction — the closest available
@@ -4044,6 +4049,471 @@ def main():
     forward_calls_121 = [c for c in calls_121 if c == "intro1" or (isinstance(c, tuple) and c[0] != "text")]
     assert forward_calls_121 == ["intro1"], calls_121  # take1/take2 never re-appear here — RETRY only ever touches what the backend re-includes
     print("121. SEND self-healing/RETRY: the worker only ever forwards what send_targets actually contains — a RETRY re-dispatch (backend-filtered to just the failed item) never re-touches already-sent media (Requirement D/P)")
+
+    # ------------------------------------------------------------------
+    # 122-131: STRENGTHENED delivery verification (Production fix,
+    # 2026-09-10 — follow-up audit). Finding: a caption-only check with
+    # NO baseline proves only "this caption exists somewhere in the last
+    # few destination messages" — NOT "the CURRENT attempt created a new
+    # message". media_assignment.simple_role_label's own captions are
+    # deliberately generic ("Introduction Take"/"Photo" carry no talent/
+    # project/take distinction at all — see that function's own
+    # docstring), so an un-baselined check would accept a COMPLETELY
+    # DIFFERENT talent's earlier Introduction/Photo forward to the SAME
+    # shared casting-group destination as "proof" THIS talent's item
+    # delivered. Conclusion: (B) delivery verification COULD false-
+    # positive without a baseline — fixed by _capture_destination_
+    # baseline + threading `baselines` through _verify_forward_delivered
+    # (see both docstrings for the full writeup).
+    #
+    # These tests fake sender._find_outgoing_with_text/sender.
+    # _snapshot_msg_baselines against a tiny SIMULATED destination
+    # message list (_SimDestination — a plain Python list of strings,
+    # not a real DOM) so the baseline-vs-no-baseline distinction is
+    # provable directly and deterministically. sender.py's own real DOM-
+    # matching primitives (_is_outgoing_msg, the actual selector chain)
+    # are unchanged and already covered by test_sender.py — these tests
+    # are about THIS module's own integration (does it correctly thread
+    # a fresh, per-item, per-destination baseline through and treat
+    # "before" vs "after" correctly), not sender.py's DOM heuristics.
+    # ------------------------------------------------------------------
+
+    class _SimDestination:
+        """A tiny simulated destination chat's message list — one string
+        per outgoing message. A deterministic stand-in for "what
+        messages currently exist", never a DOM fake."""
+        def __init__(self, initial=None):
+            self.messages: list = list(initial or [])
+
+        def send(self, text):
+            self.messages.append(text)
+
+    def _install_sim_destination_fakes(sims_by_dest: dict):
+        """`sims_by_dest` maps destination_group -> _SimDestination. The
+        fakes track which destination is "currently open" (mirroring
+        _open_source_chat's own real effect of making #main show that
+        chat) so a snapshot/find call always operates on the RIGHT
+        destination's own simulated list — this is what makes the
+        multi-talent/multi-destination isolation test (130) meaningful
+        rather than trivially true."""
+        state = {"open": None}
+
+        async def _fake_open_dest(page, source_type, group):
+            state["open"] = group
+            return "OPENED"
+
+        async def _fake_snapshot(page):
+            sim = sims_by_dest[state["open"]]
+            return {"SIM": len(sim.messages)}
+
+        async def _fake_find_text(page, needle, baselines=None):
+            sim = sims_by_dest[state["open"]]
+            start = baselines.get("SIM", 0) if baselines else max(0, len(sim.messages) - 8)
+            for i in range(start, len(sim.messages)):
+                if needle in sim.messages[i]:
+                    return "SIM", sim.messages[i], f"conv-msg-SIM{i}"
+            return None, "", None
+
+        return state, _fake_open_dest, _fake_snapshot, _fake_find_text
+
+    # 122: an OLD matching caption (already there before this item's own
+    # baseline) must NOT count as this attempt's delivery.
+    sim_122 = _SimDestination(["Introduction Take"])  # a different talent's earlier, unrelated send
+    _, fake_open_122, fake_snap_122, fake_find_122 = _install_sim_destination_fakes({"Dest Group": sim_122})
+    orig_open_122 = mark_scan._open_source_chat
+    orig_snap_122 = sender._snapshot_msg_baselines
+    orig_find_122 = sender._find_outgoing_with_text
+    mark_scan._open_source_chat, sender._snapshot_msg_baselines, sender._find_outgoing_with_text = (
+        fake_open_122, fake_snap_122, fake_find_122,
+    )
+    try:
+        baseline_122 = asyncio.run(mark_scan._capture_destination_baseline(_FakePageWithWait(), "Dest Group"))
+        # No new message is ever added to sim_122 — the old one is all
+        # there is.
+        result_122 = asyncio.run(mark_scan._verify_forward_delivered(
+            _FakePageWithWait(), "Dest Group", "Introduction Take", baselines=baseline_122.get("baselines"),
+        ))
+    finally:
+        mark_scan._open_source_chat, sender._snapshot_msg_baselines, sender._find_outgoing_with_text = (
+            orig_open_122, orig_snap_122, orig_find_122,
+        )
+    assert baseline_122["ok"] is True, baseline_122
+    assert result_122["verified"] is False, result_122
+    print("122. Delivery verification: an OLD matching caption (present before this item's own baseline) does NOT count as delivery")
+
+    # 123: a genuinely NEW matching outgoing message (appended AFTER the
+    # baseline was captured) DOES count.
+    sim_123 = _SimDestination(["Introduction Take"])  # same old message still present
+    _, fake_open_123, fake_snap_123, fake_find_123 = _install_sim_destination_fakes({"Dest Group": sim_123})
+    orig_open_123 = mark_scan._open_source_chat
+    orig_snap_123 = sender._snapshot_msg_baselines
+    orig_find_123 = sender._find_outgoing_with_text
+    mark_scan._open_source_chat, sender._snapshot_msg_baselines, sender._find_outgoing_with_text = (
+        fake_open_123, fake_snap_123, fake_find_123,
+    )
+    try:
+        baseline_123 = asyncio.run(mark_scan._capture_destination_baseline(_FakePageWithWait(), "Dest Group"))
+        sim_123.send("Introduction Take")  # THIS item's own forward actually lands now
+        result_123 = asyncio.run(mark_scan._verify_forward_delivered(
+            _FakePageWithWait(), "Dest Group", "Introduction Take", baselines=baseline_123.get("baselines"),
+        ))
+    finally:
+        mark_scan._open_source_chat, sender._snapshot_msg_baselines, sender._find_outgoing_with_text = (
+            orig_open_123, orig_snap_123, orig_find_123,
+        )
+    assert result_123["verified"] is True, result_123
+    print("123. Delivery verification: a NEWLY appeared matching outgoing message (after this item's own baseline) DOES count as delivery")
+
+    # 124: full-stack — attempt 1's Send click does NOT actually land
+    # (sim never receives the message, simulating a silent forward
+    # failure past the point of clicking Send), so verification
+    # correctly reports unverified and the bounded recovery wrapper
+    # retries; attempt 2's click DOES land -> verified, ultimately SENT.
+    # Never falsely marked SENT on attempt 1.
+    sim_124 = _SimDestination()
+    dest_state_124, fake_open_dest_124, fake_snap_124, fake_find_124 = _install_sim_destination_fakes({"Padm Group": sim_124})
+    attempt_count_124 = {"n": 0}
+
+    async def _fake_open_group_124(page, group):
+        return "OPENED"
+
+    async def _fake_ready_124(page, group, msg_id, tile_index, is_photo):
+        return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+    async def _fake_select_124(page, dest):
+        return {"ok": True}
+
+    async def _fake_caption_send_124(page, caption):
+        attempt_count_124["n"] += 1
+        if attempt_count_124["n"] == 2:
+            sim_124.send(caption)  # only the SECOND attempt's click actually delivers
+        return {"ok": True, "selector_used": "[aria-label^=\"Send\"]"}
+
+    async def _fake_ensure_closed_124(page):
+        return True
+
+    orig_open_group_124 = sender._open_group_chat
+    orig_ready_124 = mark_scan._open_media_and_get_forward_button
+    orig_select_124 = mark_scan._select_forward_destination
+    orig_caption_124 = mark_scan._enter_forward_caption_and_send
+    orig_closed_124 = mark_scan._ensure_forward_dialog_closed
+    orig_opensrc_124 = mark_scan._open_source_chat
+    orig_snap_124_ = sender._snapshot_msg_baselines
+    orig_find_124_ = sender._find_outgoing_with_text
+
+    async def _dispatching_open_source_124(page, source_type, group_name):
+        # Source opens are always "group"/talent-group here; destination
+        # opens (delivery verification) go through the SAME _open_source_
+        # chat call but always with source_type="group" and the
+        # destination's own name — the sim-destination fake keys on
+        # "which destination is currently open", so route THOSE calls to
+        # it while any other (source) open trivially succeeds.
+        if group_name == "Padm Group":
+            return await fake_open_dest_124(page, source_type, group_name)
+        return "OPENED"
+
+    sender._open_group_chat = _fake_open_group_124
+    mark_scan._open_media_and_get_forward_button = _fake_ready_124
+    mark_scan._select_forward_destination = _fake_select_124
+    mark_scan._enter_forward_caption_and_send = _fake_caption_send_124
+    mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_124
+    mark_scan._open_source_chat = _dispatching_open_source_124
+    sender._snapshot_msg_baselines = fake_snap_124
+    sender._find_outgoing_with_text = fake_find_124
+    try:
+        target_124 = _send_target("intro-padm-124", "intro")
+        target_124["destination_group"] = "Padm Group"
+        result_124 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePageWithWait(), "Padm Rautela x Talentgram", target_124))
+    finally:
+        sender._open_group_chat = orig_open_group_124
+        mark_scan._open_media_and_get_forward_button = orig_ready_124
+        mark_scan._select_forward_destination = orig_select_124
+        mark_scan._enter_forward_caption_and_send = orig_caption_124
+        mark_scan._ensure_forward_dialog_closed = orig_closed_124
+        mark_scan._open_source_chat = orig_opensrc_124
+        sender._snapshot_msg_baselines = orig_snap_124_
+        sender._find_outgoing_with_text = orig_find_124_
+
+    assert result_124["ok"] is True, result_124
+    assert attempt_count_124["n"] == 2, attempt_count_124  # attempt 1's click didn't verify -> real recovery, never a false SENT
+    print("124. Delivery verification full-stack: attempt 1's Send click doesn't actually deliver -> unverified -> real bounded recovery -> attempt 2 delivers and verifies -> SENT (never falsely marked SENT on attempt 1)")
+
+    # 125: while Introduction is being recovered (multiple attempts),
+    # Take 1 — already verified SENT earlier in the SAME _run_send call —
+    # is never re-invoked. Each item's own attempt function call count is
+    # independent.
+    calls_125: list = []
+
+    async def _fake_attempt_125(page, group_name, target, item_label="", source_type="group"):
+        calls_125.append(target["source_message_id"])
+        if target["source_message_id"] == "intro1" and calls_125.count("intro1") < 2:
+            return {"ok": False, "source_message_id": target["source_message_id"], "error": "x"}
+        return {"ok": True, "source_message_id": target["source_message_id"]}
+
+    async def _fake_open_group_125(page, group):
+        return "OPENED"
+
+    orig_attempt_125 = mark_scan._send_one_target_native_forward_attempt
+    orig_open_125 = sender._open_group_chat
+    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_125
+    sender._open_group_chat = _fake_open_group_125
+    try:
+        req_125 = {
+            "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Vaseline",
+            "send_targets": [_send_target("take1", "take", 1), _send_target("intro1", "intro")],
+            "form_insert_index": 2, "form_message": None, "send_marker_on_success": False,
+        }
+        result_125 = asyncio.run(mark_scan._run_send(_FakePageWithWait(), req_125))
+    finally:
+        mark_scan._send_one_target_native_forward_attempt = orig_attempt_125
+        sender._open_group_chat = orig_open_125
+
+    assert all(r["ok"] for r in result_125["results"]), result_125
+    assert calls_125.count("take1") == 1, calls_125  # Take 1's own successful attempt is never repeated
+    assert calls_125.count("intro1") == 2, calls_125  # only Introduction's own recovery re-attempts
+    print("125. SEND self-healing: Take 1 (already verified SENT) is never re-invoked while Introduction is independently recovered")
+
+    # 126: repeated SEND remains idempotent — this worker-side property
+    # (never re-forwarding an item send_targets doesn't include) is
+    # already proven by test 121 above; the BACKEND-side idempotency
+    # that actually computes/filters send_targets
+    # (media_send.prepare_send_targets' already_sent() filtering) is
+    # covered directly and extensively in backend/tests/test_media_send.py
+    # (e.g. test_send_orchestrator_idempotent_no_resend,
+    # test_send_orchestrator_partial_failure_resumes_only_missing_item) —
+    # not duplicated here.
+    print("126. SEND idempotency on repeated SEND: covered by test 121 (worker) + backend/tests/test_media_send.py's own idempotency tests (backend) — not duplicated here")
+
+    # 127-129: source-type-agnostic STRENGTHENED verification — group,
+    # phone, and mixed source, each using the REAL _capture_destination_
+    # baseline + _verify_forward_delivered flow (not the higher-level
+    # mock used by tests 115-117) against a sim destination, proving the
+    # baseline logic itself is unaffected by which chat the SOURCE media
+    # came from (the destination-side baseline/verify logic never reads
+    # source_type at all — only _open_source_chat's SOURCE-opening call
+    # does, which is a completely separate call from the destination
+    # baseline/verify opens).
+    for source_type_12x, source_name_12x, test_num_12x in (("group", "Talent Group", "127"), ("phone", "919990000333", "128")):
+        sim_12x = _SimDestination(["Audition Take 1"])  # an unrelated older message already present
+        _, fake_open_12x, fake_snap_12x, fake_find_12x = _install_sim_destination_fakes({"Dest Group": sim_12x})
+
+        async def _fake_ready_12x(page, group, msg_id, tile_index, is_photo):
+            return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+        async def _fake_select_12x(page, dest):
+            return {"ok": True}
+
+        async def _fake_caption_send_12x(page, caption, _sim=sim_12x):
+            _sim.send(caption)
+            return {"ok": True, "selector_used": "[aria-label^=\"Send\"]"}
+
+        async def _fake_ensure_closed_12x(page):
+            return True
+
+        async def _fake_open_group_12x(page, group):
+            return "OPENED"
+
+        async def _fake_open_phone_12x(page, phone):
+            return "OPENED"
+
+        async def _dispatching_open_12x(page, source_type, group_name, _fake_open_dest=fake_open_12x):
+            if group_name == "Dest Group":
+                return await _fake_open_dest(page, source_type, group_name)
+            return "OPENED"
+
+        orig_open_group_12x = sender._open_group_chat
+        orig_open_phone_12x = sender._open_chat_by_phone
+        orig_ready_12x = mark_scan._open_media_and_get_forward_button
+        orig_select_12x = mark_scan._select_forward_destination
+        orig_caption_12x = mark_scan._enter_forward_caption_and_send
+        orig_closed_12x = mark_scan._ensure_forward_dialog_closed
+        orig_opensrc_12x = mark_scan._open_source_chat
+        orig_snap_12x = sender._snapshot_msg_baselines
+        orig_find_12x = sender._find_outgoing_with_text
+        sender._open_group_chat = _fake_open_group_12x
+        sender._open_chat_by_phone = _fake_open_phone_12x
+        mark_scan._open_media_and_get_forward_button = _fake_ready_12x
+        mark_scan._select_forward_destination = _fake_select_12x
+        mark_scan._enter_forward_caption_and_send = _fake_caption_send_12x
+        mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_12x
+        mark_scan._open_source_chat = _dispatching_open_12x
+        sender._snapshot_msg_baselines = fake_snap_12x
+        sender._find_outgoing_with_text = fake_find_12x
+        try:
+            target_12x = _send_target("take2-msgid", "take", 2)
+            target_12x["destination_group"] = "Dest Group"
+            target_12x["caption"] = "Audition Take 2"  # the real role caption, not the test helper's default (msg id)
+            result_12x = asyncio.run(mark_scan._send_one_target_native_forward(
+                _FakePageWithWait(), source_name_12x, target_12x, source_type=source_type_12x,
+            ))
+        finally:
+            sender._open_group_chat = orig_open_group_12x
+            sender._open_chat_by_phone = orig_open_phone_12x
+            mark_scan._open_media_and_get_forward_button = orig_ready_12x
+            mark_scan._select_forward_destination = orig_select_12x
+            mark_scan._enter_forward_caption_and_send = orig_caption_12x
+            mark_scan._ensure_forward_dialog_closed = orig_closed_12x
+            mark_scan._open_source_chat = orig_opensrc_12x
+            sender._snapshot_msg_baselines = orig_snap_12x
+            sender._find_outgoing_with_text = orig_find_12x
+        assert result_12x["ok"] is True, result_12x
+        # The pre-existing "Audition Take 1" (a different item entirely,
+        # already present before this item's own baseline) is never
+        # mistaken for THIS item's ("Audition Take 2") delivery — the
+        # match found is strictly the newly appended one.
+        assert sim_12x.messages == ["Audition Take 1", "Audition Take 2"], sim_12x.messages
+        label = "group source" if source_type_12x == "group" else "individual phone source"
+        print(f"{test_num_12x}. Strengthened delivery verification works identically for {label} — baseline logic never depends on source_type")
+
+    # 129: mixed source — Take from phone, Introduction from group, in
+    # ONE send, both verified via their own fresh per-item baseline
+    # against the SAME shared destination.
+    sim_129 = _SimDestination()
+
+    async def _fake_ready_129(page, group, msg_id, tile_index, is_photo):
+        return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+    async def _fake_select_129(page, dest):
+        return {"ok": True}
+
+    async def _fake_caption_send_129(page, caption):
+        sim_129.send(caption)
+        return {"ok": True, "selector_used": "[aria-label^=\"Send\"]"}
+
+    async def _fake_ensure_closed_129(page):
+        return True
+
+    async def _fake_open_group_129(page, group):
+        return "OPENED"
+
+    async def _fake_open_phone_129(page, phone):
+        return "OPENED"
+
+    dest_state_129, fake_open_dest_129, fake_snap_129, fake_find_129 = _install_sim_destination_fakes({"Dest Group": sim_129})
+
+    async def _dispatching_open_129(page, source_type, group_name):
+        if group_name == "Dest Group":
+            return await fake_open_dest_129(page, source_type, group_name)
+        return "OPENED"
+
+    orig_open_group_129 = sender._open_group_chat
+    orig_open_phone_129 = sender._open_chat_by_phone
+    orig_ready_129 = mark_scan._open_media_and_get_forward_button
+    orig_select_129 = mark_scan._select_forward_destination
+    orig_caption_129 = mark_scan._enter_forward_caption_and_send
+    orig_closed_129 = mark_scan._ensure_forward_dialog_closed
+    orig_opensrc_129 = mark_scan._open_source_chat
+    orig_snap_129 = sender._snapshot_msg_baselines
+    orig_find_129 = sender._find_outgoing_with_text
+    sender._open_group_chat = _fake_open_group_129
+    sender._open_chat_by_phone = _fake_open_phone_129
+    mark_scan._open_media_and_get_forward_button = _fake_ready_129
+    mark_scan._select_forward_destination = _fake_select_129
+    mark_scan._enter_forward_caption_and_send = _fake_caption_send_129
+    mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_129
+    mark_scan._open_source_chat = _dispatching_open_129
+    sender._snapshot_msg_baselines = fake_snap_129
+    sender._find_outgoing_with_text = fake_find_129
+    try:
+        phone_target_129 = _send_target("phone-take1-129", "take", 1)
+        phone_target_129["destination_group"] = "Dest Group"
+        phone_target_129["caption"] = "Audition Take 1"
+        group_target_129 = _send_target("group-intro1-129", "intro")
+        group_target_129["destination_group"] = "Dest Group"
+        group_target_129["caption"] = "Introduction Take"
+        result_phone_129 = asyncio.run(mark_scan._send_one_target_native_forward(
+            _FakePageWithWait(), "919990000111", phone_target_129, source_type="phone",
+        ))
+        result_group_129 = asyncio.run(mark_scan._send_one_target_native_forward(
+            _FakePageWithWait(), "Shivi Rajput x Talentgram", group_target_129, source_type="group",
+        ))
+    finally:
+        sender._open_group_chat = orig_open_group_129
+        sender._open_chat_by_phone = orig_open_phone_129
+        mark_scan._open_media_and_get_forward_button = orig_ready_129
+        mark_scan._select_forward_destination = orig_select_129
+        mark_scan._enter_forward_caption_and_send = orig_caption_129
+        mark_scan._ensure_forward_dialog_closed = orig_closed_129
+        mark_scan._open_source_chat = orig_opensrc_129
+        sender._snapshot_msg_baselines = orig_snap_129
+        sender._find_outgoing_with_text = orig_find_129
+
+    assert result_phone_129["ok"] is True, result_phone_129
+    assert result_group_129["ok"] is True, result_group_129
+    assert sim_129.messages == ["Audition Take 1", "Introduction Take"], sim_129.messages
+    print("129. Strengthened delivery verification works for a mixed-source send — Take (phone) and Introduction (group) each verified against their own fresh baseline in the same shared destination")
+
+    # 130: MULTI-TALENT ISOLATION — the exact false-positive scenario
+    # this whole fix targets. Talent A's Introduction is already
+    # delivered to the shared destination casting group. Talent B's
+    # Introduction (a COMPLETELY different item, same generic caption)
+    # is then sent to the SAME destination — B's own baseline is
+    # captured AFTER A's message already exists, so B's verification
+    # only accepts a message strictly newer than that baseline: it can
+    # never be satisfied by A's older message, only by B's own new one.
+    sim_130 = _SimDestination(["Introduction Take"])  # Talent A's own, already-delivered Introduction
+    _, fake_open_130, fake_snap_130, fake_find_130 = _install_sim_destination_fakes({"Shared Casting Group": sim_130})
+
+    async def _fake_ready_130(page, group, msg_id, tile_index, is_photo):
+        return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+
+    async def _fake_select_130(page, dest):
+        return {"ok": True}
+
+    async def _fake_caption_send_130(page, caption):
+        sim_130.send(caption)  # Talent B's OWN forward actually lands here
+        return {"ok": True, "selector_used": "[aria-label^=\"Send\"]"}
+
+    async def _fake_ensure_closed_130(page):
+        return True
+
+    async def _fake_open_group_130(page, group):
+        return "OPENED"
+
+    async def _dispatching_open_130(page, source_type, group_name):
+        if group_name == "Shared Casting Group":
+            return await fake_open_130(page, source_type, group_name)
+        return "OPENED"
+
+    orig_open_group_130 = sender._open_group_chat
+    orig_ready_130 = mark_scan._open_media_and_get_forward_button
+    orig_select_130 = mark_scan._select_forward_destination
+    orig_caption_130 = mark_scan._enter_forward_caption_and_send
+    orig_closed_130 = mark_scan._ensure_forward_dialog_closed
+    orig_opensrc_130 = mark_scan._open_source_chat
+    orig_snap_130 = sender._snapshot_msg_baselines
+    orig_find_130 = sender._find_outgoing_with_text
+    sender._open_group_chat = _fake_open_group_130
+    mark_scan._open_media_and_get_forward_button = _fake_ready_130
+    mark_scan._select_forward_destination = _fake_select_130
+    mark_scan._enter_forward_caption_and_send = _fake_caption_send_130
+    mark_scan._ensure_forward_dialog_closed = _fake_ensure_closed_130
+    mark_scan._open_source_chat = _dispatching_open_130
+    sender._snapshot_msg_baselines = fake_snap_130
+    sender._find_outgoing_with_text = fake_find_130
+    try:
+        talent_b_target_130 = _send_target("intro-talentB-130", "intro")
+        talent_b_target_130["destination_group"] = "Shared Casting Group"
+        talent_b_target_130["caption"] = "Introduction Take"
+        result_130 = asyncio.run(mark_scan._send_one_target_native_forward(
+            _FakePageWithWait(), "Talent B x Talentgram", talent_b_target_130,
+        ))
+    finally:
+        sender._open_group_chat = orig_open_group_130
+        mark_scan._open_media_and_get_forward_button = orig_ready_130
+        mark_scan._select_forward_destination = orig_select_130
+        mark_scan._enter_forward_caption_and_send = orig_caption_130
+        mark_scan._ensure_forward_dialog_closed = orig_closed_130
+        mark_scan._open_source_chat = orig_opensrc_130
+        sender._snapshot_msg_baselines = orig_snap_130
+        sender._find_outgoing_with_text = orig_find_130
+
+    assert result_130["ok"] is True, result_130
+    # Exactly ONE new "Introduction Take" was added — Talent B's own.
+    # Talent A's older one is untouched, never double-counted or reused.
+    assert sim_130.messages == ["Introduction Take", "Introduction Take"], sim_130.messages
+    assert result_130["verified_message_id"] == "conv-msg-SIM1", result_130  # the SECOND (index 1, Talent B's own) message — never index 0 (Talent A's)
+    print("130. Multi-talent isolation: Talent B's Introduction verifies against ITS OWN new message, never Talent A's already-delivered, identically-captioned Introduction to the same shared destination (the exact false-positive this fix targets)")
 
 
 if __name__ == "__main__":

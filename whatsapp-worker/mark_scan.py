@@ -7657,29 +7657,70 @@ async def _ensure_forward_dialog_closed(page) -> bool:
     return not (dump or {}).get("dialogFound")
 
 
-async def _verify_forward_delivered(page, destination_group: str, caption: str) -> Dict[str, Any]:
-    """Delivery verification (Production fix, 2026-09-09 — the master
-    prompt's own explicit requirement: never declare a media item SENT
-    merely because the Forward button was clicked/a Send control was
-    matched). Reuses sender.py's existing, already-proven "outgoing
-    bubble confirmed" primitive (sender._find_outgoing_with_text — the
-    SAME check send_whatsapp_message's strict_send_confirmation already
-    uses for text sends) rather than inventing a new one: opens the
-    destination chat and looks for the item's own caption
-    (simple_role_label — e.g. "Audition Take 1"/"Introduction Take",
-    ALWAYS present and distinct per media_role/take_number, see
-    build_send_targets) among the last few messages there — the exact
-    same bounded "no baseline needed, check the tail" shape
-    _already_delivered's own retry-duplicate-guard already uses
-    elsewhere in sender.py, not a new pattern. Bounded poll (WhatsApp can
-    take a moment to actually deliver/render a forwarded message even
-    after Send is clicked and the picker closes), never a fixed
-    sleep-then-single-check.
+async def _capture_destination_baseline(page, destination_group: str) -> Dict[str, Any]:
+    """The "before" half of delivery verification's before/after
+    comparison (Production fix, 2026-09-10 — audit finding: a caption-
+    only check with NO baseline cannot prove the CURRENT forward
+    attempt created a new message — it only proves a matching caption
+    exists SOMEWHERE in the last few destination messages, which could
+    be a completely different talent's earlier send. See
+    _verify_forward_delivered's own docstring for the full writeup).
 
-    A caption match is real, direct proof the message landed in the
+    Opens the destination chat and snapshots its current per-selector
+    message counts via sender._snapshot_msg_baselines — the EXACT same
+    primitive send_whatsapp_message's own strict_send_confirmation
+    already uses to tell a genuinely NEW outgoing message apart from
+    whatever was already sitting in the chat. Called once per item,
+    immediately before that item's own reacquire-and-forward sequence
+    begins (see _send_one_target_native_forward_attempt) — this is a
+    real, extra WhatsApp round trip per item, the deliberate cost of
+    actually proving THIS attempt's own delivery rather than a
+    proportionally cheaper but weaker check."""
+    status = await _open_source_chat(page, "group", destination_group)  # destination is always a project's casting GROUP
+    if status != "OPENED":
+        return {"ok": False, "reason": f"could not open destination to capture baseline (status={status})"}
+    baselines = await sender._snapshot_msg_baselines(page)
+    return {"ok": True, "baselines": baselines}
+
+
+async def _verify_forward_delivered(
+    page, destination_group: str, caption: str, baselines: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """Delivery verification (Production fix, 2026-09-09; strengthened
+    2026-09-10 — see _capture_destination_baseline's own docstring for
+    the audit finding this fixes). Reuses sender.py's existing, already-
+    proven "outgoing bubble confirmed" primitive (sender.
+    _find_outgoing_with_text — the SAME check send_whatsapp_message's
+    strict_send_confirmation already uses for text sends) rather than
+    inventing a new one: opens the destination chat and looks for the
+    item's own caption (simple_role_label — e.g. "Audition Take 1"/
+    "Introduction Take") among messages that appeared AFTER `baselines`
+    (captured immediately before this exact item's own forward attempt
+    began — see _capture_destination_baseline) — never merely "anywhere
+    in the last few messages", which media_assignment.simple_role_label's
+    own deliberately generic captions ("Introduction Take"/"Photo" carry
+    NO talent/project/take distinction at all) make far too weak a
+    check on their own: a completely different talent's earlier
+    Introduction/Photo forward to the SAME shared casting group would
+    satisfy a caption-only, no-baseline match just as well as this
+    attempt's own genuine delivery. `baselines=None` (should not happen
+    in production — every real caller now always captures one first;
+    kept as a documented, honest degrade rather than a crash) falls back
+    to sender._find_outgoing_with_text's own "last 8 messages" default,
+    the ORIGINAL, weaker check — never silently pretended to be as
+    strong as the baselined path.
+
+    Bounded poll (WhatsApp can take a moment to actually deliver/render
+    a forwarded message even after Send is clicked and the picker
+    closes), never a fixed sleep-then-single-check.
+
+    A caption match found strictly AFTER this item's own baseline is
+    real, direct, attempt-scoped proof the message landed in the
     destination chat — strictly stronger than "the dialog closed" or
-    "day a Send button was clicked", which is all the previous code
-    trusted."""
+    "a Send button was clicked", which is all the previous code
+    trusted, and strictly stronger than an un-baselined "does this
+    caption exist anywhere nearby", which the previous version of this
+    function itself trusted."""
     if not caption:
         # Every SEND target always carries a role caption (see
         # build_send_targets) — this should never happen; never block or
@@ -7691,11 +7732,11 @@ async def _verify_forward_delivered(page, destination_group: str, caption: str) 
     if status != "OPENED":
         return {"verified": False, "reason": f"could not reopen destination to verify delivery (status={status})"}
     for _ in range(6):
-        matched_sel, _matched_text, message_id = await sender._find_outgoing_with_text(page, caption)
+        matched_sel, _matched_text, message_id = await sender._find_outgoing_with_text(page, caption, baselines=baselines)
         if matched_sel is not None:
             return {"verified": True, "message_id": message_id}
         await page.wait_for_timeout(500)
-    return {"verified": False, "reason": "no matching outgoing message found in the destination chat after send"}
+    return {"verified": False, "reason": "no NEW matching outgoing message found in the destination chat after send"}
 
 
 async def _send_one_target_native_forward_attempt(
@@ -7730,6 +7771,25 @@ async def _send_one_target_native_forward_attempt(
     instead of guessed at again."""
     sm_id = target["source_message_id"]
     t_start = time.monotonic()
+
+    # Delivery-verification baseline (Production fix, 2026-09-10 — see
+    # _capture_destination_baseline's own docstring for the audit
+    # finding this fixes: SEND's own role captions are deliberately
+    # generic — "Introduction Take"/"Photo" carry no talent/project/take
+    # distinction — so verification without a fresh, per-item baseline
+    # cannot tell THIS attempt's own just-forwarded message apart from a
+    # different talent's earlier send to the same shared destination
+    # group). Captured BEFORE the source chat is even opened, so the
+    # subsequent _open_source_chat call below correctly re-navigates
+    # back to the source afterward — this is a real, deliberate extra
+    # WhatsApp round trip per item; not attempted at all if it fails
+    # (baseline=None degrades to the older, weaker "last 8 messages"
+    # check — see _verify_forward_delivered — rather than failing this
+    # whole attempt over a problem in a side-channel check that hasn't
+    # even reached the actual forward yet).
+    baseline_result = await _capture_destination_baseline(page, target["destination_group"])
+    dest_baselines = baseline_result.get("baselines") if baseline_result.get("ok") else None
+
     status = await _open_source_chat(page, source_type, group_name)
     t_source_open = time.monotonic()
     if status != "OPENED":
@@ -7819,7 +7879,7 @@ async def _send_one_target_native_forward_attempt(
     # UI-timing detail proved unreliable in both directions on real
     # production sends and is never trusted as proof of success OR
     # failure on its own.
-    verify = await _verify_forward_delivered(page, target["destination_group"], target.get("caption") or "")
+    verify = await _verify_forward_delivered(page, target["destination_group"], target.get("caption") or "", baselines=dest_baselines)
     if not verify.get("verified"):
         return {"ok": False, "source_message_id": sm_id, "error": f"send unverified: {verify.get('reason')}"}
 

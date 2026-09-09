@@ -1640,7 +1640,9 @@ async def test_send_multi_target_bulk_dispatches_each_pair_to_its_own_destinatio
         await worker
         assert r.handled, r.reply
         assert "SEND FORM PREVIEW (BULK)" in r.reply, r.reply
-        assert "TARGET 1" in r.reply and "TARGET 2" in r.reply, r.reply
+        # Target numbers start at 4 — never 1/2/3 (multi-target editing,
+        # 2026-09-09 follow-up), matching the edit flow's own numbering.
+        assert "TARGET 4" in r.reply and "TARGET 5" in r.reply, r.reply
         assert name_a in r.reply and project_a_label in r.reply, r.reply
         assert name_b in r.reply and project_b_label in r.reply, r.reply
         assert "1 - Take 1" in r.reply, r.reply
@@ -1676,6 +1678,344 @@ async def test_send_multi_target_bulk_dispatches_each_pair_to_its_own_destinatio
     finally:
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": {"$in": [talent_a, talent_b]}})]
         await _cleanup_send(talent_ids=[talent_a, talent_b], project_ids=[project_a, project_b], scan_request_ids=req_ids, submission_ids=[sub_a, sub_b])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+# ---------------------------------------------------------------------------
+# Multi-Target SEND Form Editing (master prompt follow-up, 2026-09-09) —
+# numbered per-target editing (4, 5, 6, ... — never 1/2/3) for a bulk SEND
+# confirmation. Shared two-target scenario: target 4 (Take 1, Take 2,
+# Introduction — requirement S's own "three media survive an edit" case)
+# and target 5 (Take 1, Introduction), each to its own destination.
+# ---------------------------------------------------------------------------
+async def _setup_bulk_edit_scenario(phone: str, *, tag: str):
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    # Exactly two words each (Task H's "First L." formatter takes the
+    # LAST token as the surname) — the tag is glued onto the surname with
+    # no space so it stays a two-word name, giving a deterministic
+    # "Aahana E."/"Alia E." in every assertion below.
+    name_a, email_a = f"Aahana Edit{tag}", f"aahana.edit.{tag}@example.com"
+    name_b, email_b = f"Alia Edit{tag}", f"alia.edit.{tag}@example.com"
+    project_a_label = f"Mahindra Edit {tag}"
+    project_b_label = f"FairLovely Edit {tag}"
+    dest_a, dest_b = f"Mahindra EditGroup {tag}", f"FairLovely EditGroup {tag}"
+    project_a = await _seed_project(project_a_label, whatsapp_casting_group_name=dest_a)
+    project_b = await _seed_project(project_b_label, whatsapp_casting_group_name=dest_b)
+    talent_a = await _seed_talent(name_a, whatsapp_group_name=f"{name_a} x Talentgram", email=email_a)
+    talent_b = await _seed_talent(name_b, whatsapp_group_name=f"{name_b} x Talentgram", email=email_b)
+    sub_a = await _seed_submission(project_a, talent_a, email_a, decision="approved")
+    sub_b = await _seed_submission(project_b, talent_b, email_b, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+
+    worker = _with_simulated_bulk_send_preview([
+        (talent_a, project_a, [
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 1 for {project_a_label}", source_message_id=f"editA-take1-{tag}", media_type="video"),
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 2 for {project_a_label}", source_message_id=f"editA-take2-{tag}", media_type="video"),
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark introduction video for {project_a_label}", source_message_id=f"editA-intro-{tag}", media_type="video"),
+        ]),
+        (talent_b, project_b, [
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 1 for {project_b_label}", source_message_id=f"editB-take1-{tag}", media_type="video"),
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark introduction video for {project_b_label}", source_message_id=f"editB-intro-{tag}", media_type="video"),
+        ]),
+    ])
+    r = await handle_inbound_message(
+        group_name=group, sender_phone=phone,
+        text=f"send {name_a} for {project_a_label}, {name_b} for {project_b_label}",
+        sender_name="Raj", sender_is_group_member=True,
+    )
+    await worker
+    ctx = {
+        "group": group, "original": original, "phone": phone, "tag": tag,
+        "name_a": name_a, "name_b": name_b,
+        "project_a_label": project_a_label, "project_b_label": project_b_label,
+        "dest_a": dest_a, "dest_b": dest_b,
+        "talent_a": talent_a, "talent_b": talent_b,
+        "project_a": project_a, "project_b": project_b,
+        "sub_a": sub_a, "sub_b": sub_b,
+    }
+    return ctx, r
+
+
+async def _cleanup_bulk_edit_scenario(ctx: dict) -> None:
+    req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find(
+        {"talent_id": {"$in": [ctx["talent_a"], ctx["talent_b"]]}}
+    )]
+    await _cleanup_send(
+        talent_ids=[ctx["talent_a"], ctx["talent_b"]], project_ids=[ctx["project_a"], ctx["project_b"]],
+        scan_request_ids=req_ids, submission_ids=[ctx["sub_a"], ctx["sub_b"]],
+    )
+    await _restore_config(ctx["original"], agent_id="whatsapp-campaign-agent")
+
+
+async def _send_in(ctx: dict, text: str):
+    return await handle_inbound_message(
+        group_name=ctx["group"], sender_phone=ctx["phone"], text=text,
+        sender_name="Raj", sender_is_group_member=True,
+    )
+
+
+# A/B/M/N/O/P/Q/R/S combined
+async def test_send_multi_target_edit_single_target_via_selection_isolated():
+    """"2" -> "4" -> "Budget = 45k": only target 4's form changes; target
+    5's form, BOTH targets' approved media (Take1/Take2/Intro on 4,
+    Take1/Intro on 5), and both destinations stay byte-for-byte
+    unchanged. No new WhatsApp scan_request is ever created by editing."""
+    ctx, r = await _setup_bulk_edit_scenario("917000600060", tag=uuid.uuid4().hex[:6])
+    try:
+        assert "TARGET 4" in r.reply and "TARGET 5" in r.reply, r.reply
+        assert "1 - Take 1" in r.reply and "2 - Take 2" in r.reply and "3 - Introduction" in r.reply, r.reply
+
+        n_scan_before = await db[ma.SCAN_REQUESTS_COLLECTION].count_documents(
+            {"talent_id": {"$in": [ctx["talent_a"], ctx["talent_b"]]}}
+        )
+
+        r2 = await _send_in(ctx, "2")
+        assert r2.handled, r2.reply
+        assert "EDIT SEND FORM" in r2.reply, r2.reply
+        # First-name + last-initial formatting (Q), never the full name.
+        assert "4 → Aahana E. — " in r2.reply, r2.reply
+        assert "5 → Alia E. — " in r2.reply, r2.reply
+        # Target numbering never collides with 1/2/3 (H).
+        assert "1 →" not in r2.reply and "2 →" not in r2.reply and "3 →" not in r2.reply, r2.reply
+
+        r3 = await _send_in(ctx, "4")
+        assert r3.handled, r3.reply
+        assert "EDITING" in r3.reply.upper() and "AAHANA E." in r3.reply.upper(), r3.reply
+
+        r4 = await _send_in(ctx, "Budget = 45k")
+        assert r4.handled, r4.reply
+        assert "TARGET 4" in r4.reply and "TARGET 5" in r4.reply, r4.reply
+        assert "45k" in r4.reply or "45,000" in r4.reply, r4.reply
+
+        # (M) editing never triggers a WhatsApp rescan.
+        n_scan_after = await db[ma.SCAN_REQUESTS_COLLECTION].count_documents(
+            {"talent_id": {"$in": [ctx["talent_a"], ctx["talent_b"]]}}
+        )
+        assert n_scan_after == n_scan_before, "editing a form field must never create a scan_request"
+
+        # (B) only target 4's overrides changed.
+        approval_a = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_a"], "project_id": ctx["project_a"]})
+        approval_b = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_b"], "project_id": ctx["project_b"]})
+        assert approval_a["overrides"].get("budget") == "45k", approval_a
+        assert "budget" not in (approval_b.get("overrides") or {}), approval_b
+        # (R) the approval row's own preview_assignments (the approved
+        # media plan) are untouched by the edit — still exactly 3 items.
+        assert len(approval_a.get("preview_assignments") or []) == 3, approval_a
+        assert len(approval_b.get("preview_assignments") or []) == 2, approval_b
+
+        # (N/O/P/S) approve now — verify the DISPATCHED plan for BOTH
+        # targets carries the exact same media identities, and each still
+        # goes to its own destination.
+        r5 = await _send_in(ctx, "1")
+        assert r5.handled, r5.reply
+        assert "independent sends dispatched" in r5.reply, r5.reply
+
+        reqs = await db[ma.SCAN_REQUESTS_COLLECTION].find({
+            "talent_id": {"$in": [ctx["talent_a"], ctx["talent_b"]]}, "mode": "send",
+        }).to_list(10)
+        by_talent = {rr["talent_id"]: rr for rr in reqs}
+        tag = ctx["tag"]
+        assert {t["source_message_id"] for t in by_talent[ctx["talent_a"]]["send_targets"]} == {
+            f"editA-take1-{tag}", f"editA-take2-{tag}", f"editA-intro-{tag}",
+        }, by_talent[ctx["talent_a"]]["send_targets"]
+        assert {t["source_message_id"] for t in by_talent[ctx["talent_b"]]["send_targets"]} == {
+            f"editB-take1-{tag}", f"editB-intro-{tag}",
+        }, by_talent[ctx["talent_b"]]["send_targets"]
+        assert by_talent[ctx["talent_a"]]["destination_group"] == ctx["dest_a"]
+        assert by_talent[ctx["talent_b"]]["destination_group"] == ctx["dest_b"]
+        # Never re-scanned at approval either — both dispatched straight
+        # from the approved plan (Issue-1 fix), edit included.
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents(
+            {"talent_id": {"$in": [ctx["talent_a"], ctx["talent_b"]]}, "mode": "scan"}
+        ) == 0
+    finally:
+        await _cleanup_bulk_edit_scenario(ctx)
+
+
+# C/D — two-target edit in one message, multiple fields on one target
+async def test_send_multi_target_edit_two_targets_one_message_multi_field():
+    ctx, r = await _setup_bulk_edit_scenario("917000600061", tag=uuid.uuid4().hex[:6])
+    try:
+        r2 = await _send_in(ctx, "2")
+        assert "EDIT SEND FORM" in r2.reply, r2.reply
+
+        r3 = await _send_in(ctx, "4 → exclude Instagram link, budget = 45k, competitive brand = None\n5 → exclude Instagram link, competitive brand = None")
+        assert r3.handled, r3.reply
+        assert "TARGET 4" in r3.reply and "TARGET 5" in r3.reply, r3.reply
+
+        approval_a = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_a"], "project_id": ctx["project_a"]})
+        approval_b = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_b"], "project_id": ctx["project_b"]})
+        assert approval_a["overrides"].get("budget") == "45k", approval_a
+        assert approval_a["overrides"].get("instagram_link") == ms.EXCLUDED_FIELD_VALUE, approval_a
+        assert approval_a["overrides"].get("competitive_brand") == "None", approval_a
+        # (D) target 5 got ITS OWN two directives, never target 4's budget.
+        assert "budget" not in (approval_b.get("overrides") or {}), approval_b
+        assert approval_b["overrides"].get("instagram_link") == ms.EXCLUDED_FIELD_VALUE, approval_b
+        assert approval_b["overrides"].get("competitive_brand") == "None", approval_b
+
+        r4 = await _send_in(ctx, "3")
+        assert r4.handled, r4.reply
+    finally:
+        await _cleanup_bulk_edit_scenario(ctx)
+
+
+# E — multiline continuation for one target's own directives
+async def test_send_multi_target_edit_multiline_continuation():
+    ctx, r = await _setup_bulk_edit_scenario("917000600062", tag=uuid.uuid4().hex[:6])
+    try:
+        await _send_in(ctx, "2")
+        r3 = await _send_in(ctx, "4 → exclude Instagram link\n   budget = 45k\n5 → exclude Instagram link\n   Competitive Brand = None")
+        assert r3.handled, r3.reply
+        approval_a = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_a"], "project_id": ctx["project_a"]})
+        approval_b = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_b"], "project_id": ctx["project_b"]})
+        assert approval_a["overrides"].get("budget") == "45k", approval_a
+        assert approval_a["overrides"].get("instagram_link") == ms.EXCLUDED_FIELD_VALUE, approval_a
+        assert approval_b["overrides"].get("competitive_brand") == "None", approval_b
+        assert "budget" not in (approval_b.get("overrides") or {}), approval_b
+        await _send_in(ctx, "3")
+    finally:
+        await _cleanup_bulk_edit_scenario(ctx)
+
+
+# G — natural-language single-target edit, unambiguous
+async def test_send_multi_target_edit_natural_language_single_target():
+    ctx, r = await _setup_bulk_edit_scenario("917000600063", tag=uuid.uuid4().hex[:6])
+    try:
+        await _send_in(ctx, "2")
+        r3 = await _send_in(ctx, "For 4, remove Instagram and set budget to 50k")
+        assert r3.handled, r3.reply
+        approval_a = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_a"], "project_id": ctx["project_a"]})
+        approval_b = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_b"], "project_id": ctx["project_b"]})
+        assert approval_a["overrides"].get("budget") == "50k", approval_a
+        assert approval_a["overrides"].get("instagram_link") == ms.EXCLUDED_FIELD_VALUE, approval_a
+        assert not (approval_b.get("overrides") or {}), approval_b
+        await _send_in(ctx, "3")
+    finally:
+        await _cleanup_bulk_edit_scenario(ctx)
+
+
+# J — invalid target number
+async def test_send_multi_target_edit_invalid_target_number():
+    ctx, r = await _setup_bulk_edit_scenario("917000600064", tag=uuid.uuid4().hex[:6])
+    try:
+        await _send_in(ctx, "2")
+        r3 = await _send_in(ctx, "7")
+        assert r3.handled, r3.reply
+        assert "invalid target number" in r3.reply.lower(), r3.reply
+        assert "4 → Aahana E. — " in r3.reply, r3.reply
+        assert "5 → Alia E. — " in r3.reply, r3.reply
+        # 7 was never interpreted as approval — nothing dispatched.
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents(
+            {"talent_id": {"$in": [ctx["talent_a"], ctx["talent_b"]]}, "mode": "send"}
+        ) == 0
+        # Still recoverable — a valid number now works.
+        r4 = await _send_in(ctx, "4")
+        assert "EDITING" in r4.reply.upper(), r4.reply
+        await _send_in(ctx, "3")
+    finally:
+        await _cleanup_bulk_edit_scenario(ctx)
+
+
+# K — cancel from target selection (before picking a target)
+async def test_send_multi_target_edit_cancel_from_target_selection():
+    ctx, r = await _setup_bulk_edit_scenario("917000600065", tag=uuid.uuid4().hex[:6])
+    try:
+        await _send_in(ctx, "2")
+        r3 = await _send_in(ctx, "3")
+        assert r3.handled, r3.reply
+        assert "cancel" in r3.reply.lower(), r3.reply
+        assert await db[ms.SEND_APPROVALS_COLLECTION].find_one(
+            {"talent_id": ctx["talent_a"], "status": ms.SEND_APPROVAL_STATUS_APPROVED}
+        ) is None
+    finally:
+        await _cleanup_bulk_edit_scenario(ctx)
+
+
+# L — cancel while mid-single-target-field-edit
+async def test_send_multi_target_edit_cancel_while_editing_field():
+    ctx, r = await _setup_bulk_edit_scenario("917000600066", tag=uuid.uuid4().hex[:6])
+    try:
+        await _send_in(ctx, "2")
+        await _send_in(ctx, "4")  # select target 4, now mid single-target edit
+        r3 = await _send_in(ctx, "3")
+        assert r3.handled, r3.reply
+        assert "cancel" in r3.reply.lower(), r3.reply
+        # Nothing was applied to target 4 either — 3 must mean cancel,
+        # never "target 3" or a value for target 4's pending field.
+        approval_a = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": ctx["talent_a"], "project_id": ctx["project_a"]})
+        assert not (approval_a.get("overrides") or {}), approval_a
+    finally:
+        await _cleanup_bulk_edit_scenario(ctx)
+
+
+# H — 1/2/3 reservation at every stage of the edit flow
+async def test_send_multi_target_edit_1_2_3_reserved_at_every_stage():
+    ctx, r = await _setup_bulk_edit_scenario("917000600067", tag=uuid.uuid4().hex[:6])
+    try:
+        # From the very first confirmation, "1" approves immediately —
+        # never confused with a target number (targets start at 4).
+        assert "1 → Approve all" in r.reply, r.reply
+        assert "2 → Edit" in r.reply, r.reply
+        assert "3 → Cancel" in r.reply, r.reply
+
+        # Re-derive a fresh scenario to test "1" mid-selection without
+        # having already consumed this one's approval.
+        r2 = await _send_in(ctx, "2")
+        assert "EDIT SEND FORM" in r2.reply, r2.reply
+        r3 = await _send_in(ctx, "1")  # approve immediately from selection sub-state
+        assert r3.handled, r3.reply
+        assert "independent sends dispatched" in r3.reply, r3.reply
+    finally:
+        await _cleanup_bulk_edit_scenario(ctx)
+
+
+# I — target numbering 4,5,6,... with a THIRD target
+async def test_send_multi_target_edit_three_targets_numbered_4_5_6():
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    names = [f"Talent{i} Edit {tag}" for i in range(3)]
+    emails = [f"talent{i}.edit.{tag}@example.com" for i in range(3)]
+    project_labels = [f"Project{i} Edit {tag}" for i in range(3)]
+    dests = [f"Dest{i} Edit {tag}" for i in range(3)]
+    project_ids, talent_ids, sub_ids = [], [], []
+    try:
+        for i in range(3):
+            pid = await _seed_project(project_labels[i], whatsapp_casting_group_name=dests[i])
+            tid = await _seed_talent(names[i], whatsapp_group_name=f"{names[i]} x Talentgram", email=emails[i])
+            sid = await _seed_submission(pid, tid, emails[i], decision="approved")
+            project_ids.append(pid); talent_ids.append(tid); sub_ids.append(sid)
+        await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True)
+
+        worker = _with_simulated_bulk_send_preview([
+            (talent_ids[i], project_ids[i], [
+                _mark(mention_lid=GUNWANTI_LID, mark_text=f"mark take 1 for {project_labels[i]}", source_message_id=f"three-{i}-{tag}", media_type="video"),
+            ]) for i in range(3)
+        ])
+        r = await handle_inbound_message(
+            group_name=group, sender_phone="917000600068",
+            text=f"send {names[0]} for {project_labels[0]}, {names[1]} for {project_labels[1]}, {names[2]} for {project_labels[2]}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        await worker
+        assert "TARGET 4" in r.reply and "TARGET 5" in r.reply and "TARGET 6" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(group_name=group, sender_phone="917000600068", text="2", sender_name="Raj", sender_is_group_member=True)
+        assert "4 →" in r2.reply and "5 →" in r2.reply and "6 →" in r2.reply, r2.reply
+
+        r3 = await handle_inbound_message(group_name=group, sender_phone="917000600068", text="6 → budget = 60k", sender_name="Raj", sender_is_group_member=True)
+        assert r3.handled, r3.reply
+        approval_2 = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": talent_ids[2], "project_id": project_ids[2]})
+        assert approval_2["overrides"].get("budget") == "60k", approval_2
+        for i in (0, 1):
+            approval_i = await db[ms.SEND_APPROVALS_COLLECTION].find_one({"talent_id": talent_ids[i], "project_id": project_ids[i]})
+            assert not (approval_i.get("overrides") or {}), approval_i
+
+        await handle_inbound_message(group_name=group, sender_phone="917000600068", text="3", sender_name="Raj", sender_is_group_member=True)
+    finally:
+        req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": {"$in": talent_ids}})]
+        await _cleanup_send(talent_ids=talent_ids, project_ids=project_ids, scan_request_ids=req_ids, submission_ids=sub_ids)
         await _restore_config(original, agent_id="whatsapp-campaign-agent")
 
 

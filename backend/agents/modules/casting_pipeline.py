@@ -8998,6 +8998,35 @@ async def _preview_one_bulk_target(target: Dict[str, Any]) -> Tuple[Dict[str, An
     return target, assignments, marks_error
 
 
+async def _bulk_target_form_message(target: Dict[str, Any]) -> str:
+    """This target's own outgoing form text — mirrors the single-target
+    confirmation's exact "already approved -> reuse the FROZEN message
+    verbatim; else -> build from the submission + current overrides, then
+    save that as the pending draft" logic (see _build_send_confirmation),
+    so a bulk target behaves identically to a single-send target at every
+    later step (resume-after-worker-failure, _send_one_pair's own
+    approve/freeze/dispatch). Reading+saving the draft here is what makes
+    a target's Form: block in the bulk preview reflect whatever
+    _apply_send_edit_directives_to_target most recently wrote for it."""
+    talent_id = target["authoritative_talent_id"]
+    project_id = target["project"]["id"]
+    destination_group = target["destination_group"]
+    existing = await media_send.get_send_approval(talent_id, project_id, destination_group)
+    if existing and existing.get("status") == media_send.SEND_APPROVAL_STATUS_APPROVED:
+        return existing["message"]
+    overrides = _send_approval_overrides(existing)
+    built = media_send.build_form_send_message(
+        target["submission"], target["project_doc"],
+        target["authoritative_talent_label"], target["project"]["label"], overrides,
+    )
+    await media_send.save_send_approval_draft(
+        talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+        submission_id=target["submission"]["id"], overrides=overrides,
+        message=built["message"], content_hash=built["content_hash"],
+    )
+    return built["message"]
+
+
 async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected: dict) -> str:
     """Resolves every (talent, project) pair independently — a single
     ambiguous/unresolvable pair reports that exact problem and stops the
@@ -9033,10 +9062,13 @@ async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected:
     dispatch falls back to a live re-scan at execution time (the
     documented Issue-1 fallback path) rather than the approved-plan reuse.
 
-    Per-target field EDITING (the master prompt's "4 → Aahana P. —
-    Mahindra" numbered-target picker) is NOT implemented in this pass —
-    see this task's final report for why, and cancel + re-run a single
-    "send - Talent - Project" to edit one target's form before sending."""
+    Per-target field EDITING (multi-target editing, 2026-09-09 follow-up)
+    — "2 -> Edit" now shows the numbered target list (4, 5, 6, ...) and
+    _send_bulk_parse_edits_async handles the rest; see the module block
+    comment above _SEND_EDIT_TARGET_KEY for the full design. Each
+    target's own Form: block below is what a per-target edit actually
+    changes — media/destination/every OTHER target's form are untouched
+    by any edit."""
     resolved: List[Dict[str, Any]] = []
     for talent_sel, project_q in pairs:
         target, err = await _resolve_send_target({"talent_selector": talent_sel, "project_query": project_q})
@@ -9078,7 +9110,12 @@ async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected:
         f"submission form. Nothing has gone out, and nothing will, until you explicitly "
         f"approve below.", "",
     ]
-    for i, (target, assignments, marks_error) in enumerate(previews, start=1):
+    # Target numbers start at 4 here too — never 1/2/3 (matching the edit
+    # flow's own numbering exactly, master prompt requirement 9's own
+    # worked example: the regenerated preview after an edit still shows
+    # "TARGET 4"/"TARGET 5", the SAME numbers _send_bulk_parse_edits_async
+    # uses) — one consistent numbering scheme throughout, never two.
+    for i, (target, assignments, marks_error) in enumerate(previews, start=4):
         lines.append(f"TARGET {i}")
         lines.append(f"Talent: {target['authoritative_talent_label']}")
         lines.append(f"Project: {target['project']['label']}")
@@ -9092,13 +9129,16 @@ async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected:
         lines.extend(marked_media_lines)
         lines.append(f"Destination: {target['destination_group']}")
         lines.append("")
+        lines.append("Form:")
+        lines.append(await _bulk_target_form_message(target))
+        lines.append("")
     lines += [
-        "Editing an individual target's form isn't supported for a bulk send — cancel and "
-        "re-run a single \"send - Talent - Project\" first if you need to edit one before "
-        "sending.",
+        'Edit any target\'s field with "2", then the target number — for example "4", then '
+        '"Age = 24".',
         "",
         "Reply:",
         "1 → Approve all (starts sending every target above: Takes → Introduction → Form → Pictures → ☑️, one after another)",
+        "2 → Edit",
         "3 → Cancel",
     ]
     return "\n".join(lines)
@@ -9539,6 +9579,370 @@ def _looks_like_send_edit(text: str) -> bool:
     return any(low.startswith(label + " ") for label in _SEND_FIXED_FIELD_LABELS_LOWER)
 
 
+async def _apply_send_edit_directives_to_target(target: Dict[str, Any], text: str) -> bool:
+    """Applies one or more field-edit directives to ONE target's approval
+    draft — extracted (multi-target SEND editing, 2026-09-09 follow-up)
+    from _send_parse_edits_async's original single-target body so the
+    bulk multi-target flow (_send_bulk_parse_edits_async) and the plain
+    single-target flow below share IDENTICAL edit semantics, never a
+    second, possibly-drifting copy. Writes ONLY that target's own
+    media_send.SEND_APPROVALS_COLLECTION row (keyed on its own talent_id/
+    project_id/destination_group) — never touches the underlying
+    submission, the approved media plan, the destination, or any OTHER
+    target's row. Returns whether anything was recognized/applied."""
+    talent_id = target["authoritative_talent_id"]
+    project_id = target["project"]["id"]
+    destination_group = target["destination_group"]
+
+    existing = await media_send.get_send_approval(talent_id, project_id, destination_group)
+    overrides = _send_approval_overrides(existing)
+
+    shape = _submission_to_client_shape(target["submission"], project=target["project_doc"])
+    label_to_key: Dict[str, str] = {v.lower(): k for k, v in media_send.OVERRIDABLE_FIELD_LABELS.items()}
+    for qa in (shape.get("custom_answers") or []):
+        question = (qa.get("question") or "").strip()
+        if question:
+            label_to_key[question.lower()] = question
+
+    directives = _parse_send_edit_directives(text, label_to_key)
+    if not directives:
+        return False
+    for override_key, value in directives.items():
+        overrides[override_key] = media_send.EXCLUDED_FIELD_VALUE if value is None else value
+
+    built = media_send.build_form_send_message(
+        target["submission"], target["project_doc"],
+        target["authoritative_talent_label"], target["project"]["label"], overrides,
+    )
+    await media_send.save_send_approval_draft(
+        talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+        submission_id=target["submission"]["id"], overrides=overrides,
+        message=built["message"], content_hash=built["content_hash"],
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Multi-Target SEND Form Editing (master prompt follow-up, 2026-09-09) —
+# numbered per-target editing for a bulk (2+ pair) SEND confirmation.
+#
+# 1/2/3 remain PERMANENTLY reserved for Approve all/Edit/Cancel at EVERY
+# point in this flow (checked first, unconditionally, in
+# _send_bulk_parse_edits_async — before any target-number parsing) —
+# target numbers always start at 4, never 1/2/3, so a target choice can
+# never collide with the top-level controls even by coincidence.
+#
+# Two sub-states, mirroring MOVE's own Guided Step-Specific Editing
+# exactly (_plan_aware_parse_edits_async/_PLAN_EDIT_STEP_KEY — see that
+# block's own comment for the full "why" of this shape) but reusing NONE
+# of its state (a completely separate hidden field): SEND targets and
+# MOVE plan steps are unrelated concepts.
+#
+#   1. SELECTING (or DIRECT multi-target edit) — _SEND_EDIT_TARGET_KEY
+#      unset. A bare target number ("4") selects that target and moves to
+#      sub-state 2. A full "4 -> directives[, 5 -> directives...]"
+#      expression (one or more complete target+directive segments, on one
+#      or more lines — see _parse_bulk_send_edit_segments) is applied
+#      directly to every target it names, without ever entering
+#      sub-state 2 at all — covers both the single-target-in-one-message
+#      and multi-target-in-one-message shapes identically.
+#   2. EDITING ONE TARGET — _SEND_EDIT_TARGET_KEY set to that target's
+#      STABLE identity (talent_id|project_id|destination_group — NEVER
+#      the display number, which is only ever this target's position in
+#      the current resolved target list, recomputed fresh every turn).
+#      The next free-text reply is directives for THAT target alone, no
+#      "N ->" prefix needed — the target is already established.
+#
+# Neither sub-state ever rescans WhatsApp or touches the approved media
+# plan — both only ever read/write media_send.SEND_APPROVALS_COLLECTION's
+# `overrides` via _apply_send_edit_directives_to_target above, the exact
+# same mechanism the single-target edit flow already used untouched.
+# ---------------------------------------------------------------------------
+_SEND_EDIT_TARGET_KEY = "_send_edit_target"
+_SEND_EDIT_TARGET_SEP = "\x1f"
+
+SEND_EDIT_TARGET_FIELD = FieldSpec(
+    key=_SEND_EDIT_TARGET_KEY, label="Send Edit Target", question="",
+    validate=_validate_hidden, required=False,
+)
+# Reuses _validate_plan_step_edit_error verbatim (MOVE's own Guided Step-
+# Specific Editing) — a generic, purely-mechanical "always fail, echo
+# `raw` back as the error" validator with no plan-specific behavior at
+# all; see that function's own docstring for exactly how this lets a hook
+# stay in the SAME editing turn and show a custom message, without the
+# dispatcher's own generic completion logic (agents/dispatcher.py's
+# _collect_or_advance) ever running after it — the mechanism this whole
+# multi-target flow depends on.
+SEND_EDIT_STEP_ERROR_FIELD = FieldSpec(
+    key="_send_edit_step_error", label="Send Edit Step Error", question="",
+    validate=_validate_plan_step_edit_error, required=False,
+)
+
+# One target segment's own boundary — optional "project"/"target" word,
+# then the number, then EITHER an explicit separator (arrow/colon/equals)
+# or plain whitespace before the directive text. Anchored to the START of
+# a line (checked per-line in _parse_bulk_send_edit_segments, never
+# mid-line) so an ordinary directive value that happens to contain a
+# number ("Budget = 45k") is never mistaken for a new target boundary.
+_SEND_EDIT_TARGET_LINE_RE = re.compile(
+    r"(?i)^\s*(?:project|target)?\s*#?\s*(\d+)\s*(?:→|->|[:=]|\s)\s*(.*)$"
+)
+_SEND_EDIT_BARE_TARGET_NUMBER_RE = re.compile(r"^\s*#?(\d+)\s*$")
+# Natural-language single-target fallback (Requirement 13) — "Edit project
+# 4 budget to 50k", "For 4, remove Instagram...", "Project 5 competitive
+# brand none". Only ever consulted when the strict per-line parser above
+# found NOTHING (see _send_bulk_parse_edits_async) — matches a target
+# reference ANCHORED at the start of the message, never mid-sentence, so
+# a directive value that happens to contain "for 4 people" deep in it can
+# never be misread as a target reference.
+_SEND_EDIT_NL_TARGET_RE = re.compile(
+    r"(?i)^\s*(?:edit\s+)?(?:for|project|target)\s+#?(\d+)\b[,:\s]*(.*)$"
+)
+
+
+async def _resolve_bulk_send_targets(
+    pairs: List[Tuple[str, str]],
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Resolves every (talent, project) pair to its full target dict —
+    talent/project/destination/submission — WITHOUT touching marked media
+    at all (no _preview_send_marks call, no WhatsApp scan). Shared by
+    _build_bulk_send_confirmation (which separately previews media on top
+    once every pair resolves) and the multi-target EDIT flow, which only
+    ever needs each target's identity/label/current form overrides —
+    editing a form field must never trigger a WhatsApp scan (master
+    prompt's own explicit "do not rescan merely because a form field
+    changed" requirement)."""
+    resolved: List[Dict[str, Any]] = []
+    for talent_sel, project_q in pairs:
+        target, err = await _resolve_send_target({"talent_selector": talent_sel, "project_query": project_q})
+        if err is not None:
+            return None, f'For "{talent_sel} / {project_q}":\n\n{err.message}'
+        resolved.append(target)
+    return resolved, None
+
+
+def _send_bulk_target_key(target: Dict[str, Any]) -> str:
+    """This target's STABLE identity — never the display number (which is
+    only ever a position in the current resolved list, recomputed fresh
+    every turn from collected["talent_selector"]/["project_query"], and
+    could in principle shift if a talent/project name's fuzzy resolution
+    changed — the actual (talent_id, project_id, destination_group)
+    triple never does)."""
+    return _SEND_EDIT_TARGET_SEP.join([
+        target["authoritative_talent_id"], target["project"]["id"], target["destination_group"],
+    ])
+
+
+def _send_bulk_target_display_label(target: Dict[str, Any]) -> str:
+    """"Aahana P. — Mahindra" — First-name-plus-last-initial (Task H's
+    existing formatter, unchanged), matching the master prompt's own
+    worked example exactly; never the raw talent record."""
+    name = media_send._format_talent_submission_name(target["authoritative_talent_label"])
+    return f"{name} — {target['project']['label']}"
+
+
+def _parse_bulk_send_edit_segments(
+    text: str, n_targets: int,
+) -> Tuple[List[Tuple[int, str]], Optional[str]]:
+    """Parses a "4 -> exclude Instagram link, budget = 45k\n5 -> ..."
+    (or "Project 4: ...", or "4 exclude Instagram link, budget 45k", or a
+    continuation line with no target prefix at all, appended to whichever
+    target's segment is currently open) into [(target_number,
+    directive_text), ...]. Returns ([], None) when the text doesn't start
+    with any recognizable target reference at all (not an error — the
+    caller tries other strategies, e.g. a bare target number or the
+    natural-language fallback). Returns ([], error_message) once at least
+    one target reference WAS found but something about it doesn't hold up
+    (out-of-range target, or a segment with no actual field/value) — a
+    real problem, never silently dropped or partially applied."""
+    segments: List[Tuple[int, List[str]]] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = _SEND_EDIT_TARGET_LINE_RE.match(line)
+        if m:
+            segments.append((int(m.group(1)), [m.group(2).strip()] if m.group(2).strip() else []))
+        elif segments:
+            segments[-1][1].append(line)
+        # else: no segment open yet and this line doesn't start one —
+        # this whole text isn't in the strict multi-target shape; keep
+        # scanning (a later line might still open one), but a line here
+        # never becomes a continuation of nothing.
+    if not segments:
+        return [], None
+    for target_num, _ in segments:
+        if target_num < 4 or target_num >= 4 + n_targets:
+            valid = ", ".join(str(n) for n in range(4, 4 + n_targets))
+            return [], f"Target {target_num} doesn't exist. Valid targets: {valid}."
+    result: List[Tuple[int, str]] = []
+    for target_num, lines in segments:
+        joined = "\n".join(lines).strip()
+        if not joined:
+            return [], f"Target {target_num} has no field/value to change."
+        result.append((target_num, joined))
+    return result, None
+
+
+async def _send_select_target_for_edit(
+    collected: Dict[str, str], ctx: ExecContext, target: Dict[str, Any],
+) -> Dict[str, str]:
+    """Persists sub-state 2 (this ONE target now selected) and shows its
+    own "EDITING ..." prompt — the manual conversation.update_conversation
+    call here IS the real state transition; the returned
+    SEND_EDIT_STEP_ERROR_FIELD sentinel only delivers the message text
+    without the dispatcher's own generic completion code running a SECOND,
+    conflicting state update afterward (see this block's own module
+    comment)."""
+    new_collected = dict(collected)
+    new_collected[_SEND_EDIT_TARGET_KEY] = _send_bulk_target_key(target)
+    await conversation.update_conversation(
+        ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing",
+    )
+    label = _send_bulk_target_display_label(target)
+    return {SEND_EDIT_STEP_ERROR_FIELD.key: (
+        f"EDITING {label.upper()}\n\n"
+        f"Tell me the field and new value.\n\n"
+        f"Examples:\nAge = 24\nBudget = 45k\nexclude Instagram link\nCompetitive Brand = None"
+    )}
+
+
+async def _send_bulk_parse_edits_async(
+    text: str, collected: Dict[str, str], ctx: ExecContext,
+) -> Dict[str, str]:
+    """The "editing" step's own state machine for a bulk (2+ pair) SEND —
+    see the module block comment above _SEND_EDIT_TARGET_KEY for the two
+    sub-states. Called from _send_parse_edits_async's bulk branch.
+
+    1/2/3 remain reserved EVEN inside this flow (master prompt's own
+    explicit requirement) — checked FIRST, unconditionally, before any
+    target-number parsing. "1" approves immediately from wherever the
+    admin currently is in the edit flow (identical effect to leaving edit
+    mode and replying "1" on the confirmation card); "3" cancels the
+    whole SEND; "2"/"edit" (re-)shows the target list, discarding any
+    in-progress single-target selection — never partially applied, since
+    a target's overrides are only ever written once a COMPLETE directive
+    for it is recognized."""
+    stripped = (text or "").strip()
+    action = parse_confirmation_reply(stripped)
+    if action == "approve":
+        exec_result = await _send_executor(collected, ctx)
+        # No _clear_or_handoff needed here (that dispatcher-private helper
+        # also chains into a compound plan's own next step — SEND's
+        # executor never sets next_conversation, so a plain conversation
+        # clear is the complete, correct equivalent for SEND specifically).
+        await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+        return {SEND_EDIT_STEP_ERROR_FIELD.key: exec_result.message}
+    if action == "cancel":
+        cancel_reply = await _build_send_cancel_message(collected, ctx)
+        await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+        return {SEND_EDIT_STEP_ERROR_FIELD.key: cancel_reply}
+
+    pairs = _send_selector_pairs(collected)
+    resolved, resolve_err = await _resolve_bulk_send_targets(pairs)
+    if resolve_err is not None:
+        return {SEND_EDIT_STEP_ERROR_FIELD.key: (
+            f"{resolve_err}\n\nNothing in this bulk send has been sent — fix this target and "
+            f"re-run the full command, or type CANCEL."
+        )}
+    n_targets = len(resolved)
+    target_list_text = "\n".join(
+        f"{i} → {_send_bulk_target_display_label(t)}" for i, t in enumerate(resolved, start=4)
+    )
+    valid_numbers = ", ".join(str(n) for n in range(4, 4 + n_targets))
+
+    if action == "edit":
+        new_collected = dict(collected)
+        new_collected[_SEND_EDIT_TARGET_KEY] = ""
+        await conversation.update_conversation(
+            ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing",
+        )
+        return {SEND_EDIT_STEP_ERROR_FIELD.key: (
+            f"EDIT SEND FORM\n\n{target_list_text}\n\nReply with the target number."
+        )}
+
+    selected_key = (collected.get(_SEND_EDIT_TARGET_KEY) or "").strip()
+
+    if selected_key:
+        # Sub-state 2 — a target is already selected; this WHOLE message
+        # is directives for that one target, no "N ->" prefix needed.
+        target = next((t for t in resolved if _send_bulk_target_key(t) == selected_key), None)
+        if target is None:
+            # The selected target no longer resolves (shouldn't normally
+            # happen — the exact same talent/project text this whole
+            # conversation already resolved once) — fail safe back to the
+            # list rather than silently editing the wrong target.
+            new_collected = dict(collected)
+            new_collected[_SEND_EDIT_TARGET_KEY] = ""
+            await conversation.update_conversation(
+                ctx.agent_id, ctx.sender_phone, collected=new_collected, step="editing",
+            )
+            return {SEND_EDIT_STEP_ERROR_FIELD.key: (
+                f"That target could no longer be resolved — please pick again.\n\n"
+                f"{target_list_text}\n\nReply with the target number."
+            )}
+        applied = await _apply_send_edit_directives_to_target(target, stripped)
+        if not applied:
+            return {SEND_EDIT_STEP_ERROR_FIELD.key: (
+                f"I didn't understand that field edit for {_send_bulk_target_display_label(target)}.\n\n"
+                f"Tell me the field and new value — for example:\n"
+                f"Age = 24\nBudget = 45k\nexclude Instagram link\nCompetitive Brand = None"
+            )}
+        # Success — a REAL field write this time (not the error-echo
+        # trick), so the dispatcher's OWN generic completion path takes
+        # over: clears the selection and regenerates the bulk
+        # confirmation with this one target's form updated, every other
+        # target's overrides/media/destination completely untouched.
+        return {_SEND_EDIT_TARGET_KEY: ""}
+
+    # Sub-state 1 — no target selected yet. A bare target number selects
+    # one (checked first — the single most common reply here, and the
+    # ONLY shape _parse_bulk_send_edit_segments below deliberately never
+    # matches on its own).
+    m = _SEND_EDIT_BARE_TARGET_NUMBER_RE.match(stripped)
+    if m:
+        n = int(m.group(1))
+        if n < 4 or n >= 4 + n_targets:
+            return {SEND_EDIT_STEP_ERROR_FIELD.key: (
+                f"Invalid target number.\n\nAvailable targets:\n\n{target_list_text}\n\n"
+                f"Reply with {valid_numbers}.\n\nReply 3 to cancel."
+            )}
+        return await _send_select_target_for_edit(collected, ctx, resolved[n - 4])
+
+    # A full "N -> directives[, N -> directives...]" expression — applies
+    # to every target it names directly, no selection step needed.
+    segments, parse_err = _parse_bulk_send_edit_segments(text, n_targets)
+    if parse_err is not None:
+        return {SEND_EDIT_STEP_ERROR_FIELD.key: f"{parse_err}\n\n{target_list_text}\n\nReply with the target number."}
+    if segments:
+        for target_num, directive_text in segments:
+            target = resolved[target_num - 4]
+            applied = await _apply_send_edit_directives_to_target(target, directive_text)
+            if not applied:
+                return {SEND_EDIT_STEP_ERROR_FIELD.key: (
+                    f"I didn't understand the field edit for target {target_num} "
+                    f"({_send_bulk_target_display_label(target)}): {directive_text!r}\n\n"
+                    f"Nothing was changed for any target in this message — fix it and resend."
+                )}
+        return {_SEND_EDIT_TARGET_KEY: ""}
+
+    # Natural-language single-target fallback (Requirement 13) — only
+    # ever resolved when EXACTLY one target reference is found at the
+    # start of the message; never guessed.
+    nl = _SEND_EDIT_NL_TARGET_RE.match(stripped)
+    if nl:
+        n = int(nl.group(1))
+        rest = nl.group(2).strip()
+        if 4 <= n < 4 + n_targets and rest:
+            applied = await _apply_send_edit_directives_to_target(resolved[n - 4], rest)
+            if applied:
+                return {_SEND_EDIT_TARGET_KEY: ""}
+
+    return {SEND_EDIT_STEP_ERROR_FIELD.key: (
+        f"I didn't understand that.\n\n{target_list_text}\n\nReply with the target number."
+    )}
+
+
 async def _send_claims_editing_reply(text: str, collected: Dict[str, str], ctx: ExecContext) -> bool:
     """Guided Step-Specific Editing hook (see IntentDefinition.claims_
     editing_reply's own docstring) — Production fix, Issue 2's real bug:
@@ -9548,13 +9952,18 @@ async def _send_claims_editing_reply(text: str, collected: Dict[str, str], ctx: 
     casting.query's own triggers) — without this hook, the dispatcher's
     normal "a fresh trigger always restarts" rule hijacks the reply into
     a brand-new casting.query command instead of applying the SEND edit.
-    Bulk sends (2+ pairs) never claim an editing reply here — per-field
-    editing isn't supported across multiple pairs anyway (see
-    _send_parse_edits_async's own bulk guard), so a message that happens
-    to start with an edit-shaped verb during a bulk confirmation is left
-    to the normal 1/3 approve/cancel handling, unchanged."""
+
+    Bulk sends (2+ pairs, multi-target editing, 2026-09-09 follow-up) —
+    mirrors _plan_step_editing_claims_reply's identical reasoning exactly:
+    the "selecting" sub-state's only valid replies are bare target
+    numbers / "N -> directives" expressions / CANCEL, none of which
+    collide with any real trigger word, so only the "editing ONE target"
+    sub-state (_SEND_EDIT_TARGET_KEY set) needs this immunity."""
     if len(_send_selector_pairs(collected)) > 1:
-        return False
+        stripped = (text or "").strip()
+        if not (collected.get(_SEND_EDIT_TARGET_KEY) or "").strip():
+            return _EDIT_CANCEL_RE.match(stripped) is not None
+        return _looks_like_send_edit(text) or _EDIT_CANCEL_RE.match(stripped) is not None
     return _looks_like_send_edit(text)
 
 
@@ -9579,46 +9988,17 @@ async def _send_parse_edits_async(
     lines, or one line joined with "and") are all applied together before
     a single regenerated preview is shown.
 
-    Bulk (2026-08-27): per-field editing isn't supported across multiple
-    pairs (which of N forms would "Age = 24" apply to?) — the bulk
-    confirmation already tells the admin this and offers 1/3 only; this
-    just falls through to the generic edit-instruction parser rather than
-    silently editing the wrong (or every) pair's submission."""
+    Bulk (2026-08-27, multi-target editing added 2026-09-09 follow-up) —
+    2+ pairs now support full numbered per-target editing via
+    _send_bulk_parse_edits_async (see its own docstring and the module
+    block comment above _SEND_EDIT_TARGET_KEY)."""
     if len(_send_selector_pairs(collected)) > 1:
-        return parse_edit_instructions(text, fields) or {}
+        return await _send_bulk_parse_edits_async(text, collected, ctx)
 
     target, err = await _resolve_send_target(collected)
     if err is None:
-        talent_id = target["authoritative_talent_id"]
-        project_id = target["project"]["id"]
-        destination_group = target["destination_group"]
-
-        existing = await media_send.get_send_approval(talent_id, project_id, destination_group)
-        overrides = _send_approval_overrides(existing)
-
-        shape = _submission_to_client_shape(target["submission"], project=target["project_doc"])
-        label_to_key: Dict[str, str] = {v.lower(): k for k, v in media_send.OVERRIDABLE_FIELD_LABELS.items()}
-        for qa in (shape.get("custom_answers") or []):
-            question = (qa.get("question") or "").strip()
-            if question:
-                label_to_key[question.lower()] = question
-
-        directives = _parse_send_edit_directives(text, label_to_key)
-        applied = False
-        for override_key, value in directives.items():
-            overrides[override_key] = media_send.EXCLUDED_FIELD_VALUE if value is None else value
-            applied = True
-
+        applied = await _apply_send_edit_directives_to_target(target, text)
         if applied:
-            built = media_send.build_form_send_message(
-                target["submission"], target["project_doc"],
-                target["authoritative_talent_label"], target["project"]["label"], overrides,
-            )
-            await media_send.save_send_approval_draft(
-                talent_id=talent_id, project_id=project_id, destination_group=destination_group,
-                submission_id=target["submission"]["id"], overrides=overrides,
-                message=built["message"], content_hash=built["content_hash"],
-            )
             return {"_send_form_edit_marker": "1"}
 
     explicit = parse_edit_instructions(text, fields)
@@ -9806,7 +10186,21 @@ async def _build_send_edit_prompt(collected: dict, ctx: ExecContext) -> str:
     form-approval flow untouched (media_send.py, _send_executor,
     _send_parse_edits_async — none of that changes here); this only makes
     the "2 → Edit" prompt name what's actually editable on the form
-    instead of the generic Role=value example."""
+    instead of the generic Role=value example.
+
+    Bulk (multi-target editing, 2026-09-09 follow-up) — shows the
+    numbered target list (4, 5, 6, ... — never 1/2/3) instead of the
+    single-form field list; the admin's next reply is handled by
+    _send_bulk_parse_edits_async's "selecting" sub-state."""
+    pairs = _send_selector_pairs(collected)
+    if len(pairs) > 1:
+        resolved, err = await _resolve_bulk_send_targets(pairs)
+        if err is not None:
+            return f"{err}\n\nType CANCEL to leave editing."
+        target_list_text = "\n".join(
+            f"{i} → {_send_bulk_target_display_label(t)}" for i, t in enumerate(resolved, start=4)
+        )
+        return f"EDIT SEND FORM\n\n{target_list_text}\n\nReply with the target number."
     lines = [
         "EDITING SEND FORM", "",
         "You can change any field shown in the form above.", "",
@@ -9850,7 +10244,12 @@ SEND_INTENT = IntentDefinition(
     # trailing-SEND-step recognition (_SEND_CHUNK_TRIGGERS, a completely
     # separate constant) is unaffected either way.
     triggers=[],
-    fields=[SEND_TALENT_FIELD, SEND_PROJECT_FIELD, SEND_FORM_EDIT_FIELD],
+    fields=[
+        SEND_TALENT_FIELD, SEND_PROJECT_FIELD, SEND_FORM_EDIT_FIELD,
+        # Multi-target editing (2026-09-09 follow-up) — hidden, never
+        # prompted for; see the module comment above _SEND_EDIT_TARGET_KEY.
+        SEND_EDIT_TARGET_FIELD, SEND_EDIT_STEP_ERROR_FIELD,
+    ],
     executor=_send_executor,
     extract_fields=_extract_send_fields,
     build_confirmation=_build_send_confirmation,

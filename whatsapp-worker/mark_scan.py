@@ -664,6 +664,13 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
     candidates: List[Dict[str, Any]] = []
     batch_candidates: List[Dict[str, Any]] = []
     jump_fallback_attempts = 0
+    # Wall-clock ceiling for ALL per-candidate live-jump fallback work in
+    # this scan (2026-09-11 — the verify poll added real per-jump time).
+    # Once spent, remaining unresolved marks skip the jump and are
+    # reported unresolved — never let jump work blow _run_scan's own
+    # outer wait_for (which would cancel the whole scan and discard every
+    # result). Still bounded by MAX_JUMP_FALLBACK_ATTEMPTS_PER_SCAN too.
+    _jump_deadline = time.monotonic() + _JUMP_FALLBACK_TOTAL_BUDGET_S
     for item in window:
         quoted_html = item.get("quotedHtml")
         if not quoted_html:
@@ -719,6 +726,7 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
 
         source = sources_by_hash.get(quoted_hash) if quoted_hash else None
         jump_fallback_used = False
+        resolution_failure_state: Optional[str] = None
         # Attempt the live jump whenever the cheap in-window lookup didn't
         # already resolve it AND we have at least ONE real identity signal
         # to verify a jump result against — a hash (preferred, strongest)
@@ -728,7 +736,11 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
         # at all — genuinely nothing to jump toward or verify, so no
         # attempt is made and this stays a hard, honest resolution failure.
         can_attempt_jump = quoted_hash is not None or quoted_media_type is not None
-        if source is None and can_attempt_jump and jump_fallback_attempts < MAX_JUMP_FALLBACK_ATTEMPTS_PER_SCAN:
+        if (
+            source is None and can_attempt_jump
+            and jump_fallback_attempts < MAX_JUMP_FALLBACK_ATTEMPTS_PER_SCAN
+            and time.monotonic() < _jump_deadline
+        ):
             # Live-jump fallback (Production fix — real bug, "Sneha
             # Varghese / Vaseline (Birthday film)"): a reply's quoted
             # block unambiguously targets one exact original message —
@@ -777,6 +789,12 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
                         "source_sender": jump_result.get("source_sender"),
                     }
                     jump_fallback_used = True
+                else:
+                    # Carry the exact state the jump stalled in (2026-09-11
+                    # — Zeeshan Ali) so the backend's MEDIA RESOLUTION
+                    # FAILED report can name it: not_located / wrong_message
+                    # / media_not_rendered.
+                    resolution_failure_state = jump_result.get("failure_state") or "not_located"
         candidates.append({
             "mention_lid": lid,
             "mark_text": mark_text,
@@ -789,6 +807,7 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             "is_album_tile": (source or {}).get("is_album_tile", False),
             "album_tile_index": (source or {}).get("album_tile_index"),
             "resolved_via_jump_fallback": jump_fallback_used,
+            "resolution_failure_state": resolution_failure_state,
         })
         logger.info(
             "mark_scan: candidate FINAL mark_text=%r reply_message_id=%s -> resolved_source_message_id=%s (via_jump=%s)",
@@ -1327,6 +1346,102 @@ async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: s
 # better on both.
 _JUMP_SETTLE_MAX_ROUNDS = 8
 _JUMP_SETTLE_INTERVAL_MS = 400
+# A non-highlight "nearest to viewport centre" match is only trusted as
+# "the jump has landed" once it is genuinely near centre — otherwise the
+# scroll is still in flight and we would latch onto a mid-scroll message
+# (2026-09-11 — Zeeshan Ali).
+_JUMP_CENTERED_MAX_PX = 220
+
+# "Which message did WhatsApp actually jump to" — prefer the message it
+# HIGHLIGHTS (the flash it paints on the jump target: authoritative),
+# fall back to nearest-viewport-centre with its distance so the caller
+# can tell a settled jump from one still scrolling.
+_JUMP_TARGET_JS = """
+() => {
+  const els = Array.from(document.querySelectorAll('[data-testid^="conv-msg-"]'));
+  const viewportCenter = window.innerHeight / 2;
+  let best = null, bestDist = Infinity, highlighted = null;
+  for (const el of els) {
+    const r = el.getBoundingClientRect();
+    if (r.height === 0) continue;
+    if (!highlighted) {
+      // Structural only — never inspects message content. WhatsApp's
+      // jump flash is a transient highlight class on the target row or a
+      // descendant; obfuscated class names never contain the literal
+      // word "highlight", so a substring match here is safe.
+      const clsOf = (n) => { const c = n.getAttribute && n.getAttribute('class'); return c ? String(c) : ''; };
+      if (/highlight/i.test(clsOf(el)) || el.querySelector('[class*="highlight" i]')) highlighted = el;
+    }
+    const dist = Math.abs((r.y + r.height / 2) - viewportCenter);
+    if (dist < bestDist) { bestDist = dist; best = el; }
+  }
+  const pick = highlighted || best;
+  if (!pick) return null;
+  return { dataId: pick.getAttribute('data-id'), distancePx: highlighted ? 0 : Math.round(bestDist), viaHighlight: !!highlighted };
+}
+"""
+
+_JUMP_MEDIA_VERIFY_MAX_ROUNDS = 10
+_JUMP_MEDIA_VERIFY_INTERVAL_MS = 500
+_MAX_JUMP_ATTEMPTS = 2
+# Total wall-clock across every per-candidate live-jump fallback in one
+# _run_scan — must stay well under _run_scan's own outer 90s wait_for.
+_JUMP_FALLBACK_TOTAL_BUDGET_S = 55.0
+
+
+async def _await_marked_media_on_message(
+    page, message_locator, expected_hash: Optional[str], expected_media_type: Optional[str],
+) -> Dict[str, Any]:
+    """Bounded "the EXACT marked media has finished rendering on THIS
+    EXACT message" poll (Production fix, 2026-09-11 — real UPLOAD
+    incident, Zeeshan Ali / "Mahindra Thar Film 1 & 2": TWO independent
+    live jumps — Take 1 and Introduction — EACH landed on a DIFFERENT
+    message (data_id 3AF846… vs 3A8787…) yet _smallest_hash read the
+    IDENTICAL value 98d3fe51… for both). Two different videos cannot have
+    a byte-identical thumbnail — that hash is a SHARED WhatsApp
+    placeholder blob that sits in a video message's DOM BEFORE its real
+    poster thumbnail lazy-loads. _ensure_message_content_rendered's
+    `outerHTML.length > 300` bar is trivially cleared by that skeleton,
+    so the caller read the placeholder, not the media.
+
+    Phase 0 proved the real thumbnail, once loaded, is byte-identical to
+    the reply's quoted hash. So this re-reads THIS ONE message's own
+    outerHTML on a bounded poll until its _smallest_hash equals
+    expected_hash (or, in the hash-less path, its _media_type matches AND
+    it carries some real media blob). It NEVER re-jumps, NEVER looks at a
+    different message, NEVER guesses — so it can only recover a temporary
+    render delay or fail honestly. Returns {matched, last_hash,
+    last_media_type, last_is_album, rounds}."""
+    last_hash = last_type = None
+    last_album = False
+    seen_hashes: set = set()
+    rounds = 0
+    for rounds in range(1, _JUMP_MEDIA_VERIFY_MAX_ROUNDS + 1):
+        try:
+            await message_locator.scroll_into_view_if_needed(timeout=2500)
+        except Exception:
+            pass
+        try:
+            html = await message_locator.evaluate("(el) => el.outerHTML", timeout=10000)
+        except Exception:
+            html = ""
+        last_album = _is_album(html)
+        last_type = _media_type(html)
+        last_hash = _smallest_hash(html)
+        if last_hash:
+            seen_hashes.add(last_hash)
+        if expected_hash is not None:
+            if last_hash == expected_hash:
+                return {"matched": True, "last_hash": last_hash, "last_media_type": last_type,
+                        "last_is_album": last_album, "rounds": rounds, "hash_changed": len(seen_hashes) > 1}
+        elif expected_media_type is not None:
+            if last_type == expected_media_type:
+                return {"matched": True, "last_hash": last_hash, "last_media_type": last_type,
+                        "last_is_album": last_album, "rounds": rounds, "hash_changed": len(seen_hashes) > 1}
+        if rounds < _JUMP_MEDIA_VERIFY_MAX_ROUNDS:
+            await page.wait_for_timeout(_JUMP_MEDIA_VERIFY_INTERVAL_MS)
+    return {"matched": False, "last_hash": last_hash, "last_media_type": last_type,
+            "last_is_album": last_album, "rounds": rounds, "hash_changed": len(seen_hashes) > 1}
 
 
 async def _jump_to_quoted_message(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
@@ -1377,20 +1492,41 @@ async def _jump_to_quoted_message(page, group_name: str, reply_data_id: str) -> 
     except Exception as exc:
         return {"ok": False, "reason": f"click on quoted-message failed: {exc}"}
 
+    # Settle detection (2026-09-11 — Zeeshan Ali): break on WhatsApp's own
+    # jump HIGHLIGHT (authoritative), else on a data_id that is stable
+    # across two reads AND genuinely near viewport centre (< _JUMP_
+    # CENTERED_MAX_PX — a large distance means the scroll is still in
+    # flight and "nearest to centre" is just a mid-scroll message). If
+    # neither condition is met within the bounded rounds, proceed anyway
+    # with the best guess — the caller's exact-hash verification poll
+    # (_await_marked_media_on_message) is the real safety net and will
+    # reject a wrong landing.
     centered: Optional[Dict[str, Any]] = None
     prev_id: Optional[str] = None
+    settle_confident = False
     for _ in range(_JUMP_SETTLE_MAX_ROUNDS):
         await page.wait_for_timeout(_JUMP_SETTLE_INTERVAL_MS)
         try:
-            centered = await _evaluate(page, _CENTERED_MESSAGE_JS)
+            centered = await _evaluate(page, _JUMP_TARGET_JS)
         except Exception as exc:
-            return {"ok": False, "reason": f"centered-message evaluate failed: {exc}"}
+            return {"ok": False, "reason": f"jump-target evaluate failed: {exc}"}
         cur_id = (centered or {}).get("dataId")
-        if cur_id and cur_id == prev_id:
+        if not cur_id:
+            continue
+        if centered.get("viaHighlight"):
+            settle_confident = True
+            break
+        if cur_id == prev_id and (centered.get("distancePx") or 9999) < _JUMP_CENTERED_MAX_PX:
+            settle_confident = True
             break
         prev_id = cur_id
     if not centered or not centered.get("dataId"):
         return {"ok": False, "reason": "no message found near viewport center after jump", "centered": centered}
+    if not settle_confident:
+        logger.info(
+            "mark_scan: jump settle not confident (data_id=%s distancePx=%s viaHighlight=%s) — proceeding, verify poll will gate",
+            centered.get("dataId"), centered.get("distancePx"), centered.get("viaHighlight"),
+        )
 
     # Address the jumped-to message DIRECTLY, exactly where WhatsApp's
     # own jump already scrolled it — never via _find_message_index_by_
@@ -1414,7 +1550,7 @@ async def _jump_to_quoted_message(page, group_name: str, reply_data_id: str) -> 
         return {"ok": False, "reason": f"could not read jumped-to message HTML: {exc}", "data_id": centered["dataId"]}
     return {
         "ok": True, "data_id": centered["dataId"], "html": jumped_html[:HTML_TRUNCATE],
-        "locator": jumped_message, "centered": centered,
+        "locator": jumped_message, "centered": centered, "settle_confident": settle_confident,
     }
 
 
@@ -1501,48 +1637,84 @@ async def _resolve_single_media_via_jump(
         never even called in that case (see _run_scan's `can_attempt_jump`
         gate), and callers must not call it with neither.
     Either way, failure is reported exactly like any other unresolved
-    mark, never guessed."""
-    jumped = await _jump_to_quoted_message(page, group_name, reply_data_id)
-    if not jumped.get("ok"):
-        return jumped
-    jumped_html = jumped["html"]
-    if _is_album(jumped_html):
-        # Structurally shouldn't happen (an album tile's own hash is keyed
-        # per-tile, distinct from a plain message's smallest-blob hash),
-        # but if it ever does, it's an unresolved fallback failure, never
-        # a guessed tile.
-        return {
-            "ok": False, "data_id": jumped["data_id"],
-            "reason": "jumped-to message is an album, not the expected single media item",
+    mark, never guessed.
+
+    2026-09-11 (real UPLOAD incident — Zeeshan Ali / "Mahindra Thar Film
+    1 & 2": Take 1 AND Introduction both reported MEDIA RESOLUTION
+    FAILED). Root cause, from live logs: the jump landed, but the ONE
+    read of the jumped-to message's HTML happened BEFORE its real poster
+    thumbnail lazy-loaded — _smallest_hash returned a shared placeholder
+    blob (98d3fe51…, identical for both marks' different target
+    messages). Fix: (1) up to _MAX_JUMP_ATTEMPTS bounded jump attempts;
+    (2) each attempt hands off to _await_marked_media_on_message, a
+    bounded poll on THE EXACT jumped-to message (never a re-jump, never a
+    different message) until its own hash/type matches — recovering a
+    temporary render delay without ever risking a wrong result. The
+    returned `failure_state` distinguishes 'not_located' / 'wrong_message'
+    / 'media_not_rendered' so the user-facing report can say which."""
+    if expected_hash is None and expected_media_type is None:
+        # Defensive — _run_scan's can_attempt_jump gate never calls this
+        # way; a direct caller with nothing to verify against must never
+        # silently succeed.
+        return {"ok": False, "reason": "no expected hash or media type to verify the jump against", "failure_state": "not_located"}
+    last_fail: Dict[str, Any] = {"ok": False, "reason": "jump never attempted", "failure_state": "not_located"}
+    for jump_attempt in range(1, _MAX_JUMP_ATTEMPTS + 1):
+        jumped = await _jump_to_quoted_message(page, group_name, reply_data_id)
+        if not jumped.get("ok"):
+            last_fail = {**jumped, "failure_state": "not_located"}
+            continue
+        data_id = jumped["data_id"]
+        loc = jumped["locator"]
+        if _is_album(jumped.get("html") or ""):
+            last_fail = {
+                "ok": False, "data_id": data_id, "failure_state": "wrong_message",
+                "reason": "jumped-to message is an album, not the expected single media item",
+            }
+            continue
+        verify = await _await_marked_media_on_message(page, loc, expected_hash, expected_media_type)
+        logger.info(
+            "mark_scan: jump attempt %d/%d data_id=%s settle_confident=%s verify_matched=%s "
+            "rounds=%d live_hash=%s live_type=%s",
+            jump_attempt, _MAX_JUMP_ATTEMPTS, data_id, jumped.get("settle_confident"),
+            verify["matched"], verify["rounds"],
+            (verify["last_hash"][:12] + "…") if verify["last_hash"] else None, verify["last_media_type"],
+        )
+        if verify["matched"]:
+            media_type = verify["last_media_type"]
+            if not media_type:
+                last_fail = {
+                    "ok": False, "data_id": data_id, "failure_state": "tile_not_found",
+                    "reason": "jumped-to message has no recognizable media",
+                }
+                continue
+            try:
+                html = await loc.evaluate("(el) => el.outerHTML", timeout=10000)
+            except Exception:
+                html = ""
+            return {
+                "ok": True, "source_message_id": data_id, "source_media_type": media_type,
+                "source_sender": _sender_name(html),
+            }
+        if verify["last_is_album"]:
+            state, reason = "wrong_message", "jumped-to message is an album, not the expected single media item"
+        elif expected_media_type is not None and verify["last_media_type"] and verify["last_media_type"] != expected_media_type:
+            state, reason = "wrong_message", "the jumped-to message's media type does not match the marked media"
+        elif jumped.get("settle_confident"):
+            # WhatsApp highlighted this message / the scroll settled it
+            # dead-centre -> it IS the jump target; a non-matching hash
+            # means its own media just did not finish loading in time.
+            state, reason = "media_not_rendered", (
+                "the exact marked media did not finish rendering on the jumped-to message within the recovery budget"
+            )
+        else:
+            # The jump never settled confidently AND the hash never
+            # matched -> most likely landed on a different message.
+            state, reason = "wrong_message", "the jumped-to message's own media does not match the marked media"
+        last_fail = {
+            "ok": False, "data_id": data_id, "failure_state": state, "reason": reason,
+            "expected_hash": expected_hash, "live_hash": verify["last_hash"], "live_media_type": verify["last_media_type"],
         }
-    media_type = _media_type(jumped_html)
-    if expected_hash is not None:
-        live_hash = _smallest_hash(jumped_html)
-        if live_hash != expected_hash:
-            return {
-                "ok": False, "data_id": jumped["data_id"],
-                "reason": "jumped-to message's own hash does not match the reply's quoted hash",
-                "expected_hash": expected_hash, "live_hash": live_hash,
-            }
-    elif expected_media_type is not None:
-        if media_type != expected_media_type:
-            return {
-                "ok": False, "data_id": jumped["data_id"],
-                "reason": "jumped-to message's media type does not match the quoted block's own media type",
-                "expected_media_type": expected_media_type, "live_media_type": media_type,
-            }
-    else:
-        # Defensive only — _run_scan never calls this function with
-        # neither signal available (can_attempt_jump gate); a direct
-        # caller doing so has nothing to verify against, so this must
-        # never silently succeed.
-        return {"ok": False, "data_id": jumped["data_id"], "reason": "no expected hash or media type to verify the jump against"}
-    if not media_type:
-        return {"ok": False, "data_id": jumped["data_id"], "reason": "jumped-to message has no recognizable media"}
-    return {
-        "ok": True, "source_message_id": jumped["data_id"], "source_media_type": media_type,
-        "source_sender": _sender_name(jumped_html),
-    }
+    return last_fail
 
 
 async def _identify_tile_index(page, group_name: str, data_id: str, expected_hash: str) -> Dict[str, Any]:
@@ -2212,15 +2384,24 @@ async def _resolve_video_tile_by_hash(
     elif mark_reply_message_id:
         jumped = await _jump_to_quoted_message(page, group_name, mark_reply_message_id)
         if jumped.get("ok") and jumped.get("locator") is not None:
-            # data_id parity is a strong signal but NOT the gate — the
-            # hash re-verification below is authoritative, so a near-miss
-            # jump is caught there and reported as hash_mismatch, exactly
-            # like _resolve_single_media_via_jump.
             message_locator = jumped["locator"]
             logger.info(
-                "mark_scan: UPLOAD download-phase jump fallback for source=%s via reply=%s -> landed on %s",
-                source_message_id, mark_reply_message_id, jumped.get("data_id"),
+                "mark_scan: UPLOAD download-phase jump fallback for source=%s via reply=%s -> landed on %s (settle_confident=%s)",
+                source_message_id, mark_reply_message_id, jumped.get("data_id"), jumped.get("settle_confident"),
             )
+            # Wait (bounded) for the EXACT marked thumbnail to render on
+            # the jumped-to message before trusting it — the shared-
+            # placeholder-blob fix (2026-09-11, Zeeshan Ali). Never a
+            # re-jump, never a different message.
+            if source_thumbnail_hash:
+                v = await _await_marked_media_on_message(page, message_locator, source_thumbnail_hash, None)
+                if not v["matched"]:
+                    # A stable non-matching hash the whole time -> settled
+                    # wrong message. A moving / never-appearing hash ->
+                    # the right message's media just didn't finish loading.
+                    if v["last_hash"] and not v["hash_changed"]:
+                        return None, None, None, "hash_mismatch"
+                    return None, None, None, "media_not_rendered"
     if message_locator is None:
         return None, None, None, "message_not_found"
     # Hydrate the message in place (the same primitive the SCAN-phase jump
@@ -7162,6 +7343,7 @@ async def _return_download_ui_to_neutral(page) -> None:
 
 async def _locate_download_message(
     page, group_name: str, source_message_id: str, mark_reply_message_id: Optional[str],
+    source_thumbnail_hash: Optional[str] = None,
 ) -> Tuple[Optional[int], Any, Optional[str]]:
     """Re-locate an UPLOAD download target's exact source message. Index
     lookup first (fast, common); on a miss, the SAME native jump-to-
@@ -7171,7 +7353,16 @@ async def _locate_download_message(
     Sahal Mansuri Take 1). After a jump, the message has been scrolled
     into the rendered window, so a fresh index lookup then also succeeds
     (needed by the single-photo blob-fetch path, which is index-based).
-    Returns (idx, message_locator, reason) — reason None on success."""
+
+    2026-09-11 (Zeeshan Ali): after a jump, wait (bounded) for the EXACT
+    marked thumbnail to actually finish rendering on that message before
+    trusting it — the same shared-placeholder-blob issue
+    _await_marked_media_on_message fixes on the scan side. Never a
+    re-jump, never a different message.
+
+    Returns (idx, message_locator, reason) — reason None on success, else
+    one of "source message no longer found in window" (A) /
+    "source located but its marked media did not finish rendering" (B)."""
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
     idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
@@ -7183,9 +7374,13 @@ async def _locate_download_message(
         jumped = await _jump_to_quoted_message(page, group_name, mark_reply_message_id)
         if jumped.get("ok") and jumped.get("locator") is not None:
             logger.info(
-                "mark_scan: UPLOAD download-phase jump fallback for source=%s via reply=%s -> landed on %s",
-                source_message_id, mark_reply_message_id, jumped.get("data_id"),
+                "mark_scan: UPLOAD download-phase jump fallback for source=%s via reply=%s -> landed on %s (settle_confident=%s)",
+                source_message_id, mark_reply_message_id, jumped.get("data_id"), jumped.get("settle_confident"),
             )
+            if source_thumbnail_hash:
+                verify = await _await_marked_media_on_message(page, jumped["locator"], source_thumbnail_hash, None)
+                if not verify["matched"]:
+                    return None, None, "source located but its marked media did not finish rendering"
             re_idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
             msg = page.locator(full_sel).nth(re_idx) if re_idx is not None else jumped["locator"]
             await _ensure_message_content_rendered(page, msg)
@@ -7225,6 +7420,7 @@ async def _run_download_one(page, http: httpx.AsyncClient, group_name: str, targ
         return {"ok": False, "source_message_id": sm_id, "error": f"group not open (status={status})"}
     idx, message, locate_reason = await _locate_download_message(
         page, group_name, sm_id, target.get("mark_reply_message_id"),
+        source_thumbnail_hash=target.get("source_thumbnail_hash"),
     )
     if message is None:
         return {"ok": False, "source_message_id": sm_id, "error": locate_reason}

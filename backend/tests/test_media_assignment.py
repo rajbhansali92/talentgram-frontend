@@ -673,6 +673,28 @@ def test_report_unresolved_names_real_talent_never_presents_agent_as_talent():
     assert "marked for Gunwanti" not in report
 
 
+def test_report_unresolved_distinguishes_transient_from_remark_states():
+    """2026-09-11 — Zeeshan Ali: a 'media didn't finish loading'
+    (media_not_rendered) failure should tell the user to RETRY, not to
+    re-send the MARK; a genuine 'message gone' (not_located) still says
+    re-send."""
+    transient = orch._report_unresolved(
+        "Zeeshan Ali", "Mahindra Thar Film 1 & 2",
+        [{"media_role": "take", "take_number": 1, "resolution_failure_state": "media_not_rendered"},
+         {"media_role": "intro", "take_number": None, "resolution_failure_state": "media_not_rendered"}],
+    )
+    assert "did not finish loading" in transient
+    assert "temporary" in transient and "retry UPLOAD" in transient
+    assert "re-send the MARK" not in transient.split("if it keeps failing")[0]
+
+    gone = orch._report_unresolved(
+        "Zeeshan Ali", "Mahindra Thar Film 1 & 2",
+        [{"media_role": "take", "take_number": 1, "resolution_failure_state": "not_located"}],
+    )
+    assert "could not be re-opened" in gone
+    assert "Re-send the MARK reply" in gone
+
+
 async def test_orchestrator_unresolved_report_names_ishani_not_gunwanti():
     """Full _process_scan_done for the screenshot scenario end-to-end:
     Agent-mentioned MARK, Take 1 unresolvable at scan time, talent =

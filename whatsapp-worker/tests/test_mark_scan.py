@@ -5644,6 +5644,12 @@ def main():
             self._tiles = tiles
         def locator(self, sel):
             return _FakeHashTilesLocator(self._tiles)
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def evaluate(self, js, timeout=None):
+            # whole-message outerHTML (the bounded verify poll re-reads this)
+            html = "<div data-testid=\"conv-msg-x\">" + "".join(t._html for t in self._tiles) + "</div>"
+            return len(html) if "outerHTML.length" in js else html
     class _Page155:
         def locator(self, sel):
             return None
@@ -5774,6 +5780,183 @@ def main():
     # asked), proven by backend/tests/test_media_assignment.py's own
     # already-uploaded tests; not re-implemented in the worker.
     print("160. UPLOAD idempotency: enforced by the backend's media_assignment.already_uploaded slot filter (see backend/tests/test_media_assignment.py) — a repeat UPLOAD only ever hands the worker the genuinely-missing items, ZERO duplicates")
+
+    # ------------------------------------------------------------------
+    # 161-167: REAL UPLOAD INCIDENT (2026-09-11 — Zeeshan Ali / "Mahindra
+    # Thar Film 1 & 2": "MEDIA RESOLUTION FAILED ... could not re-open the
+    # exact original media message: Take 1, Intro"). This is a SCAN-phase
+    # failure (_report_unresolved), not a download-phase one. Live logs
+    # showed both marks' jumps landed on DIFFERENT messages yet
+    # _smallest_hash read the IDENTICAL 98d3fe51… — a shared WhatsApp
+    # placeholder blob present BEFORE the real poster thumbnail
+    # lazy-loads. The single read of jumped_html happened too early. Fix:
+    # _await_marked_media_on_message bounded-polls THE EXACT jumped-to
+    # message until its own hash matches the mark; _jump_to_quoted_message
+    # settle detection is highlight-aware + distance-gated; up to
+    # _MAX_JUMP_ATTEMPTS bounded jump attempts.
+    # ------------------------------------------------------------------
+    class _FakeEvolvingTarget:
+        """Returns `placeholder_html` for the first `real_after` reads of
+        its outerHTML, then `real_html` — models a video message whose
+        real poster thumbnail lazy-loads a few polls after the jump."""
+        def __init__(self, placeholder_html, real_html, real_after=3):
+            self._ph = placeholder_html
+            self._real = real_html
+            self._real_after = real_after
+            self.reads = 0
+        @property
+        def first(self):
+            return self
+        async def count(self):
+            return 1
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def evaluate(self, js, timeout=None):
+            if "outerHTML.length" in js:
+                return len(self._real if self.reads >= self._real_after else self._ph)
+            self.reads += 1
+            return self._real if self.reads > self._real_after else self._ph
+
+    def _msg_html_161(data_id, seed):
+        blob = (seed * 20)[:78] + "AX"
+        return (f'<div data-id="{data_id}" data-testid="conv-msg-{data_id}">'
+                f'<div data-testid="video-content"><div style="background-image: url(&quot;data:image/jpeg;base64,{blob}&quot;);"></div></div></div>')
+
+    _PLACEHOLDER_161 = ('<div data-id="X" data-testid="conv-msg-X"><div data-testid="video-content">'
+                        '<div style="background-image: url(&quot;data:image/jpeg;base64,' + ("SHAREDPLACEHOLDERBLOB98d3fe51" * 4)[:80] + '&quot;);"></div></div></div>')
+
+    take1_real_161 = _msg_html_161("ZEESHAN_TAKE1_SRC", "ZEESHANTAKE1REALTHUMB")
+    take1_hash_161 = mark_scan._smallest_hash(take1_real_161)
+
+    def _setup_evolving(reply_id, jumped_id, evolving_target):
+        reply_q = _FakeJumpQuotedBlock(count=1)
+        reply_m = _FakeJumpReplyMessage(reply_q)
+        page = _FakeJumpPage({0: reply_m, 1: evolving_target})
+        mark_scan._find_message_index_by_data_id = _make_fake_find_idx_map({reply_id: 0, jumped_id: 1})
+        async def _fe(p, js, arg=None, timeout=10.0):
+            return {"dataId": jumped_id, "distancePx": 5, "viaHighlight": True}
+        mark_scan._evaluate = _fe
+        return page
+
+    # 161: the jump lands on the RIGHT message, but its real thumbnail
+    # loads 3 polls late (shared placeholder before then) -> the bounded
+    # verify poll recovers it -> resolved to the EXACT source. THE fix.
+    tgt_161 = _FakeEvolvingTarget(_PLACEHOLDER_161, take1_real_161, real_after=3)
+    page_161 = _setup_evolving("REPLY_T1_161", "ZEESHAN_TAKE1_SRC", tgt_161)
+    r161 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_161, "Zeeshan Ali x Talentgram Agency", "REPLY_T1_161", take1_hash_161,
+    ))
+    assert r161["ok"] is True, r161
+    assert r161["source_message_id"] == "ZEESHAN_TAKE1_SRC", r161
+    assert tgt_161.reads > 3, f"must have polled past the placeholder ({tgt_161.reads} reads)"
+    print("161. Zeeshan Ali Take 1: jump lands right but the real thumbnail lazy-loads 3 polls late (shared placeholder before then) -> _await_marked_media_on_message recovers the EXACT source (THE incident's fix)")
+
+    # 162: the real thumbnail NEVER loads (placeholder forever) -> bounded,
+    # HONEST failure, failure_state=media_not_rendered, NEVER a wrong
+    # source, NEVER the placeholder accepted.
+    tgt_162 = _FakeEvolvingTarget(_PLACEHOLDER_161, take1_real_161, real_after=999)
+    page_162 = _setup_evolving("REPLY_T1_162", "ZEESHAN_TAKE1_SRC", tgt_162)
+    r162 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_162, "Zeeshan Ali x Talentgram Agency", "REPLY_T1_162", take1_hash_161,
+    ))
+    assert r162["ok"] is False, r162
+    assert r162["failure_state"] == "media_not_rendered", r162
+    assert r162.get("source_message_id") is None
+    print("162. real thumbnail never loads -> bounded honest failure (failure_state=media_not_rendered), the shared placeholder is NEVER accepted as the source")
+
+    # 163: jump lands on a genuinely DIFFERENT, fully-settled message whose
+    # own thumbnail is stable and non-matching -> wrong_message, never the
+    # media_not_rendered "retry" state, never a wrong source.
+    wrong_settled_163 = _msg_html_161("SOME_OTHER_MSG", "COMPLETELYUNRELATED")
+    page_163, _ = _setup_jump_fixture("REPLY_163", "SOME_OTHER_MSG", wrong_settled_163)
+    r163 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_163, "Zeeshan Ali x Talentgram Agency", "REPLY_163", take1_hash_161,
+    ))
+    assert r163["ok"] is False and r163["failure_state"] == "wrong_message", r163
+    print("163. jump lands on a settled, genuinely different message -> failure_state=wrong_message (distinct from a slow-loading right one), never a wrong source")
+
+    # 164: _MAX_JUMP_ATTEMPTS — the FIRST jump lands on a stale/wrong
+    # message, the SECOND (bounded re-jump) lands right -> resolved.
+    attempt_164 = {"n": 0}
+    reply_q_164 = _FakeJumpQuotedBlock(count=1)
+    reply_m_164 = _FakeJumpReplyMessage(reply_q_164)
+    wrong_tgt_164 = _FakeJumpTargetMessage(_msg_html_161("WRONG_164", "WRONGONE164"))
+    right_tgt_164 = _FakeJumpTargetMessage(take1_real_161)
+
+    class _FakeJumpPage164:
+        def locator(self, sel):
+            if "^=" in sel:
+                return _FakeJumpLocatorRoot({0: reply_m_164})
+            return wrong_tgt_164 if attempt_164["n"] == 1 else right_tgt_164
+        async def wait_for_timeout(self, ms):
+            pass
+
+    async def _fe_164(p, js, arg=None, timeout=10.0):
+        attempt_164["n"] += 1
+        return {"dataId": ("WRONG_164" if attempt_164["n"] == 1 else "ZEESHAN_TAKE1_SRC"),
+                "distancePx": 5, "viaHighlight": True}
+
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_map({"REPLY_164": 0})
+    mark_scan._evaluate = _fe_164
+    r164 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        _FakeJumpPage164(), "Zeeshan Ali x Talentgram Agency", "REPLY_164", take1_hash_161,
+    ))
+    assert r164["ok"] is True and r164["source_message_id"] == "ZEESHAN_TAKE1_SRC", r164
+    assert reply_q_164.click_count == 2, f"exactly one bounded re-jump, got {reply_q_164.click_count} clicks"
+    print("164. bounded re-jump: first jump lands wrong, second (of _MAX_JUMP_ATTEMPTS) lands right -> resolved, never more than the bounded attempts")
+
+    # 165: Take 1 AND Introduction — BOTH need the placeholder-recovery,
+    # BOTH resolve to their own DISTINCT exact source (the full incident).
+    intro_real_165 = _msg_html_161("ZEESHAN_INTRO_SRC", "ZEESHANINTROREALTHUMB")
+    intro_hash_165 = mark_scan._smallest_hash(intro_real_165)
+    tgt_t1_165 = _FakeEvolvingTarget(_PLACEHOLDER_161, take1_real_161, real_after=2)
+    page_t1_165 = _setup_evolving("REPLY_T1_165", "ZEESHAN_TAKE1_SRC", tgt_t1_165)
+    r_t1_165 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_t1_165, "Zeeshan Ali x Talentgram Agency", "REPLY_T1_165", take1_hash_161))
+    tgt_i_165 = _FakeEvolvingTarget(_PLACEHOLDER_161, intro_real_165, real_after=2)
+    page_i_165 = _setup_evolving("REPLY_I_165", "ZEESHAN_INTRO_SRC", tgt_i_165)
+    r_i_165 = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_i_165, "Zeeshan Ali x Talentgram Agency", "REPLY_I_165", intro_hash_165))
+    assert r_t1_165["ok"] and r_t1_165["source_message_id"] == "ZEESHAN_TAKE1_SRC", r_t1_165
+    assert r_i_165["ok"] and r_i_165["source_message_id"] == "ZEESHAN_INTRO_SRC", r_i_165
+    assert r_t1_165["source_message_id"] != r_i_165["source_message_id"]
+    print("165. Zeeshan Ali Take 1 AND Introduction both recover from the shared-placeholder state -> two DISTINCT exact sources, never cross-contaminated, never the placeholder")
+
+    mark_scan.sender._resolve_scope = orig_resolve_scope_jump
+    mark_scan._find_message_index_by_data_id = orig_find_idx_jump
+    mark_scan._evaluate = orig_evaluate_jump
+
+    # 166: _run_scan integration — when the jump fallback fails, the
+    # candidate carries resolution_failure_state so the backend report can
+    # name it (Phase 12).
+    class _FakeScanSender166:
+        async def _open_group_chat(self, page, group_name):
+            return "OPENED"
+        async def _resolve_scope(self, page):
+            return "#main"
+    orig_sender_166 = mark_scan.sender
+    orig_dump_166 = mark_scan._dump_window
+    orig_jump_166 = mark_scan._resolve_single_media_via_jump
+    reply_166 = REPLY_TO_PHOTO_HTML.replace("3EB0CAC0901DAD51217B30", "REPLY166").replace("mark spike take 1", "mark take 1 for zeeshanproj")
+    quoted_166 = QUOTED_PHOTO_BLOCK_HTML.replace(
+        "AAAABBBBCCCCDDDDsamephotoAAAABBBBCCCCDDDDsamephotoAAAABBBBCCCCDDDDsamephotoAAAAX", ("zeeshanq" * 12)[:78] + "AX")
+    async def _dump_166(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return [{"messageHtml": reply_166, "quotedHtml": quoted_166}]
+    async def _jump_fail_166(page, group_name, reply_id, expected_hash, expected_media_type=None):
+        return {"ok": False, "failure_state": "media_not_rendered", "reason": "did not render"}
+    mark_scan.sender = _FakeScanSender166()
+    mark_scan._dump_window = _dump_166
+    mark_scan._resolve_single_media_via_jump = _jump_fail_166
+    try:
+        sr_166 = asyncio.run(mark_scan._run_scan(page=object(), req={"group_name": "Zeeshan Ali x Talentgram Agency"}))
+    finally:
+        mark_scan.sender = orig_sender_166
+        mark_scan._dump_window = orig_dump_166
+        mark_scan._resolve_single_media_via_jump = orig_jump_166
+    c166 = (sr_166.get("candidates") or [])[0]
+    assert c166["resolved_source_message_id"] is None, c166
+    assert c166["resolution_failure_state"] == "media_not_rendered", c166
+    print("166. _run_scan integration: a failed jump fallback tags the candidate with resolution_failure_state (media_not_rendered) for the backend's MEDIA RESOLUTION FAILED report")
 
 
 if __name__ == "__main__":

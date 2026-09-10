@@ -130,21 +130,35 @@ def _report_ambiguous(talent_label: str, project_label: str, ambiguous: Dict[str
     )
 
 
+_UNRESOLVED_STATE_PHRASE = {
+    # From mark_scan._resolve_single_media_via_jump's `failure_state`
+    # (2026-09-11 — Zeeshan Ali). Distinguishes "the marked message is
+    # genuinely gone / the jump landed elsewhere" (re-mark) from "the
+    # marked media just didn't finish rendering this time" (retry).
+    "not_located": "the marked WhatsApp message could not be re-opened",
+    "wrong_message": "the marked WhatsApp message could not be re-opened",
+    "media_not_rendered": "the marked media did not finish loading in WhatsApp Web in time",
+}
+
+
 def _report_unresolved(talent_label: str, project_label: str, unresolved: List[Dict[str, Any]]) -> str:
-    items = "\n".join(
-        f"- {project_label} {('Take ' + str(u.get('take_number'))) if u.get('media_role') == 'take' else (u.get('media_role') or '').capitalize()}"
-        for u in unresolved
+    def _line(u: Dict[str, Any]) -> str:
+        role = ("Take " + str(u.get("take_number"))) if u.get("media_role") == "take" else (u.get("media_role") or "").capitalize()
+        phrase = _UNRESOLVED_STATE_PHRASE.get(u.get("resolution_failure_state") or "", "the marked WhatsApp message could not be re-opened")
+        return f"- {project_label} {role} — {phrase}"
+
+    items = "\n".join(_line(u) for u in unresolved)
+    transient = any((u.get("resolution_failure_state") == "media_not_rendered") for u in unresolved)
+    tail = (
+        "No upload was performed. This is usually a temporary WhatsApp Web loading delay — retry UPLOAD; "
+        "if it keeps failing, re-send the MARK reply on the same media."
+        if transient else
+        "No upload was performed. Re-send the MARK reply on the same media, then retry UPLOAD."
     )
-    # Wording (2026-09-10) — "marked for Gunwanti" read as if Gunwanti
-    # were the talent. It never is: Gunwanti is the agent's own WhatsApp
-    # identity that a MARK reply @mentions; the talent line above is
-    # already the real, resolved talent. Reworded to say what actually
-    # happened without that ambiguity.
     return (
         f"MEDIA RESOLUTION FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
-        f"These were correctly MARKed in {talent_label}'s WhatsApp group, but WhatsApp Web "
-        f"could not re-open the exact original media message they point at:\n{items}\n\n"
-        f"No upload was performed. Re-send the MARK reply on the same media, then retry UPLOAD."
+        f"These were correctly MARKed in {talent_label}'s WhatsApp group, but their exact original "
+        f"media could not be re-verified:\n{items}\n\n{tail}"
     )
 
 

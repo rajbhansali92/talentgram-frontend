@@ -185,6 +185,7 @@ def _reset_module_state():
     inbound._INVALID_GROUPS.clear()
     inbound._PENDING_REVALIDATION.clear()
     inbound._seen_cache.clear()
+    inbound._acked_cache.clear()
     inbound._invalid_group_last_logged.clear()
     inbound._last_written_status.clear()
     inbound._last_seen_generation = None
@@ -252,7 +253,7 @@ async def test_page_lock_is_free_while_poll_once_awaits_the_backend(_setup, monk
     async def slow_post_inbound(http, **kwargs):
         backend_call_started.set()
         await backend_call_may_finish.wait()
-        return {"reply": None, "operation_id": None, "handled": True}
+        return ("ok", {"reply": None, "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", slow_post_inbound)
     monkeypatch.setattr(inbound, "ACK_THRESHOLD_SEC", 999.0)  # never fires the ack path — irrelevant here
@@ -315,7 +316,7 @@ async def test_ack_and_reply_sends_still_reacquire_the_lock(_setup, monkeypatch)
 
     async def slow_post_inbound(http, **kwargs):
         await backend_may_finish.wait()
-        return {"reply": "Confirmation card", "operation_id": None, "handled": True}
+        return ("ok", {"reply": "Confirmation card", "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", slow_post_inbound)
 
@@ -363,7 +364,7 @@ async def test_reply_send_skipped_gracefully_if_page_vanishes_mid_flight(_setup,
 
     async def post_inbound_that_wipes_the_page(http, **kwargs):
         session.page = None  # simulate a reconnect wiping the page mid-dispatch
-        return {"reply": "Confirmation card", "operation_id": None, "handled": True}
+        return ("ok", {"reply": "Confirmation card", "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", post_inbound_that_wipes_the_page)
 
@@ -428,7 +429,7 @@ async def test_poll_once_never_redispatches_a_message_already_marked_processed(_
 
     async def fake_post_inbound(http, **kwargs):
         dispatch_calls.append(kwargs["message_id"])
-        return {"reply": None, "operation_id": None, "handled": True}
+        return ("ok", {"reply": None, "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
 
@@ -481,7 +482,7 @@ async def test_same_message_observed_ten_times_still_one_ack_and_one_execution(_
 
     async def fake_post_inbound(http, **kwargs):
         dispatch_calls.append(kwargs["message_id"])
-        return {"reply": "SEND FORM PREVIEW", "operation_id": None, "handled": True}
+        return ("ok", {"reply": "SEND FORM PREVIEW", "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
 
@@ -606,7 +607,7 @@ async def test_legitimate_second_command_different_message_id_executes_normally(
 
     async def fake_post_inbound(http, **kwargs):
         dispatch_calls.append(kwargs["message_id"])
-        return {"reply": None, "operation_id": None, "handled": True}
+        return ("ok", {"reply": None, "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
     monkeypatch.setattr(inbound, "_send_reply", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no reply expected")))
@@ -643,7 +644,7 @@ async def test_genuinely_new_message_with_new_id_still_processes_normally(_setup
 
     async def fake_post_inbound(http, **kwargs):
         dispatch_calls.append(kwargs["message_id"])
-        return {"reply": None, "operation_id": None, "handled": True}
+        return ("ok", {"reply": None, "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
     monkeypatch.setattr(inbound, "_send_reply", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no reply expected")))
@@ -685,8 +686,8 @@ async def test_failed_backend_dispatch_is_retried_on_the_next_poll_cycle(_setup,
     async def flaky_post_inbound(http, **kwargs):
         attempts["n"] += 1
         if attempts["n"] == 1:
-            return None  # transient failure (exception/timeout), as _post_inbound itself returns on error
-        return {"reply": None, "operation_id": None, "handled": True}
+            return ("unreachable", None)  # genuine connection failure -> claim released for retry
+        return ("ok", {"reply": None, "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", flaky_post_inbound)
 
@@ -763,7 +764,7 @@ async def test_send_approval_message_is_independently_idempotent(_setup, monkeyp
 
     async def fake_post_inbound(http, **kwargs):
         approve_calls.append(kwargs["message_id"])
-        return {"reply": "✅ Approved — now sending...", "operation_id": None, "handled": True}
+        return ("ok", {"reply": "✅ Approved — now sending...", "operation_id": None, "handled": True})
 
     monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
 
@@ -863,6 +864,167 @@ async def test_agent_own_acknowledgement_never_reingested_as_a_command(_setup):
         "an agent's own outgoing message, once marked via the direction=True "
         "path, must never be claimable again as if it were a fresh inbound command"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 2026-09-11 — "Send Zeeshan Ali for Mahindra Thar" acked "Got it —
+# processing..." FOUR times (~9:09 / 9:11 / 9:13 / 9:15). Root cause: the
+# backend's synchronous SEND-confirmation preview scan exceeded the
+# worker's _INBOUND_DISPATCH_TIMEOUT_SEC; _post_inbound returned None; the
+# caller RELEASED the claim (deleting it) and re-dispatched — with no ack
+# idempotency, every retry re-acked and re-triggered the same slow scan.
+# Fixes: (a) _post_inbound discriminates timeout (backend HAS it — do not
+# re-dispatch) from unreachable (never got it — safe silent retry); (b) a
+# durable, claim-release-surviving ack-once marker.
+# ─────────────────────────────────────────────────────────────────────────
+
+async def test_slow_send_command_acked_exactly_once_and_not_redispatched(_setup, monkeypatch):
+    """The exact Zeeshan Ali shape: the backend receives the command but
+    its synchronous work runs past the dispatch timeout. Across many poll
+    cycles: exactly ONE 'Got it — processing...' and exactly ONE dispatch
+    — never four."""
+    monkeypatch.setattr(inbound, "ACK_THRESHOLD_SEC", 0.0)
+    session = FakeSession(generation=1)
+    groups_cache = _groups_cache(["Talentgram Scouting Agent"])
+    participants_cache = inbound.GroupParticipantsCache()
+    monkeypatch.setattr(sender, "_open_group_chat", _fake_open_opened)
+
+    raw = {
+        "message_id": "wamid-zeeshan-1", "text": "Send Zeeshan Ali for Mahindra Thar",
+        "sender_name": "Raj", "sender_phone": "919198765900", "sender_is_group_member": True,
+        "raw_pre_plain_text": None, "media_type": None, "reply_context": None,
+    }
+
+    async def fake_scan(page, group_name, participants_cache):
+        if not await inbound._claim_message(raw["message_id"]):
+            return [], 0.0, 0.0
+        return [dict(raw)], 0.0, 0.0
+    monkeypatch.setattr(inbound, "_scan_group_for_new_messages", fake_scan)
+
+    dispatches = []
+
+    async def slow_then_timeout(http, **kwargs):
+        dispatches.append(kwargs["message_id"])
+        await asyncio.sleep(0.01)  # never completes before ACK_THRESHOLD (0.0)
+        return ("timeout", None)   # backend received it, still working / already done
+    monkeypatch.setattr(inbound, "_post_inbound", slow_then_timeout)
+
+    acks = []
+
+    async def fake_send_reply(page, group_name, text):
+        acks.append(text)
+        return 0.0, {}, "sent"
+    monkeypatch.setattr(inbound, "_send_reply", fake_send_reply)
+
+    for _ in range(6):
+        await inbound.poll_once(session, http=object(), groups_cache=groups_cache,
+                                participants_cache=participants_cache)
+
+    assert dispatches == ["wamid-zeeshan-1"], f"one dispatch only, got {dispatches}"
+    assert acks == [inbound.ACK_TEXT], f"exactly one processing-ack, got {acks}"
+    assert await inbound._claim_message("wamid-zeeshan-1") is False, "a timed-out dispatch terminal-completes the claim"
+
+
+async def test_ack_once_survives_a_claim_release_and_redispatch(_setup, monkeypatch):
+    """A GENUINE connection failure legitimately releases the claim and
+    the message is retried — but the durable ack-once marker means the
+    'Got it — processing...' is still sent only ONCE across the retries."""
+    monkeypatch.setattr(inbound, "ACK_THRESHOLD_SEC", 0.0)
+    session = FakeSession(generation=1)
+    groups_cache = _groups_cache(["G"])
+    participants_cache = inbound.GroupParticipantsCache()
+    monkeypatch.setattr(sender, "_open_group_chat", _fake_open_opened)
+
+    raw = {
+        "message_id": "wamid-ackonce-1", "text": "Send X for Y", "sender_name": "Raj",
+        "sender_phone": "919198765901", "sender_is_group_member": True,
+        "raw_pre_plain_text": None, "media_type": None, "reply_context": None,
+    }
+
+    async def fake_scan(page, group_name, participants_cache):
+        if not await inbound._claim_message(raw["message_id"]):
+            return [], 0.0, 0.0
+        return [dict(raw)], 0.0, 0.0
+    monkeypatch.setattr(inbound, "_scan_group_for_new_messages", fake_scan)
+
+    n = {"i": 0}
+
+    async def flaky(http, **kwargs):
+        n["i"] += 1
+        await asyncio.sleep(0.01)
+        if n["i"] <= 2:
+            return ("unreachable", None)  # genuine outage -> claim released, retried
+        return ("ok", {"reply": "SEND FORM PREVIEW", "operation_id": None, "handled": True})
+    monkeypatch.setattr(inbound, "_post_inbound", flaky)
+
+    acks = []
+
+    async def fake_send_reply(page, group_name, text):
+        acks.append(text)
+        return 0.0, {}, "sent"
+    monkeypatch.setattr(inbound, "_send_reply", fake_send_reply)
+
+    for _ in range(4):
+        await inbound.poll_once(session, http=object(), groups_cache=groups_cache,
+                                participants_cache=participants_cache)
+
+    assert n["i"] == 3, f"retried on each unreachable, then succeeded — {n['i']} dispatches"
+    assert acks.count(inbound.ACK_TEXT) == 1, f"processing-ack sent exactly once despite retries, got {acks}"
+    assert "SEND FORM PREVIEW" in acks, "the real reply still lands once the backend recovers"
+
+
+async def test_claim_ack_is_atomic_exactly_one_of_concurrent_callers_wins(_setup):
+    """Concurrent delivery of the same message_id: exactly one caller gets
+    to send the ack (durable unique-index gate, same guarantee the claim
+    itself has)."""
+    inbound._acked_cache.clear()
+    results = await asyncio.gather(
+        inbound._claim_ack("wamid-ackrace-1"),
+        inbound._claim_ack("wamid-ackrace-1"),
+        inbound._claim_ack("wamid-ackrace-1"),
+        inbound._claim_ack("wamid-ackrace-1"),
+    )
+    assert sorted(results) == [False, False, False, True], results
+
+
+async def test_timeout_outcome_never_releases_the_claim(_setup, monkeypatch):
+    """A ('timeout', None) from _post_inbound must terminal-complete the
+    claim, NOT release it — the backend has the request; re-dispatch is
+    pure harm (redundant work + duplicate ack)."""
+    monkeypatch.setattr(inbound, "ACK_THRESHOLD_SEC", 0.0)
+    session = FakeSession(generation=1)
+    groups_cache = _groups_cache(["G"])
+    participants_cache = inbound.GroupParticipantsCache()
+    monkeypatch.setattr(sender, "_open_group_chat", _fake_open_opened)
+    raw = {
+        "message_id": "wamid-timeout-noretry-1", "text": "Send A for B", "sender_name": "Raj",
+        "sender_phone": "919198765902", "sender_is_group_member": True,
+        "raw_pre_plain_text": None, "media_type": None, "reply_context": None,
+    }
+
+    async def fake_scan(page, group_name, participants_cache):
+        if not await inbound._claim_message(raw["message_id"]):
+            return [], 0.0, 0.0
+        return [dict(raw)], 0.0, 0.0
+    monkeypatch.setattr(inbound, "_scan_group_for_new_messages", fake_scan)
+
+    calls = {"n": 0}
+
+    async def timing_out(http, **kwargs):
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        return ("timeout", None)
+    monkeypatch.setattr(inbound, "_post_inbound", timing_out)
+    monkeypatch.setattr(inbound, "_send_reply", lambda *a, **k: _noop_reply())
+
+    for _ in range(5):
+        await inbound.poll_once(session, http=object(), groups_cache=groups_cache,
+                                participants_cache=participants_cache)
+    assert calls["n"] == 1, f"timed-out dispatch must not be re-dispatched, got {calls['n']}"
+
+
+async def _noop_reply():
+    return 0.0, {}, "sent"
 
 
 if __name__ == "__main__":

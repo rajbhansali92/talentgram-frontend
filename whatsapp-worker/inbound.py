@@ -53,6 +53,13 @@ from db import get_db
 logger = logging.getLogger(__name__)
 
 SEEN_COLLECTION = "whatsapp_inbound_seen"
+# Durable "we have already sent the processing-ack for this message_id"
+# marker (2026-09-11 — "Send Zeeshan Ali for Mahindra Thar" was acked
+# FOUR times). SEPARATE from SEEN_COLLECTION on purpose: a claim can be
+# legitimately released and re-dispatched (a genuine connection outage),
+# but the ack must NEVER be sent twice for one inbound message. Same
+# unique-index + TTL pattern as the claim collection.
+ACK_COLLECTION = "whatsapp_inbound_acked"
 
 # In-memory fast path — avoids a Mongo round-trip for every element on
 # every poll of an already-scanned chat. The Mongo collection (TTL-indexed)
@@ -175,6 +182,13 @@ async def _ensure_indexes() -> None:
         )
     except Exception:
         logger.exception("inbound: failed to create whatsapp_inbound_seen indexes (non-fatal)")
+    try:
+        await db[ACK_COLLECTION].create_index("message_id", unique=True)
+        await db[ACK_COLLECTION].create_index(
+            "created_at", expireAfterSeconds=config.INBOUND_DEDUP_TTL_SEC
+        )
+    except Exception:
+        logger.exception("inbound: failed to create whatsapp_inbound_acked indexes (non-fatal)")
 
 
 def _cap_seen_cache() -> None:
@@ -320,6 +334,37 @@ async def _complete_claim(message_id: str) -> None:
         )
     except Exception:
         logger.exception("inbound: failed to persist completed claim for %s", message_id)
+
+
+_acked_cache: set[str] = set()
+
+
+async def _claim_ack(message_id: str) -> bool:
+    """Atomic, durable "send the processing-ack exactly once for this
+    message_id" gate (2026-09-11 — the Zeeshan Ali quadruple-ack). Returns
+    True iff THIS call is the one that gets to send the ack. Survives a
+    claim release + re-dispatch, a worker restart, and concurrent
+    delivery (unique index on message_id) — exactly the durability the
+    claim itself has, but on its own record so releasing a claim can
+    never re-enable the ack. Fails CLOSED on an infra hiccup (returns
+    False — better a missing courtesy ack than a duplicate one; the real
+    result still lands)."""
+    if message_id in _acked_cache:
+        return False
+    db = get_db()
+    now = _now()
+    try:
+        await db[ACK_COLLECTION].insert_one({"message_id": message_id, "created_at": now})
+        _acked_cache.add(message_id)
+        if len(_acked_cache) > 5000:
+            _acked_cache.clear()
+        return True
+    except DuplicateKeyError:
+        _acked_cache.add(message_id)
+        return False
+    except Exception:
+        logger.exception("inbound: ack-claim failed for %s — suppressing the ack (fail closed)", message_id)
+        return False
 
 
 async def _mark_processed(message_id: str) -> None:
@@ -843,7 +888,23 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
                          sender_is_group_member: Optional[bool] = None,
                          media_type: Optional[str] = None,
                          replied_to_message_id: Optional[str] = None,
-                         replied_quoted_text: Optional[str] = None) -> Optional[dict]:
+                         replied_quoted_text: Optional[str] = None) -> Tuple[str, Optional[dict]]:
+    """Returns a discriminated outcome (2026-09-11 — "Send Zeeshan Ali for
+    Mahindra Thar" produced FOUR "Got it — processing..." acks):
+      ("ok", body)        — backend responded; caller completes the claim.
+      ("timeout", None)   — the backend RECEIVED the request but did not
+                            respond within _INBOUND_DISPATCH_TIMEOUT_SEC.
+                            The request IS being processed server-side
+                            (or already finished after we gave up) — the
+                            caller must NOT re-dispatch it (that just
+                            doubles backend work and re-acks). The real
+                            result arrives via the backend's own async
+                            completion path.
+      ("unreachable", None) — a genuine connection failure: the backend
+                            provably never received the request, so the
+                            caller may release the claim for a prompt,
+                            silent retry on the next poll.
+    """
     t0 = time.monotonic()
     try:
         resp = await http.post(
@@ -870,16 +931,28 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
             group_name, sender_phone, message_id, body.get("handled"), latency_ms,
         )
         await _update_worker_status(dispatcher_status="ready")
-        return body
-    except Exception:
-        logger.exception(
-            "inbound: dispatch to backend FAILED group=%r sender=%r message_id=%r "
-            "(message left unprocessed; will retry only if it re-appears unseen — "
-            "it will not, since marking-seen happens after a successful dispatch)",
-            group_name, sender_phone, message_id,
+        return "ok", body
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        # The backend was never reached — safe to retry (the request did
+        # not run). A genuine transient outage gets a prompt retry.
+        logger.warning(
+            "inbound: dispatch UNREACHABLE group=%r message_id=%r (%s) — claim released for retry",
+            group_name, message_id, type(exc).__name__,
         )
         await _update_worker_status(dispatcher_status="unreachable")
-        return None
+        return "unreachable", None
+    except Exception:
+        # Read/pool timeout or a 5xx AFTER the backend already had the
+        # request. It is running (or ran) server-side; re-dispatching it
+        # would re-run the same expensive work and re-ack. The backend's
+        # own async completion path delivers the real result.
+        logger.exception(
+            "inbound: dispatch TIMED OUT / errored after backend received it — group=%r "
+            "message_id=%r (NOT re-dispatched; backend is processing it asynchronously)",
+            group_name, message_id,
+        )
+        await _update_worker_status(dispatcher_status="unreachable")
+        return "timeout", None
 
 
 async def _send_reply(
@@ -1342,33 +1415,50 @@ async def poll_once(
             done, _ = await asyncio.wait({backend_task}, timeout=ACK_THRESHOLD_SEC)
             ack_sent_sec = None
             if backend_task not in done:
-                async with session.page_lock:
-                    ack_page = session.page
-                    if ack_page is not None:
-                        ack_elapsed, _ack_timing, _ack_message_id = await _send_reply(ack_page, group_name, ACK_TEXT)
-                        ack_sent_sec = round(time.monotonic() - t_detected, 2)
-                        logger.info(
-                            "inbound: TIMING backend exceeded %.1fs — sent ack (took %.2fs) "
-                            "message_id=%r", ACK_THRESHOLD_SEC, ack_elapsed, msg["message_id"],
-                        )
-                    else:
-                        logger.warning(
-                            "inbound: no active page while trying to send ack for message_id=%r",
-                            msg["message_id"],
-                        )
-            result = await backend_task
+                # Durable ack-once (2026-09-11 — "Send Zeeshan Ali for
+                # Mahindra Thar" was acked FOUR times): the ack is gated
+                # on a durable per-message_id marker that SURVIVES a
+                # claim release, so no matter how many times this message
+                # is (legitimately) re-dispatched, at most ONE "Got it —
+                # processing..." is ever sent.
+                if await _claim_ack(msg["message_id"]):
+                    async with session.page_lock:
+                        ack_page = session.page
+                        if ack_page is not None:
+                            ack_elapsed, _ack_timing, _ack_message_id = await _send_reply(ack_page, group_name, ACK_TEXT)
+                            ack_sent_sec = round(time.monotonic() - t_detected, 2)
+                            logger.info(
+                                "inbound: TIMING backend exceeded %.1fs — sent ack (took %.2fs) "
+                                "message_id=%r", ACK_THRESHOLD_SEC, ack_elapsed, msg["message_id"],
+                            )
+                        else:
+                            logger.warning(
+                                "inbound: no active page while trying to send ack for message_id=%r",
+                                msg["message_id"],
+                            )
+                else:
+                    logger.info(
+                        "inbound: ack already sent for message_id=%r on an earlier dispatch — not re-acking",
+                        msg["message_id"],
+                    )
+            outcome, result = await backend_task
             t_backend_done = time.monotonic()
 
-            if result is None:
-                # Backend call genuinely failed (network error, or the
-                # client-side _INBOUND_DISPATCH_TIMEOUT_SEC ceiling was
-                # exceeded — see _post_inbound). This message was already
-                # claimed in the scan phase; RELEASE that claim (rather
-                # than leaving it "in_progress" until the recovery
-                # timeout) so a transient outage gets a genuine, prompt
-                # retry on the next poll — never a second silent
-                # dispatch of a call that might actually still be
-                # running on the backend, and never an indefinite wait.
+            if outcome == "timeout":
+                # The backend RECEIVED this and is processing it (SEND's
+                # confirmation build, a slow scan, etc.) — or already
+                # finished after we stopped waiting. Re-dispatching would
+                # re-run that work AND (before the durable ack-once
+                # above) re-ack. Terminal-complete the claim: the real
+                # result reaches the group via the backend's own async
+                # completion path, never this HTTP response.
+                await _complete_claim(msg["message_id"])
+                continue
+            if outcome == "unreachable":
+                # The backend was never reached (connection failure) — the
+                # request did NOT run. Release for a prompt, SILENT retry
+                # (the ack, if it was sent, is not repeated — durable
+                # ack-once).
                 await _release_claim(msg["message_id"])
                 continue
 

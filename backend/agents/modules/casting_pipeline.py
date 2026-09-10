@@ -8474,11 +8474,18 @@ _SEND_PREVIEW_POLL_INTERVAL_SEC = float(os.environ.get("SEND_PREVIEW_POLL_INTERV
 # outer client budget (whatsapp-worker/inbound.py) alongside the rest of
 # this turn's fast, DB-only work.
 _SEND_PREVIEW_MAX_WAIT_SEC = float(os.environ.get("SEND_PREVIEW_MAX_WAIT_SEC", "20"))
+# Total across ALL sources for the synchronous SEND-confirmation preview
+# scan — MUST stay well under the worker's _INBOUND_DISPATCH_TIMEOUT_SEC
+# (35s) so /inbound always responds in time and the worker never
+# releases + re-dispatches (2026-09-11). Best-effort: a timeout only
+# degrades the preview's "Marked media" line.
+_SEND_PREVIEW_TOTAL_MAX_WAIT_SEC = float(os.environ.get("SEND_PREVIEW_TOTAL_MAX_WAIT_SEC", "22"))
 
 
 async def _scan_raw_candidates_for_source(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str,
     source_type: str, group_name: str, destination_group: str,
+    budget_s: Optional[float] = None,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     """Scans exactly ONE source (a talent's group OR their individual
     chat) and returns its RAW, unvalidated candidates — never runs
@@ -8501,7 +8508,7 @@ async def _scan_raw_candidates_for_source(
         group_name=group_name, source_type=source_type,
         destination_group=destination_group, preview_only=True, skip_validation=True,
     )
-    deadline = time.monotonic() + _SEND_PREVIEW_MAX_WAIT_SEC
+    deadline = time.monotonic() + (budget_s if budget_s is not None else _SEND_PREVIEW_MAX_WAIT_SEC)
     try:
         while True:
             doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
@@ -8550,11 +8557,24 @@ async def _scan_and_validate_multi_source(
     merged: List[Dict[str, Any]] = []
     hard_errors: List[str] = []
     saw_timeout = False
+    # ONE shared budget across ALL sources (2026-09-11 — "Send Zeeshan Ali
+    # for Mahindra Thar" acked 4x). This preview is best-effort and runs
+    # INSIDE the synchronous /inbound HTTP handler; with a per-source
+    # _SEND_PREVIEW_MAX_WAIT_SEC (20s) and a talent that has BOTH a group
+    # and a phone, two sequential 20s waits (40s) blew the worker's own
+    # 35s dispatch timeout — which then released the claim and
+    # re-dispatched, re-triggering this same scan and re-acking. Capping
+    # the TOTAL keeps /inbound comfortably under that ceiling; a genuine
+    # timeout just degrades the "Marked media" preview line to "couldn't
+    # verify in time" (the real execution-time scan re-verifies anyway).
+    _total_deadline = time.monotonic() + _SEND_PREVIEW_TOTAL_MAX_WAIT_SEC
     for source_type, group_name in sources:
+        _remaining = max(1.0, _total_deadline - time.monotonic())
         candidates, err = await _scan_raw_candidates_for_source(
             talent_id=talent_id, talent_label=talent_label,
             project_id=project_id, project_label=project_label,
             source_type=source_type, group_name=group_name, destination_group=destination_group,
+            budget_s=min(_SEND_PREVIEW_MAX_WAIT_SEC, _remaining),
         )
         if candidates is not None:
             merged.extend(candidates)

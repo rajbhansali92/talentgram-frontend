@@ -13,6 +13,7 @@ import base64
 import hashlib
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("MONGO_URL", "mongodb://x")
@@ -2276,97 +2277,118 @@ def main():
     # the Forward dialog open, which then made the UNRELATED next
     # operation (opening the destination chat to send the form) fail too.
     # ------------------------------------------------------------------
-    class _FakeLocator77:
-        def __init__(self, click_results):
-            self._click_results = list(click_results)
-            self.click_calls = 0
-            self.typed = None
+    # 2026-09-11 REWRITE (Sahal Mansuri / Mahindra Thar: ALL THREE media
+    # failed — Take 1 timed out, Take 2 + Introduction "Send control could
+    # not be confirmed"). _enter_forward_caption_and_send now resolves the
+    # caption box AND the Send control from the SAME active-dialog dump
+    # (_FORWARD_DIALOG_DUMP_JS) it already used for the "Remove caption"
+    # fallback — never a page-global `[data-testid="append-message-
+    # compose-box"]`.first / sender._find_and_click_send whole-page scan
+    # (the fragile accessors that broke for every captioned role at once).
+    class _FakeFwdDialogPage:
+        """Drives the new dialog-scoped _enter_forward_caption_and_send.
+        Geometry is fixed: remove-caption X at [50,50,20,20] (center
+        60,60), compose box at [100,500,400,40], Send at [520,500,40,40]
+        (center 540,520). `clear_after` remove-clicks are needed before
+        the compose box + Send appear; `box_after` extra dialog polls
+        (with the caption already clear) before the compose box mounts."""
+        def __init__(self, *, clear_after=0, box_after=0, via="buttons"):
+            self.clear_after = clear_after
+            self.box_after = box_after
+            self.via = via
+            self.remove_clicks = 0
+            self.dialog_polls = 0
+            self.typed_caption = None
+            self.send_clicked = False
+            self.keyboard = self
+            outer = self
+
+            class _Mouse:
+                @staticmethod
+                async def click(x, y, button="left"):
+                    if (x, y) == (60, 60):
+                        outer.remove_clicks += 1
+                    elif (x, y) == (540, 520):
+                        outer.send_clicked = True
+            self.mouse = _Mouse()
+
+        def locator(self, sel):
+            return self  # legacy fallback path; .first/.click below
 
         @property
         def first(self):
             return self
 
-        async def click(self, timeout=5000):
-            self.click_calls += 1
-            result = self._click_results[min(self.click_calls, len(self._click_results)) - 1]
-            if isinstance(result, Exception):
-                raise result
-            return result
+        async def click(self, timeout=3000):
+            raise Exception("legacy append-message-compose-box not present (dialog-scoped path is authoritative)")
 
         async def type(self, text, delay=10):
-            self.typed = text
+            self.typed_caption = text
 
-    class _FakePage77:
-        def __init__(self, locator):
-            self._locator = locator
-
-        def locator(self, selector):
-            return self._locator
+        async def press(self, key):
+            pass
 
         async def wait_for_timeout(self, ms):
             pass
 
-    # 77: the caption box's click fails twice (simulating a not-yet-mounted
-    # composer), then succeeds on the third bounded attempt -- overall
-    # result is still success, proving this is a retry loop, not a
-    # single shot.
-    locator_77 = _FakeLocator77([TimeoutError("not ready"), TimeoutError("not ready"), None])
-    page_77 = _FakePage77(locator_77)
+        def dump(self):
+            self.dialog_polls += 1
+            cleared = self.remove_clicks >= self.clear_after
+            box_ready = cleared and self.dialog_polls > self.box_after
+            remove_ctrl = {"ariaLabel": "Remove caption", "testid": None, "dataIcon": "x", "role": None, "rect": [50, 50, 20, 20], "text": ""}
+            d = {"dialogFound": True, "textboxes": [], "listItems": [], "buttons": [], "iconControls": []}
+            if not cleared:
+                (d["buttons"] if self.via == "buttons" else d["iconControls"]).append(remove_ctrl)
+                return d
+            if box_ready:
+                d["textboxes"].append({"ariaLabel": "Type a message", "role": "textbox", "rect": [100, 500, 400, 40], "text": ""})
+                d["buttons"].append({"ariaLabel": "Send", "dataIcon": "wds-ic-send-filled", "role": "button", "rect": [520, 500, 40, 40], "text": ""})
+            return d
 
-    async def _fake_find_and_click_send_77(page, allow_enter_fallback=False):
-        return "[aria-label^=\"Send\"][role=\"button\"]"
+    async def _fake_evaluate_fwd_dialog(page, js, arg=None, timeout=10.0):
+        return page.dump()
 
+    orig_evaluate_77 = mark_scan._evaluate
     orig_send_77 = sender._find_and_click_send
-    sender._find_and_click_send = _fake_find_and_click_send_77
+
+    async def _never_called_send(page, allow_enter_fallback=False):
+        raise AssertionError("dialog-scoped Send must be used, not the page-global fallback")
+
+    # 77: the compose box mounts a couple of polls late (video forward
+    # dialogs render slower) -> the bounded dialog poll still finds it ->
+    # success, entirely dialog-scoped.
+    page_77 = _FakeFwdDialogPage(clear_after=0, box_after=2)
+    mark_scan._evaluate = _fake_evaluate_fwd_dialog
+    sender._find_and_click_send = _never_called_send
     try:
         result_77 = asyncio.run(mark_scan._enter_forward_caption_and_send(page_77, "a caption"))
     finally:
+        mark_scan._evaluate = orig_evaluate_77
         sender._find_and_click_send = orig_send_77
 
     assert result_77["ok"] is True, result_77
-    assert locator_77.click_calls == 3, locator_77.click_calls  # two failures, then success -- not a single shot
-    assert locator_77.typed == "a caption", locator_77.typed
-    print("77. SEND caption entry retries      -> a not-yet-mounted composer box is retried up to 3 bounded attempts, not a single 5s shot")
+    assert result_77["selector_used"].startswith("dialog:"), result_77
+    assert page_77.typed_caption == "a caption", page_77.typed_caption
+    assert page_77.send_clicked is True, "Send must be clicked by identity inside the active dialog"
+    print("77. SEND caption+send is dialog-scoped -> a late-mounting compose box is bounded-polled from the active Forward dialog dump, then the dialog's own Send control is clicked by identity")
 
-    # 77b (2026-08-27, real production incident): a video whose forward
-    # preview already carries SOME existing caption shows a "Remove
-    # caption" (X) control instead of our expected empty compose box --
-    # confirmed via a real dialog dump (no append-message-compose-box at
-    # all). The retry loop must clear it (once) and then find the box.
-    class _FakePage77b(_FakePage77):
-        def __init__(self, locator):
-            super().__init__(locator)
-            self.clicks = []
-
-        class _Mouse:
-            def __init__(self, outer):
-                self._outer = outer
-
-            async def click(self, x, y, button="left"):
-                self._outer.clicks.append((x, y, button))
-
-    locator_77b = _FakeLocator77([TimeoutError("no compose box yet"), None])
-    page_77b = _FakePage77b(locator_77b)
-    page_77b.mouse = _FakePage77b._Mouse(page_77b)
-    remove_caption_dump = {"dialogFound": True, "buttons": [{"ariaLabel": "Remove caption", "testid": None, "rect": [818, 595, 32, 32]}]}
-
-    async def _fake_evaluate_77b(page, js, arg=None, timeout=10.0):
-        return remove_caption_dump
-
-    orig_evaluate_77b = mark_scan._evaluate
-    orig_send_77b = sender._find_and_click_send
-    mark_scan._evaluate = _fake_evaluate_77b
-    sender._find_and_click_send = _fake_find_and_click_send_77
+    # 77b: the source video already carries its OWN caption -> a "Remove
+    # caption" (X) sits where our compose box would be; cleared once (via
+    # the buttons dump), then the box + Send appear -> success.
+    page_77b = _FakeFwdDialogPage(clear_after=1, via="buttons")
+    mark_scan._evaluate = _fake_evaluate_fwd_dialog
+    sender._find_and_click_send = _never_called_send
     try:
         result_77b = asyncio.run(mark_scan._enter_forward_caption_and_send(page_77b, "a caption"))
     finally:
-        mark_scan._evaluate = orig_evaluate_77b
-        sender._find_and_click_send = orig_send_77b
+        mark_scan._evaluate = orig_evaluate_77
+        sender._find_and_click_send = orig_send_77
 
     assert result_77b["ok"] is True, result_77b
-    assert page_77b.clicks == [(834.0, 611.0, "left")], page_77b.clicks  # center of the Remove caption button's rect
-    assert locator_77b.typed == "a caption", locator_77b.typed
-    print("77b. SEND clears existing caption   -> a 'Remove caption' control is cleared once, revealing the real compose box, before retrying")
+    assert page_77b.remove_clicks == 1, page_77b.remove_clicks
+    assert page_77b.typed_caption == "a caption", page_77b.typed_caption
+    assert page_77b.send_clicked is True, page_77b.send_clicked
+    print("77b. SEND clears existing caption   -> a 'Remove caption' control is cleared, revealing the dialog's real compose box + Send, before typing")
 
     # 78-80 (2026-08-27): _ensure_forward_dialog_closed -- a failed
     # caption/send must never leave the Forward dialog open to poison the
@@ -4571,61 +4593,65 @@ def main():
     # ------------------------------------------------------------------
 
     class _FakeComposeBoxPage:
-        """Simulates the forward dialog's own compose-box readiness:
-        `.locator(...).first.click()` raises until `clear_after` real
-        "remove existing caption" clicks (via page.mouse.click, the SAME
-        mechanism the real removal control uses) have registered — 0
-        means the box is available immediately (no existing caption at
-        all, the Audition Take case); N>0 means N rounds are needed
-        first (the Introduction-with-existing-caption case)."""
+        """Drives the dialog-scoped _enter_forward_caption_and_send (2026-
+        09-11 rewrite). Fixed geometry: "Remove caption" X at [50,50,20,20]
+        (center 60,60); compose box at [100,500,400,40]; dialog Send at
+        [520,500,40,40] (center 540,520). The active-dialog dump
+        (_fake_evaluate_existing_caption_factory) shows the X until
+        `clear_after` clicks at (60,60) have registered, then shows the
+        compose box + Send. `clear_after=0` = no existing caption (the
+        ordinary Audition Take case)."""
         def __init__(self, clear_after: int = 0):
             self.clear_after = clear_after
             self.remove_clicks = 0
-            self.box_click_attempts = 0
             self.waits: list = []
             self.typed_caption = None
+            self.send_clicked = False
+            self.on_send = None  # tests set this to a _SimDestination.send
+            self.keyboard = self
             outer = self
 
             class _Mouse:
                 @staticmethod
                 async def click(x, y, button="left"):
-                    # Only a click at the simulated "Remove caption"
-                    # control's own center (its rect is [50, 50, 20, 20]
-                    # in _fake_evaluate_existing_caption_factory below)
-                    # counts here — the SAME page.mouse.click primitive
-                    # is also used, unrelated, by _send_one_target_
-                    # native_forward_attempt's own Forward-button click
-                    # (a different rect/center entirely), which must
-                    # never be conflated with a caption-removal attempt.
                     if (x, y) == (60, 60):
                         outer.remove_clicks += 1
+                    elif (x, y) == (540, 520):
+                        outer.send_clicked = True
+                        if outer.on_send is not None:
+                            outer.on_send(outer.typed_caption)
+                    # any other coordinate (e.g. the Forward-button click
+                    # in _send_one_target_native_forward_attempt, or the
+                    # compose-box focus click) is an unrelated no-op here
 
             self.mouse = _Mouse()
 
         def locator(self, sel):
-            return self
+            return self  # legacy append-message-compose-box fallback path
 
         @property
         def first(self):
             return self
 
         async def click(self, timeout=3000):
-            self.box_click_attempts += 1
-            if self.remove_clicks < self.clear_after:
-                raise Exception("compose box not yet available (existing caption still showing)")
+            raise Exception("legacy compose-box testid not present (dialog-scoped path authoritative)")
 
         async def type(self, text, delay=10):
             self.typed_caption = text
+
+        async def press(self, key):
+            pass
 
         async def wait_for_timeout(self, ms):
             self.waits.append(ms)
 
     def _fake_evaluate_existing_caption_factory(via: str = "iconControls"):
-        """`via` chooses whether the simulated "Remove caption" control
-        is found through the ORIGINAL buttons-only search or the NEW
-        widened iconControls search — both are exercised across tests
-        131-138 so the widening itself (not just the retry-every-round
-        fix) is directly proven."""
+        """`via` chooses whether the simulated "Remove caption" control is
+        surfaced through the buttons dump or the widened iconControls dump
+        — both exercised across 131-138. Once the caption is cleared the
+        dump also carries the dialog's own compose box (textboxes) and
+        Send control (buttons), which the rewritten
+        _enter_forward_caption_and_send resolves by identity."""
         async def _fake_evaluate(page, js, arg=None, timeout=10.0):
             if page.remove_clicks < page.clear_after:
                 control = {"ariaLabel": "Remove caption", "testid": None, "dataIcon": "x-viewer", "role": None, "rect": [50, 50, 20, 20], "text": ""}
@@ -4634,7 +4660,11 @@ def main():
                     "buttons": [control] if via == "buttons" else [],
                     "iconControls": [control] if via == "iconControls" else [],
                 }
-            return {"dialogFound": True, "textboxes": [], "listItems": [], "buttons": [], "iconControls": []}
+            return {
+                "dialogFound": True, "listItems": [], "iconControls": [],
+                "textboxes": [{"ariaLabel": "Type a message", "role": "textbox", "rect": [100, 500, 400, 40], "text": ""}],
+                "buttons": [{"ariaLabel": "Send", "dataIcon": "wds-ic-send-filled", "role": "button", "rect": [520, 500, 40, 40], "text": ""}],
+            }
         return _fake_evaluate
 
     # 131: Introduction with NO existing caption (clear_after=0) — the
@@ -4819,6 +4849,7 @@ def main():
     for source_type_13x, source_name_13x, test_num_13x in (("group", "Talent Group", "136"), ("phone", "919990000444", "137")):
         page_13x = _FakeComposeBoxPage(clear_after=1)
         sim_13x = _SimDestination()
+        page_13x.on_send = sim_13x.send  # dialog-scoped Send click delivers to the sim
         _, fake_open_dest_13x, fake_snap_13x, fake_find_13x = _install_sim_destination_fakes({"Dest Group": sim_13x})
 
         async def _fake_ready_13x(page, group, msg_id, tile_index, is_photo):
@@ -4888,6 +4919,8 @@ def main():
     page_take_138 = _FakeComposeBoxPage(clear_after=0)
     page_intro_138 = _FakeComposeBoxPage(clear_after=1)
     sim_138 = _SimDestination()
+    page_take_138.on_send = sim_138.send
+    page_intro_138.on_send = sim_138.send
     _, fake_open_dest_138, fake_snap_138, fake_find_138 = _install_sim_destination_fakes({"Dest Group": sim_138})
 
     async def _fake_ready_138(page, group, msg_id, tile_index, is_photo):
@@ -5221,6 +5254,355 @@ def main():
     assert take1_144["resolved_via_jump_fallback"] is False, take1_144
     assert intro_144["resolved_source_message_id"] == "INTRO_SRC_139", intro_144  # the OTHER mark is unaffected
     print("144. jumped-to message genuinely never hydrates -> hash re-verification fails -> Take 1 stays honestly unresolved (MEDIA RESOLUTION FAILED), never a guessed source; Introduction in the same scan still resolves")
+
+    # ------------------------------------------------------------------
+    # 145-154: REAL INCIDENT (2026-09-11 — Sahal Mansuri / Mahindra Thar
+    # Film 1 & 2: ALL THREE media failed — Take 1 "did not respond in
+    # time", Take 2 + Introduction "Send control could not be confirmed",
+    # while "Submission details" succeeded). Root cause (code trace; no
+    # incident logs survived Railway retention):
+    #   * _enter_forward_caption_and_send resolved BOTH the caption box
+    #     (bare `[data-testid="append-message-compose-box"]`) AND the Send
+    #     control (sender._find_and_click_send, WHOLE-PAGE, `.first`-only)
+    #     with fragile, non-dialog-scoped accessors. When either shifts,
+    #     EVERY captioned media role fails identically at that one common
+    #     state — exactly "all three now fail".
+    #   * Take 1's video readiness could exceed PER_ITEM_SEND_TIMEOUT on
+    #     one attempt, so asyncio.wait_for CANCELLED it mid-step, running
+    #     no cleanup and leaving a viewer/dialog open for the next item
+    #     (same class UPLOAD fixed in 2026-08-23 with _close_viewer).
+    # Fix: caption box + Send both resolved from the SAME active-dialog
+    # dump (_FORWARD_DIALOG_DUMP_JS); a wall-clock budget on media
+    # readiness so wait_for never cancels; _return_forward_ui_to_neutral
+    # in _run_send's per-item finally.
+    # ------------------------------------------------------------------
+    _FWD_GEO = {"box": [100, 500, 400, 40], "send": [520, 500, 40, 40]}
+
+    def _fwd_dump(*, dialog=True, box=True, send=True, send_icon_only=False, hidden_send_first=False):
+        d = {"dialogFound": dialog, "textboxes": [], "listItems": [], "buttons": [], "iconControls": []}
+        if not dialog:
+            return {"dialogFound": False}
+        if box:
+            d["textboxes"].append({"ariaLabel": "Type a message", "role": "textbox", "rect": _FWD_GEO["box"], "text": ""})
+        if hidden_send_first:
+            d["buttons"].append({"ariaLabel": "Send", "role": "button", "rect": [0, 0, 0, 0], "text": ""})  # stale/hidden
+        if send:
+            if send_icon_only:
+                d["iconControls"].append({"ariaLabel": None, "dataIcon": "wds-ic-send-filled", "role": "button", "rect": _FWD_GEO["send"], "text": ""})
+            else:
+                d["buttons"].append({"ariaLabel": "Send 1 selected", "dataIcon": "wds-ic-send-filled", "role": "button", "rect": _FWD_GEO["send"], "text": ""})
+        return d
+
+    class _FwdPage:
+        def __init__(self, dump_seq):
+            self._seq = list(dump_seq)
+            self.i = 0
+            self.typed = None
+            self.send_clicked = False
+            self.keyboard = self
+        def _dump(self):
+            d = self._seq[min(self.i, len(self._seq) - 1)]
+            self.i += 1
+            return d
+        def locator(self, sel):
+            return self
+        @property
+        def first(self):
+            return self
+        async def click(self, timeout=3000):
+            raise Exception("legacy compose-box testid absent")
+        async def type(self, text, delay=10):
+            self.typed = text
+        async def press(self, key):
+            pass
+        async def wait_for_timeout(self, ms):
+            pass
+
+    class _FwdMouse:
+        def __init__(self, page):
+            self.page = page
+        async def click(self, x, y, button="left"):
+            if (x, y) == (540.0, 520.0):
+                self.page.send_clicked = True
+
+    async def _fwd_eval(page, js, arg=None, timeout=10.0):
+        return page._dump()
+
+    orig_eval_145 = mark_scan._evaluate
+    orig_send_145 = sender._find_and_click_send
+    mark_scan._evaluate = _fwd_eval
+
+    async def _boom_send(page, allow_enter_fallback=False):
+        raise AssertionError("page-global Send fallback must not run when the dialog has its own Send control")
+    sender._find_and_click_send = _boom_send
+
+    try:
+        # 145: forward dialog appears LATE (2 empty polls) -> then ready -> success.
+        p145 = _FwdPage([_fwd_dump(dialog=False), _fwd_dump(dialog=False), _fwd_dump()])
+        p145.mouse = _FwdMouse(p145)
+        r145 = asyncio.run(mark_scan._enter_forward_caption_and_send(p145, "Audition Take 1"))
+        assert r145["ok"] is True, r145
+        assert p145.typed == "Audition Take 1" and p145.send_clicked, r145
+        print("145. forward dialog appears late -> bounded dialog poll still finds it -> caption typed + dialog Send clicked -> success")
+
+        # 146: dialog + box present immediately, Send control appears one poll later -> success.
+        p146 = _FwdPage([_fwd_dump(send=False), _fwd_dump()])
+        p146.mouse = _FwdMouse(p146)
+        r146 = asyncio.run(mark_scan._enter_forward_caption_and_send(p146, "Audition Take 2"))
+        assert r146["ok"] is True and p146.send_clicked, r146
+        print("146. Send control appears late -> polled from the active dialog dump until present, then clicked -> success")
+
+        # 147: a stale/hidden [aria-label=Send] sits FIRST in the dump; the
+        # real, on-screen one is found instead (never the .first-only trap
+        # that broke sender._find_and_click_send).
+        p147 = _FwdPage([_fwd_dump(hidden_send_first=True)])
+        p147.mouse = _FwdMouse(p147)
+        r147 = asyncio.run(mark_scan._enter_forward_caption_and_send(p147, "Introduction Take"))
+        assert r147["ok"] is True and p147.send_clicked, r147
+        print("147. a stale/hidden Send match is skipped -> the on-screen dialog Send control is the one clicked (no .first-only trap)")
+
+        # 148: icon-only Send control (no aria-label at all, just
+        # data-icon) -> still found by identity.
+        p148 = _FwdPage([_fwd_dump(send_icon_only=True)])
+        p148.mouse = _FwdMouse(p148)
+        r148 = asyncio.run(mark_scan._enter_forward_caption_and_send(p148, "Audition Take 1"))
+        assert r148["ok"] is True and p148.send_clicked, r148
+        print("148. icon-based Send control (data-icon only, no aria-label) is found by identity in the dialog dump")
+
+        # 149: Send control genuinely never present -> bounded, honest
+        # failure naming SEND_CONTROL_READY (never a false success).
+        async def _null_send(page, allow_enter_fallback=False):
+            return None
+        sender._find_and_click_send = _null_send
+        p149 = _FwdPage([_fwd_dump(send=False)])
+        p149.mouse = _FwdMouse(p149)
+        r149 = asyncio.run(mark_scan._enter_forward_caption_and_send(p149, "Introduction Take"))
+        assert r149["ok"] is False and r149["failed_state"] == "SEND_CONTROL_READY", r149
+        assert not p149.send_clicked, r149
+        print("149. Send control genuinely absent -> bounded failure, failed_state=SEND_CONTROL_READY, never a false success")
+
+        # 150: no caption at all (caption="") -> box is irrelevant, only a
+        # Send control is required -> success typing nothing.
+        sender._find_and_click_send = _boom_send
+        p150 = _FwdPage([_fwd_dump(box=False)])
+        p150.mouse = _FwdMouse(p150)
+        r150 = asyncio.run(mark_scan._enter_forward_caption_and_send(p150, ""))
+        assert r150["ok"] is True and p150.typed is None and p150.send_clicked, r150
+        print("150. empty caption -> compose box not required, only the dialog Send control -> success, nothing typed")
+
+        # 151: forward dialog never appears at all -> FORWARD_DIALOG_READY failure.
+        p151 = _FwdPage([_fwd_dump(dialog=False)])
+        p151.mouse = _FwdMouse(p151)
+        r151 = asyncio.run(mark_scan._enter_forward_caption_and_send(p151, "Audition Take 1"))
+        assert r151["ok"] is False and r151["failed_state"] == "FORWARD_DIALOG_READY", r151
+        print("151. forward dialog never appears -> failed_state=FORWARD_DIALOG_READY (accurate state, not a catch-all 'Send control' error)")
+    finally:
+        mark_scan._evaluate = orig_eval_145
+        sender._find_and_click_send = orig_send_145
+
+    # 152: _open_media_and_get_forward_button honours its wall-clock budget
+    # — a video whose on-screen Forward control never appears returns a
+    # CLEAN, accurate reason WELL within PER_ITEM_SEND_TIMEOUT (so the
+    # outer asyncio.wait_for never has to cancel it mid-step).
+    orig_find_idx_152 = mark_scan._find_message_index_by_data_id
+    orig_scope_152 = mark_scan.sender
+    orig_ensure_152 = mark_scan._ensure_message_content_rendered
+    orig_resolve_tile_152 = mark_scan._resolve_video_tile_locator
+    orig_wait_ready_152 = mark_scan._wait_for_video_readiness
+    orig_eval_152 = mark_scan._evaluate
+    orig_close_152 = mark_scan._close_viewer
+
+    class _Sc152:
+        async def _resolve_scope(self, page):
+            return "#main"
+
+    class _Tile152:
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def click(self, timeout=None):
+            pass
+
+    class _Page152:
+        def locator(self, sel):
+            return self
+        def nth(self, i):
+            return self
+        @property
+        def first(self):
+            return self
+        async def count(self):
+            return 1  # a <video> is "mounted" so we reach the forward-button poll
+        async def evaluate(self, js, timeout=None):
+            return 1000
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def wait_for_timeout(self, ms):
+            pass
+
+    async def _fi152(page, group, data_id):
+        return 0
+    async def _emc152(page, loc, **kw):
+        pass
+    async def _rtl152(page, group, sm, ti):
+        return _Tile152(), 0
+    async def _wvr152(page, min_ready_state=3, timeout_s=60.0):
+        return {"reached": True}
+    async def _ev152(page, js, arg=None, timeout=10.0):
+        return {"rootFound": True, "buttons": []}  # never any Forward button
+    async def _cv152(page, vd):
+        return {"closed": True}
+
+    mark_scan._find_message_index_by_data_id = _fi152
+    mark_scan.sender = _Sc152()
+    mark_scan._ensure_message_content_rendered = _emc152
+    mark_scan._resolve_video_tile_locator = _rtl152
+    mark_scan._wait_for_video_readiness = _wvr152
+    mark_scan._evaluate = _ev152
+    mark_scan._close_viewer = _cv152
+    try:
+        t0_152 = time.monotonic()
+        r152 = asyncio.run(mark_scan._open_media_and_get_forward_button(
+            _Page152(), "Talent Group", "conv-msg-X", 0, is_photo=False, budget_s=3.0,
+        ))
+        elapsed_152 = time.monotonic() - t0_152
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_152
+        mark_scan.sender = orig_scope_152
+        mark_scan._ensure_message_content_rendered = orig_ensure_152
+        mark_scan._resolve_video_tile_locator = orig_resolve_tile_152
+        mark_scan._wait_for_video_readiness = orig_wait_ready_152
+        mark_scan._evaluate = orig_eval_152
+        mark_scan._close_viewer = orig_close_152
+    assert r152["ok"] is False, r152
+    assert "budget" in r152["reason"], r152
+    assert elapsed_152 < 15.0, f"must bail within its own small budget, took {elapsed_152:.1f}s"
+    print("152. _open_media_and_get_forward_button honours its wall-clock budget -> a never-appearing Forward control returns a clean, accurate reason fast, never a mid-step wait_for cancel")
+
+    # 153: _run_send returns the page to neutral (viewer + dialog closed)
+    # after EVERY item — including a failed one — so the next item never
+    # inherits a leftover overlay (the Sahal Mansuri cascade).
+    neutral_calls_153 = {"n": 0}
+    orig_neutral_153 = mark_scan._return_forward_ui_to_neutral
+    orig_fwd_153 = mark_scan._send_one_target_native_forward
+    orig_open_153 = sender._open_group_chat
+    orig_text_153 = mark_scan._send_text_message
+
+    async def _spy_neutral_153(page):
+        neutral_calls_153["n"] += 1
+        return {"dialog_closed": True, "viewer_closed": True}
+
+    forward_outcomes_153 = {"take1": {"ok": True}, "take2": {"ok": False, "error": "send failed [CAPTION_STATE]: x"}, "intro1": {"ok": True}}
+    attempted_153: list = []
+
+    async def _fake_fwd_153(page, group_name, target, item_label="", source_type="group"):
+        attempted_153.append(target["source_message_id"])
+        return {"source_message_id": target["source_message_id"], **forward_outcomes_153[target["source_message_id"]]}
+
+    async def _fake_open_153(page, group_name):
+        return "OPENED"
+
+    async def _fake_text_153(page, destination_group, message, *, destination_type="group"):
+        return {"ok": True}
+
+    mark_scan._return_forward_ui_to_neutral = _spy_neutral_153
+    mark_scan._send_one_target_native_forward = _fake_fwd_153
+    sender._open_group_chat = _fake_open_153
+    mark_scan._send_text_message = _fake_text_153
+    try:
+        req_153 = {
+            "group_name": "Sahal Mansuri x Talentgram Agency", "destination_group": "Mahindra Thar x Talentgram Agency",
+            "project_label": "Mahindra Thar Film 1 & 2",
+            "send_targets": [
+                _send_target("take1", "take", 1), _send_target("take2", "take", 2), _send_target("intro1", "intro"),
+            ],
+            "form_insert_index": 3, "form_message": "SUBMISSION DETAILS", "send_marker_on_success": True,
+        }
+        result_153 = asyncio.run(mark_scan._run_send(_FakePage73(), req_153))
+    finally:
+        mark_scan._return_forward_ui_to_neutral = orig_neutral_153
+        mark_scan._send_one_target_native_forward = orig_fwd_153
+        sender._open_group_chat = orig_open_153
+        mark_scan._send_text_message = orig_text_153
+    assert attempted_153 == ["take1", "take2", "intro1"], attempted_153  # take2's failure never blocks intro1
+    assert neutral_calls_153["n"] == 3, neutral_calls_153  # once after EVERY media item, pass or fail
+    print("153. _run_send returns the page to neutral after every media item (pass OR fail) -> one stuck item can never cascade into the rest (the Sahal Mansuri failure mode)")
+
+    # 154: THE most-important regression — Take 1, Take 2, Introduction all
+    # flow through the SAME common dialog-scoped caption/send state
+    # machine; Take 2 hits a temporary compose-box delay and recovers via
+    # the bounded outer wrapper; Take 1 and Introduction are each sent
+    # EXACTLY once and never re-forwarded while Take 2 recovers.
+    sim_154 = _SimDestination()
+    _, open_dest_154, snap_154, find_154 = _install_sim_destination_fakes({"Dest Group": sim_154})
+    take2_attempts_154 = {"n": 0}
+    call_log_154: list = []
+
+    async def _ready_154(page, group, sm, ti, is_photo, budget_s=55.0):
+        return {"ok": True, "forward_button": {"rect": [10, 10, 20, 20]}}
+    async def _select_154(page, dest):
+        return {"ok": True}
+    async def _closed_154(page):
+        return True
+    async def _neutral_154(page):
+        return {}
+    async def _dispatch_open_154(page, source_type, group_name):
+        if group_name == "Dest Group":
+            return await open_dest_154(page, source_type, group_name)
+        return "OPENED"
+
+    async def _caption_154(page, caption):
+        if caption == "Audition Take 2":
+            take2_attempts_154["n"] += 1
+            call_log_154.append(f"take2-{take2_attempts_154['n']}")
+            if take2_attempts_154["n"] == 1:
+                return {"ok": False, "failed_state": "CAPTION_STATE", "reason": "caption entry failed: forward compose box not found (transient)"}
+        else:
+            call_log_154.append(caption)
+        sim_154.send(caption)
+        return {"ok": True, "selector_used": "dialog:Send"}
+
+    orig_ready_154 = mark_scan._open_media_and_get_forward_button
+    orig_sel_154 = mark_scan._select_forward_destination
+    orig_closed_154 = mark_scan._ensure_forward_dialog_closed
+    orig_neutral2_154 = mark_scan._return_forward_ui_to_neutral
+    orig_opensrc_154 = mark_scan._open_source_chat
+    orig_snap_154 = sender._snapshot_msg_baselines
+    orig_find_154 = sender._find_outgoing_with_text
+    orig_caption_154 = mark_scan._enter_forward_caption_and_send
+
+    mark_scan._open_media_and_get_forward_button = _ready_154
+    mark_scan._select_forward_destination = _select_154
+    mark_scan._ensure_forward_dialog_closed = _closed_154
+    mark_scan._return_forward_ui_to_neutral = _neutral_154
+    mark_scan._open_source_chat = _dispatch_open_154
+    sender._snapshot_msg_baselines = snap_154
+    sender._find_outgoing_with_text = find_154
+    mark_scan._enter_forward_caption_and_send = _caption_154
+    try:
+        req_154 = {
+            "group_name": "Talent Group", "destination_group": "Dest Group", "project_label": "Mahindra Thar Film 1 & 2",
+            "send_targets": [
+                _send_target("t1", "take", 1), _send_target("t2", "take", 2), _send_target("i1", "intro"),
+            ],
+            "form_insert_index": 3, "form_message": None, "send_marker_on_success": False,
+        }
+        req_154["send_targets"][0]["caption"] = "Audition Take 1"
+        req_154["send_targets"][1]["caption"] = "Audition Take 2"
+        req_154["send_targets"][2]["caption"] = "Introduction Take"
+        result_154 = asyncio.run(mark_scan._run_send(_FakeComposeBoxPage(), req_154))
+    finally:
+        mark_scan._open_media_and_get_forward_button = orig_ready_154
+        mark_scan._select_forward_destination = orig_sel_154
+        mark_scan._ensure_forward_dialog_closed = orig_closed_154
+        mark_scan._return_forward_ui_to_neutral = orig_neutral2_154
+        mark_scan._open_source_chat = orig_opensrc_154
+        sender._snapshot_msg_baselines = orig_snap_154
+        sender._find_outgoing_with_text = orig_find_154
+        mark_scan._enter_forward_caption_and_send = orig_caption_154
+    assert [r["ok"] for r in result_154["results"]] == [True, True, True], result_154
+    assert call_log_154 == ["Audition Take 1", "take2-1", "take2-2", "Introduction Take"], call_log_154
+    assert sim_154.messages == ["Audition Take 1", "Audition Take 2", "Introduction Take"], sim_154.messages
+    print("154. KEY regression: Take 1 + Take 2 + Introduction share ONE dialog-scoped caption/send state machine; Take 2's transient compose-box failure recovers via the bounded wrapper; Take 1 and Introduction each sent EXACTLY once, never re-forwarded")
 
 
 if __name__ == "__main__":

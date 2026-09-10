@@ -3927,6 +3927,39 @@ def test_humanize_media_error_unknown_falls_back_generic():
     assert "WhatsApp Web issue" in msg, msg
 
 
+# 2026-09-11 (Sahal Mansuri / Mahindra Thar — ALL THREE media failed, the
+# previous catch-all "send failed" bucket reported "Send control could not
+# be confirmed" for failures that were actually elsewhere). mark_scan.py
+# now tags the exact stalled native-forward state; each maps to its own
+# sentence so a future incident names the real transition.
+def test_humanize_media_error_video_forward_control_not_ready():
+    msg = orch._humanize_media_send_error("forward not ready: video Forward control not ready within 55s budget")
+    assert "budget" not in msg, msg
+    assert "forward control ready" in msg.lower() and "video" in msg.lower(), msg
+
+
+def test_humanize_media_error_caption_box_state():
+    msg = orch._humanize_media_send_error("send failed [CAPTION_STATE]: caption entry failed: forward compose box not found (X)")
+    assert "caption box" in msg.lower(), msg
+    assert "CAPTION_STATE" not in msg, msg
+
+
+def test_humanize_media_error_forward_dialog_state():
+    msg = orch._humanize_media_send_error("send failed [FORWARD_DIALOG_READY]: forward dialog never appeared for caption/send")
+    assert "forward dialog" in msg.lower() and "did not open" in msg.lower(), msg
+
+
+def test_humanize_media_error_send_control_state_still_maps_to_confirmed():
+    msg = orch._humanize_media_send_error("send failed [SEND_CONTROL_READY]: no real Send control found in the forward dialog — refusing to guess")
+    assert "send control could not be confirmed" in msg.lower(), msg
+    assert "SEND_CONTROL_READY" not in msg, msg
+
+
+def test_humanize_media_error_send_unverified_is_its_own_sentence():
+    msg = orch._humanize_media_send_error("send unverified: no NEW matching outgoing message found in the destination chat after send")
+    assert "could not confirm it arrived" in msg.lower(), msg
+
+
 def test_report_send_result_never_leaks_raw_playwright_text():
     report = orch._report_send_result(
         "Test Talent", "Test Project", "Test Casting Group",

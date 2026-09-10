@@ -7219,6 +7219,15 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
 # completion within one worker claim.
 PER_ITEM_SEND_TIMEOUT = 240.0
 MAX_FORWARD_READINESS_ROUNDS = 3
+# Per-attempt wall-clock ceiling for "open the media + get its on-screen
+# Forward control" (2026-09-11 — Sahal Mansuri / Mahindra Thar incident,
+# Take 1 "did not respond in time"). Sized so MAX_SEND_ITEM_ATTEMPTS full
+# attempts of the whole per-item sequence fit inside PER_ITEM_SEND_TIMEOUT
+# with headroom — i.e. so the outer asyncio.wait_for never has to cancel
+# a running attempt (a cancel skips all cleanup, see
+# _return_forward_ui_to_neutral). NOT a bumped timeout: it strictly
+# *caps* a wait that was previously effectively open-ended across rounds.
+_MEDIA_READY_BUDGET_S = 55.0
 # The final "everything sent" marker (Phase 5/7, 2026-08-26) — kept in sync
 # with backend/agents/modules/media_send.py's MARKER_TEXT (the worker
 # process never imports backend modules, so this is duplicated, not
@@ -7370,19 +7379,44 @@ async def _ensure_message_content_rendered(page, message_locator, max_rounds: in
 
 async def _open_media_and_get_forward_button(
     page, group_name: str, source_message_id: str, tile_index: int, is_photo: bool,
+    budget_s: float = _MEDIA_READY_BUDGET_S,
 ) -> Dict[str, Any]:
     """Opens the exact marked source media — re-resolved fresh by identity
     on every attempt, never a stale positional index — and returns once
     the real ON-SCREEN Forward control is confirmed present. A video whose
-    Forward control isn't yet on-screen even after full buffering (proven:
-    full-buffer alone does not guarantee immediate Forward availability)
-    is closed and the SAME message reopened, up to
-    MAX_FORWARD_READINESS_ROUNDS times — never a fixed sleep, never a
-    different message. Photos are proven Forward-ready immediately but run
-    through the identical bounded loop rather than being special-cased, so
-    both media types share one safety net."""
+    Forward control isn't yet on-screen is closed and the SAME message
+    reopened, up to MAX_FORWARD_READINESS_ROUNDS times — never a fixed
+    sleep, never a different message. Photos are proven Forward-ready
+    immediately but run through the identical bounded loop rather than
+    being special-cased, so both media types share one safety net.
+
+    2026-09-11 (real incident — Sahal Mansuri / Mahindra Thar Film 1 & 2,
+    ALL THREE media failed, Take 1 with "WhatsApp Web did not respond in
+    time"): this function's own worst case (3 rounds x [<video> mount +
+    _wait_for_video_readiness(60s, FULL-buffer) + Forward-button poll])
+    could exceed PER_ITEM_SEND_TIMEOUT on a single attempt, so the outer
+    asyncio.wait_for CANCELLED the coroutine mid-step — which skips every
+    cleanup path and leaves a media viewer / Forward dialog open for the
+    NEXT item to inherit (the same class of bug UPLOAD's own download
+    path hit and fixed in 2026-08-23, see _close_viewer). Two changes,
+    neither a "bump the timeout" one:
+      1. A hard wall-clock `budget_s` for THIS whole call — on expiry it
+         returns a clean, accurate reason instead of being cancelled, so
+         the caller's cleanup always runs and the error names the real
+         state ("video Forward control not ready within budget", not
+         "did not respond in time").
+      2. Native Forward does NOT need the video downloaded (WhatsApp
+         forwards it server-side) — only a mounted, metadata-ready
+         <video> whose viewer toolbar has rendered. The FULL-buffer
+         readiness wait (right for UPLOAD's Download menu, not for
+         Forward) is relaxed here to metadata-only + short; the
+         on-screen Forward-control poll below is and always was the real
+         gate."""
     last_reason = "Forward control never appeared"
+    _budget_start = time.monotonic()
     for _round in range(MAX_FORWARD_READINESS_ROUNDS):
+        if time.monotonic() - _budget_start > budget_s:
+            return {"ok": False, "reason": f"video Forward control not ready within {budget_s:.0f}s budget"}
         if is_photo:
             idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
             if idx is None:
@@ -7497,10 +7531,13 @@ async def _open_media_and_get_forward_button(
                 await page.wait_for_timeout(500)
             if not mounted:
                 return {"ok": False, "reason": "no <video> mounted within 15s of click"}
-            await _wait_for_video_readiness(page, min_ready_state=3, timeout_s=60.0)
+            # Metadata-only (min_ready_state=1) + short: native Forward
+            # never needs the clip buffered, only mounted + described.
+            _meta_budget = max(5.0, min(20.0, budget_s - (time.monotonic() - _budget_start)))
+            await _wait_for_video_readiness(page, min_ready_state=1, timeout_s=_meta_budget)
 
         forward_btn = None
-        for _ in range(20):
+        while time.monotonic() - _budget_start < budget_s:
             try:
                 dump = await _evaluate(page, _FORWARD_VIEWER_BUTTONS_JS)
             except Exception:
@@ -7619,121 +7656,200 @@ def _find_remove_caption_button(dump: Optional[Dict[str, Any]]) -> Optional[Dict
     return None
 
 
+def _onscreen(el: Optional[Dict[str, Any]]) -> bool:
+    r = (el or {}).get("rect") or [0, 0, 0, 0]
+    return len(r) == 4 and r[2] > 0 and r[3] > 0 and -50 <= r[1] <= 4000
+
+
+def _center(el: Dict[str, Any]) -> tuple:
+    r = el["rect"]
+    return r[0] + r[2] / 2, r[1] + r[3] / 2
+
+
+def _find_forward_compose_box(dump: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The forward dialog's own "Add a message..." caption box — found
+    INSIDE the active Forward dialog (`_FORWARD_DIALOG_DUMP_JS` already
+    scopes to `dialogs[dialogs.length-1]`), never a page-global
+    `[data-testid="append-message-compose-box"]` selector (2026-09-11 —
+    Sahal Mansuri incident: that single testid is exactly the fragile
+    kind that has gone stale before in this file (media-caption-input-
+    container, data-testid='send'); when WhatsApp renames it EVERY
+    captioned forward — Take 1, Take 2, Introduction alike — fails
+    identically at the caption step, humanized as "Send control could
+    not be confirmed"). The last on-screen editable textbox in the
+    dialog that is not the (by-now-gone) destination search box."""
+    boxes = [
+        tb for tb in ((dump or {}).get("textboxes") or [])
+        if _onscreen(tb) and "search" not in (tb.get("ariaLabel") or "").strip().lower()
+    ]
+    return boxes[-1] if boxes else None
+
+
+def _find_forward_send_button(dump: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The forward dialog's own Send control — matched by identity inside
+    the active dialog (same approach as _find_onscreen_forward_button /
+    _find_remove_caption_button), never sender._find_and_click_send's
+    page-global scan whose per-selector `.first` can lock onto a hidden/
+    background match and skip the real, visible one at `.nth(1)`."""
+    for b in ((dump or {}).get("buttons") or []) + ((dump or {}).get("iconControls") or []):
+        if not _onscreen(b):
+            continue
+        aria = (b.get("ariaLabel") or "").strip().lower()
+        icon = (b.get("dataIcon") or "").strip().lower()
+        # "Send" / "Send 1 selected" / "Send message" ; wds-ic-send-filled / send
+        if aria.startswith("send") or "send" in icon:
+            return b
+    return None
+
+
 _CAPTION_BOX_MAX_ROUNDS = 5
+_FWD_SEND_ROUND_MS = 500
 
 
 async def _enter_forward_caption_and_send(page, caption: str) -> Dict[str, Any]:
-    """Types an optional caption into the forward composer's own "Add a
-    message..." box (data-testid="append-message-compose-box" — proven
-    live 2026-08-25, DIFFERENT from the attach-flow's own
-    media-caption-input-container) then clicks the real Send control via
-    the SAME strict, no-Enter-fallback selector chain sender.py's own send
-    path already uses. Success is defined ONLY as: a known real Send
-    selector was matched AND the click on it succeeded — never a secondary
-    signal like the composer clearing or the dialog disappearing.
+    """Enters the optional caption into the forward preview's own "Add a
+    message..." box and clicks the forward dialog's own Send control.
+    Success is defined ONLY as: a real Send control was located and the
+    click on it succeeded — never a secondary signal like the composer
+    clearing or the dialog disappearing.
 
-    Introduction-vs-Audition-Take native-forward audit (Production fix,
-    2026-09-10 — real recurring incident, e.g. Krishnaa Kilikar/Lava:
-    Audition Take reliably succeeds, Introduction repeatedly fails with
-    "Send control could not be confirmed"). Traced the FULL per-item
-    path for both: source reopen, media-viewer readiness, the Forward
-    button itself, and destination selection are ALL role-agnostic and
-    ALL already confirmed working (the reported failure never reaches
-    the "forward not ready"/"destination selection failed" branches at
-    all) — the concrete, code-level difference is entirely HERE, at the
-    caption/compose-box step, and stems from an already-DOCUMENTED
-    WhatsApp Web behavior (see the 2026-08-27 fix this extends): when
-    the SOURCE message being forwarded already carries its OWN caption
-    (as posted by the talent), WhatsApp's forward preview shows a
-    "Remove caption" (X) control OVER the video instead of our own
-    compose box — our own box never appears until that's cleared.
-    Introduction videos are a fundamentally different kind of content
-    from a raw Audition Take clip (a presentational piece a talent is
-    naturally more likely to caption when originally posting it), so
-    this exact code path is disproportionately exercised by Introduction
-    items even though the underlying mechanism is media-role-agnostic —
-    this is the concrete difference, not a generic "WhatsApp Web can be
-    unreliable" one.
+    2026-09-11 REWRITE (real incident — Sahal Mansuri / Mahindra Thar
+    Film 1 & 2: ALL THREE media failed — Take 1, Take 2, Introduction —
+    Take 2 + Introduction both with "Send control could not be
+    confirmed"). Root cause found by code trace (no live incident logs
+    survived Railway retention): the previous version depended on two
+    FRAGILE, PAGE-GLOBAL, single-`.first` accessors, neither scoped to
+    the active Forward dialog:
+      1. the caption box via a bare `[data-testid="append-message-
+         compose-box"]` — one testid, page-wide; exactly the kind that
+         has silently gone stale before in this file (media-caption-
+         input-container; data-testid='send'). When WhatsApp renames it,
+         EVERY captioned forward — every role alike — fails at the
+         caption step;
+      2. the Send control via sender._find_and_click_send, which scans
+         the WHOLE PAGE and for each selector only ever inspects
+         `loc.first` — a hidden/background match (e.g. the main
+         composer's own send button) shadows the real, visible one in
+         the dialog.
+    "Submission details" kept working throughout precisely because it
+    uses a DIFFERENT surface — the normal conversation composer after a
+    fresh sidebar navigation — not this dialog.
 
-    The PREVIOUS version of this fix had two real weaknesses, both
-    fixed here without touching timeouts or sleep durations: (1) it only
-    ever attempted the removal click ONCE per whole operation — if that
-    single click didn't register (mis-timed, or the control hadn't
-    fully settled yet), nothing else ever tried again; (2) it could only
-    find the removal control if it happened to render as a real
-    <button>/[role="button"] element — see _FORWARD_DIALOG_DUMP_JS's own
-    docstring for the widened, still-strict search this fixes. Fixed:
-    the removal check+click now runs on EVERY bounded round (a real,
-    cheap DOM re-check each time, never a blind extra sleep), and rounds
-    were raised 3 -> _CAPTION_BOX_MAX_ROUNDS=5 to give this genuinely
-    multi-step readiness condition (detect existing caption -> click
-    remove -> wait for OUR box to actually replace it) enough real
-    iterations to complete — still fully bounded (2.5s worst case at
-    500ms/round, vs. the previous 1.5s), never unbounded."""
+    Now everything is resolved from `_FORWARD_DIALOG_DUMP_JS`, which
+    ALREADY scopes to the active dialog (`dialogs[dialogs.length-1]`)
+    and already collects its textboxes / buttons / iconControls — the
+    same by-identity, dialog-scoped approach _find_onscreen_forward_
+    button and _find_remove_caption_button already use successfully. The
+    old page-global accessors remain ONLY as last-resort fallbacks. Each
+    failure now names the exact state it stalled in (FORWARD_DIALOG_
+    READY / CAPTION_STATE / SEND_CONTROL_READY) via `failed_state`, so a
+    future incident report says which transition broke."""
+    compose_box: Optional[Dict[str, Any]] = None
+    send_btn: Optional[Dict[str, Any]] = None
+    remove_click_attempts = 0
+    saw_dialog = False
+    for _round in range(_CAPTION_BOX_MAX_ROUNDS):
+        try:
+            dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+        except Exception:
+            dump = None
+        if not (dump or {}).get("dialogFound"):
+            await page.wait_for_timeout(_FWD_SEND_ROUND_MS)
+            continue
+        saw_dialog = True
+        compose_box = _find_forward_compose_box(dump)
+        send_btn = _find_forward_send_button(dump)
+        remove_btn = _find_remove_caption_button(dump)
+        # Existing-caption gate (2026-08-27/09-10, preserved): when the
+        # SOURCE message carried its OWN caption, WhatsApp shows a
+        # "Remove caption" (X) where our compose box would be. Clear it
+        # (every round, bounded — never a blind extra sleep) and re-check.
+        if caption and compose_box is None and remove_btn is not None:
+            remove_click_attempts += 1
+            logger.info(
+                "SEND_FWD_STATE state=CAPTION_STATE existing_caption round=%d attempt=%d testid=%r",
+                _round, remove_click_attempts, remove_btn.get("testid"),
+            )
+            try:
+                cx, cy = _center(remove_btn)
+                await page.mouse.click(cx, cy, button="left")
+            except Exception:
+                pass
+            await page.wait_for_timeout(_FWD_SEND_ROUND_MS)
+            continue
+        # Ready when we have what THIS item needs: a compose box (if a
+        # caption is to be typed) AND a Send control.
+        if (compose_box is not None or not caption) and send_btn is not None:
+            break
+        await page.wait_for_timeout(_FWD_SEND_ROUND_MS)
+
+    if not saw_dialog:
+        return {"ok": False, "failed_state": "FORWARD_DIALOG_READY",
+                "reason": "forward dialog never appeared for caption/send"}
+
     if caption:
-        last_exc: Optional[Exception] = None
-        box_ready = False
-        remove_click_attempts = 0
-        for _round in range(_CAPTION_BOX_MAX_ROUNDS):
+        typed = False
+        if compose_box is not None:
+            try:
+                cx, cy = _center(compose_box)
+                await page.mouse.click(cx, cy, button="left")
+                await page.keyboard.type(caption, delay=10)
+                typed = True
+            except Exception:
+                typed = False
+        if not typed:
+            # Last-resort legacy accessor (kept only as a fallback now).
             try:
                 box = page.locator('[data-testid="append-message-compose-box"]').first
                 await box.click(timeout=3000)
-                box_ready = True
-                break
+                await box.type(caption, delay=10)
+                typed = True
             except Exception as exc:
-                last_exc = exc
+                # Structural-only diagnostic — never logs textbox VALUES
+                # (a pre-existing caption could be the talent's own words).
                 try:
-                    dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
-                except Exception:
-                    dump = None
-                remove_btn = _find_remove_caption_button(dump)
-                if remove_btn is not None:
-                    remove_click_attempts += 1
-                    logger.info(
-                        "SEND_MEDIA_EXISTING_CAPTION_DETECTED round=%d attempt=%d testid=%r",
-                        _round, remove_click_attempts, remove_btn.get("testid"),
-                    )
-                    try:
-                        cx = remove_btn["rect"][0] + remove_btn["rect"][2] / 2
-                        cy = remove_btn["rect"][1] + remove_btn["rect"][3] / 2
-                        await page.mouse.click(cx, cy, button="left")
-                    except Exception:
-                        pass
-                await page.wait_for_timeout(500)
-        if not box_ready:
-            # Structural-only diagnostic (2026-08-27, widened 2026-09-10)
-            # — buttons'/iconControls' own testid/ariaLabel/dataIcon are
-            # UI chrome labels, never personal content; `textboxes` is
-            # deliberately EXCLUDED from this log line — one of them
-            # could be the pre-existing caption's own TEXT VALUE (the
-            # talent's own words), never logged.
-            try:
-                diag_dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
-            except Exception as diag_exc:
-                diag_dump = {"dump_failed": str(diag_exc)}
-            def _structural(items):
-                return [
-                    {"testid": el.get("testid"), "ariaLabel": el.get("ariaLabel"), "dataIcon": el.get("dataIcon"), "role": el.get("role")}
-                    for el in (items or [])
-                ]
-            safe_diag = {
-                "dialogFound": diag_dump.get("dialogFound"),
-                "buttons": _structural(diag_dump.get("buttons")),
-                "iconControls": _structural(diag_dump.get("iconControls")),
-            }
-            logger.warning(
-                "mark_scan: caption box not found after %d rounds (%d existing-caption removal attempts) — "
-                "structural dialog dump: %r",
-                _CAPTION_BOX_MAX_ROUNDS, remove_click_attempts, safe_diag,
-            )
-            return {"ok": False, "reason": f"caption entry failed: {last_exc}"}
+                    diag_dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+                except Exception as diag_exc:
+                    diag_dump = {"dump_failed": str(diag_exc)}
+                def _structural(items):
+                    return [
+                        {"testid": el.get("testid"), "ariaLabel": el.get("ariaLabel"),
+                         "dataIcon": el.get("dataIcon"), "role": el.get("role")}
+                        for el in (items or [])
+                    ]
+                logger.warning(
+                    "mark_scan: SEND_FWD_STATE state=CAPTION_STATE FAILED after %d rounds "
+                    "(%d existing-caption removal attempts) — structural dialog dump: %r",
+                    _CAPTION_BOX_MAX_ROUNDS, remove_click_attempts,
+                    {"dialogFound": diag_dump.get("dialogFound"),
+                     "buttons": _structural(diag_dump.get("buttons")),
+                     "iconControls": _structural(diag_dump.get("iconControls"))},
+                )
+                return {"ok": False, "failed_state": "CAPTION_STATE",
+                        "reason": f"caption entry failed: forward compose box not found ({exc})"}
+
+    # Send — dialog-scoped control first, page-global strict chain only
+    # as a fallback, never Enter.
+    if send_btn is None:
         try:
-            await box.type(caption, delay=10)
+            dump = await _evaluate(page, _FORWARD_DIALOG_DUMP_JS)
+        except Exception:
+            dump = None
+        send_btn = _find_forward_send_button(dump)
+    if send_btn is not None:
+        try:
+            cx, cy = _center(send_btn)
+            await page.mouse.click(cx, cy, button="left")
+            logger.info("SEND_FWD_STATE state=SEND_CLICK via=dialog aria=%r icon=%r",
+                        send_btn.get("ariaLabel"), send_btn.get("dataIcon"))
+            return {"ok": True, "selector_used": f"dialog:{send_btn.get('ariaLabel') or send_btn.get('dataIcon')}"}
         except Exception as exc:
-            return {"ok": False, "reason": f"caption entry failed: {exc}"}
+            logger.info("mark_scan: dialog-scoped Send click failed (%s) — trying page-global chain", exc)
     selector_used = await sender._find_and_click_send(page, allow_enter_fallback=False)
     if not selector_used:
-        return {"ok": False, "reason": "no real Send control found — refusing to guess"}
+        return {"ok": False, "failed_state": "SEND_CONTROL_READY",
+                "reason": "no real Send control found in the forward dialog — refusing to guess"}
+    logger.info("SEND_FWD_STATE state=SEND_CLICK via=page-global selector=%s", selector_used)
     return {"ok": True, "selector_used": selector_used}
 
 
@@ -7789,6 +7905,40 @@ async def _ensure_forward_dialog_closed(page) -> bool:
     except Exception:
         dump = None
     return not (dump or {}).get("dialogFound")
+
+
+async def _return_forward_ui_to_neutral(page) -> Dict[str, Any]:
+    """Force the page back to a neutral state — NO open media viewer, NO
+    open Forward dialog — regardless of how the item that just ran ended
+    (sent, failed, or was CANCELLED by the outer per-item asyncio.wait_for
+    timeout, which runs no except/finally inside the attempt itself).
+
+    2026-09-11 (Sahal Mansuri / Mahindra Thar: Take 1 timed out, then
+    Take 2 AND Introduction both failed) — direct in-repo precedent:
+    UPLOAD's own download path had the identical "first item opens+works,
+    every later item then fails on the leftover full-screen overlay" bug
+    and fixed it with an explicit _close_viewer (2026-08-23). SEND's
+    native-forward path never had an equivalent guaranteed teardown, so
+    one slow/stuck item cascaded into all the rest. Bounded, best-effort,
+    never raises — a cleanup step must never itself fail an item."""
+    result = {"dialog_closed": True, "viewer_closed": True}
+    try:
+        result["dialog_closed"] = await _ensure_forward_dialog_closed(page)
+    except Exception as exc:
+        result["dialog_closed"] = f"error: {exc}"
+    try:
+        if await page.locator("video").count() > 0:
+            try:
+                vd = await _evaluate(page, _FORWARD_VIEWER_BUTTONS_JS)
+            except Exception:
+                vd = {"buttons": []}
+            closed = await _close_viewer(page, vd)
+            result["viewer_closed"] = closed.get("closed", False)
+    except Exception as exc:
+        result["viewer_closed"] = f"error: {exc}"
+    if result["dialog_closed"] is False or result["viewer_closed"] is False:
+        logger.info("SEND_FWD_STATE state=RETURN_TO_NEUTRAL result=%r", result)
+    return result
 
 
 async def _capture_destination_baseline(page, destination_group: str) -> Dict[str, Any]:
@@ -7989,7 +8139,13 @@ async def _send_one_target_native_forward_attempt(
         reason = send_result.get("reason")
         if not closed:
             reason = f"{reason} (also: Forward dialog would not close afterward)"
-        return {"ok": False, "source_message_id": sm_id, "error": f"send failed: {reason}"}
+        # Carry the exact stalled state (FORWARD_DIALOG_READY /
+        # CAPTION_STATE / SEND_CONTROL_READY) into the error string so
+        # _humanize_media_send_error (backend) can report the real
+        # failure, not a catch-all "Send control could not be confirmed".
+        fs = send_result.get("failed_state")
+        prefix = f"send failed [{fs}]" if fs else "send failed"
+        return {"ok": False, "source_message_id": sm_id, "error": f"{prefix}: {reason}"}
     logger.info("SEND_MEDIA_FORWARD_SENT item=%s source_message_id=%s selector=%s",
                 item_label, sm_id, send_result.get("selector_used"))
 
@@ -8087,6 +8243,12 @@ async def _send_one_target_native_forward(
     )
     logger.info("SEND_MEDIA_START " + log_fields, *log_args)
     last_result: Dict[str, Any] = {"ok": False, "source_message_id": target.get("source_message_id"), "error": "never attempted"}
+    # Own the whole per-item budget here so the outer asyncio.wait_for in
+    # _run_send NEVER has to cancel a running attempt (a cancel skips
+    # every cleanup — see _return_forward_ui_to_neutral). Stop starting a
+    # new attempt once there isn't a realistic full attempt's worth of
+    # budget left; the last real error is returned as-is (2026-09-11).
+    overall_deadline = time.monotonic() + PER_ITEM_SEND_TIMEOUT - 20.0
     for attempt_num in range(1, MAX_SEND_ITEM_ATTEMPTS + 1):
         if attempt_num > 1:
             logger.info(
@@ -8095,6 +8257,12 @@ async def _send_one_target_native_forward(
             )
             if attempt_num == MAX_SEND_ITEM_ATTEMPTS:
                 await page.wait_for_timeout(SEND_ITEM_RECOVERY_BACKOFF_MS)
+        if attempt_num > 1 and time.monotonic() + _MEDIA_READY_BUDGET_S > overall_deadline:
+            logger.info(
+                "SEND_MEDIA_BUDGET_EXHAUSTED " + log_fields + " attempt=%d/%d — not starting (no full attempt's budget left)",
+                *log_args, attempt_num, MAX_SEND_ITEM_ATTEMPTS,
+            )
+            break
         t_attempt = time.monotonic()
         last_result = await _send_one_target_native_forward_attempt(page, group_name, target, item_label, source_type)
         elapsed_ms = int((time.monotonic() - t_attempt) * 1000)
@@ -8261,6 +8429,15 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
             result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"timed out after {PER_ITEM_SEND_TIMEOUT}s"}
         except Exception as exc:
             result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"item failed: {exc}"}
+        finally:
+            # Guarantee the NEXT item (and the form) never inherits a
+            # leftover media viewer / Forward dialog from this one —
+            # including when the wait_for above CANCELLED a stuck item
+            # mid-step (no except/finally inside the attempt runs then).
+            # This is the cascade fix for the Sahal Mansuri incident
+            # (2026-09-11): a safety net around the state machine, not a
+            # substitute for the dialog-scoped caption/send fix.
+            await _return_forward_ui_to_neutral(page)
         results.append(result)
         logger.info(
             "%s item=%s source_message_id=%s role=%s%s",

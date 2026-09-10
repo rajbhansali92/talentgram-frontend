@@ -264,12 +264,27 @@ def _humanize_media_send_error(raw_error: str) -> str:
     runs, so nothing diagnostic is lost, only kept out of the chat."""
     logger.info("media_assignment_worker: raw SEND item error: %s", raw_error)
     low = (raw_error or "").lower()
+    # Native-forward failure states (2026-09-11 — Sahal Mansuri / Mahindra
+    # Thar: the previous catch-all "send failed" bucket reported "Send
+    # control could not be confirmed" even when the real failure was the
+    # video never becoming forward-ready or the compose box never
+    # appearing). mark_scan.py now tags the exact stalled state.
+    if "video forward control not ready" in low or "forward control not ready" in low:
+        return "could not be sent because WhatsApp Web could not make the video's Forward control ready in time. Please try SEND again."
     if "tile click failed" in low or "forward not ready" in low or "no <video> mounted" in low or "no clickable" in low or "no longer found in window" in low or "message not found in current window" in low:
         return "could not be sent because WhatsApp Web could not reopen the marked media. Please re-mark the media and try SEND again."
     if "destination selection failed" in low:
         return "could not be sent because the destination group could not be selected in WhatsApp Web. Please try SEND again."
+    if "[forward_dialog_ready]" in low or "forward dialog never appeared" in low:
+        return "could not be sent because WhatsApp Web's Forward dialog did not open. Please try SEND again."
+    if "[caption_state]" in low or "compose box" in low:
+        return "could not be sent because WhatsApp Web's forward caption box did not appear. Please try SEND again."
+    if "[send_control_ready]" in low or "no real send control" in low:
+        return "could not be sent because WhatsApp Web's Send control could not be confirmed. Please try SEND again."
     if "send failed" in low or "forward click failed" in low:
         return "could not be sent because WhatsApp Web's Send control could not be confirmed. Please try SEND again."
+    if "send unverified" in low:
+        return "was forwarded but WhatsApp Web could not confirm it arrived in the destination group. Please check the group and try SEND again if it is missing."
     if "source group not open" in low or "source message not open" in low:
         return "could not be sent because the source WhatsApp chat could not be opened. Please try SEND again."
     if "timed out after" in low:

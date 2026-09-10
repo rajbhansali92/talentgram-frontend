@@ -1291,6 +1291,18 @@ async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: s
     return {"ok": False, "reason": "unreachable", "restoration_log": restoration_log}
 
 
+# Bounded "the jump-scroll has settled" poll (Production fix, 2026-09-10)
+# — replaces a blind fixed 1000ms wait in _jump_to_quoted_message. Two
+# consecutive reads of the same centered-message id is the real
+# readiness signal; ~3.2s ceiling so a chat that never fully settles
+# still proceeds best-effort rather than hanging. Not a "bigger sleep":
+# the old fixed wait was frequently BOTH too short (read a message
+# mid-scroll) and, on a fast settle, wasted time — a poll is strictly
+# better on both.
+_JUMP_SETTLE_MAX_ROUNDS = 8
+_JUMP_SETTLE_INTERVAL_MS = 400
+
+
 async def _jump_to_quoted_message(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
     """Shared low-level primitive (Production fix — MARK/SEND
     source-resolution): clicks a reply's own quoted-message block (a real
@@ -1303,7 +1315,31 @@ async def _jump_to_quoted_message(page, group_name: str, reply_data_id: str) -> 
     (_resolve_quoted_jump, unchanged below) and the single-media fallback
     (_resolve_single_media_via_jump) — the click-and-observe mechanism is
     identical either way; only what each caller does with the jumped-to
-    message differs."""
+    message differs.
+
+    2026-09-10 (real UPLOAD incident — Ishani Kouli / "SINGLETON with
+    shruti hassan": "MARK audition take 1" reported MEDIA RESOLUTION
+    FAILED while "MARK introduction video" from the SAME group in the
+    SAME scan resolved fine). Two concrete bugs, both here, both fixed:
+      1. The blind fixed 1000ms wait after the click was too short for a
+         jump to a message far back in history (an older take's source
+         is more likely to be beyond the render tail than a
+         more-recently-posted introduction's) — the code then read
+         whatever was mid-scroll. Now a bounded settle poll (see above).
+      2. It re-located the just-jumped-to message via
+         _find_message_index_by_data_id, whose VERY FIRST action is
+         _scroll_to_true_bottom — which scrolls the chat away from the
+         exact spot WhatsApp's own jump just landed on, forcing a
+         fragile re-discovery of a far-back message from the tail and,
+         when that "succeeded", often reading a virtualization STUB
+         (outer HTML ~222 bytes, no media) whose _smallest_hash /
+         _media_type both come back None — exactly what made the
+         caller's hash/media-type verification fail and the mark get
+         reported unresolved. Now the message is addressed DIRECTLY by
+         its own data-id where the jump already put it (no scroll away),
+         then hydrated with the same bounded scroll-then-poll-for-real-
+         content primitive SEND's own tile path already uses
+         (_ensure_message_content_rendered) before its HTML is read."""
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
     located = await _wait_for_quoted_message_block(page, group_name, reply_data_id, full_sel)
@@ -1314,17 +1350,38 @@ async def _jump_to_quoted_message(page, group_name: str, reply_data_id: str) -> 
         await quoted.first.click(timeout=10000)
     except Exception as exc:
         return {"ok": False, "reason": f"click on quoted-message failed: {exc}"}
-    await page.wait_for_timeout(1000)
-    try:
-        centered = await _evaluate(page, _CENTERED_MESSAGE_JS)
-    except Exception as exc:
-        return {"ok": False, "reason": f"centered-message evaluate failed: {exc}"}
+
+    centered: Optional[Dict[str, Any]] = None
+    prev_id: Optional[str] = None
+    for _ in range(_JUMP_SETTLE_MAX_ROUNDS):
+        await page.wait_for_timeout(_JUMP_SETTLE_INTERVAL_MS)
+        try:
+            centered = await _evaluate(page, _CENTERED_MESSAGE_JS)
+        except Exception as exc:
+            return {"ok": False, "reason": f"centered-message evaluate failed: {exc}"}
+        cur_id = (centered or {}).get("dataId")
+        if cur_id and cur_id == prev_id:
+            break
+        prev_id = cur_id
     if not centered or not centered.get("dataId"):
         return {"ok": False, "reason": "no message found near viewport center after jump", "centered": centered}
-    jumped_idx = await _find_message_index_by_data_id(page, group_name, centered["dataId"])
-    if jumped_idx is None:
-        return {"ok": False, "reason": "jumped-to message no longer found in window", "data_id": centered["dataId"]}
-    jumped_message = page.locator(full_sel).nth(jumped_idx)
+
+    # Address the jumped-to message DIRECTLY, exactly where WhatsApp's
+    # own jump already scrolled it — never via _find_message_index_by_
+    # data_id (which would _scroll_to_true_bottom first, throwing the
+    # jump's own positioning away). WhatsApp renders each message with
+    # BOTH data-testid="conv-msg-<id>" and data-id="<id>" (the existing
+    # _find_message_index_by_data_id / _CENTERED_MESSAGE_JS pair already
+    # relies on that equivalence).
+    jumped_message = page.locator(f'{scope} [data-testid="conv-msg-{centered["dataId"]}"]').first
+    try:
+        if await jumped_message.count() == 0:
+            return {"ok": False, "reason": "jumped-to message not present in the DOM after jump", "data_id": centered["dataId"]}
+    except Exception as exc:
+        return {"ok": False, "reason": f"jumped-to message lookup failed: {exc}", "data_id": centered["dataId"]}
+
+    await _ensure_message_content_rendered(page, jumped_message)
+
     try:
         jumped_html = await jumped_message.evaluate("(el) => el.outerHTML", timeout=10000)
     except Exception as exc:
@@ -7277,10 +7334,12 @@ async def _ensure_message_content_rendered(page, message_locator, max_rounds: in
     tiles present, stable every round after). Never a blind fixed sleep:
     scrolls once, then polls (bounded) for the message's own outerHTML to
     stop being a bare stub, since a truly-empty single (non-media) message
-    would never gain the same tile testids to poll for instead. Isolated
-    entirely to this SEND code path — never touches
-    _resolve_video_tile_locator/_find_message_index_by_data_id or any
-    other function UPLOAD's _run_download also calls."""
+    would never gain the same tile testids to poll for instead. Read-only
+    (scroll + bounded poll, no state change), so it is also safe to reuse
+    from the shared _jump_to_quoted_message hydration step (2026-09-10) —
+    it still never touches _resolve_video_tile_locator/
+    _find_message_index_by_data_id or any other function UPLOAD's
+    _run_download also calls."""
     try:
         await message_locator.scroll_into_view_if_needed(timeout=5000)
     except Exception:

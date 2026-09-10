@@ -595,6 +595,116 @@ def test_validate_candidates_unresolved_mark_reports_failure_not_guess():
 
 
 # ---------------------------------------------------------------------------
+# Agent identity is NEVER the talent identity (2026-09-10 — real UPLOAD
+# incident "Ishani Kouli x Talentgram Agency" / "SINGLETON with shruti
+# hassan": the MEDIA RESOLUTION FAILED report said "correctly marked for
+# Gunwanti", which reads as if Gunwanti — the agent's own WhatsApp
+# identity — were the talent. It never is.)
+# ---------------------------------------------------------------------------
+async def test_validate_candidates_agent_identity_never_becomes_talent_identity():
+    """Agent = "Gunwanti Talentgram Team Agent" (the @mention target AND
+    the visible sender of the MARK reply). Talent = "Ishani Kouli" (the
+    caller-resolved, email-verified UPLOAD target). Every resulting
+    assignment must carry talent_id = the Ishani Kouli id passed in —
+    NEVER anything derived from mention_lid or source_sender."""
+    ishani_id = "talent-ishani-kouli-001"
+    candidates = [
+        # both marks: agent is the @mention target and the sender WhatsApp
+        # shows on the reply — exactly the screenshot.
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark singleton audition take 1",
+              source_message_id="src-take1", media_type="video", sender="Gunwanti Talentgram Team Agent"),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark singleton introduction video",
+              source_message_id="src-intro", media_type="video", sender="Gunwanti Talentgram Team Agent"),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID,
+        requested_project_id="p-singleton", requested_project_label="SINGLETON with shruti hassan",
+        projects=[{"id": "p-singleton", "label": "SINGLETON with shruti hassan"}],
+        talent_id=ishani_id,
+    )
+    assert outcome.ok, outcome
+    assert len(outcome.assignments) == 2, outcome.assignments
+    slots = {(a["media_role"], a["take_number"]) for a in outcome.assignments}
+    assert slots == {("take", 1), ("intro", None)}
+    # Take 1 and Introduction are independently addressable, distinct sources.
+    srcs = {a["resolved_source_message_id"] for a in outcome.assignments}
+    assert srcs == {"src-take1", "src-intro"}
+
+    # SEND target build: talent_id is stamped from the caller-resolved
+    # value, NEVER from the mark's mention_lid / source_sender.
+    send_targets, _ = ma.build_send_targets(
+        outcome.assignments, set(), "SINGLETON x Talentgram Agency", ishani_id, "p-singleton",
+    )
+    for t in send_targets:
+        assert t["talent_id"] == ishani_id, t
+        assert t["talent_id"] not in (GUNWANTI_LID, "Gunwanti Talentgram Team Agent")
+        # the agent mention survives only as opaque metadata, never identity
+        assert t["mark_target_contact_id"] == GUNWANTI_LID
+
+    # Persisted assignment doc: same guarantee — talent_id from the
+    # caller, agent name kept only as source_sender metadata.
+    doc = await ma.record_assignment(
+        talent_id=ishani_id, project_id="p-singleton", normalized_project="singleton",
+        group_name="Ishani Kouli x Talentgram Agency", group_id=None,
+        mark=outcome.assignments[0], created_by="test",
+    )
+    try:
+        assert doc["talent_id"] == ishani_id
+        assert doc["talent_id"] not in (GUNWANTI_LID, "Gunwanti Talentgram Team Agent")
+        assert doc["source_sender"] == "Gunwanti Talentgram Team Agent"  # metadata only
+    finally:
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_one({"assignment_id": doc["assignment_id"]})
+
+
+def test_report_unresolved_names_real_talent_never_presents_agent_as_talent():
+    """orch._report_unresolved for the exact screenshot: Take 1 unresolved,
+    talent = Ishani Kouli. The report must name Ishani Kouli as the talent
+    and must NOT say the media was 'marked for Gunwanti' (or otherwise
+    imply the agent is the talent)."""
+    report = orch._report_unresolved(
+        "Ishani Kouli", "SINGLETON with shruti hassan",
+        [{"media_role": "take", "take_number": 1}],
+    )
+    assert "MEDIA RESOLUTION FAILED" in report
+    assert "Talent: Ishani Kouli" in report
+    assert "SINGLETON with shruti hassan Take 1" in report
+    assert "No upload was performed" in report
+    assert "Gunwanti" not in report
+    assert "marked for Gunwanti" not in report
+
+
+async def test_orchestrator_unresolved_report_names_ishani_not_gunwanti():
+    """Full _process_scan_done for the screenshot scenario end-to-end:
+    Agent-mentioned MARK, Take 1 unresolvable at scan time, talent =
+    Ishani Kouli -> the persisted final report names Ishani Kouli, never
+    Gunwanti, as the talent."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"SINGLETON {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Ishani Kouli {tag}"
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    req_id = await _insert_scan_done(
+        talent_id=talent_id, talent_label=talent_label, project_id=project_id, project_label=project_label,
+        group_name=f"{talent_label} x Talentgram Agency",
+        candidates=[
+            {**_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 1",
+                     source_message_id="x", media_type="video", sender="Gunwanti Talentgram Team Agent"),
+             "resolved_source_message_id": None},
+        ],
+    )
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    try:
+        assert await orch._process_scan_done()
+        final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert final["status"] == ma.STATUS_FINISHED
+        assert "MEDIA RESOLUTION FAILED" in final["report"]
+        assert f"Talent: {talent_label}" in final["report"]
+        assert "Gunwanti" not in final["report"]
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+# ---------------------------------------------------------------------------
 # `upload - talent - project` — immediate ACK + scan-request creation, and
 # the never-guess error paths.
 # ---------------------------------------------------------------------------

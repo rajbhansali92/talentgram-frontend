@@ -2746,7 +2746,20 @@ def main():
     class _FakeJumpTargetMessage:
         def __init__(self, html):
             self._html = html
+        @property
+        def first(self):
+            return self
+        async def count(self):
+            return 1
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
         async def evaluate(self, js, timeout=None):
+            # _ensure_message_content_rendered (2026-09-10 hydration fix)
+            # polls outerHTML.length; every fixture HTML here is already
+            # well past the stub threshold, so hydration completes on the
+            # first round.
+            if "outerHTML.length" in js:
+                return len(self._html)
             return self._html
 
     class _FakeJumpLocatorRoot:
@@ -2760,7 +2773,13 @@ def main():
             self._by_idx = by_idx
             self.waits = []
         def locator(self, sel):
-            return _FakeJumpLocatorRoot(self._by_idx)
+            # The jump fix (2026-09-10) addresses the jumped-to message
+            # DIRECTLY by its own data-testid="conv-msg-<id>" instead of
+            # via _find_message_index_by_data_id (which scrolls away).
+            # The generic tail selector uses ^= ; the direct one does not.
+            if "^=" in sel:
+                return _FakeJumpLocatorRoot(self._by_idx)
+            return self._by_idx[1]
         async def wait_for_timeout(self, ms):
             self.waits.append(ms)
 
@@ -3262,6 +3281,10 @@ def main():
         3: _FakeJumpTargetMessage(jumped_intro_100),
     }
     reply_to_jumped_100 = {"REPLY100A": "JUMPED100A", "REPLY100B": "JUMPED100B"}
+    # The jump fix (2026-09-10) addresses the jumped-to message DIRECTLY by
+    # its own data-testid="conv-msg-<id>" (no scroll-away re-discovery), so
+    # the fake page must resolve that direct selector to the right target.
+    jump_target_by_id_100 = {"JUMPED100A": by_idx_100[1], "JUMPED100B": by_idx_100[3]}
     find_idx_calls_100: list = []
 
     async def _fake_find_idx_100(page, group_name, data_id):
@@ -3285,7 +3308,12 @@ def main():
         def __init__(self):
             pass
         def locator(self, sel):
-            return _FakeJumpLocatorRoot(by_idx_100)
+            # generic tail selector uses ^= ; the direct jumped-to lookup
+            # names one exact conv-msg-<id>.
+            if "^=" in sel:
+                return _FakeJumpLocatorRoot(by_idx_100)
+            data_id = sel.split("conv-msg-", 1)[1].split('"')[0]
+            return jump_target_by_id_100[data_id]
         async def wait_for_timeout(self, ms):
             pass
 
@@ -4939,6 +4967,260 @@ def main():
     # proof) by test 121/126/122/130; 14 (genuine failure -> ATTENTION
     # REQUIRED) by test 111/120/134 — never duplicated here.
     print("(Requirements 1/4/5/7/8/12/13/14 of this audit's test list: covered by existing tests 104-107/111/120-122/125/126/130/131/134, not duplicated)")
+
+    # ------------------------------------------------------------------
+    # 139-143: REAL UPLOAD INCIDENT (2026-09-10) — "Ishani Kouli x
+    # Talentgram Agency" group, talent Ishani Kouli, project "SINGLETON
+    # with shruti hassan". Two genuine marks, both replies to the talent's
+    # own videos:
+    #     MARK audition take 1 for singleton
+    #     MARK introduction video for singleton
+    # UPLOAD reported MEDIA RESOLUTION FAILED for "Take 1" only —
+    # Introduction resolved fine in the SAME scan. Root cause was entirely
+    # inside _jump_to_quoted_message, two concrete bugs:
+    #   (1) a blind fixed 1000ms wait after clicking the quoted block —
+    #       too short for a jump to a message far back in history (an
+    #       older take's source is likelier beyond the render tail than a
+    #       freshly-posted introduction's) — so it read whatever was
+    #       mid-scroll;
+    #   (2) it re-located the jumped-to message via
+    #       _find_message_index_by_data_id, whose FIRST action is
+    #       _scroll_to_true_bottom — scrolling the chat AWAY from where
+    #       WhatsApp's own jump just landed, forcing a fragile
+    #       re-discovery that frequently read a virtualization STUB
+    #       (outerHTML ~200 bytes, no media) -> _smallest_hash /
+    #       _media_type both None -> caller's verification failed -> mark
+    #       reported unresolved.
+    # These tests drive the REAL _jump_to_quoted_message end-to-end
+    # through _run_scan (only _evaluate / _find_message_index_by_data_id /
+    # _dump_window / sender are faked) and reproduce BOTH bug conditions.
+    # ------------------------------------------------------------------
+    class _FakeScanSenderIshani:
+        async def _open_group_chat(self, page, group_name):
+            return "OPENED"
+        async def _resolve_scope(self, page):
+            return "#main"
+
+    class _FakeHydratingTargetMessage:
+        """Models bug (2): the jumped-to message initially renders as a
+        virtualization stub (no media in its outerHTML); only a
+        scroll_into_view_if_needed brings its real content in. The fix's
+        _ensure_message_content_rendered hydration call is what makes this
+        resolve — remove that call and .evaluate('...outerHTML') below
+        still returns the media-less stub, _smallest_hash comes back None,
+        and hash re-verification fails exactly as in production."""
+        def __init__(self, full_html, stub_html, hydrates=True):
+            self._full = full_html
+            self._stub = stub_html
+            self._hydrates = hydrates
+            self._hydrated = False
+            self.scroll_calls = 0
+        @property
+        def first(self):
+            return self
+        async def count(self):
+            return 1
+        async def scroll_into_view_if_needed(self, timeout=None):
+            self.scroll_calls += 1
+            if self._hydrates:
+                self._hydrated = True
+        async def evaluate(self, js, timeout=None):
+            html = self._full if self._hydrated else self._stub
+            if "outerHTML.length" in js:
+                return len(html)
+            return html
+
+    take1_blob_139 = "ISHANITAKE1THUMBHASHBYTESTABLE" * 4          # 116 chars, letters only
+    take1_poster_139 = "ISHANITAKE1POSTERBLOBLARGERANDVOLATILE" * 6  # clearly larger -> never the "smallest"
+    take1_src_full_139 = (
+        '<div data-id="TAKE1_SRC_139" data-testid="conv-msg-TAKE1_SRC_139">'
+        '<span data-testid="author">Ishani Kouli Talent</span>'
+        '<div data-testid="video-content">'
+        '<div style="background-image: url(&quot;data:image/jpeg;base64,' + take1_blob_139 + '&quot;);"></div>'
+        '<div style="background-image: url(&quot;data:image/jpeg;base64,' + take1_poster_139 + '&quot;);"></div>'
+        '</div></div>'
+    )
+    take1_src_stub_139 = '<div data-id="TAKE1_SRC_139" data-testid="conv-msg-TAKE1_SRC_139"></div>'
+    take1_quoted_139 = (
+        '<div data-testid="quoted-message"><span data-testid="author">Ishani Kouli Talent</span>'
+        '<div data-testid="video-content">'
+        '<div style="background-image: url(&quot;data:image/jpeg;base64,' + take1_blob_139 + '&quot;);"></div>'
+        '</div></div>'
+    )
+
+    intro_blob_139 = "ISHANIINTRODUCTIONVIDEOTHUMBSTABLE" * 4
+    intro_src_139 = (
+        '<div data-id="INTRO_SRC_139" data-testid="conv-msg-INTRO_SRC_139">'
+        '<span data-testid="author">Ishani Kouli Talent</span>'
+        '<div data-testid="video-content">'
+        '<div style="background-image: url(&quot;data:image/jpeg;base64,' + intro_blob_139 + '&quot;);"></div>'
+        '</div></div>'
+    )
+    intro_quoted_139 = (
+        '<div data-testid="quoted-message"><span data-testid="author">Ishani Kouli Talent</span>'
+        '<div data-testid="video-content">'
+        '<div style="background-image: url(&quot;data:image/jpeg;base64,' + intro_blob_139 + '&quot;);"></div>'
+        '</div></div>'
+    )
+    take1_reply_139 = REPLY_TO_PHOTO_HTML.replace("3EB0CAC0901DAD51217B30", "REPLY_TAKE1_139").replace(
+        "mark spike take 1", "mark audition take 1 for singleton",
+    )
+    intro_reply_139 = REPLY_TO_PHOTO_HTML.replace("3EB0CAC0901DAD51217B30", "REPLY_INTRO_139").replace(
+        "mark spike take 1", "mark introduction video for singleton",
+    )
+    # The window _dump_window captured: Introduction's ORIGINAL video is
+    # still in the render tail (resolves via the cheap in-window hash) —
+    # Take 1's older original has scrolled out (only the live jump can
+    # reach it). This is the exact screenshot asymmetry.
+    window_139 = [
+        {"messageHtml": intro_src_139, "quotedHtml": None},
+        {"messageHtml": intro_reply_139, "quotedHtml": intro_quoted_139},
+        {"messageHtml": take1_reply_139, "quotedHtml": take1_quoted_139},
+    ]
+
+    find_idx_calls_139: list = []
+    centered_reads_139: list = ["MIDSCROLL_A_139", "MIDSCROLL_B_139", "TAKE1_SRC_139", "TAKE1_SRC_139"]
+
+    async def _fake_find_idx_139(page, group_name, data_id):
+        find_idx_calls_139.append(data_id)
+        return {"REPLY_TAKE1_139": 0}.get(data_id)
+
+    def _make_fake_evaluate_139(reads):
+        seq = list(reads)
+        async def _fake_evaluate(p, js, arg=None, timeout=10.0):
+            # models bug (1): the centered message keeps changing while
+            # the jump-scroll is still animating, then stabilises on the
+            # real target. The fix waits for two equal consecutive reads
+            # instead of trusting the first (mid-scroll) one.
+            return {"dataId": seq.pop(0) if len(seq) > 1 else seq[0]}
+        return _fake_evaluate
+
+    class _FakeIshaniPage:
+        def __init__(self, target):
+            self._target = target
+            self._reply = _FakeJumpReplyMessage(_FakeJumpQuotedBlock(count=1))
+            self.waits: list = []
+        def locator(self, sel):
+            if "^=" in sel:
+                return _FakeJumpLocatorRoot({0: self._reply})
+            assert 'conv-msg-TAKE1_SRC_139"]' in sel, sel  # addressed DIRECTLY by data-id
+            return self._target
+        async def wait_for_timeout(self, ms):
+            self.waits.append(ms)
+
+    orig_sender_139 = mark_scan.sender
+    orig_find_idx_139 = mark_scan._find_message_index_by_data_id
+    orig_evaluate_139 = mark_scan._evaluate
+    orig_dump_window_139 = mark_scan._dump_window
+
+    async def _fake_dump_window_139(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_139
+
+    target_139 = _FakeHydratingTargetMessage(take1_src_full_139, take1_src_stub_139, hydrates=True)
+    mark_scan.sender = _FakeScanSenderIshani()
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_139
+    mark_scan._evaluate = _make_fake_evaluate_139(centered_reads_139)
+    mark_scan._dump_window = _fake_dump_window_139
+    try:
+        scan_result_139 = asyncio.run(mark_scan._run_scan(page=_FakeIshaniPage(target_139), req={"group_name": "Ishani Kouli x Talentgram Agency"}))
+    finally:
+        mark_scan.sender = orig_sender_139
+        mark_scan._find_message_index_by_data_id = orig_find_idx_139
+        mark_scan._evaluate = orig_evaluate_139
+        mark_scan._dump_window = orig_dump_window_139
+
+    cands_139 = scan_result_139.get("candidates") or []
+    by_text_139 = {c["mark_text"]: c for c in cands_139}
+    assert len(cands_139) == 2, cands_139
+    take1_139 = by_text_139["mark audition take 1 for singleton"]
+    intro_139 = by_text_139["mark introduction video for singleton"]
+
+    # 139 — THE screenshot regression: Take 1 now resolves to its EXACT
+    # source message, via the live-jump fallback, never left unresolved.
+    assert take1_139["resolved_source_message_id"] == "TAKE1_SRC_139", take1_139
+    assert take1_139["resolved_via_jump_fallback"] is True, take1_139
+    assert take1_139["source_media_type"] == "video", take1_139
+    print("139. Ishani Kouli / SINGLETON 'MARK audition take 1' -> original video scrolled out of the render window -> real _jump_to_quoted_message resolves the EXACT source (TAKE1_SRC_139), never left unresolved (the exact screenshot failure)")
+
+    # 140 — it resolved to the RIGHT message, not a mid-scroll one. The
+    # settle poll consumed more than one centered read and only trusted
+    # the id that was stable across two consecutive reads.
+    assert take1_139["resolved_source_message_id"] not in ("MIDSCROLL_A_139", "MIDSCROLL_B_139"), take1_139
+    assert take1_139["resolved_source_message_id"] == "TAKE1_SRC_139"
+    print("140. bug (1) fixed: the jump settle poll never trusts a message read mid-scroll -> only the id stable across consecutive reads (TAKE1_SRC_139) is accepted, never MIDSCROLL_*")
+
+    # 141 — bug (2) fixed: the jumped-to message is addressed DIRECTLY by
+    # its own data-id, never re-discovered via _find_message_index_by_
+    # data_id (which would _scroll_to_true_bottom away from the landing
+    # spot). That function was only ever called for the REPLY lookup.
+    assert find_idx_calls_139 == ["REPLY_TAKE1_139"], find_idx_calls_139
+    assert "TAKE1_SRC_139" not in find_idx_calls_139, find_idx_calls_139
+    assert target_139.scroll_calls >= 1, "the direct locator path must hydrate the stub via scroll_into_view_if_needed"
+    print("141. bug (2) fixed: jumped-to message addressed directly by data-id + hydrated in place (scroll_calls>=1); _find_message_index_by_data_id never re-invoked for the source (no scroll-away)")
+
+    # 142 — the stub was actually hydrated before its HTML was read: hash
+    # re-verification against the quoted block's own thumbnail passed,
+    # which is only possible if the FULL (media-bearing) outerHTML was
+    # read, not the stub.
+    assert mark_scan._smallest_hash(take1_src_full_139) == mark_scan._smallest_hash(take1_quoted_139), "fixture sanity: source and quote share the smallest thumbnail hash"
+    assert mark_scan._smallest_hash(take1_src_stub_139) is None, "fixture sanity: the stub has no thumbnail hash at all"
+    assert take1_139["resolved_source_message_id"] == "TAKE1_SRC_139", "resolved only because the hydrated (not stub) HTML re-verified against the quoted hash"
+    print("142. the virtualization stub was hydrated before its HTML was read -> hash of the jumped-to message re-verified byte-for-byte against the mark's own quoted thumbnail (stub alone would have failed this check)")
+
+    # 143 — identity isolation at the scan layer: Take 1 and Introduction
+    # resolve to two DISTINCT exact sources, each independently
+    # addressable, and the recorded source_sender is the TALENT
+    # ("Ishani Kouli Talent") off the jumped-to message itself — never the
+    # agent, never the @mention target. Introduction resolved via the
+    # cheap in-window path (no jump), proving the asymmetry is real.
+    assert intro_139["resolved_source_message_id"] == "INTRO_SRC_139", intro_139
+    assert intro_139["resolved_via_jump_fallback"] is False, intro_139
+    assert take1_139["resolved_source_message_id"] != intro_139["resolved_source_message_id"], "Take 1 and Introduction must resolve to two distinct exact sources"
+    assert take1_139["source_sender"] == "Ishani Kouli Talent", take1_139
+    print("143. Take 1 (jump) and Introduction (cheap in-window) resolve to two DISTINCT exact sources, independently addressable; source_sender is the talent off the source message itself, never the agent")
+
+    # 144 — the fix never GUESSES. If the jumped-to message genuinely
+    # never hydrates within the bounded round budget (stays a media-less
+    # stub), hash re-verification fails and the mark stays honestly
+    # unresolved — exactly the "MEDIA RESOLUTION FAILED, no upload
+    # performed" outcome, never a wrong/substituted source. (This is the
+    # correct, safe behaviour for the residual case; the settle poll +
+    # in-place hydration make it rare, they do not paper over it.)
+    find_idx_calls_144: list = []
+
+    async def _fake_find_idx_144(page, group_name, data_id):
+        find_idx_calls_144.append(data_id)
+        return {"REPLY_TAKE1_139": 0}.get(data_id)
+
+    window_144 = [
+        {"messageHtml": intro_src_139, "quotedHtml": None},
+        {"messageHtml": intro_reply_139, "quotedHtml": intro_quoted_139},
+        {"messageHtml": take1_reply_139, "quotedHtml": take1_quoted_139},
+    ]
+
+    async def _fake_dump_window_144(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_144
+
+    target_144 = _FakeHydratingTargetMessage(take1_src_full_139, take1_src_stub_139, hydrates=False)
+    mark_scan.sender = _FakeScanSenderIshani()
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_144
+    mark_scan._evaluate = _make_fake_evaluate_139(centered_reads_139)
+    mark_scan._dump_window = _fake_dump_window_144
+    try:
+        scan_result_144 = asyncio.run(mark_scan._run_scan(page=_FakeIshaniPage(target_144), req={"group_name": "Ishani Kouli x Talentgram Agency"}))
+    finally:
+        mark_scan.sender = orig_sender_139
+        mark_scan._find_message_index_by_data_id = orig_find_idx_139
+        mark_scan._evaluate = orig_evaluate_139
+        mark_scan._dump_window = orig_dump_window_139
+
+    by_text_144 = {c["mark_text"]: c for c in (scan_result_144.get("candidates") or [])}
+    take1_144 = by_text_144["mark audition take 1 for singleton"]
+    intro_144 = by_text_144["mark introduction video for singleton"]
+    assert take1_144["resolved_source_message_id"] is None, take1_144
+    assert take1_144["resolved_via_jump_fallback"] is False, take1_144
+    assert intro_144["resolved_source_message_id"] == "INTRO_SRC_139", intro_144  # the OTHER mark is unaffected
+    print("144. jumped-to message genuinely never hydrates -> hash re-verification fails -> Take 1 stays honestly unresolved (MEDIA RESOLUTION FAILED), never a guessed source; Introduction in the same scan still resolves")
 
 
 if __name__ == "__main__":

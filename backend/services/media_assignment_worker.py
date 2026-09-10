@@ -135,10 +135,16 @@ def _report_unresolved(talent_label: str, project_label: str, unresolved: List[D
         f"- {project_label} {('Take ' + str(u.get('take_number'))) if u.get('media_role') == 'take' else (u.get('media_role') or '').capitalize()}"
         for u in unresolved
     )
+    # Wording (2026-09-10) — "marked for Gunwanti" read as if Gunwanti
+    # were the talent. It never is: Gunwanti is the agent's own WhatsApp
+    # identity that a MARK reply @mentions; the talent line above is
+    # already the real, resolved talent. Reworded to say what actually
+    # happened without that ambiguity.
     return (
         f"MEDIA RESOLUTION FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
-        f"The following were correctly marked for Gunwanti but the exact source media could not "
-        f"be deterministically resolved:\n{items}\n\nNo upload was performed."
+        f"These were correctly MARKed in {talent_label}'s WhatsApp group, but WhatsApp Web "
+        f"could not re-open the exact original media message they point at:\n{items}\n\n"
+        f"No upload was performed. Re-send the MARK reply on the same media, then retry UPLOAD."
     )
 
 

@@ -5604,6 +5604,177 @@ def main():
     assert sim_154.messages == ["Audition Take 1", "Audition Take 2", "Introduction Take"], sim_154.messages
     print("154. KEY regression: Take 1 + Take 2 + Introduction share ONE dialog-scoped caption/send state machine; Take 2's transient compose-box failure recovers via the bounded wrapper; Take 1 and Introduction each sent EXACTLY once, never re-forwarded")
 
+    # ------------------------------------------------------------------
+    # 155-160: REAL UPLOAD INCIDENT (2026-09-11 — Sahal Mansuri / Mahindra
+    # Thar: "UPLOAD Sahal Mansuri - Mahindra Thar" -> ✓ Take 2, ✓
+    # Introduction, ✗ Take 1, SAME command). First divergence:
+    # MEDIA_DISCOVERY. The SCAN phase resolves the exact source (fd8f883
+    # jump fix), but the DOWNLOAD phase re-located it ONLY via
+    # _find_message_index_by_data_id (scroll-to-bottom + tail search +
+    # bounded upward history load) — which cannot always reach a source
+    # further back in history than the other, more-recently-marked items.
+    # Fix: the DOWNLOAD phase now falls back to the SAME
+    # _jump_to_quoted_message primitive via the persisted
+    # mark_reply_message_id, with the tile hash re-verification unchanged
+    # (a jump that lands anywhere else is still hash_mismatch, never a
+    # guess). Plus per-item guaranteed cleanup.
+    # ------------------------------------------------------------------
+    def _blob_hash(seed):
+        blob = (seed * 20)[:80]
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    def _tile_html_155(seed):
+        blob = (seed * 20)[:80]
+        return f'<div data-testid="video-content"><div style="background-image: url(&quot;data:image/jpeg;base64,{blob}&quot;);"></div></div>'
+
+    orig_find_idx_155 = mark_scan._find_message_index_by_data_id
+    orig_jump_155 = mark_scan._jump_to_quoted_message
+    orig_scope_155 = mark_scan.sender._resolve_scope
+    orig_emc_155 = mark_scan._ensure_message_content_rendered
+
+    async def _scope_155(page):
+        return "#main"
+    async def _emc_155(page, loc, **kw):
+        pass
+    mark_scan.sender._resolve_scope = _scope_155
+    mark_scan._ensure_message_content_rendered = _emc_155
+
+    class _MsgLoc155:
+        def __init__(self, tiles):
+            self._tiles = tiles
+        def locator(self, sel):
+            return _FakeHashTilesLocator(self._tiles)
+    class _Page155:
+        def locator(self, sel):
+            return None
+        async def wait_for_timeout(self, ms):
+            pass
+
+    try:
+        # 155: index lookup misses, mark_reply_message_id present -> jump
+        # fallback lands on the EXACT source, tile hash verifies -> resolved.
+        take1_tile_155 = _FakeHashTile("video-content", _tile_html_155("SAHALTAKE1"))
+        async def _find_none_155(page, group, data_id):
+            return None
+        async def _jump_hit_155(page, group_name, reply_data_id):
+            assert reply_data_id == "REPLY_TAKE1_155"
+            return {"ok": True, "data_id": "TAKE1_SRC_155", "locator": _MsgLoc155([take1_tile_155]), "html": "", "centered": {}}
+        mark_scan._find_message_index_by_data_id = _find_none_155
+        mark_scan._jump_to_quoted_message = _jump_hit_155
+        tile, msg, ridx, reason = asyncio.run(mark_scan._resolve_video_tile_by_hash(
+            _Page155(), "Sahal Mansuri x Talentgram Agency", "TAKE1_SRC_155",
+            _blob_hash("SAHALTAKE1"), 0, mark_reply_message_id="REPLY_TAKE1_155",
+        ))
+        assert reason is None, reason
+        assert tile is take1_tile_155, tile
+        assert ridx == 0, ridx
+        print("155. UPLOAD download-phase: index lookup misses -> jump fallback via the persisted mark reply lands on the EXACT source -> tile hash verifies -> Take 1 resolved (the screenshot failure)")
+
+        # 156: jump lands on a DIFFERENT message (wrong hash) -> hash_mismatch,
+        # clean failure, NEVER a substituted media (Take 1 can't drift).
+        wrong_tile_156 = _FakeHashTile("video-content", _tile_html_155("SOMEOTHERVIDEO"))
+        async def _jump_wrong_156(page, group_name, reply_data_id):
+            return {"ok": True, "data_id": "WRONG_MSG_156", "locator": _MsgLoc155([wrong_tile_156]), "html": "", "centered": {}}
+        mark_scan._jump_to_quoted_message = _jump_wrong_156
+        tile2, _m2, _r2, reason2 = asyncio.run(mark_scan._resolve_video_tile_by_hash(
+            _Page155(), "Sahal Mansuri x Talentgram Agency", "TAKE1_SRC_155",
+            _blob_hash("SAHALTAKE1"), 0, mark_reply_message_id="REPLY_TAKE1_155",
+        ))
+        assert tile2 is None and reason2 == "hash_mismatch", (tile2, reason2)
+        print("156. UPLOAD download-phase: jump lands on a different message -> hash_mismatch -> clean failure, Take 1 NEVER drifts to another media")
+
+        # 157: index misses AND no mark_reply_message_id available -> the
+        # pre-existing clean 'message_not_found', unchanged (no jump to try).
+        mark_scan._jump_to_quoted_message = _jump_hit_155  # would succeed IF called
+        jump_called_157 = {"n": 0}
+        async def _jump_spy_157(page, group_name, reply_data_id):
+            jump_called_157["n"] += 1
+            return {"ok": False}
+        mark_scan._jump_to_quoted_message = _jump_spy_157
+        tile3, _m3, _r3, reason3 = asyncio.run(mark_scan._resolve_video_tile_by_hash(
+            _Page155(), "G", "GONE_157", _blob_hash("X"), 0, mark_reply_message_id=None,
+        ))
+        assert tile3 is None and reason3 == "message_not_found", (tile3, reason3)
+        assert jump_called_157["n"] == 0, "no mark reply -> jump is never attempted"
+        print("157. UPLOAD download-phase: index misses and no mark reply available -> clean 'message_not_found', jump never attempted, never a guess")
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_155
+        mark_scan._jump_to_quoted_message = orig_jump_155
+        mark_scan.sender._resolve_scope = orig_scope_155
+        mark_scan._ensure_message_content_rendered = orig_emc_155
+
+    # 158: _run_download — Take 1 fails to resolve, Take 2 + Introduction
+    # succeed, in ONE UPLOAD; a failed item never blocks or pollutes the
+    # next (per-item try/finally + _return_download_ui_to_neutral).
+    neutral_calls_158 = {"n": 0}
+    orig_open_grp_158 = mark_scan.sender._open_group_chat
+    orig_one_158 = mark_scan._run_download_one
+    orig_neutral_158 = mark_scan._return_download_ui_to_neutral
+
+    async def _open_grp_158(page, group_name):
+        return "OPENED"
+    async def _neutral_158(page):
+        neutral_calls_158["n"] += 1
+    async def _one_158(page, http, group_name, target):
+        r = target["media_role"]
+        if r == "take" and target["take_number"] == 1:
+            return {"ok": False, "source_message_id": target["source_message_id"], "error": "source message no longer found in window"}
+        return {"ok": True, "source_message_id": target["source_message_id"], "media_id": f"m-{r}"}
+    mark_scan.sender._open_group_chat = _open_grp_158
+    mark_scan._run_download_one = _one_158
+    mark_scan._return_download_ui_to_neutral = _neutral_158
+    try:
+        req_158 = {"group_name": "Sahal Mansuri x Talentgram Agency", "download_targets": [
+            {"source_message_id": "s-t1", "media_role": "take", "take_number": 1},
+            {"source_message_id": "s-t2", "media_role": "take", "take_number": 2},
+            {"source_message_id": "s-intro", "media_role": "intro", "take_number": None},
+        ]}
+        res_158 = asyncio.run(mark_scan._run_download(_Page155(), object(), req_158))
+    finally:
+        mark_scan.sender._open_group_chat = orig_open_grp_158
+        mark_scan._run_download_one = orig_one_158
+        mark_scan._return_download_ui_to_neutral = orig_neutral_158
+    oks_158 = [r["ok"] for r in res_158["results"]]
+    assert oks_158 == [False, True, True], res_158
+    assert neutral_calls_158["n"] == 3, "return-to-neutral runs after EVERY item, pass or fail"
+    print("158. UPLOAD: Take 1 fails, Take 2 + Introduction succeed in ONE command; return-to-neutral after every item -> a failed Take 1 never blocks or pollutes Take 2 (the screenshot scenario)")
+
+    # 159: an exception inside one item is contained (still return a
+    # failure result + still run cleanup + still process the next item).
+    orig_one_159 = mark_scan._run_download_one
+    orig_neutral_159 = mark_scan._return_download_ui_to_neutral
+    neutral_159 = {"n": 0}
+    async def _neutral_159(page):
+        neutral_159["n"] += 1
+    async def _one_159(page, http, group_name, target):
+        if target["source_message_id"] == "boom":
+            raise RuntimeError("mid-item explosion")
+        return {"ok": True, "source_message_id": target["source_message_id"]}
+    mark_scan.sender._open_group_chat = _open_grp_158
+    mark_scan._run_download_one = _one_159
+    mark_scan._return_download_ui_to_neutral = _neutral_159
+    try:
+        req_159 = {"group_name": "G", "download_targets": [
+            {"source_message_id": "boom", "media_role": "take", "take_number": 1},
+            {"source_message_id": "ok", "media_role": "take", "take_number": 2},
+        ]}
+        res_159 = asyncio.run(mark_scan._run_download(_Page155(), object(), req_159))
+    finally:
+        mark_scan.sender._open_group_chat = orig_open_grp_158
+        mark_scan._run_download_one = orig_one_159
+        mark_scan._return_download_ui_to_neutral = orig_neutral_159
+    assert [r["ok"] for r in res_159["results"]] == [False, True], res_159
+    assert "item failed" in res_159["results"][0]["error"], res_159
+    assert neutral_159["n"] == 2, "cleanup runs even when an item raises"
+    print("159. UPLOAD: an exception inside one download item is contained -> failure result + cleanup + next item still processed")
+
+    # 160: idempotency — the UPLOAD idempotency guarantee lives in the
+    # backend (media_assignment.already_uploaded filters
+    # already-uploaded slots out of to_download before the worker is ever
+    # asked), proven by backend/tests/test_media_assignment.py's own
+    # already-uploaded tests; not re-implemented in the worker.
+    print("160. UPLOAD idempotency: enforced by the backend's media_assignment.already_uploaded slot filter (see backend/tests/test_media_assignment.py) — a repeat UPLOAD only ever hands the worker the genuinely-missing items, ZERO duplicates")
+
 
 if __name__ == "__main__":
     main()

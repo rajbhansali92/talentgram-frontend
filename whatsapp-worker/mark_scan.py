@@ -971,6 +971,32 @@ async ([sel, idx]) => {
 }
 """
 
+# Locator-scoped variant of _DOWNLOAD_JS (2026-09-11) — same blob fetch,
+# but addressed via a message locator's own element (`el`) instead of a
+# selector+index, for the UPLOAD single-photo path when the source was
+# re-located by jump and its virtualized-list index couldn't be re-derived.
+_DOWNLOAD_ONE_MESSAGE_JS = """
+async (el) => {
+  const img = el.querySelector('img[src^="blob:"]');
+  const video = el.querySelector('video[src^="blob:"]');
+  const srcEl = video || img;
+  if (!srcEl) return {ok: false, reason: "no blob: media element found"};
+  try {
+    const resp = await fetch(srcEl.src);
+    const buf = await resp.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || ''};
+  } catch (e) {
+    return {ok: false, reason: String(e && e.message || e)};
+  }
+}
+"""
+
 
 # ---------------------------------------------------------------------------
 # Album-tile download via WhatsApp Web's native right-click "Download"
@@ -2125,6 +2151,7 @@ MESSAGE_REHYDRATION_DELAY_MS = 800
 async def _resolve_video_tile_by_hash(
     page, group_name: str, source_message_id: str,
     source_thumbnail_hash: Optional[str], tile_index_hint: int,
+    *, mark_reply_message_id: Optional[str] = None,
 ):
     """UPLOAD-only hardened resolution — re-finds the message fresh by its
     immutable source_message_id (same identity primitive
@@ -2152,7 +2179,24 @@ async def _resolve_video_tile_by_hash(
     the media-viewer overlay closes), the exact same DOM-virtualization-
     transience class _wait_for_quoted_message_block already retries for a
     different call site. A message that's genuinely gone still fails
-    cleanly once every attempt comes back empty."""
+    cleanly once every attempt comes back empty.
+
+    2026-09-11 (Sahal Mansuri / Mahindra Thar — UPLOAD: Take 1 "could not
+    be uploaded" while Take 2 + Introduction succeeded, SAME command).
+    First divergence: MEDIA_DISCOVERY. _find_message_index_by_data_id
+    (scroll-to-true-bottom + tail search + bounded upward history load,
+    capped at MAX_MESSAGES_SCANNED_DEFAULT) cannot always reach a source
+    that sits FURTHER BACK in history than the other, more-recently-
+    marked items — Take 2's and Introduction's sources were within reach,
+    Take 1's older one was not. The SCAN phase already solved this exact
+    class of problem in fd8f883 with _jump_to_quoted_message (click the
+    mark's own quoted block -> WhatsApp's native "jump to original" ->
+    hydrate in place). The DOWNLOAD phase never used it. Now, when the
+    index lookup misses AND the persisted mark_reply_message_id is
+    available, that same primitive is the fallback — and the tile hash
+    re-verification below is unchanged, so a jump that lands anywhere
+    other than the exact marked source is still rejected (hash_mismatch),
+    never a guess."""
     idx = None
     for attempt in range(MESSAGE_REHYDRATION_ATTEMPTS):
         idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
@@ -2160,11 +2204,29 @@ async def _resolve_video_tile_by_hash(
             break
         if attempt < MESSAGE_REHYDRATION_ATTEMPTS - 1:
             await page.wait_for_timeout(MESSAGE_REHYDRATION_DELAY_MS)
-    if idx is None:
-        return None, None, None, "message_not_found"
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
-    message_locator = page.locator(full_sel).nth(idx)
+    message_locator = None
+    if idx is not None:
+        message_locator = page.locator(full_sel).nth(idx)
+    elif mark_reply_message_id:
+        jumped = await _jump_to_quoted_message(page, group_name, mark_reply_message_id)
+        if jumped.get("ok") and jumped.get("locator") is not None:
+            # data_id parity is a strong signal but NOT the gate — the
+            # hash re-verification below is authoritative, so a near-miss
+            # jump is caught there and reported as hash_mismatch, exactly
+            # like _resolve_single_media_via_jump.
+            message_locator = jumped["locator"]
+            logger.info(
+                "mark_scan: UPLOAD download-phase jump fallback for source=%s via reply=%s -> landed on %s",
+                source_message_id, mark_reply_message_id, jumped.get("data_id"),
+            )
+    if message_locator is None:
+        return None, None, None, "message_not_found"
+    # Hydrate the message in place (the same primitive the SCAN-phase jump
+    # fix uses) before reading tile hashes — a virtualization stub returns
+    # zero tiles / wrong hashes and would otherwise look like hash_mismatch.
+    await _ensure_message_content_rendered(page, message_locator)
 
     if not source_thumbnail_hash:
         tile = message_locator.locator('[data-testid="video-content"], [data-testid="image-content"]').nth(tile_index_hint)
@@ -2195,6 +2257,7 @@ async def _resolve_video_tile_by_hash(
 async def _open_tile_viewer_and_download_hardened(
     page, group_name: str, source_message_id: str,
     source_thumbnail_hash: Optional[str], tile_index: int,
+    *, mark_reply_message_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """UPLOAD's own hardened video retrieval — a NEW, independent entry
     point (never calls, and is never called by, _open_tile_viewer_and_download
@@ -2243,6 +2306,7 @@ async def _open_tile_viewer_and_download_hardened(
         for attempt in range(MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS):
             tile, message_locator, resolved_index, resolve_reason = await _resolve_video_tile_by_hash(
                 page, group_name, source_message_id, source_thumbnail_hash, tile_index,
+                mark_reply_message_id=mark_reply_message_id,
             )
             if tile is None:
                 # Identity itself could not be established — never a
@@ -7077,6 +7141,58 @@ async def _upload_one(http: httpx.AsyncClient, target: Dict[str, Any], base64_da
     return {"ok": True, "source_message_id": target["source_message_id"]}
 
 
+async def _return_download_ui_to_neutral(page) -> None:
+    """UPLOAD per-item guaranteed cleanup (2026-09-11 — Sahal Mansuri /
+    Mahindra Thar). Every download item must leave WhatsApp Web with NO
+    media viewer open, so a failed Take 1 can never affect Take 2 and a
+    successful Take 2 can never affect Take 1. In-repo precedent: this is
+    the exact class of bug _close_viewer was added for (2026-08-23,
+    "first tile works, every later tile fails on the leftover overlay").
+    Bounded, best-effort, never raises."""
+    try:
+        if await page.locator("video").count() > 0:
+            try:
+                vd = await _evaluate(page, _VIEWER_BUTTONS_JS)
+            except Exception:
+                vd = {"rootFound": False, "buttons": []}
+            await _close_viewer(page, vd)
+    except Exception as exc:
+        logger.info("mark_scan: UPLOAD return-to-neutral best-effort cleanup hiccup: %s", exc)
+
+
+async def _locate_download_message(
+    page, group_name: str, source_message_id: str, mark_reply_message_id: Optional[str],
+) -> Tuple[Optional[int], Any, Optional[str]]:
+    """Re-locate an UPLOAD download target's exact source message. Index
+    lookup first (fast, common); on a miss, the SAME native jump-to-
+    quoted-message primitive the SCAN phase uses (fd8f883) via the
+    persisted mark reply — so a source further back in history than the
+    other, more-recently-marked items is still reached (2026-09-11 —
+    Sahal Mansuri Take 1). After a jump, the message has been scrolled
+    into the rendered window, so a fresh index lookup then also succeeds
+    (needed by the single-photo blob-fetch path, which is index-based).
+    Returns (idx, message_locator, reason) — reason None on success."""
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+    if idx is not None:
+        msg = page.locator(full_sel).nth(idx)
+        await _ensure_message_content_rendered(page, msg)
+        return idx, msg, None
+    if mark_reply_message_id:
+        jumped = await _jump_to_quoted_message(page, group_name, mark_reply_message_id)
+        if jumped.get("ok") and jumped.get("locator") is not None:
+            logger.info(
+                "mark_scan: UPLOAD download-phase jump fallback for source=%s via reply=%s -> landed on %s",
+                source_message_id, mark_reply_message_id, jumped.get("data_id"),
+            )
+            re_idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+            msg = page.locator(full_sel).nth(re_idx) if re_idx is not None else jumped["locator"]
+            await _ensure_message_content_rendered(page, msg)
+            return re_idx, msg, None
+    return None, None, "source message no longer found in window"
+
+
 async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> Dict[str, Any]:
     group_name = req["group_name"]
     status = await sender._open_group_chat(page, group_name)
@@ -7085,113 +7201,117 @@ async def _run_download(page, http: httpx.AsyncClient, req: Dict[str, Any]) -> D
 
     results = []
     for target in req.get("download_targets") or []:
-        # Re-verify the conversation is still the right one before each
-        # target — a prior tile's viewer-open/Escape cycle can leave the
-        # DOM in a state where a fresh index lookup misses (2026-08-23
-        # bug); this fast-paths straight through when already fine.
-        status = await sender._open_group_chat(page, group_name)
-        if status != "OPENED":
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"group not open (status={status})"})
-            continue
-        idx = await _find_message_index_by_data_id(page, group_name, target["source_message_id"])
-        if idx is None:
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "source message no longer found in window"})
-            continue
-        scope = await sender._resolve_scope(page)
-        full_sel = f"{scope} [data-testid^='conv-msg-']"
-        message = page.locator(full_sel).nth(idx)
+        try:
+            result = await _run_download_one(page, http, group_name, target)
+        except Exception as exc:
+            result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"item failed: {exc}"}
+        finally:
+            # Guaranteed neutral state before the NEXT item — a failed
+            # Take 1 must not affect Take 2, a successful Take 2 must not
+            # affect Take 1 (2026-09-11).
+            await _return_download_ui_to_neutral(page)
+        results.append(result)
+    return {"results": results}
 
-        if target.get("source_media_type") == "video":
-            # Hardened path (2026-08-25) — _open_tile_viewer_and_download_hardened:
-            # re-resolves + verifies the tile by its own live thumbnail hash
-            # before every click (never trusts tile_index alone), bounded
-            # click retry on DOM-instability errors, and a bounded
-            # close/reopen round when the video buffers fully but Download
-            # never appears. Works uniformly for a single (non-album) video
-            # message too — tile_index 0 addresses that message's own sole
-            # media element.
-            tile_index = target.get("album_tile_index")
-            if tile_index is None:
-                tile_index = 0
-            try:
-                dl = await asyncio.wait_for(
-                    _open_tile_viewer_and_download_hardened(
-                        page, group_name, target["source_message_id"], target.get("source_thumbnail_hash"), tile_index,
-                    ),
-                    timeout=PER_VIDEO_DOWNLOAD_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                results.append({
-                    "ok": False, "source_message_id": target["source_message_id"],
-                    "error": f"timed out after {PER_VIDEO_DOWNLOAD_TIMEOUT}s",
-                })
-                continue
-            if not dl.get("ok"):
-                results.append(_strip_raw_bytes({
-                    "ok": False, "source_message_id": target["source_message_id"],
-                    "error": dl.get("reason") or f"failed at stage {dl.get('stage')}", "detail": dl,
-                }))
-                continue
-            downloads = dl.get("downloads") or []
-            raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
-            if not raw:
-                results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
-                continue
-            b64 = b64mod.b64encode(raw).decode()
-            upload_result = await _upload_one(http, target, b64, "")
-            upload_result["byte_length"] = len(raw)
-            results.append(upload_result)
-            continue
 
-        if target.get("album_tile_index") is not None:
-            # Photo album tile (2026-08-24) — WhatsApp's gallery viewer
-            # never mounts for a media-album (proven exhaustively: real
-            # trusted clicks, keyboard activation, byte-identical DOM/CSS
-            # to a working single photo — root cause is inside WhatsApp's
-            # own non-DOM runtime, not anything fixable here). Bypasses
-            # the viewer entirely: each image-thumb tile's full-resolution
-            # photo is already a complete, loaded blob: URL in its own
-            # DOM — fetched directly, with hash-based tile identity
-            # re-verified live (never trusted from album_tile_index alone).
-            dl = await _download_photo_album_tile_via_blob(
-                message, page, target.get("album_tile_index"), target["source_thumbnail_hash"],
+async def _run_download_one(page, http: httpx.AsyncClient, group_name: str, target: Dict[str, Any]) -> Dict[str, Any]:
+    sm_id = target["source_message_id"]
+    # Re-verify the conversation is still the right one before each target
+    # — a prior tile's viewer-open/Escape cycle can leave the DOM in a
+    # state where a fresh index lookup misses (2026-08-23 bug); this
+    # fast-paths straight through when already fine.
+    status = await sender._open_group_chat(page, group_name)
+    if status != "OPENED":
+        return {"ok": False, "source_message_id": sm_id, "error": f"group not open (status={status})"}
+    idx, message, locate_reason = await _locate_download_message(
+        page, group_name, sm_id, target.get("mark_reply_message_id"),
+    )
+    if message is None:
+        return {"ok": False, "source_message_id": sm_id, "error": locate_reason}
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+
+    if target.get("source_media_type") == "video":
+        # Hardened path (2026-08-25) — _open_tile_viewer_and_download_hardened:
+        # re-resolves + verifies the tile by its own live thumbnail hash
+        # before every click (never trusts tile_index alone), bounded
+        # click retry on DOM-instability errors, and a bounded
+        # close/reopen round when the video buffers fully but Download
+        # never appears. Works uniformly for a single (non-album) video
+        # message too — tile_index 0 addresses that message's own sole
+        # media element. 2026-09-11: the persisted mark_reply_message_id
+        # is threaded through so its own re-resolution can also use the
+        # SCAN-phase jump fallback when the index lookup misses.
+        tile_index = target.get("album_tile_index")
+        if tile_index is None:
+            tile_index = 0
+        try:
+            dl = await asyncio.wait_for(
+                _open_tile_viewer_and_download_hardened(
+                    page, group_name, sm_id, target.get("source_thumbnail_hash"), tile_index,
+                    mark_reply_message_id=target.get("mark_reply_message_id"),
+                ),
+                timeout=PER_VIDEO_DOWNLOAD_TIMEOUT,
             )
-            if not dl.get("ok"):
-                results.append(_strip_raw_bytes({
-                    "ok": False, "source_message_id": target["source_message_id"],
-                    "error": dl.get("reason") or f"failed at stage {dl.get('stage')}", "detail": dl,
-                }))
-                continue
-            raw = dl.get("_raw_bytes")
-            if not raw:
-                results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
-                continue
-            b64 = b64mod.b64encode(raw).decode()
-            upload_result = await _upload_one(http, target, b64, dl.get("content_type") or "")
-            upload_result["byte_length"] = len(raw)
-            results.append(upload_result)
-            continue
+        except asyncio.TimeoutError:
+            return {"ok": False, "source_message_id": sm_id, "error": f"timed out after {PER_VIDEO_DOWNLOAD_TIMEOUT}s"}
+        if not dl.get("ok"):
+            return _strip_raw_bytes({
+                "ok": False, "source_message_id": sm_id,
+                "error": dl.get("reason") or f"failed at stage {dl.get('stage')}", "detail": dl,
+            })
+        downloads = dl.get("downloads") or []
+        raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
+        if not raw:
+            return {"ok": False, "source_message_id": sm_id, "error": "downloaded zero bytes"}
+        b64 = b64mod.b64encode(raw).decode()
+        upload_result = await _upload_one(http, target, b64, "")
+        upload_result["byte_length"] = len(raw)
+        return upload_result
 
-        # Single (non-album) photo: the simpler message-level blob-fetch
-        # path — unchanged since Phase 0, no buffering/viewer-menu
-        # complexity has been observed for a static image the way it was
-        # for video.
+    if target.get("album_tile_index") is not None:
+        # Photo album tile (2026-08-24) — WhatsApp's gallery viewer
+        # never mounts for a media-album (proven exhaustively). Bypasses
+        # the viewer entirely: each image-thumb tile's full-resolution
+        # photo is already a complete, loaded blob: URL in its own DOM —
+        # fetched directly, with hash-based tile identity re-verified live.
+        dl = await _download_photo_album_tile_via_blob(
+            message, page, target.get("album_tile_index"), target["source_thumbnail_hash"],
+        )
+        if not dl.get("ok"):
+            return _strip_raw_bytes({
+                "ok": False, "source_message_id": sm_id,
+                "error": dl.get("reason") or f"failed at stage {dl.get('stage')}", "detail": dl,
+            })
+        raw = dl.get("_raw_bytes")
+        if not raw:
+            return {"ok": False, "source_message_id": sm_id, "error": "downloaded zero bytes"}
+        b64 = b64mod.b64encode(raw).decode()
+        upload_result = await _upload_one(http, target, b64, dl.get("content_type") or "")
+        upload_result["byte_length"] = len(raw)
+        return upload_result
+
+    # Single (non-album) photo: the simpler message-level blob-fetch path.
+    if idx is None:
+        # Resolved by jump but its index couldn't be re-derived — read the
+        # blob straight off the resolved message locator instead of the
+        # index-based _DOWNLOAD_JS.
+        try:
+            fetched = await message.evaluate(_DOWNLOAD_ONE_MESSAGE_JS)
+        except Exception as exc:
+            return {"ok": False, "source_message_id": sm_id, "error": f"download failed: {exc}"}
+    else:
         try:
             fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
         except Exception as exc:
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": f"download failed: {exc}"})
-            continue
-        if not fetched.get("ok"):
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": fetched.get("reason")})
-            continue
-        if not fetched.get("base64"):
-            results.append({"ok": False, "source_message_id": target["source_message_id"], "error": "downloaded zero bytes"})
-            continue
-        upload_result = await _upload_one(http, target, fetched["base64"], fetched.get("contentType", ""))
-        upload_result["byte_length"] = fetched.get("byteLength")
-        results.append(upload_result)
-
-    return {"results": results}
+            return {"ok": False, "source_message_id": sm_id, "error": f"download failed: {exc}"}
+    if not fetched.get("ok"):
+        return {"ok": False, "source_message_id": sm_id, "error": fetched.get("reason")}
+    if not fetched.get("base64"):
+        return {"ok": False, "source_message_id": sm_id, "error": "downloaded zero bytes"}
+    upload_result = await _upload_one(http, target, fetched["base64"], fetched.get("contentType", ""))
+    upload_result["byte_length"] = fetched.get("byteLength")
+    return upload_result
 
 
 # Native-Forward SEND (2026-08-25) — replaces the old download+reattach

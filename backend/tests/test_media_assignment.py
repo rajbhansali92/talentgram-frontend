@@ -1110,6 +1110,66 @@ async def test_orchestrator_download_done_reports_upload_complete():
         await db.submissions.delete_one({"id": sub_id})
 
 
+def test_humanize_upload_error_is_state_specific():
+    """2026-09-11 — "Take 1 could not be uploaded" gave the operator no
+    state. Each worker failure prefix now maps to its own sentence."""
+    m = orch._humanize_upload_error("resolve_tile: message_not_found")
+    assert "exact marked whatsapp message" in m.lower(), m
+    m = orch._humanize_upload_error("failed at stage download_not_available")
+    assert "could not open the media" in m.lower(), m
+    m = orch._humanize_upload_error("hash_mismatch")
+    assert "no longer matches the mark" in m.lower(), m
+    m = orch._humanize_upload_error("downloaded zero bytes")
+    assert "came back empty" in m.lower(), m
+    m = orch._humanize_upload_error("timed out after 500.0s")
+    assert "took too long" in m.lower(), m
+    # never leaks raw internals
+    assert "message_not_found" not in orch._humanize_upload_error("resolve_tile: message_not_found")
+
+
+async def test_orchestrator_download_done_reports_state_specific_failure():
+    """Sahal Mansuri / Mahindra Thar shape: Take 2 + Introduction upload,
+    Take 1 fails at MEDIA_DISCOVERY. The report must name Take 1's ACTUAL
+    failed state (from the worker's own per-item download_results), not a
+    bare "could not be uploaded"."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Mahindra {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Sahal {tag}"
+    req_id = str(uuid.uuid4())
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "download", "status": ma.DOWNLOAD_STATUS_DONE,
+        "talent_id": talent_id, "project_id": project_id,
+        "download_targets": [
+            {"source_message_id": "src-t1", "media_role": "take", "take_number": 1, "original_label": "Take 1"},
+            {"source_message_id": "src-t2", "media_role": "take", "take_number": 2, "original_label": "Take 2"},
+        ],
+        "download_results": [
+            {"ok": False, "source_message_id": "src-t1", "error": "source message no longer found in window"},
+            {"ok": True, "source_message_id": "src-t2"},
+        ],
+        "pending_report_context": {"talent_label": talent_label, "project_label": project_label, "already": []},
+        "created_at": _now(), "updated_at": _now(),
+    })
+    sub_id = await _seed_submission(project_id, talent_id, f"{talent_label.lower()}@test.example")
+    await db.submissions.update_one({"id": sub_id}, {"$push": {"media": {"id": "m2", "source_message_id": "src-t2", "label": "Take 2"}}})
+    await db[ma.ASSIGNMENTS_COLLECTION].insert_one({
+        "assignment_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
+        "source_message_id": "src-t2", "media_role": "take", "take_number": 2,
+        "assignment_status": ma.ASSIGN_STATUS_UPLOADED, "created_at": _now(), "created_by": "test",
+    })
+    try:
+        assert await orch._process_download_done()
+        final = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert "UPLOAD FAILED" in final["report"]
+        assert "✓ " in final["report"] and "Take 2" in final["report"]
+        assert "could not be found from the exact marked WhatsApp message" in final["report"]
+        assert "Pipeline stage was NOT changed" in final["report"]
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await db.submissions.delete_one({"id": sub_id})
+
+
 async def test_orchestrator_already_uploaded_is_idempotent_no_redownload():
     """Running scan_done validation again for a project already fully
     uploaded (verified against the REAL submission media, not just the

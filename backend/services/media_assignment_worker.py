@@ -213,20 +213,46 @@ def _report_no_marks_found(talent_label: str, project_label: str) -> str:
     )
 
 
+def _humanize_upload_error(raw_error: str) -> str:
+    """UPLOAD per-item failure (2026-09-11 — Sahal Mansuri / Mahindra Thar:
+    "Take 1 could not be uploaded" gave no state). The worker's own error
+    string is a detailed diagnostic (right for Railway logs, wrong as
+    user-facing text); this maps its small closed set of failure PREFIXES
+    (see mark_scan.py _run_download_one / _open_tile_viewer_and_download_
+    hardened / _resolve_video_tile_by_hash) to one plain sentence each,
+    naming the ACTUAL failed state — never inventing a reason, never
+    exposing internals."""
+    low = (raw_error or "").lower()
+    if "no longer found in window" in low or "message_not_found" in low or "message not found" in low:
+        return "could not be found from the exact marked WhatsApp message — please re-mark it and run UPLOAD again."
+    if "hash_mismatch" in low or "no_tiles_found" in low or "hash_read_failed" in low:
+        return "was located, but the media no longer matches the mark — please re-mark it and run UPLOAD again."
+    if "timed out after" in low:
+        return "took too long to retrieve from WhatsApp Web — please run UPLOAD again."
+    if "zero bytes" in low:
+        return "was retrieved from WhatsApp Web but came back empty — please run UPLOAD again."
+    if "download_not_available" in low or "download" in low or "no <video>" in low or "click failed" in low or "tile" in low:
+        return "was found, but WhatsApp Web could not open the media to retrieve it — please run UPLOAD again."
+    if "/media-upload" in low or "handoff" in low or "cloudinary" in low or "http " in low:
+        return "was retrieved, but the upload to Talentgram failed — please run UPLOAD again."
+    if "group not open" in low:
+        return "could not be retrieved because the WhatsApp group could not be opened — please run UPLOAD again."
+    return "could not be uploaded due to a WhatsApp Web issue — please run UPLOAD again."
+
+
 def _report_upload_result(
-    talent_label: str, project_label: str, uploaded_labels: List[str], failed_labels: List[str],
-    already: List[Dict[str, Any]],
+    talent_label: str, project_label: str, uploaded_labels: List[str],
+    failed_items: List[Dict[str, str]], already: List[Dict[str, Any]],
 ) -> str:
     already_labels = [
         media_assignment.role_label(a["media_role"], a.get("take_number"), project_label)
         for a in already
     ]
     all_ok_lines = already_labels + uploaded_labels
-    body = "\n".join(
-        [f"✓ {l}" for l in all_ok_lines] + [f"✗ {l}" for l in failed_labels]
-    )
-    if failed_labels:
-        failed_str = ", ".join(failed_labels)
+    failed_lines = [f"✗ {fi['label']} — {_humanize_upload_error(fi.get('error') or '')}" for fi in failed_items]
+    body = "\n".join([f"✓ {l}" for l in all_ok_lines] + failed_lines)
+    if failed_items:
+        failed_str = ", ".join(fi["label"] for fi in failed_items)
         return (
             f"UPLOAD FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n{body}\n\n"
             f"{failed_str} could not be uploaded.\n\nPipeline stage was NOT changed."
@@ -922,8 +948,12 @@ async def _process_download_done() -> bool:
         for a in fresh_uploaded
     }
 
-    uploaded_labels, failed_labels = [], []
-    for target in doc.get("download_targets") or []:
+    # Per-item worker error strings, positionally paired with
+    # download_targets (2026-09-11 — the previous report just said "could
+    # not be uploaded" with no state; the worker always reported WHY).
+    dl_results = doc.get("download_results") or []
+    uploaded_labels, failed_items = [], []
+    for i, target in enumerate(doc.get("download_targets") or []):
         slot = media_assignment.slot_key(
             target["media_role"], target["take_number"], target.get("source_message_id"), target.get("source_thumbnail_hash"),
         )
@@ -937,9 +967,10 @@ async def _process_download_done() -> bool:
         if slot in uploaded_slots and not already_before:
             uploaded_labels.append(label)
         elif not already_before:
-            failed_labels.append(label)
+            item_result = dl_results[i] if i < len(dl_results) else None
+            failed_items.append({"label": label, "error": (item_result or {}).get("error") or "no result reported"})
 
-    report = _report_upload_result(talent_label, project_label, uploaded_labels, failed_labels, ctx.get("already") or [])
+    report = _report_upload_result(talent_label, project_label, uploaded_labels, failed_items, ctx.get("already") or [])
     await _finish(doc["id"], report + (ctx.get("upload_advisory") or ""))
     return True
 

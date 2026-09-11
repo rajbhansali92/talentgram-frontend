@@ -1149,6 +1149,38 @@ def test_humanize_upload_error_is_state_specific():
     assert "message_not_found" not in orch._humanize_upload_error("resolve_tile: message_not_found")
 
 
+def test_humanize_upload_error_machine_state_tags_are_distinct():
+    """2026-09-11 — Mahim Suhalka: Take AND Introduction both reported the
+    SAME catch-all "WhatsApp Web could not open the media" sentence, even
+    though one never opened the viewer at all and the other opened it
+    fully but the acquisition step itself failed. mark_scan.py now tags
+    its own errors with a machine `[STATE]` prefix (see
+    _open_tile_viewer_and_download_hardened / _locate_download_message /
+    _upload_one) — each must map to its OWN distinct sentence, and the
+    master prompt's own two worked examples must actually differ."""
+    open_failed = orch._humanize_upload_error("[MEDIA_OPEN_FAILED] click failed: Timeout 10000ms exceeded")
+    download_not_started = orch._humanize_upload_error("[DOWNLOAD_NOT_STARTED] video mounted but no plausible menu-trigger button found")
+    assert "could not be opened" in open_failed
+    assert "did not provide the media for download" in download_not_started
+    assert open_failed != download_not_started  # the master prompt's own required distinction
+
+    assert "could not be found" in orch._humanize_upload_error("[SOURCE_NOT_FOUND] source message no longer found in window")
+    assert "did not finish loading" in orch._humanize_upload_error("[SOURCE_NOT_HYDRATED] source located but its marked media did not finish rendering")
+    assert "no longer matches the mark" in orch._humanize_upload_error("[MEDIA_HASH_MISMATCH] hash_mismatch")
+    assert "never became ready" in orch._humanize_upload_error("[MEDIA_NOT_READY] no <video> element mounted within 15s of clicking the tile")
+    assert "took too long" in orch._humanize_upload_error("[DOWNLOAD_TIMEOUT] timed out after 500.0s")
+    assert "upload to Talentgram failed" in orch._humanize_upload_error("[UPLOAD_FAILED] 500 Internal Server Error")
+
+    # never leaks the bracket tag or raw internals into the user-facing text
+    msg = orch._humanize_upload_error("[MEDIA_OPEN_FAILED] click failed: Locator.click: Timeout 10000ms exceeded")
+    assert "[MEDIA_OPEN_FAILED]" not in msg and "Locator.click" not in msg
+
+    # an unrecognized/future state tag degrades to the legacy substring
+    # path rather than crashing or leaking the bracket.
+    unknown = orch._humanize_upload_error("[SOME_FUTURE_STATE] whatever internal detail")
+    assert "[SOME_FUTURE_STATE]" not in unknown
+
+
 async def test_orchestrator_download_done_reports_state_specific_failure():
     """Sahal Mansuri / Mahindra Thar shape: Take 2 + Introduction upload,
     Take 1 fails at MEDIA_DISCOVERY. The report must name Take 1's ACTUAL

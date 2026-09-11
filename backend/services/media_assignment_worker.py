@@ -227,16 +227,45 @@ def _report_no_marks_found(talent_label: str, project_label: str) -> str:
     )
 
 
+_UPLOAD_STATE_PHRASE = {
+    # From mark_scan.py's machine `state` tags (2026-09-11 — Mahim Suhalka:
+    # Take AND Introduction both reported the SAME catch-all "WhatsApp Web
+    # could not open the media", which was true for one of them (the
+    # video viewer never opened) but imprecise for the other (the viewer
+    # opened and fully buffered — acquisition itself is what failed).
+    # Each machine state now gets its own sentence, per the master
+    # prompt's own worked examples.
+    "SOURCE_NOT_FOUND": "exact source could not be found from the marked WhatsApp message",
+    "SOURCE_NOT_HYDRATED": "exact source was found, but its media did not finish loading in time",
+    "MEDIA_HASH_MISMATCH": "was located, but the media no longer matches the mark",
+    "MEDIA_TILE_NOT_FOUND": "exact source was found, but its media tile could not be located",
+    "MEDIA_NOT_READY": "exact source was found, but its video never became ready to open",
+    "MEDIA_OPEN_FAILED": "exact source was found, but the video could not be opened",
+    "DOWNLOAD_NOT_STARTED": "exact video was opened, but WhatsApp did not provide the media for download",
+    "DOWNLOAD_TIMEOUT": "took too long to retrieve from WhatsApp Web",
+    "UPLOAD_FAILED": "was retrieved, but the upload to Talentgram failed",
+}
+
+
 def _humanize_upload_error(raw_error: str) -> str:
-    """UPLOAD per-item failure (2026-09-11 — Sahal Mansuri / Mahindra Thar:
-    "Take 1 could not be uploaded" gave no state). The worker's own error
-    string is a detailed diagnostic (right for Railway logs, wrong as
-    user-facing text); this maps its small closed set of failure PREFIXES
-    (see mark_scan.py _run_download_one / _open_tile_viewer_and_download_
-    hardened / _resolve_video_tile_by_hash) to one plain sentence each,
-    naming the ACTUAL failed state — never inventing a reason, never
-    exposing internals."""
-    low = (raw_error or "").lower()
+    """UPLOAD per-item failure (2026-09-11 — Sahal Mansuri / then Mahim
+    Suhalka: a single catch-all sentence gave no state, and later
+    conflated two genuinely different failures under the same wording).
+    mark_scan.py now tags its own errors with a machine `[STATE]` prefix
+    (see _UPLOAD_STATE_PHRASE); this is checked FIRST. The substring
+    matching below remains as a fallback for untagged errors (the photo/
+    album acquisition paths, which this incident did not touch, and any
+    older persisted record) — never inventing a reason, never exposing
+    internals."""
+    raw_error = raw_error or ""
+    if raw_error.startswith("["):
+        end = raw_error.find("]")
+        if end > 0:
+            state = raw_error[1:end]
+            phrase = _UPLOAD_STATE_PHRASE.get(state)
+            if phrase:
+                return f"{phrase} — please run UPLOAD again."
+    low = raw_error.lower()
     if "no longer found in window" in low or "message_not_found" in low or "message not found" in low:
         return "could not be found from the exact marked WhatsApp message — please re-mark it and run UPLOAD again."
     if "hash_mismatch" in low or "no_tiles_found" in low or "hash_read_failed" in low:

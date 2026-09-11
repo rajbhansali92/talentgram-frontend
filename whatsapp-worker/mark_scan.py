@@ -1108,27 +1108,115 @@ _VIEWER_BUTTONS_JS = """
 () => {
   const v = document.querySelector('video');
   if (!v) return {rootFound: false, buttons: [], reason: 'no video element'};
-  let root = v;
-  while (root.parentElement && root.parentElement !== document.body) {
-    root = root.parentElement;
+  // 2026-09-11 (Mahim Suhalka — Take AND Introduction both failed
+  // identically with "WhatsApp Web could not open the media"): the OLD
+  // root-finding walked from <video> up to whatever sits directly under
+  // <body>, then searched ONLY that subtree for the viewer's own
+  // Download/Menu buttons. If WhatsApp renders the viewer's header
+  // chrome as a SIBLING overlay rather than a descendant of that one
+  // node (a real, plausible DOM restructuring — this exact "walk to a
+  // body-child, search its subtree" pattern is what SEND's own Forward-
+  // button finder independently uses too, and SEND's own reliability has
+  // been separately flagged), the real buttons are silently never found.
+  // Prefer the nearest [role="dialog"]-style ancestor (WhatsApp's media
+  // viewer IS a modal) as a more robust anchor; keep the old body-child
+  // walk as a fallback so nothing that already worked regresses.
+  let root = v.closest('[role="dialog"], [data-animate-modal-body="true"]');
+  if (!root) {
+    root = v;
+    while (root.parentElement && root.parentElement !== document.body) {
+      root = root.parentElement;
+    }
   }
-  if (!root.parentElement) return {rootFound: false, buttons: [], reason: 'video not attached under body'};
+  if (!root || !root.parentElement) return {rootFound: false, buttons: [], reason: 'video not attached under body'};
+  const seen = new Set();
+  const dump = b => {
+    const r = b.getBoundingClientRect();
+    const svgTitle = b.querySelector('svg title');
+    return {
+      ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
+      testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
+      rect: [r.x, r.y, r.width, r.height],
+    };
+  };
   const btns = Array.from(root.querySelectorAll('button, [role="button"]'));
+  btns.forEach(b => seen.add(b));
+  // Identity-scoped union (never a blind global dump): also include any
+  // OTHER on-screen element anywhere in the document whose OWN aria-
+  // label already unambiguously names it "Download" or a menu trigger —
+  // found by what it IS, never by position, so a real button outside
+  // `root`'s subtree is still reachable.
+  const extra = Array.from(document.querySelectorAll(
+    'button[aria-label="Download" i], [role="button"][aria-label="Download" i], ' +
+    'button[aria-label*="menu" i], [role="button"][aria-label*="menu" i]'
+  )).filter(b => !seen.has(b));
   return {
     rootFound: true,
     rootInfo: {tag: root.tagName, id: root.id || null, testid: root.getAttribute('data-testid')},
-    buttons: btns.map(b => {
-      const r = b.getBoundingClientRect();
-      const svgTitle = b.querySelector('svg title');
-      return {
-        ariaLabel: b.getAttribute('aria-label'), dataIcon: b.getAttribute('data-icon'),
-        testid: b.getAttribute('data-testid'), svgTitle: svgTitle ? svgTitle.textContent : null,
-        rect: [r.x, r.y, r.width, r.height],
-      };
-    }),
+    buttons: btns.concat(extra).map(dump),
   };
 }
 """
+
+# Direct blob-fetch (2026-09-11 — Mahim Suhalka: the smallest reliable
+# path Phase 3 of the incident audit asks for). Once the video viewer is
+# open and _wait_for_video_readiness confirms the FULL clip is buffered
+# (its own docstring: this only returns reached=True once the buffered
+# range reaches the video's own duration), the mounted <video> element's
+# own src IS the complete file as a blob: URL — the exact same "fetch a
+# blob: URL directly" mechanism _DOWNLOAD_JS and
+# _download_photo_album_tile_via_blob already use and have already
+# proven for photos and single-message video. This completely bypasses
+# the fragile "find the viewer's menu-trigger button -> open it -> find
+# a 'Download' item -> click it -> capture a browser download event"
+# chain, which depends on WhatsApp's current viewer-chrome DOM shape
+# (see _VIEWER_BUTTONS_JS's own note above) — a real point of fragility
+# a UI change can break at any of four separate steps. Never a fallback
+# to a DIFFERENT video: this reads the SAME <video> element the caller
+# already verified is mounted for the exact resolved tile. The existing
+# menu/Download-button flow (_click_download_in_open_viewer) remains,
+# unchanged, as the fallback for whatever WhatsApp variant doesn't
+# expose a full blob on the mounted element.
+_MOUNTED_VIDEO_BLOB_JS = """
+async () => {
+  const v = document.querySelector('video');
+  if (!v || !v.src || !v.src.startsWith('blob:')) {
+    return {ok: false, reason: 'mounted <video> has no blob: src'};
+  }
+  try {
+    const resp = await fetch(v.src);
+    const buf = await resp.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return {ok: true, base64: btoa(binary), contentType: resp.headers.get('content-type') || 'video/mp4', byteLength: bytes.length};
+  } catch (e) {
+    return {ok: false, reason: String(e && e.message || e)};
+  }
+}
+"""
+
+
+async def _fetch_mounted_video_blob(page) -> Dict[str, Any]:
+    """Runs _MOUNTED_VIDEO_BLOB_JS and decodes the result — never raises;
+    a JS-side failure or an exception here both come back as ok=False,
+    letting the caller fall through to the existing menu/Download flow."""
+    try:
+        result = await _evaluate(page, _MOUNTED_VIDEO_BLOB_JS, timeout=30.0)
+    except Exception as exc:
+        return {"ok": False, "reason": f"blob fetch evaluate failed: {exc}"}
+    if not result or not result.get("ok") or not result.get("base64"):
+        return {"ok": False, "reason": (result or {}).get("reason") or "blob fetch returned no bytes"}
+    try:
+        raw = b64mod.b64decode(result["base64"])
+    except Exception as exc:
+        return {"ok": False, "reason": f"blob base64 decode failed: {exc}"}
+    if not raw:
+        return {"ok": False, "reason": "blob fetch decoded to zero bytes"}
+    return {"ok": True, "_raw_bytes": raw, "content_type": result.get("contentType") or "video/mp4", "byte_length": len(raw)}
 
 # Finds whichever currently-rendered message is closest to the viewport's
 # vertical center — used right after clicking a quoted-message block's own
@@ -2458,13 +2546,37 @@ async def _open_tile_viewer_and_download_hardened(
     "not stable"/"detached" errors only (MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS,
     re-resolving+re-verifying by hash before every retry, never reusing a
     stale locator) -> wait for <video> to mount -> wait for FULL buffering
-    (_wait_for_video_readiness, unchanged) -> try the Download menu. If
-    Download isn't available, the viewer is closed and the next round
-    starts from a fresh hash-verified resolution — never assumes waiting
-    longer in the same open viewer will help. Fails cleanly (never
-    substitutes a different message/tile) once resolution itself reports
-    "message_not_found"/"hash_mismatch"."""
+    (_wait_for_video_readiness, unchanged) -> ACQUIRE the bytes. Fails
+    cleanly (never substitutes a different message/tile) once resolution
+    itself reports "message_not_found"/"hash_mismatch".
+
+    2026-09-11 (real UPLOAD incident — Mahim Suhalka / "SINGLETON with
+    shruti hassan": Take AND Introduction BOTH failed with "WhatsApp Web
+    could not open the media to retrieve it", the SAME error, on media
+    visibly present and correctly MARKed in the group). Every stage up to
+    and including full buffering (source resolve, tile click, <video>
+    mount, readiness) is role-agnostic and was NOT where either item
+    failed — both reached an open, fully-buffered viewer. The acquisition
+    step itself — find the viewer's own menu-trigger button -> open it ->
+    find a "Download" menu item -> click it -> capture a resulting
+    browser download event — depends on WhatsApp's current viewer-chrome
+    DOM shape at FOUR separate points, any one of which a UI change can
+    silently break (see _VIEWER_BUTTONS_JS's own note). Per Phase 3 of
+    this incident's own audit: once the viewer is open and the video is
+    FULLY buffered, the mounted <video> element's own `src` already IS
+    the complete file as a `blob:` URL — the exact same "fetch a blob:
+    URL directly" mechanism this codebase already uses (and has already
+    proven) for photos (_download_photo_album_tile_via_blob) and for
+    single-message video (_DOWNLOAD_JS). _fetch_mounted_video_blob is
+    tried FIRST once readiness is reached — it reads the SAME mounted
+    <video> element the caller just verified, never a different one — and
+    only falls through to the existing menu/Download-button flow
+    (unchanged, still the fallback) if that direct read fails. Every
+    stage transition is logged (UPLOAD_MEDIA_*) and every failure now
+    carries a machine `state` tag (Phase 12) so a future incident names
+    the exact stalled state instead of a catch-all sentence."""
     last_reason: Optional[str] = None
+    last_state: str = "DOWNLOAD_NOT_STARTED"
     last_detail: Dict[str, Any] = {}
     for round_i in range(MAX_DOWNLOAD_READINESS_ROUNDS):
         # Re-verify the conversation is still the right one before every
@@ -2494,8 +2606,19 @@ async def _open_tile_viewer_and_download_hardened(
                 # click-retryable condition; fails immediately, no
                 # substitution, no further rounds (retrying rounds won't
                 # fix a message that's gone or a hash that never matches).
+                rr = (resolve_reason or "")
+                if "hash_mismatch" in rr or "no_tiles_found" in rr or "hash_read_failed" in rr:
+                    resolve_state = "MEDIA_HASH_MISMATCH"
+                elif "media_not_rendered" in rr:
+                    resolve_state = "SOURCE_NOT_HYDRATED"
+                else:
+                    resolve_state = "SOURCE_NOT_FOUND"
+                logger.warning(
+                    "UPLOAD_MEDIA_RESOLVE_FAILED source=%s round=%d attempt=%d state=%s reason=%r",
+                    source_message_id, round_i, attempt, resolve_state, resolve_reason,
+                )
                 return {
-                    "ok": False, "stage": "resolve_tile", "reason": resolve_reason,
+                    "ok": False, "stage": "resolve_tile", "state": resolve_state, "reason": resolve_reason,
                     "round": round_i, "attempt": attempt,
                 }
             try:
@@ -2513,10 +2636,15 @@ async def _open_tile_viewer_and_download_hardened(
                 # reuse the same (possibly now-detached) locator.
 
         if click_error is not None:
+            logger.warning(
+                "UPLOAD_MEDIA_OPEN_FAILED source=%s round=%d state=MEDIA_OPEN_FAILED reason=%r",
+                source_message_id, round_i, str(click_error),
+            )
             return {
-                "ok": False, "stage": "open_tile", "reason": f"click failed: {click_error}",
+                "ok": False, "stage": "open_tile", "state": "MEDIA_OPEN_FAILED", "reason": f"click failed: {click_error}",
                 "click_attempts": click_attempts, "round": round_i, "resolved_tile_index": resolved_index,
             }
+        logger.info("UPLOAD_MEDIA_TILE_CLICKED source=%s round=%d resolved_tile_index=%s", source_message_id, round_i, resolved_index)
 
         video_mounted = False
         elapsed = 0.0
@@ -2532,10 +2660,40 @@ async def _open_tile_viewer_and_download_hardened(
             elapsed += 0.5
         if not video_mounted:
             last_reason = "no <video> element mounted within 15s of clicking the tile"
+            last_state = "MEDIA_NOT_READY"
             last_detail = {"round": round_i, "resolved_tile_index": resolved_index}
+            logger.warning("UPLOAD_MEDIA_NOT_READY source=%s round=%d reason=%r", source_message_id, round_i, last_reason)
             continue  # nothing to close — the viewer never actually opened
 
         readiness = await _wait_for_video_readiness(page)
+        logger.info(
+            "UPLOAD_MEDIA_READINESS source=%s round=%d reached=%s elapsed_s=%.1f",
+            source_message_id, round_i, readiness.get("reached"), readiness.get("elapsed_s") or 0.0,
+        )
+
+        # Primary acquisition (2026-09-11): a direct blob: fetch off the
+        # mounted <video> element — see this function's own docstring for
+        # why. Only attempted once the video is FULLY buffered (the same
+        # precondition the existing Download-menu path already implicitly
+        # required — see _wait_for_video_readiness's own evidence that
+        # Download itself was never available before then either).
+        if readiness.get("reached"):
+            direct = await _fetch_mounted_video_blob(page)
+            if direct.get("ok"):
+                logger.info(
+                    "UPLOAD_MEDIA_ACQUIRED source=%s round=%d via=direct_blob_fetch byte_length=%d",
+                    source_message_id, round_i, direct.get("byte_length") or 0,
+                )
+                viewer_closed = await _close_viewer(page, {"rootFound": False, "buttons": []})
+                return {
+                    "ok": True, "downloads": [direct], "stage_used": "direct_blob_fetch",
+                    "viewer_closed": viewer_closed, "round": round_i, "resolved_tile_index": resolved_index,
+                }
+            logger.info(
+                "UPLOAD_MEDIA_DIRECT_BLOB_UNAVAILABLE source=%s round=%d reason=%r — falling back to Download menu",
+                source_message_id, round_i, direct.get("reason"),
+            )
+
         try:
             viewer_buttons = await _evaluate(page, _VIEWER_BUTTONS_JS)
         except Exception:
@@ -2543,18 +2701,27 @@ async def _open_tile_viewer_and_download_hardened(
 
         download_result = await _click_download_in_open_viewer(page, viewer_buttons, readiness)
         if download_result.get("ok"):
+            logger.info(
+                "UPLOAD_MEDIA_ACQUIRED source=%s round=%d via=%s",
+                source_message_id, round_i, download_result.get("stage_used") or "download_menu",
+            )
             download_result["viewer_closed"] = await _close_viewer(page, viewer_buttons)
             download_result["round"] = round_i
             download_result["resolved_tile_index"] = resolved_index
             return download_result
 
         last_reason = download_result.get("reason")
+        last_state = "DOWNLOAD_NOT_STARTED"
         last_detail = download_result
+        logger.warning(
+            "UPLOAD_MEDIA_DOWNLOAD_NOT_STARTED source=%s round=%d stage=%s reason=%r",
+            source_message_id, round_i, download_result.get("stage"), last_reason,
+        )
         await _close_viewer(page, viewer_buttons)
         # Next round re-resolves + re-verifies by hash from scratch —
         # never assumes the SAME viewer, reopened, will behave differently.
 
-    return {"ok": False, "stage": "download_not_available", "reason": last_reason, "detail": last_detail}
+    return {"ok": False, "stage": "download_not_available", "state": last_state, "reason": last_reason, "detail": last_detail}
 
 
 async def _close_viewer(page, viewer_buttons: Dict[str, Any]) -> Dict[str, Any]:
@@ -7318,7 +7485,7 @@ async def _upload_one(http: httpx.AsyncClient, target: Dict[str, Any], base64_da
     }
     resp = await http.post(f"{BASE}/media-upload", data=data, files=files, headers=_auth_headers(), timeout=120.0)
     if resp.status_code >= 400:
-        return {"ok": False, "source_message_id": target["source_message_id"], "error": resp.text[:300]}
+        return {"ok": False, "source_message_id": target["source_message_id"], "error": f"[UPLOAD_FAILED] {resp.text[:300]}"}
     return {"ok": True, "source_message_id": target["source_message_id"]}
 
 
@@ -7423,7 +7590,8 @@ async def _run_download_one(page, http: httpx.AsyncClient, group_name: str, targ
         source_thumbnail_hash=target.get("source_thumbnail_hash"),
     )
     if message is None:
-        return {"ok": False, "source_message_id": sm_id, "error": locate_reason}
+        locate_state = "SOURCE_NOT_HYDRATED" if "did not finish rendering" in (locate_reason or "") else "SOURCE_NOT_FOUND"
+        return {"ok": False, "source_message_id": sm_id, "error": f"[{locate_state}] {locate_reason}"}
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
 
@@ -7431,13 +7599,15 @@ async def _run_download_one(page, http: httpx.AsyncClient, group_name: str, targ
         # Hardened path (2026-08-25) — _open_tile_viewer_and_download_hardened:
         # re-resolves + verifies the tile by its own live thumbnail hash
         # before every click (never trusts tile_index alone), bounded
-        # click retry on DOM-instability errors, and a bounded
-        # close/reopen round when the video buffers fully but Download
-        # never appears. Works uniformly for a single (non-album) video
-        # message too — tile_index 0 addresses that message's own sole
-        # media element. 2026-09-11: the persisted mark_reply_message_id
-        # is threaded through so its own re-resolution can also use the
-        # SCAN-phase jump fallback when the index lookup misses.
+        # click retry on DOM-instability errors, and (2026-09-11) a
+        # direct blob: fetch off the mounted <video> element as the
+        # PRIMARY acquisition mechanism, falling back to the Download-
+        # menu flow only if that direct read fails. Works uniformly for a
+        # single (non-album) video message too — tile_index 0 addresses
+        # that message's own sole media element. The persisted
+        # mark_reply_message_id is threaded through so its own
+        # re-resolution can also use the SCAN-phase jump fallback when
+        # the index lookup misses.
         tile_index = target.get("album_tile_index")
         if tile_index is None:
             tile_index = 0
@@ -7450,16 +7620,18 @@ async def _run_download_one(page, http: httpx.AsyncClient, group_name: str, targ
                 timeout=PER_VIDEO_DOWNLOAD_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            return {"ok": False, "source_message_id": sm_id, "error": f"timed out after {PER_VIDEO_DOWNLOAD_TIMEOUT}s"}
+            return {"ok": False, "source_message_id": sm_id, "error": f"[DOWNLOAD_TIMEOUT] timed out after {PER_VIDEO_DOWNLOAD_TIMEOUT}s"}
         if not dl.get("ok"):
+            state = dl.get("state") or "DOWNLOAD_NOT_STARTED"
+            reason = dl.get("reason") or f"failed at stage {dl.get('stage')}"
             return _strip_raw_bytes({
                 "ok": False, "source_message_id": sm_id,
-                "error": dl.get("reason") or f"failed at stage {dl.get('stage')}", "detail": dl,
+                "error": f"[{state}] {reason}", "detail": dl,
             })
         downloads = dl.get("downloads") or []
         raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
         if not raw:
-            return {"ok": False, "source_message_id": sm_id, "error": "downloaded zero bytes"}
+            return {"ok": False, "source_message_id": sm_id, "error": "[DOWNLOAD_NOT_STARTED] downloaded zero bytes"}
         b64 = b64mod.b64encode(raw).decode()
         upload_result = await _upload_one(http, target, b64, "")
         upload_result["byte_length"] = len(raw)

@@ -5958,6 +5958,237 @@ def main():
     assert c166["resolution_failure_state"] == "media_not_rendered", c166
     print("166. _run_scan integration: a failed jump fallback tags the candidate with resolution_failure_state (media_not_rendered) for the backend's MEDIA RESOLUTION FAILED report")
 
+    # ------------------------------------------------------------------
+    # 167-173: REAL UPLOAD INCIDENT (2026-09-11 — Mahim Suhalka /
+    # "SINGLETON with shruti hassan": Take AND Introduction BOTH failed
+    # with "WhatsApp Web could not open the media to retrieve it" —
+    # media visibly present, correctly MARKed, source resolution and
+    # hydration all working. First divergence: MEDIA ACQUISITION. The
+    # existing menu-trigger -> Download-item -> browser-download-event
+    # chain depends on WhatsApp's current viewer-chrome DOM shape at four
+    # separate points. Fix: once the viewer is open and the video is
+    # FULLY buffered, fetch the mounted <video> element's own blob: src
+    # DIRECTLY (the same mechanism this codebase already proved for
+    # photos) — tried FIRST, the menu flow remains as the fallback.
+    # ------------------------------------------------------------------
+    def _b64(data: bytes) -> str:
+        return base64.b64encode(data).decode()
+
+    def _fake_evaluate_blob_router(blob_result):
+        """Routes _evaluate calls by WHICH script is passed — distinguishes
+        _MOUNTED_VIDEO_BLOB_JS (the new direct-fetch primary path) from
+        _VIEWER_BUTTONS_JS (the existing menu-discovery dump) by a unique
+        literal substring in each script, never by call order."""
+        async def _fake_evaluate(page, js, arg=None, timeout=10.0):
+            if "v.src.startsWith('blob:')" in js:
+                return blob_result
+            if "rootFound" in js:
+                return {"rootFound": False, "buttons": []}
+            return None
+        return _fake_evaluate
+
+    # 167: direct blob fetch succeeds as the PRIMARY acquisition path —
+    # the menu-based Download flow is never even invoked.
+    tile_167 = _FakeHashTile("video-content", _video_tile_html("MAHIMTAKE167"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([2])
+    orig_click_dl_167 = mark_scan._click_download_in_open_viewer
+    menu_calls_167 = {"n": 0}
+    async def _menu_spy_167(page, vb, r):
+        menu_calls_167["n"] += 1
+        return {"ok": True, "downloads": [{"ok": True, "_raw_bytes": b"MENU_PATH_SHOULD_NOT_RUN"}]}
+    mark_scan._click_download_in_open_viewer = _menu_spy_167
+    orig_readiness_167 = mark_scan._wait_for_video_readiness
+    orig_close_167 = mark_scan._close_viewer
+    mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True, "elapsed_s": 3.0})
+    mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+    real_bytes_167 = b"REAL VIDEO BYTES 167" * 50
+    mark_scan._evaluate = _fake_evaluate_blob_router({
+        "ok": True, "base64": _b64(real_bytes_167), "contentType": "video/mp4", "byteLength": len(real_bytes_167),
+    })
+    try:
+        page_167 = _FakeHashPage({2: _FakeHashMessageLocator([tile_167])}, video_mounted=True)
+        dl_167 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            page_167, "Mahim Suhalka x Talentgram Agency", "MAHIM_TAKE_SRC", _hash_of("MAHIMTAKE167"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+        mark_scan._click_download_in_open_viewer = orig_click_dl_167
+        mark_scan._wait_for_video_readiness = orig_readiness_167
+        mark_scan._close_viewer = orig_close_167
+        mark_scan._evaluate = orig_evaluate_up
+    assert dl_167["ok"] is True, dl_167
+    assert dl_167["stage_used"] == "direct_blob_fetch", dl_167
+    assert dl_167["downloads"][0]["_raw_bytes"] == real_bytes_167, dl_167
+    assert menu_calls_167["n"] == 0, "the menu/Download-button flow must never run when the direct blob fetch already succeeded"
+    print("167. UPLOAD Mahim Take: direct blob: fetch off the mounted <video> is the PRIMARY acquisition path -> exact bytes acquired, the fragile menu/Download flow never invoked (THE incident's fix)")
+
+    # 168: direct blob fetch genuinely unavailable (no blob: src on the
+    # mounted element) -> falls back to the existing menu-based Download
+    # flow, which still succeeds -> regression safety, the old mechanism
+    # is preserved as a fallback, never removed.
+    tile_168 = _FakeHashTile("video-content", _video_tile_html("MAHIMINTRO168"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([4])
+    menu_calls_168 = {"n": 0}
+    async def _menu_ok_168(page, vb, r):
+        menu_calls_168["n"] += 1
+        return {"ok": True, "downloads": [{"ok": True, "_raw_bytes": b"MENU_FALLBACK_BYTES"}], "stage_used": "direct_download_button"}
+    mark_scan._click_download_in_open_viewer = _menu_ok_168
+    mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+    mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+    mark_scan._evaluate = _fake_evaluate_blob_router({"ok": False, "reason": "mounted <video> has no blob: src"})
+    try:
+        page_168 = _FakeHashPage({4: _FakeHashMessageLocator([tile_168])}, video_mounted=True)
+        dl_168 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            page_168, "Mahim Suhalka x Talentgram Agency", "MAHIM_INTRO_SRC", _hash_of("MAHIMINTRO168"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+        mark_scan._click_download_in_open_viewer = orig_click_dl_167
+        mark_scan._wait_for_video_readiness = orig_readiness_167
+        mark_scan._close_viewer = orig_close_167
+        mark_scan._evaluate = orig_evaluate_up
+    assert dl_168["ok"] is True, dl_168
+    assert dl_168["downloads"][0]["_raw_bytes"] == b"MENU_FALLBACK_BYTES", dl_168
+    assert menu_calls_168["n"] == 1, "the menu flow must run exactly once when the direct fetch reports no blob: src"
+    print("168. UPLOAD Mahim Introduction: direct blob: fetch unavailable (no blob src) -> falls back to the existing menu/Download flow, which still succeeds -> old mechanism preserved")
+
+    # 169: machine `state` tags surface correctly for each distinct
+    # failure — never one generic catch-all sentence again.
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([None])
+    try:
+        dl_state_notfound = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            _FakeHashPage({}), "G", "GONE169", _hash_of("X169"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_state_notfound["state"] == "SOURCE_NOT_FOUND", dl_state_notfound
+
+    only_tile_169 = _FakeHashTile("video-content", _video_tile_html("ONLY169"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([1])
+    try:
+        dl_state_hash = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            _FakeHashPage({1: _FakeHashMessageLocator([only_tile_169])}, video_mounted=True),
+            "G", "MISMATCH169", _hash_of("NOTHING_MATCHES_169"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_state_hash["state"] == "MEDIA_HASH_MISMATCH", dl_state_hash
+
+    fail_click_169 = _FakeHashTile("video-content", _video_tile_html("CLICKFAIL169"), fail_times=99)
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([9, 9, 9])
+    try:
+        dl_state_open = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            _FakeHashPage({9: _FakeHashMessageLocator([fail_click_169])}, video_mounted=True),
+            "G", "CLICKFAIL169", _hash_of("CLICKFAIL169"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_state_open["state"] == "MEDIA_OPEN_FAILED", dl_state_open
+
+    tile_notmounted_169 = _FakeHashTile("video-content", _video_tile_html("NOTMOUNTED169"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([6, 6, 6])
+    orig_wait_169 = mark_scan._evaluate
+    try:
+        page_notmounted = _FakeHashPage({6: _FakeHashMessageLocator([tile_notmounted_169])}, video_mounted=False)
+        page_notmounted.wait_for_timeout = lambda ms: asyncio.sleep(0)  # skip the real 15s wait
+        dl_state_notready = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            page_notmounted, "G", "NOTMOUNTED169", _hash_of("NOTMOUNTED169"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+    assert dl_state_notready["state"] == "MEDIA_NOT_READY", dl_state_notready
+
+    tile_dlfail_169 = _FakeHashTile("video-content", _video_tile_html("DLFAIL169"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([8, 8, 8])
+    mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": False})
+    mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+    mark_scan._click_download_in_open_viewer = lambda page, vb, r: asyncio.sleep(
+        0, result={"ok": False, "stage": "find_menu_trigger", "reason": "video mounted but no plausible menu-trigger button found"})
+    mark_scan._evaluate = _fake_evaluate_blob_router({"ok": False, "reason": "mounted <video> has no blob: src"})
+    try:
+        dl_state_dl = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            _FakeHashPage({8: _FakeHashMessageLocator([tile_dlfail_169])}, video_mounted=True),
+            "G", "DLFAIL169", _hash_of("DLFAIL169"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+        mark_scan._wait_for_video_readiness = orig_readiness_167
+        mark_scan._close_viewer = orig_close_167
+        mark_scan._click_download_in_open_viewer = orig_click_dl_167
+        mark_scan._evaluate = orig_evaluate_up
+    assert dl_state_dl["state"] == "DOWNLOAD_NOT_STARTED", dl_state_dl
+    print("169. UPLOAD failure states are machine-taggable: SOURCE_NOT_FOUND / MEDIA_HASH_MISMATCH / MEDIA_OPEN_FAILED / MEDIA_NOT_READY / DOWNLOAD_NOT_STARTED each surface distinctly (Phase 12)")
+
+    # 170: viewer cleanup (_close_viewer) runs after a SUCCESSFUL direct
+    # blob-fetch acquisition, not just after failure.
+    close_calls_170 = {"n": 0}
+    async def _close_spy_170(page, vb):
+        close_calls_170["n"] += 1
+        return {"closed": True}
+    tile_170 = _FakeHashTile("video-content", _video_tile_html("CLEANUP170"))
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([1])
+    mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+    mark_scan._close_viewer = _close_spy_170
+    mark_scan._evaluate = _fake_evaluate_blob_router({"ok": True, "base64": _b64(b"BYTES170"), "contentType": "video/mp4", "byteLength": 8})
+    try:
+        dl_170 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            _FakeHashPage({1: _FakeHashMessageLocator([tile_170])}, video_mounted=True),
+            "G", "CLEANUP170", _hash_of("CLEANUP170"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+        mark_scan._wait_for_video_readiness = orig_readiness_167
+        mark_scan._close_viewer = orig_close_167
+        mark_scan._evaluate = orig_evaluate_up
+    assert dl_170["ok"] is True, dl_170
+    assert close_calls_170["n"] == 1, "the viewer must be closed after a successful direct-blob acquisition too"
+    print("170. UPLOAD viewer cleanup runs after a SUCCESSFUL direct blob-fetch acquisition, not only after failure")
+
+    # 171: Mahim CRITICAL REGRESSION — Take and Introduction both require
+    # acquisition, Take falls back to the menu path (no blob src),
+    # Introduction succeeds via the new direct path -> BOTH succeed, each
+    # to its OWN exact resolved tile, no cross-contamination.
+    take_tile_171 = _FakeHashTile("video-content", _video_tile_html("MAHIMTAKE171"))
+    intro_tile_171 = _FakeHashTile("video-content", _video_tile_html("MAHIMINTRO171"))
+
+    async def _run_one_171(tile, source_hash, blob_result, menu_fn, idx):
+        mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([idx])
+        mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+        mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+        mark_scan._click_download_in_open_viewer = menu_fn
+        mark_scan._evaluate = _fake_evaluate_blob_router(blob_result)
+        try:
+            return await mark_scan._open_tile_viewer_and_download_hardened(
+                _FakeHashPage({idx: _FakeHashMessageLocator([tile])}, video_mounted=True),
+                "Mahim Suhalka x Talentgram Agency", f"MAHIM_SRC_{idx}", source_hash, 0,
+            )
+        finally:
+            mark_scan._find_message_index_by_data_id = orig_find_idx_up
+
+    async def _menu_for_take_171(page, vb, r):
+        return {"ok": True, "downloads": [{"ok": True, "_raw_bytes": b"TAKE_VIA_MENU"}]}
+
+    try:
+        take_result_171 = asyncio.run(_run_one_171(
+            take_tile_171, _hash_of("MAHIMTAKE171"),
+            {"ok": False, "reason": "mounted <video> has no blob: src"}, _menu_for_take_171, 21,
+        ))
+        intro_result_171 = asyncio.run(_run_one_171(
+            intro_tile_171, _hash_of("MAHIMINTRO171"),
+            {"ok": True, "base64": _b64(b"INTRO_VIA_DIRECT_BLOB"), "contentType": "video/mp4", "byteLength": 21},
+            None, 22,
+        ))
+    finally:
+        mark_scan._wait_for_video_readiness = orig_readiness_167
+        mark_scan._close_viewer = orig_close_167
+        mark_scan._click_download_in_open_viewer = orig_click_dl_167
+        mark_scan._evaluate = orig_evaluate_up
+
+    assert take_result_171["ok"] is True and take_result_171["downloads"][0]["_raw_bytes"] == b"TAKE_VIA_MENU", take_result_171
+    assert intro_result_171["ok"] is True and intro_result_171["downloads"][0]["_raw_bytes"] == b"INTRO_VIA_DIRECT_BLOB", intro_result_171
+    assert take_tile_171.click_count == 1 and intro_tile_171.click_count == 1, "each item clicks ONLY its own resolved tile, exactly once"
+    print("171. Mahim CRITICAL REGRESSION: Take (menu-flow fallback) AND Introduction (direct blob-fetch) BOTH succeed, each acquiring its OWN exact resolved media — no source substitution, no cross-contamination")
+
 
 if __name__ == "__main__":
     main()

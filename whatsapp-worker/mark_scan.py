@@ -1199,13 +1199,160 @@ async () => {
 }
 """
 
+# Real content validation (Production fix, 2026-09-11 — critical audit
+# finding, second Mahim Suhalka follow-up): "video.src starts with
+# blob:" or "a browser download event fired" was NEVER actual proof the
+# acquired bytes are a genuine, complete, playable video — this
+# codebase's own PROVEN photo path (_download_photo_album_tile_via_blob)
+# already applies real content validation (MIME-signature check + an
+# independent byte-level dimension parse cross-checked against the DOM's
+# own naturalWidth/naturalHeight) before ever trusting a fetched blob;
+# the video acquisition path had NO equivalent. Worse: _collect_downloads
+# already computes rich diagnostics via _read_file_diagnostics (byte
+# length, sha256, magic bytes, an ffprobe-derived duration) for every
+# browser-download-event path — but never used any of it to gate
+# success; every download was unconditionally reported ok=True
+# regardless of content. This closes both gaps: every acquired video's
+# bytes — from EITHER the direct blob: fetch OR the existing menu/
+# Download-button flow — now passes through the SAME real validation
+# before ever being trusted, uploaded, or reported as ACQUIRED.
+_HTML_ERROR_PREFIXES = (b"<!doctype", b"<html", b"<?xml", b"<head")
+
+
+def _is_recognized_video_signature(data: bytes) -> bool:
+    """Checks the ACTUAL bytes' own magic signature against known video
+    container formats — NEVER trusts a caller-supplied type hint.
+    _detect_mime_type's own hint-fallback (`return "video/mp4" if
+    media_type_hint == "video" else ...`) silently assumes unrecognized
+    bytes are a valid video whenever the caller expected one — exactly
+    the gap that would let an HTML error page, a truncated stream, or any
+    other non-video content masquerade as acquired media. This performs
+    the strict, hint-independent check that gap needs."""
+    if len(data) < 12:
+        return False
+    if data[4:8] == b"ftyp":  # MP4 / MOV / 3GP family (ISO base media container)
+        return True
+    if data[:4] == b"\x1aE\xdf\xa3":  # WebM / Matroska (EBML header)
+        return True
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"AVI ":
+        return True
+    return False
+
+
+async def _probe_video_duration(raw: bytes) -> Dict[str, Any]:
+    """Writes `raw` to a bounded-lifetime temp file and runs ffprobe
+    against it — the SAME system dependency _read_file_diagnostics
+    already relies on, confirmed present in this exact runtime
+    (whatsapp-worker/Dockerfile installs ffmpeg, which provides ffprobe).
+    Always cleans up the temp file, always bounded. An infra-level
+    failure (binary genuinely missing, timeout) reports via "error" —
+    treated as non-fatal by the caller, since the byte-signature check
+    already gives real assurance on its own; a genuine DECODE failure
+    (ffprobe ran, but rejected the file) reports decodable=False —
+    treated as fatal."""
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(raw)
+            path = f.name
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", path],
+            capture_output=True, timeout=15, text=True,
+        )
+        if proc.returncode != 0:
+            return {"decodable": False, "detail": (proc.stderr or "no ffprobe output")[:300]}
+        import json as _json
+        parsed = _json.loads(proc.stdout or "{}")
+        duration = (parsed.get("format") or {}).get("duration")
+        return {"decodable": True, "duration_s": float(duration) if duration else None}
+    except FileNotFoundError as exc:
+        return {"error": f"ffprobe not available: {exc}"}
+    except subprocess.TimeoutExpired:
+        return {"error": "ffprobe timed out"}
+    except Exception as exc:
+        return {"error": str(exc)}
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+
+async def _validate_acquired_media_bytes(raw: bytes, expected_media_type: str, *, min_video_bytes: int = 4096) -> Dict[str, Any]:
+    """The real "are these actually the exact media" gate (Phase 7 of the
+    2026-09-11 audit) — applied uniformly, after EITHER acquisition
+    mechanism, before ANY result is ever trusted. Rejects, cheapest/most
+    certain checks first:
+      1. empty / implausibly small for a video (a real clip, even 1s
+         long, is never a few hundred bytes — that shape matches a
+         thumbnail or placeholder instead).
+      2. an HTML error page — a stale/revoked blob: URL or an
+         intercepted network error can return real, non-empty, HTML
+         bytes instead of binary, indistinguishable from "real bytes" by
+         length alone.
+      3. NOT a recognized video container signature by the bytes'
+         OWN magic header (_is_recognized_video_signature) — independent
+         of any hint.
+      4. (best-effort — see _probe_video_duration) ffprobe cannot decode
+         it at all, or reports a near-zero duration (a truncated/partial
+         stream) — the strongest available confirmation of a complete,
+         playable file.
+    Returns {"valid": bool, "reason": Optional[str], "byte_length": int,
+    "ffprobe_duration_s": Optional[float]}. Identity (the right message,
+    the right hash) is established BEFORE this ever runs, by the
+    existing exact-hash tile resolution — this validates only that the
+    bytes themselves are genuine, complete media, never re-decides
+    identity."""
+    n = len(raw)
+    if n == 0:
+        return {"valid": False, "reason": "acquired zero bytes", "byte_length": 0}
+    if expected_media_type == "video" and n < min_video_bytes:
+        return {
+            "valid": False, "byte_length": n,
+            "reason": f"acquired only {n} bytes — too small to be a real video (thumbnail or placeholder?)",
+        }
+    head = raw[:64].lower()
+    if any(head.startswith(p) for p in _HTML_ERROR_PREFIXES):
+        return {"valid": False, "byte_length": n, "reason": "acquired bytes are an HTML page, not media (stale blob: URL or a network error page)"}
+    if expected_media_type == "video" and not _is_recognized_video_signature(raw):
+        return {
+            "valid": False, "byte_length": n,
+            "reason": f"acquired bytes do not match any known video container signature (magic={raw[:16].hex()})",
+        }
+    ffprobe_duration: Optional[float] = None
+    if expected_media_type == "video":
+        probe = await _probe_video_duration(raw)
+        if probe.get("error"):
+            logger.info("mark_scan: ffprobe validation unavailable (%s) — accepting on signature check alone", probe.get("error"))
+        elif not probe.get("decodable"):
+            return {"valid": False, "byte_length": n, "reason": f"ffprobe could not decode the acquired bytes as a video: {probe.get('detail')}"}
+        else:
+            ffprobe_duration = probe.get("duration_s")
+            if ffprobe_duration is not None and ffprobe_duration <= 0.05:
+                return {
+                    "valid": False, "byte_length": n, "ffprobe_duration_s": ffprobe_duration,
+                    "reason": f"ffprobe reports a near-zero duration ({ffprobe_duration}s) — likely a truncated/partial stream",
+                }
+    return {"valid": True, "reason": None, "byte_length": n, "ffprobe_duration_s": ffprobe_duration}
+
 
 async def _fetch_mounted_video_blob(page) -> Dict[str, Any]:
     """Runs _MOUNTED_VIDEO_BLOB_JS and decodes the result — never raises;
     a JS-side failure or an exception here both come back as ok=False,
-    letting the caller fall through to the existing menu/Download flow."""
+    letting the caller fall through to the existing menu/Download flow.
+    2026-09-11: the decoded bytes are now run through
+    _validate_acquired_media_bytes before this ever reports ok=True — a
+    real blob: src and a non-empty fetch response were never, on their
+    own, proof of a genuine complete video (see that function's own
+    docstring). A validation failure returns ok=False (never ok=True
+    with bad bytes), which the caller already treats identically to "no
+    blob src" — it falls through to the menu/Download flow as the
+    bounded alternate acquisition method, exactly Phase 6's own
+    "Attempt 4 — alternate safe acquisition method"."""
     try:
-        result = await _evaluate(page, _MOUNTED_VIDEO_BLOB_JS, timeout=30.0)
+        result = await _evaluate(page, _MOUNTED_VIDEO_BLOB_JS, timeout=45.0)
     except Exception as exc:
         return {"ok": False, "reason": f"blob fetch evaluate failed: {exc}"}
     if not result or not result.get("ok") or not result.get("base64"):
@@ -1216,7 +1363,16 @@ async def _fetch_mounted_video_blob(page) -> Dict[str, Any]:
         return {"ok": False, "reason": f"blob base64 decode failed: {exc}"}
     if not raw:
         return {"ok": False, "reason": "blob fetch decoded to zero bytes"}
-    return {"ok": True, "_raw_bytes": raw, "content_type": result.get("contentType") or "video/mp4", "byte_length": len(raw)}
+    validation = await _validate_acquired_media_bytes(raw, "video")
+    if not validation["valid"]:
+        return {
+            "ok": False, "validation_failed": True, "byte_length": validation.get("byte_length"),
+            "reason": f"direct blob fetch acquired bytes but they failed content validation: {validation['reason']}",
+        }
+    return {
+        "ok": True, "_raw_bytes": raw, "content_type": result.get("contentType") or "video/mp4",
+        "byte_length": len(raw), "ffprobe_duration_s": validation.get("ffprobe_duration_s"),
+    }
 
 # Finds whichever currently-rendered message is closest to the viewport's
 # vertical center — used right after clicking a quoted-message block's own
@@ -2233,6 +2389,32 @@ async def _open_tile_viewer_and_download(
     return result
 
 
+async def _validate_video_downloads(downloads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Re-validates every already-`ok`-flagged browser download's own
+    bytes against _validate_acquired_media_bytes before the caller ever
+    trusts it (2026-09-11 audit finding: _collect_downloads/_read_file_
+    diagnostics already compute byte length, sha256, magic bytes, and an
+    ffprobe-derived duration for every download event — but nothing ever
+    USED that to gate success; every entry was unconditionally reported
+    "ok": True regardless of actual content, a real gap the master
+    prompt's own Phase 7 flags directly). Scoped to THIS production
+    UPLOAD video path only — _collect_downloads itself, and its other
+    (probe/diagnostic-only) callers, are left completely unchanged.
+    Returns a NEW list; any entry whose bytes don't pass gets demoted to
+    ok=False with a "validation_failed"/"reason" explaining why, so the
+    caller's existing `any(d.get("ok") ...)` check correctly treats it as
+    a failed acquisition rather than a successful one with bad bytes."""
+    out = []
+    for d in downloads:
+        if d.get("ok") and d.get("_raw_bytes"):
+            validation = await _validate_acquired_media_bytes(d["_raw_bytes"], "video")
+            if not validation["valid"]:
+                out.append({**d, "ok": False, "validation_failed": True, "reason": validation["reason"]})
+                continue
+        out.append(d)
+    return out
+
+
 async def _click_download_in_open_viewer(page, viewer_buttons: Dict[str, Any], readiness: Dict[str, Any]) -> Dict[str, Any]:
     """Finds the viewer's own three-dot menu trigger, opens it, finds the
     "Download" item, clicks it, and collects the resulting download.
@@ -2286,7 +2468,7 @@ async def _click_download_in_open_viewer(page, viewer_buttons: Dict[str, Any], r
                 cy = b["rect"][1] + b["rect"][3] / 2
                 await page.mouse.click(cx, cy, button="left")
 
-            downloads = await _collect_downloads(page, _click_direct_download)
+            downloads = await _validate_video_downloads(await _collect_downloads(page, _click_direct_download))
             return {
                 "ok": bool(downloads) and any(d.get("ok") for d in downloads),
                 "readiness": readiness, "downloads": downloads, "menu_trigger": b,
@@ -2368,7 +2550,7 @@ async def _click_download_in_open_viewer(page, viewer_buttons: Dict[str, Any], r
         async def _click_item():
             await item.click(timeout=5000)
 
-        downloads = await _collect_downloads(page, _click_item)
+        downloads = await _validate_video_downloads(await _collect_downloads(page, _click_item))
         return {
             "ok": bool(downloads) and any(d.get("ok") for d in downloads),
             "readiness": readiness, "menu_dump": menu_dump, "downloads": downloads, "menu_trigger": menu_trigger,
@@ -2677,18 +2859,25 @@ async def _open_tile_viewer_and_download_hardened(
         # precondition the existing Download-menu path already implicitly
         # required — see _wait_for_video_readiness's own evidence that
         # Download itself was never available before then either).
+        round_saw_invalid_bytes = False
         if readiness.get("reached"):
             direct = await _fetch_mounted_video_blob(page)
             if direct.get("ok"):
                 logger.info(
-                    "UPLOAD_MEDIA_ACQUIRED source=%s round=%d via=direct_blob_fetch byte_length=%d",
-                    source_message_id, round_i, direct.get("byte_length") or 0,
+                    "UPLOAD_MEDIA_ACQUIRED source=%s round=%d via=direct_blob_fetch byte_length=%d ffprobe_duration_s=%s",
+                    source_message_id, round_i, direct.get("byte_length") or 0, direct.get("ffprobe_duration_s"),
                 )
                 viewer_closed = await _close_viewer(page, {"rootFound": False, "buttons": []})
                 return {
                     "ok": True, "downloads": [direct], "stage_used": "direct_blob_fetch",
                     "viewer_closed": viewer_closed, "round": round_i, "resolved_tile_index": resolved_index,
                 }
+            if direct.get("validation_failed"):
+                round_saw_invalid_bytes = True
+                logger.warning(
+                    "UPLOAD_MEDIA_INVALID_BYTES source=%s round=%d via=direct_blob_fetch reason=%r",
+                    source_message_id, round_i, direct.get("reason"),
+                )
             logger.info(
                 "UPLOAD_MEDIA_DIRECT_BLOB_UNAVAILABLE source=%s round=%d reason=%r — falling back to Download menu",
                 source_message_id, round_i, direct.get("reason"),
@@ -2710,12 +2899,22 @@ async def _open_tile_viewer_and_download_hardened(
             download_result["resolved_tile_index"] = resolved_index
             return download_result
 
+        # Distinguish "we never got real bytes at all this round"
+        # (DOWNLOAD_NOT_STARTED — no button/menu/item ever found) from
+        # "we DID acquire bytes via at least one mechanism, but they
+        # failed real content validation" (INVALID_MEDIA_BYTES — Phase 7
+        # of the 2026-09-11 audit: never upload unverified bytes, but
+        # also never conflate that with "acquisition never started").
+        menu_saw_invalid_bytes = any(
+            d.get("validation_failed") for d in (download_result.get("downloads") or [])
+        )
+        round_saw_invalid_bytes = round_saw_invalid_bytes or menu_saw_invalid_bytes
         last_reason = download_result.get("reason")
-        last_state = "DOWNLOAD_NOT_STARTED"
+        last_state = "INVALID_MEDIA_BYTES" if round_saw_invalid_bytes else "DOWNLOAD_NOT_STARTED"
         last_detail = download_result
         logger.warning(
-            "UPLOAD_MEDIA_DOWNLOAD_NOT_STARTED source=%s round=%d stage=%s reason=%r",
-            source_message_id, round_i, download_result.get("stage"), last_reason,
+            "UPLOAD_MEDIA_%s source=%s round=%d stage=%s reason=%r",
+            last_state, source_message_id, round_i, download_result.get("stage"), last_reason,
         )
         await _close_viewer(page, viewer_buttons)
         # Next round re-resolves + re-verifies by hash from scratch —

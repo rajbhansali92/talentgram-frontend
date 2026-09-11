@@ -113,6 +113,27 @@ def _upload_target(**overrides):
 
 
 def main():
+    # 2026-09-11 (content-validation audit) — every test in this file that
+    # exercises the REAL UPLOAD video-acquisition path now flows through
+    # _validate_acquired_media_bytes, which (by design) checks the bytes'
+    # own signature/size/HTML-page-detection for real, but shells out to
+    # ffprobe for the final decode/duration check. Patched ONCE, globally,
+    # for this whole run: keeps every test deterministic and independent
+    # of ffprobe actually being installed wherever this suite runs, while
+    # the signature/size/HTML checks (the actual regression coverage for
+    # the Mahim Suhalka incident) still run against REAL byte content,
+    # unmocked. Tests that specifically exercise ffprobe rejection
+    # override this locally. _VALID_VIDEO_BYTES is a real, minimal
+    # MP4-signature ("ftyp" box at the correct offset) payload padded past
+    # the size floor — used wherever a test needs acquisition to succeed.
+    orig_probe_duration_global = mark_scan._probe_video_duration
+
+    async def _fake_probe_duration_ok(raw: bytes):
+        return {"decodable": True, "duration_s": 5.0}
+
+    mark_scan._probe_video_duration = _fake_probe_duration_ok
+    _VALID_VIDEO_BYTES = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00" + (b"\x00" * 4096)
+
     assert mark_scan._own_data_id(PHOTO_MESSAGE_HTML) == "3B6637D11A63081B8712"
     assert mark_scan._media_type(PHOTO_MESSAGE_HTML) == "image"
     assert mark_scan._media_type(VIDEO_MESSAGE_HTML) == "video"
@@ -1417,7 +1438,7 @@ def main():
 
     async def _fake_collect_downloads(page, trigger, window_s=25.0, quiet_s=3.0):
         await trigger()
-        return [{"ok": True, "_raw_bytes": b"X"}]
+        return [{"ok": True, "_raw_bytes": _VALID_VIDEO_BYTES}]
 
     mark_scan._evaluate = _fake_evaluate_menu
     mark_scan._collect_downloads = _fake_collect_downloads
@@ -1460,7 +1481,7 @@ def main():
 
     async def _fake_collect_downloads_53(page, trigger, window_s=25.0, quiet_s=3.0):
         await trigger()
-        return [{"ok": True, "_raw_bytes": b"X"}]
+        return [{"ok": True, "_raw_bytes": _VALID_VIDEO_BYTES}]
 
     mark_scan._evaluate = _fake_evaluate_menu_53
     mark_scan._collect_downloads = _fake_collect_downloads_53
@@ -1903,7 +1924,7 @@ def main():
 
     async def _fake_collect_downloads_69(page, trigger, window_s=25.0, quiet_s=3.0):
         await trigger()
-        return [{"ok": True, "_raw_bytes": b"X"}]
+        return [{"ok": True, "_raw_bytes": _VALID_VIDEO_BYTES}]
 
     orig_evaluate_69, orig_collect_69 = mark_scan._evaluate, mark_scan._collect_downloads
     mark_scan._evaluate, mark_scan._collect_downloads = _evaluate_must_not_run_69, _fake_collect_downloads_69
@@ -1949,7 +1970,7 @@ def main():
 
     async def _fake_collect_downloads_70(page, trigger, window_s=25.0, quiet_s=3.0):
         await trigger()
-        return [{"ok": True, "_raw_bytes": b"X"}]
+        return [{"ok": True, "_raw_bytes": _VALID_VIDEO_BYTES}]
 
     orig_evaluate_70, orig_collect_70 = mark_scan._evaluate, mark_scan._collect_downloads
     mark_scan._evaluate, mark_scan._collect_downloads = _fake_evaluate_70, _fake_collect_downloads_70
@@ -1977,7 +1998,7 @@ def main():
 
     async def _fake_collect_downloads_71(page, trigger, window_s=25.0, quiet_s=3.0):
         await trigger()
-        return [{"ok": True, "_raw_bytes": b"X"}]
+        return [{"ok": True, "_raw_bytes": _VALID_VIDEO_BYTES}]
 
     orig_evaluate_71, orig_collect_71 = mark_scan._evaluate, mark_scan._collect_downloads
     mark_scan._evaluate, mark_scan._collect_downloads = _fake_evaluate_71, _fake_collect_downloads_71
@@ -2007,7 +2028,7 @@ def main():
 
     async def _fake_collect_downloads_72(page, trigger, window_s=25.0, quiet_s=3.0):
         await trigger()
-        return [{"ok": True, "_raw_bytes": b"X"}]
+        return [{"ok": True, "_raw_bytes": _VALID_VIDEO_BYTES}]
 
     orig_evaluate_72, orig_collect_72 = mark_scan._evaluate, mark_scan._collect_downloads
     mark_scan._evaluate, mark_scan._collect_downloads = _fake_evaluate_72, _fake_collect_downloads_72
@@ -5974,6 +5995,15 @@ def main():
     def _b64(data: bytes) -> str:
         return base64.b64encode(data).decode()
 
+    def _valid_video(marker: bytes) -> bytes:
+        """A byte payload that passes _validate_acquired_media_bytes (a
+        real ftyp signature at the required offset + the 4096-byte size
+        floor) while still carrying a per-test unique `marker`, so each
+        test's own content-identity assertions keep working."""
+        header = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00"
+        body = marker + (b"\x00" * max(0, 4096 - len(header) - len(marker)))
+        return header + body
+
     def _fake_evaluate_blob_router(blob_result):
         """Routes _evaluate calls by WHICH script is passed — distinguishes
         _MOUNTED_VIDEO_BLOB_JS (the new direct-fetch primary path) from
@@ -6001,7 +6031,7 @@ def main():
     orig_close_167 = mark_scan._close_viewer
     mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True, "elapsed_s": 3.0})
     mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
-    real_bytes_167 = b"REAL VIDEO BYTES 167" * 50
+    real_bytes_167 = _valid_video(b"REAL VIDEO BYTES 167")
     mark_scan._evaluate = _fake_evaluate_blob_router({
         "ok": True, "base64": _b64(real_bytes_167), "contentType": "video/mp4", "byteLength": len(real_bytes_167),
     })
@@ -6129,7 +6159,8 @@ def main():
     mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([1])
     mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
     mark_scan._close_viewer = _close_spy_170
-    mark_scan._evaluate = _fake_evaluate_blob_router({"ok": True, "base64": _b64(b"BYTES170"), "contentType": "video/mp4", "byteLength": 8})
+    bytes_170 = _valid_video(b"BYTES170")
+    mark_scan._evaluate = _fake_evaluate_blob_router({"ok": True, "base64": _b64(bytes_170), "contentType": "video/mp4", "byteLength": len(bytes_170)})
     try:
         dl_170 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
             _FakeHashPage({1: _FakeHashMessageLocator([tile_170])}, video_mounted=True),
@@ -6173,9 +6204,10 @@ def main():
             take_tile_171, _hash_of("MAHIMTAKE171"),
             {"ok": False, "reason": "mounted <video> has no blob: src"}, _menu_for_take_171, 21,
         ))
+        intro_bytes_171 = _valid_video(b"INTRO_VIA_DIRECT_BLOB")
         intro_result_171 = asyncio.run(_run_one_171(
             intro_tile_171, _hash_of("MAHIMINTRO171"),
-            {"ok": True, "base64": _b64(b"INTRO_VIA_DIRECT_BLOB"), "contentType": "video/mp4", "byteLength": 21},
+            {"ok": True, "base64": _b64(intro_bytes_171), "contentType": "video/mp4", "byteLength": len(intro_bytes_171)},
             None, 22,
         ))
     finally:
@@ -6185,9 +6217,95 @@ def main():
         mark_scan._evaluate = orig_evaluate_up
 
     assert take_result_171["ok"] is True and take_result_171["downloads"][0]["_raw_bytes"] == b"TAKE_VIA_MENU", take_result_171
-    assert intro_result_171["ok"] is True and intro_result_171["downloads"][0]["_raw_bytes"] == b"INTRO_VIA_DIRECT_BLOB", intro_result_171
+    assert intro_result_171["ok"] is True and intro_result_171["downloads"][0]["_raw_bytes"] == intro_bytes_171, intro_result_171
     assert take_tile_171.click_count == 1 and intro_tile_171.click_count == 1, "each item clicks ONLY its own resolved tile, exactly once"
     print("171. Mahim CRITICAL REGRESSION: Take (menu-flow fallback) AND Introduction (direct blob-fetch) BOTH succeed, each acquiring its OWN exact resolved media — no source substitution, no cross-contamination")
+
+    # ------------------------------------------------------------------
+    # 172-177: _validate_acquired_media_bytes direct unit coverage
+    # (2026-09-11 content-validation audit, Phase 11) — the real gate
+    # exercised in isolation, every reject path proven distinctly.
+    # ------------------------------------------------------------------
+    v_empty = asyncio.run(mark_scan._validate_acquired_media_bytes(b"", "video"))
+    assert v_empty["valid"] is False and v_empty["reason"] == "acquired zero bytes", v_empty
+    print("172. _validate_acquired_media_bytes: zero bytes -> rejected honestly, never treated as a successful (empty) acquisition")
+
+    v_small = asyncio.run(mark_scan._validate_acquired_media_bytes(_valid_video(b"TINY")[:100], "video"))
+    assert v_small["valid"] is False and "too small" in v_small["reason"], v_small
+    print("173. _validate_acquired_media_bytes: implausibly small payload (100 bytes) -> rejected as a thumbnail/placeholder, not a real video")
+
+    v_html = asyncio.run(mark_scan._validate_acquired_media_bytes(b"<!DOCTYPE html><html><body>Not Found</body></html>" + (b" " * 4096), "video"))
+    assert v_html["valid"] is False and "HTML page" in v_html["reason"], v_html
+    print("174. _validate_acquired_media_bytes: an HTML error page (stale blob: URL / network error) -> rejected, never mistaken for real media by length alone")
+
+    v_badsig = asyncio.run(mark_scan._validate_acquired_media_bytes(b"\x00" * 4096, "video"))
+    assert v_badsig["valid"] is False and "container signature" in v_badsig["reason"], v_badsig
+    print("175. _validate_acquired_media_bytes: plausible size but no recognized video container signature -> rejected on the bytes' OWN magic header, independent of any caller hint")
+
+    orig_probe_decode_fail = mark_scan._probe_video_duration
+    async def _fake_probe_decode_fail(raw: bytes):
+        return {"decodable": False, "detail": "moov atom not found"}
+    mark_scan._probe_video_duration = _fake_probe_decode_fail
+    try:
+        v_undecodable = asyncio.run(mark_scan._validate_acquired_media_bytes(_valid_video(b"BADDECODE"), "video"))
+    finally:
+        mark_scan._probe_video_duration = orig_probe_decode_fail
+    assert v_undecodable["valid"] is False and "could not decode" in v_undecodable["reason"], v_undecodable
+    print("176. _validate_acquired_media_bytes: a real container signature but ffprobe genuinely cannot decode it -> rejected as a truncated/corrupt stream")
+
+    async def _fake_probe_zero_duration(raw: bytes):
+        return {"decodable": True, "duration_s": 0.0}
+    mark_scan._probe_video_duration = _fake_probe_zero_duration
+    try:
+        v_zero_dur = asyncio.run(mark_scan._validate_acquired_media_bytes(_valid_video(b"ZERODUR"), "video"))
+    finally:
+        mark_scan._probe_video_duration = orig_probe_decode_fail
+    assert v_zero_dur["valid"] is False and "near-zero duration" in v_zero_dur["reason"], v_zero_dur
+    print("177. _validate_acquired_media_bytes: ffprobe decodes it but reports a near-zero duration -> rejected as a truncated/partial stream")
+
+    async def _fake_probe_infra_error(raw: bytes):
+        return {"error": "ffprobe not available: [Errno 2] No such file or directory"}
+    mark_scan._probe_video_duration = _fake_probe_infra_error
+    try:
+        v_infra = asyncio.run(mark_scan._validate_acquired_media_bytes(_valid_video(b"INFRAERR"), "video"))
+    finally:
+        mark_scan._probe_video_duration = orig_probe_decode_fail
+    assert v_infra["valid"] is True, v_infra
+    print("178. _validate_acquired_media_bytes: ffprobe itself unavailable/erroring (infra trouble, not a decode rejection) -> non-fatal, accepted on the signature check alone")
+
+    v_valid = asyncio.run(mark_scan._validate_acquired_media_bytes(_valid_video(b"GOODVIDEO"), "video"))
+    assert v_valid["valid"] is True and v_valid["reason"] is None, v_valid
+    print("179. _validate_acquired_media_bytes: a genuinely valid video (signature + size + decodable, non-zero duration) -> accepted")
+
+    # 180: _validate_video_downloads wiring inside the REAL (unmocked)
+    # _click_download_in_open_viewer -> the menu/Download flow acquiring
+    # bytes that LOOK like a successful browser download (ok=True) but
+    # fail content validation (no real video signature) must be demoted
+    # to ok=False before the caller ever trusts them, never silently
+    # reported as a successful acquisition (this is the concrete gap the
+    # 2026-09-11 audit found: _collect_downloads always set ok=True
+    # regardless of its own computed diagnostics).
+    menu_only_trigger_180 = {"ariaLabel": None, "dataIcon": None, "testid": None, "svgTitle": "menu", "rect": [850, 20, 24, 24]}
+    viewer_buttons_180 = {"buttons": [menu_only_trigger_180]}
+    page_180 = _FakeMenuOnlyPage70()
+
+    async def _fake_evaluate_180(page, js, arg=None, timeout=10.0):
+        return {"items": [{"text": "Download"}]}
+
+    async def _fake_collect_downloads_180(page, trigger, window_s=25.0, quiet_s=3.0):
+        await trigger()
+        return [{"ok": True, "_raw_bytes": b"NOT A REAL VIDEO"}]  # browser reported success; content is not
+
+    orig_evaluate_180, orig_collect_180 = mark_scan._evaluate, mark_scan._collect_downloads
+    mark_scan._evaluate, mark_scan._collect_downloads = _fake_evaluate_180, _fake_collect_downloads_180
+    try:
+        result_180 = asyncio.run(mark_scan._click_download_in_open_viewer(page_180, viewer_buttons_180, {"reached": True}))
+    finally:
+        mark_scan._evaluate, mark_scan._collect_downloads = orig_evaluate_180, orig_collect_180
+
+    assert result_180["downloads"][0]["ok"] is False, result_180
+    assert result_180["downloads"][0]["validation_failed"] is True, result_180
+    print("180. _validate_video_downloads: a browser-reported-successful download whose bytes fail content validation is demoted to ok=False (validation_failed), never trusted merely because the download event fired")
 
 
 if __name__ == "__main__":

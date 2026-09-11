@@ -243,6 +243,13 @@ _UPLOAD_STATE_PHRASE = {
     "MEDIA_OPEN_FAILED": "exact source was found, but the video could not be opened",
     "DOWNLOAD_NOT_STARTED": "exact video was opened, but WhatsApp did not provide the media for download",
     "DOWNLOAD_TIMEOUT": "took too long to retrieve from WhatsApp Web",
+    # 2026-09-11 (second Mahim Suhalka follow-up, byte-validation audit):
+    # a browser download event firing, or a blob: fetch returning a
+    # non-empty response, was never actual proof of a genuine, complete
+    # video — this is what the new real content validation
+    # (mark_scan._validate_acquired_media_bytes) catches, and it is
+    # reported honestly as its OWN state rather than a false success.
+    "INVALID_MEDIA_BYTES": "the exact media opened, but WhatsApp Web returned invalid or incomplete media data — the upload was not attempted",
     "UPLOAD_FAILED": "was retrieved, but the upload to Talentgram failed",
 }
 

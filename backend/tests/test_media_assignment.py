@@ -1171,6 +1171,14 @@ def test_humanize_upload_error_machine_state_tags_are_distinct():
     assert "took too long" in orch._humanize_upload_error("[DOWNLOAD_TIMEOUT] timed out after 500.0s")
     assert "upload to Talentgram failed" in orch._humanize_upload_error("[UPLOAD_FAILED] 500 Internal Server Error")
 
+    # 2026-09-11 (byte-validation audit): a download/blob-fetch that
+    # reported success but whose content failed real validation gets its
+    # OWN honest sentence — never conflated with DOWNLOAD_NOT_STARTED
+    # (which never got any bytes at all).
+    invalid_bytes = orch._humanize_upload_error("[INVALID_MEDIA_BYTES] acquired only 812 bytes — too small to be a real video")
+    assert "invalid or incomplete media data" in invalid_bytes
+    assert invalid_bytes != download_not_started
+
     # never leaks the bracket tag or raw internals into the user-facing text
     msg = orch._humanize_upload_error("[MEDIA_OPEN_FAILED] click failed: Locator.click: Timeout 10000ms exceeded")
     assert "[MEDIA_OPEN_FAILED]" not in msg and "Locator.click" not in msg

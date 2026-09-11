@@ -6307,6 +6307,324 @@ def main():
     assert result_180["downloads"][0]["validation_failed"] is True, result_180
     print("180. _validate_video_downloads: a browser-reported-successful download whose bytes fail content validation is demoted to ok=False (validation_failed), never trusted merely because the download event fired")
 
+    # ------------------------------------------------------------------
+    # 181-184: Rashi Mal incident (2026-09-11) — "SINGLETON with shruti
+    # hassan": Take 1 uploaded successfully, Introduction (resolved to
+    # its OWN exact, correctly-MARKed source) immediately failed with
+    # "exact source was found, but the video could not be opened" and
+    # zero retry. ROOT CAUSE: WhatsApp's viewer-close transition can
+    # leave its backdrop/overlay in the DOM for a brief window AFTER the
+    # <video> element itself unmounts (_close_viewer's own "video count
+    # == 0" check is satisfied, but the overlay is still fading) — the
+    # next item's tile click lands on that overlay instead of the tile.
+    # Playwright's own wording for this ("a different element is on top
+    # of the target") is "intercepts pointer events" — a string the old
+    # is_stability_error check never matched (only "not stable"/
+    # "detached"), AND the click-error branch used to `return`
+    # immediately instead of falling through to this function's own
+    # bounded round-based recovery (fresh sender._open_group_chat +
+    # from-scratch hash re-resolution) that every OTHER failure mode in
+    # this loop already benefited from.
+    # ------------------------------------------------------------------
+    class _FakeOverlayTile:
+        """Like _FakeHashTile, but its click() raises the SPECIFIC
+        Playwright wording for an overlay intercepting the click — never
+        "not stable"/"detached" — for exactly `fail_times` clicks."""
+        def __init__(self, testid, html, fail_times=0):
+            self._testid = testid
+            self._html = html
+            self._fail_times = fail_times
+            self.click_count = 0
+        async def get_attribute(self, name, timeout=None):
+            return self._testid
+        async def evaluate(self, js, timeout=None):
+            return self._html
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def click(self, timeout=None):
+            self.click_count += 1
+            if self.click_count <= self._fail_times:
+                raise Exception(
+                    "Locator.click: Timeout 10000ms exceeded.\n"
+                    "  - waiting for element to be visible, enabled and stable\n"
+                    "  - element is visible, enabled and stable\n"
+                    "  - scrolling into view if needed\n"
+                    "  - done scrolling\n"
+                    "  - <div class=\"copyable-area\">…</div> from <html>…</html> subtree intercepts pointer events"
+                )
+
+    # 181: THE incident, reproduced exactly — Introduction's tile click
+    # fails on round 0 with the overlay-intercept wording (a leftover
+    # from something else, e.g. Take 1's own still-fading viewer close),
+    # is now classified as a retryable stability error AND falls through
+    # to this function's own round-based recovery instead of returning
+    # immediately -> round 1's fresh resolution succeeds -> Introduction
+    # ultimately uploads, no re-MARK required, no substitution.
+    intro_tile_181_round0 = _FakeOverlayTile("video-content", _video_tile_html("INTRO181"), fail_times=99)
+    intro_tile_181_round1 = _FakeOverlayTile("video-content", _video_tile_html("INTRO181"), fail_times=0)
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([5, 5])
+    close_calls_181 = []
+    try:
+        call_state_181 = {"n": 0}
+        def _locator_router_181(sel):
+            if sel == "video":
+                return _CountLocator(1)
+            call_state_181["n"] += 1
+            tiles = [intro_tile_181_round0] if call_state_181["n"] <= mark_scan.MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS else [intro_tile_181_round1]
+            return _FakeHashConvLocator({5: _FakeHashMessageLocator(tiles)})
+        page_181 = _FakeHashPage({5: _FakeHashMessageLocator([intro_tile_181_round0])}, video_mounted=True)
+        page_181.locator = _locator_router_181
+
+        orig_readiness_181 = mark_scan._wait_for_video_readiness
+        orig_close_181 = mark_scan._close_viewer
+        orig_evaluate_181 = mark_scan._evaluate
+        orig_open_group_181 = mark_scan.sender._open_group_chat
+        orig_scope_181 = mark_scan.sender._resolve_scope
+        orig_emc_181 = mark_scan._ensure_message_content_rendered
+        mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+        async def _fake_close_181(page, vb):
+            close_calls_181.append(True)
+            return {"closed": True}
+        mark_scan._close_viewer = _fake_close_181
+        async def _scope_181(page):
+            return "#main"
+        mark_scan.sender._resolve_scope = _scope_181
+        async def _emc_181(page, loc, **kw):
+            pass
+        mark_scan._ensure_message_content_rendered = _emc_181
+        valid_video_181 = _valid_video(b"INTRO181_BYTES")
+        async def _fake_evaluate_181(page, js, arg=None, timeout=10.0):
+            if "v.src.startsWith('blob:')" in js:
+                return {"ok": True, "base64": _b64(valid_video_181), "contentType": "video/mp4", "byteLength": len(valid_video_181)}
+            return None
+        mark_scan._evaluate = _fake_evaluate_181
+        reopen_calls_181 = []
+        async def _fake_reopen_181(page, group_name):
+            reopen_calls_181.append(group_name)
+            return "OPENED"
+        mark_scan.sender._open_group_chat = _fake_reopen_181
+        try:
+            dl_181 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+                page_181, "Rashi Mal x Talentgram Agency", "RASHI_INTRO_SRC", _hash_of("INTRO181"), 0,
+            ))
+        finally:
+            mark_scan._wait_for_video_readiness = orig_readiness_181
+            mark_scan._close_viewer = orig_close_181
+            mark_scan._evaluate = orig_evaluate_181
+            mark_scan.sender._open_group_chat = orig_open_group_181
+            mark_scan.sender._resolve_scope = orig_scope_181
+            mark_scan._ensure_message_content_rendered = orig_emc_181
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+
+    assert dl_181["ok"] is True, dl_181
+    assert dl_181["round"] == 1, dl_181  # recovered on round 1, not round 0
+    assert dl_181["downloads"][0]["_raw_bytes"] == valid_video_181, dl_181  # the EXACT same source, never substituted
+    assert intro_tile_181_round1.click_count == 1, "round 1 must click the FRESHLY re-resolved tile, never reuse round 0's (possibly stale) locator"
+    assert reopen_calls_181 == ["Rashi Mal x Talentgram Agency"], reopen_calls_181  # the same known-neutral-state reset every other recovery mode already gets
+    print("181. Rashi Mal Introduction: an overlay-intercept click failure ('intercepts pointer events', left over from something else) is now a retryable stability error AND gets this function's own bounded round-based recovery -> round 1 resolves the EXACT same source fresh and succeeds (THE incident's fix)")
+
+    # 182: the SAME overlay-intercept failure, but genuinely permanent
+    # across every round -> still bounded (MAX_DOWNLOAD_READINESS_ROUNDS),
+    # still fails honestly as MEDIA_OPEN_FAILED, never an infinite retry
+    # loop, never a substituted source.
+    perm_tile_182 = _FakeOverlayTile("video-content", _video_tile_html("PERM182"), fail_times=999)
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([7])
+    close_calls_182 = []
+    try:
+        page_182 = _FakeHashPage({7: _FakeHashMessageLocator([perm_tile_182])}, video_mounted=True)
+        orig_close_182 = mark_scan._close_viewer
+        orig_open_group_182 = mark_scan.sender._open_group_chat
+        async def _fake_close_182(page, vb):
+            close_calls_182.append(True)
+            return {"closed": True}
+        mark_scan._close_viewer = _fake_close_182
+        reopen_calls_182 = []
+        async def _fake_reopen_182(page, group_name):
+            reopen_calls_182.append(group_name)
+            return "OPENED"
+        mark_scan.sender._open_group_chat = _fake_reopen_182
+        try:
+            dl_182 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+                page_182, "G", "PERM182_SRC", _hash_of("PERM182"), 0,
+            ))
+        finally:
+            mark_scan._close_viewer = orig_close_182
+            mark_scan.sender._open_group_chat = orig_open_group_182
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+
+    assert dl_182["ok"] is False, dl_182
+    assert dl_182["state"] == "MEDIA_OPEN_FAILED", dl_182
+    assert dl_182["round"] == mark_scan.MAX_DOWNLOAD_READINESS_ROUNDS - 1, dl_182  # exhausted every bounded round, never more
+    assert len(reopen_calls_182) == mark_scan.MAX_DOWNLOAD_READINESS_ROUNDS - 1, reopen_calls_182  # one reset before every round after the first
+    print("182. a permanently overlay-blocked tile is still bounded to MAX_DOWNLOAD_READINESS_ROUNDS -> fails honestly as MEDIA_OPEN_FAILED, never an infinite loop, never a substituted source")
+
+    # 183: full two-item reproduction of the actual screenshot scenario —
+    # Take 1 uploads normally, Introduction's OWN independent open
+    # transaction hits the overlay-intercept failure on its first round
+    # (simulating contamination left over from Take 1's own viewer close)
+    # but recovers on its second -> BOTH ultimately succeed, Take 1's own
+    # result is never touched by Introduction's recovery, no cross-item
+    # substitution.
+    take_tile_183 = _FakeHashTile("video-content", _video_tile_html("TAKE183"))
+    intro_tile_183_round0 = _FakeOverlayTile("video-content", _video_tile_html("INTRO183"), fail_times=99)
+    intro_tile_183_round1 = _FakeOverlayTile("video-content", _video_tile_html("INTRO183"), fail_times=0)
+
+    async def _run_take_183():
+        mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([30])
+        try:
+            return await mark_scan._open_tile_viewer_and_download_hardened(
+                _FakeHashPage({30: _FakeHashMessageLocator([take_tile_183])}, video_mounted=True),
+                "Rashi Mal x Talentgram Agency", "RASHI_TAKE_SRC", _hash_of("TAKE183"), 0,
+            )
+        finally:
+            mark_scan._find_message_index_by_data_id = orig_find_idx_up
+
+    async def _run_intro_183():
+        mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([31, 31])
+        try:
+            call_state_183 = {"n": 0}
+            def _locator_router_183(sel):
+                if sel == "video":
+                    return _CountLocator(1)
+                call_state_183["n"] += 1
+                tiles = [intro_tile_183_round0] if call_state_183["n"] <= mark_scan.MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS else [intro_tile_183_round1]
+                return _FakeHashConvLocator({31: _FakeHashMessageLocator(tiles)})
+            page = _FakeHashPage({31: _FakeHashMessageLocator([intro_tile_183_round0])}, video_mounted=True)
+            page.locator = _locator_router_183
+            return await mark_scan._open_tile_viewer_and_download_hardened(
+                page, "Rashi Mal x Talentgram Agency", "RASHI_INTRO_SRC", _hash_of("INTRO183"), 0,
+            )
+        finally:
+            mark_scan._find_message_index_by_data_id = orig_find_idx_up
+
+    orig_readiness_183 = mark_scan._wait_for_video_readiness
+    orig_close_183 = mark_scan._close_viewer
+    orig_evaluate_183 = mark_scan._evaluate
+    orig_open_group_183 = mark_scan.sender._open_group_chat
+    orig_scope_183 = mark_scan.sender._resolve_scope
+    orig_emc_183 = mark_scan._ensure_message_content_rendered
+    mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+    mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+    mark_scan.sender._open_group_chat = lambda page, group_name: asyncio.sleep(0, result="OPENED")
+    async def _scope_183(page):
+        return "#main"
+    mark_scan.sender._resolve_scope = _scope_183
+    async def _emc_183(page, loc, **kw):
+        pass
+    mark_scan._ensure_message_content_rendered = _emc_183
+    take_bytes_183 = _valid_video(b"TAKE183_BYTES")
+    intro_bytes_183 = _valid_video(b"INTRO183_BYTES")
+    async def _fake_evaluate_183(page, js, arg=None, timeout=10.0):
+        return None  # both items fall back to the menu/Download flow this test controls directly
+    mark_scan._evaluate = _fake_evaluate_183
+    menu_calls_183 = {"take": 0, "intro": 0}
+    orig_click_dl_183 = mark_scan._click_download_in_open_viewer
+    # Route by which tile object is the currently-clicked one (Take opens first).
+    async def _fake_click_dl_router_183(page, vb, r):
+        if take_tile_183.click_count >= 1 and menu_calls_183["take"] == 0:
+            menu_calls_183["take"] += 1
+            return {"ok": True, "downloads": [{"ok": True, "_raw_bytes": take_bytes_183}]}
+        menu_calls_183["intro"] += 1
+        return {"ok": True, "downloads": [{"ok": True, "_raw_bytes": intro_bytes_183}]}
+    mark_scan._click_download_in_open_viewer = _fake_click_dl_router_183
+    try:
+        take_result_183 = asyncio.run(_run_take_183())
+        intro_result_183 = asyncio.run(_run_intro_183())
+    finally:
+        mark_scan._wait_for_video_readiness = orig_readiness_183
+        mark_scan._close_viewer = orig_close_183
+        mark_scan._evaluate = orig_evaluate_183
+        mark_scan.sender._open_group_chat = orig_open_group_183
+        mark_scan._click_download_in_open_viewer = orig_click_dl_183
+        mark_scan.sender._resolve_scope = orig_scope_183
+        mark_scan._ensure_message_content_rendered = orig_emc_183
+
+    assert take_result_183["ok"] is True and take_result_183["downloads"][0]["_raw_bytes"] == take_bytes_183, take_result_183
+    assert intro_result_183["ok"] is True and intro_result_183["downloads"][0]["_raw_bytes"] == intro_bytes_183, intro_result_183
+    assert intro_result_183["round"] == 1, intro_result_183  # Introduction genuinely needed its own recovery round
+    assert take_tile_183.click_count == 1, "Take 1's own successful open is never re-invoked by Introduction's independent recovery"
+    print("183. Rashi Mal FULL REPRODUCTION: Take 1 succeeds normally; Introduction's independent open transaction hits an overlay-intercept failure then recovers on its own round 1 -> BOTH ultimately upload, Take 1 untouched, no cross-item contamination, no substitution")
+
+    # 184: order-independence — Introduction marked/processed FIRST (and
+    # needs its own recovery), Take 1 SECOND (opens cleanly) — the fix
+    # must not depend on which item happens to go first.
+    intro_tile_184_round0 = _FakeOverlayTile("video-content", _video_tile_html("INTRO184"), fail_times=99)
+    intro_tile_184_round1 = _FakeOverlayTile("video-content", _video_tile_html("INTRO184"), fail_times=0)
+    take_tile_184 = _FakeHashTile("video-content", _video_tile_html("TAKE184"))
+
+    async def _run_intro_184():
+        mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([40, 40])
+        try:
+            call_state_184 = {"n": 0}
+            def _locator_router_184(sel):
+                if sel == "video":
+                    return _CountLocator(1)
+                call_state_184["n"] += 1
+                tiles = [intro_tile_184_round0] if call_state_184["n"] <= mark_scan.MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS else [intro_tile_184_round1]
+                return _FakeHashConvLocator({40: _FakeHashMessageLocator(tiles)})
+            page = _FakeHashPage({40: _FakeHashMessageLocator([intro_tile_184_round0])}, video_mounted=True)
+            page.locator = _locator_router_184
+            return await mark_scan._open_tile_viewer_and_download_hardened(
+                page, "Rashi Mal x Talentgram Agency", "RASHI_INTRO_SRC_184", _hash_of("INTRO184"), 0,
+            )
+        finally:
+            mark_scan._find_message_index_by_data_id = orig_find_idx_up
+
+    async def _run_take_184():
+        mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([41])
+        try:
+            return await mark_scan._open_tile_viewer_and_download_hardened(
+                _FakeHashPage({41: _FakeHashMessageLocator([take_tile_184])}, video_mounted=True),
+                "Rashi Mal x Talentgram Agency", "RASHI_TAKE_SRC_184", _hash_of("TAKE184"), 0,
+            )
+        finally:
+            mark_scan._find_message_index_by_data_id = orig_find_idx_up
+
+    orig_readiness_184 = mark_scan._wait_for_video_readiness
+    orig_close_184 = mark_scan._close_viewer
+    orig_evaluate_184 = mark_scan._evaluate
+    orig_open_group_184 = mark_scan.sender._open_group_chat
+    orig_click_dl_184 = mark_scan._click_download_in_open_viewer
+    orig_scope_184 = mark_scan.sender._resolve_scope
+    orig_emc_184 = mark_scan._ensure_message_content_rendered
+    mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+    mark_scan._close_viewer = lambda page, vb: asyncio.sleep(0, result={"closed": True})
+    mark_scan.sender._open_group_chat = lambda page, group_name: asyncio.sleep(0, result="OPENED")
+    async def _scope_184(page):
+        return "#main"
+    mark_scan.sender._resolve_scope = _scope_184
+    async def _emc_184(page, loc, **kw):
+        pass
+    mark_scan._ensure_message_content_rendered = _emc_184
+    intro_bytes_184 = _valid_video(b"INTRO184_BYTES")
+    take_bytes_184 = _valid_video(b"TAKE184_BYTES")
+    async def _fake_evaluate_184(page, js, arg=None, timeout=10.0):
+        return None
+    mark_scan._evaluate = _fake_evaluate_184
+    async def _fake_click_dl_router_184(page, vb, r):
+        if take_tile_184.click_count >= 1:
+            return {"ok": True, "downloads": [{"ok": True, "_raw_bytes": take_bytes_184}]}
+        return {"ok": True, "downloads": [{"ok": True, "_raw_bytes": intro_bytes_184}]}
+    mark_scan._click_download_in_open_viewer = _fake_click_dl_router_184
+    try:
+        intro_result_184 = asyncio.run(_run_intro_184())
+        take_result_184 = asyncio.run(_run_take_184())
+    finally:
+        mark_scan._wait_for_video_readiness = orig_readiness_184
+        mark_scan._close_viewer = orig_close_184
+        mark_scan._evaluate = orig_evaluate_184
+        mark_scan.sender._open_group_chat = orig_open_group_184
+        mark_scan._click_download_in_open_viewer = orig_click_dl_184
+        mark_scan.sender._resolve_scope = orig_scope_184
+        mark_scan._ensure_message_content_rendered = orig_emc_184
+
+    assert intro_result_184["ok"] is True and intro_result_184["downloads"][0]["_raw_bytes"] == intro_bytes_184, intro_result_184
+    assert take_result_184["ok"] is True and take_result_184["downloads"][0]["_raw_bytes"] == take_bytes_184, take_result_184
+    assert intro_result_184["round"] == 1, intro_result_184
+    print("184. order-independence: Introduction FIRST (needs its own recovery) then Take 1 SECOND (opens cleanly) -> both succeed identically regardless of processing order")
+
 
 if __name__ == "__main__":
     main()

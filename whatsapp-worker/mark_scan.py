@@ -2725,12 +2725,29 @@ async def _open_tile_viewer_and_download_hardened(
        independently (never sharing code with, or altering, that path).
 
     Each round: resolve+verify by hash -> bounded click retry on
-    "not stable"/"detached" errors only (MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS,
-    re-resolving+re-verifying by hash before every retry, never reusing a
-    stale locator) -> wait for <video> to mount -> wait for FULL buffering
-    (_wait_for_video_readiness, unchanged) -> ACQUIRE the bytes. Fails
-    cleanly (never substitutes a different message/tile) once resolution
-    itself reports "message_not_found"/"hash_mismatch".
+    "not stable"/"detached"/"intercepts pointer events" errors only
+    (MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS, re-resolving+re-verifying by hash
+    before every retry, never reusing a stale locator) -> wait for <video>
+    to mount -> wait for FULL buffering (_wait_for_video_readiness,
+    unchanged) -> ACQUIRE the bytes. Fails cleanly (never substitutes a
+    different message/tile) once resolution itself reports
+    "message_not_found"/"hash_mismatch".
+
+    2026-09-11 (Rashi Mal — "SINGLETON with shruti hassan": Take 1
+    uploaded, Introduction immediately failed with "the video could not be
+    opened", zero retry). A click failure that survives the inner
+    MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS retries no longer returns
+    MEDIA_OPEN_FAILED immediately — it now falls through into this
+    function's own outer round loop (fresh sender._open_group_chat +
+    from-scratch hash re-resolution, best-effort viewer close), exactly
+    like every OTHER failure mode here already does, before genuinely
+    giving up on the FINAL round. Root cause: WhatsApp's viewer-close
+    transition can leave its backdrop/overlay in the DOM for a brief
+    window after the <video> element itself unmounts — the NEXT item's
+    tile click lands on that still-fading overlay. Playwright's own
+    wording for this is "intercepts pointer events", a genuinely distinct
+    string from "not stable"/"detached" that was previously never
+    classified as retryable at all.
 
     2026-09-11 (real UPLOAD incident — Mahim Suhalka / "SINGLETON with
     shruti hassan": Take AND Introduction BOTH failed with "WhatsApp Web
@@ -2811,21 +2828,64 @@ async def _open_tile_viewer_and_download_hardened(
             except Exception as exc:
                 click_error = exc
                 click_attempts.append(str(exc))
-                is_stability_error = "not stable" in str(exc) or "detached" in str(exc)
+                # 2026-09-11 (Rashi Mal — Introduction failed immediately
+                # after Take 1 succeeded, same generic MEDIA_OPEN_FAILED
+                # sentence, zero retry): WhatsApp's viewer-close transition
+                # can leave its backdrop/overlay container in the DOM for a
+                # brief window AFTER the <video> element itself has already
+                # unmounted — _close_viewer's own readiness check (video
+                # count == 0) is satisfied, but the next item's tile click
+                # lands on that still-fading overlay instead of the tile.
+                # Playwright's own wording for exactly this ("a different
+                # element is on top of the target") is "intercepts pointer
+                # events" — a genuinely distinct string from "not stable"/
+                # "detached", so it was previously never classified as
+                # retryable at all.
+                is_stability_error = (
+                    "not stable" in str(exc) or "detached" in str(exc) or "intercepts pointer events" in str(exc)
+                )
                 if not is_stability_error or attempt == MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS - 1:
                     break
                 # Loop again: re-resolve + re-verify by hash fresh — never
                 # reuse the same (possibly now-detached) locator.
 
         if click_error is not None:
+            last_reason = f"click failed: {click_error}"
+            last_state = "MEDIA_OPEN_FAILED"
+            last_detail = {"click_attempts": click_attempts, "round": round_i, "resolved_tile_index": resolved_index}
+            is_final_round = round_i == MAX_DOWNLOAD_READINESS_ROUNDS - 1
             logger.warning(
-                "UPLOAD_MEDIA_OPEN_FAILED source=%s round=%d state=MEDIA_OPEN_FAILED reason=%r",
-                source_message_id, round_i, str(click_error),
+                "UPLOAD_MEDIA_OPEN_FAILED source=%s round=%d state=MEDIA_OPEN_FAILED reason=%r final_round=%s",
+                source_message_id, round_i, str(click_error), is_final_round,
             )
-            return {
-                "ok": False, "stage": "open_tile", "state": "MEDIA_OPEN_FAILED", "reason": f"click failed: {click_error}",
-                "click_attempts": click_attempts, "round": round_i, "resolved_tile_index": resolved_index,
-            }
+            if is_final_round:
+                return {
+                    "ok": False, "stage": "open_tile", "state": "MEDIA_OPEN_FAILED", "reason": last_reason,
+                    "click_attempts": click_attempts, "round": round_i, "resolved_tile_index": resolved_index,
+                }
+            # Bounded recovery (2026-09-11): a click failure alone is no
+            # longer treated as unrecoverable — the SAME per-round reset
+            # every other failure mode in this loop already benefits from
+            # (fresh sender._open_group_chat on the next round, then a
+            # from-scratch hash re-resolution) gets a chance to clear
+            # whatever transient DOM/overlay state caused THIS click to
+            # fail, before genuinely giving up. Best-effort: dismiss any
+            # viewer left open by the failed click attempt itself so the
+            # next round starts from a clean state, never assumed.
+            try:
+                if await page.locator("video").count() > 0:
+                    try:
+                        vd = await _evaluate(page, _VIEWER_BUTTONS_JS)
+                    except Exception:
+                        vd = {"rootFound": False, "buttons": []}
+                    await _close_viewer(page, vd)
+            except Exception:
+                pass
+            logger.info(
+                "UPLOAD_MEDIA_OPEN_RECOVERY source=%s round=%d next_round=%d reason=%r",
+                source_message_id, round_i, round_i + 1, str(click_error),
+            )
+            continue
         logger.info("UPLOAD_MEDIA_TILE_CLICKED source=%s round=%d resolved_tile_index=%s", source_message_id, round_i, resolved_index)
 
         video_mounted = False

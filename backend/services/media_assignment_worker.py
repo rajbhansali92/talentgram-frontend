@@ -240,7 +240,12 @@ _UPLOAD_STATE_PHRASE = {
     "MEDIA_HASH_MISMATCH": "was located, but the media no longer matches the mark",
     "MEDIA_TILE_NOT_FOUND": "exact source was found, but its media tile could not be located",
     "MEDIA_NOT_READY": "exact source was found, but its video never became ready to open",
-    "MEDIA_OPEN_FAILED": "exact source was found, but the video could not be opened",
+    # 2026-09-11 (Rashi Mal follow-up): this state is now only ever
+    # reported after mark_scan.py's own bounded round-based recovery
+    # (fresh chat reopen + from-scratch re-resolution across every
+    # MAX_DOWNLOAD_READINESS_ROUNDS round) has genuinely been exhausted —
+    # never on the first click failure alone. Worded to reflect that.
+    "MEDIA_OPEN_FAILED": "exact source was found, but the video could not be opened after bounded automatic recovery",
     "DOWNLOAD_NOT_STARTED": "exact video was opened, but WhatsApp did not provide the media for download",
     "DOWNLOAD_TIMEOUT": "took too long to retrieve from WhatsApp Web",
     # 2026-09-11 (second Mahim Suhalka follow-up, byte-validation audit):

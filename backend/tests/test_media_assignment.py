@@ -694,6 +694,20 @@ def test_report_unresolved_distinguishes_transient_from_remark_states():
     assert "could not be re-opened" in gone
     assert "Re-send the MARK reply" in gone
 
+    # 2026-09-11 (Rashi Mal, source-reacquisition audit) — a distinct
+    # state for "the quoted block never carried any identifiable content
+    # to verify against, even after a live re-read" (mark_scan.
+    # _live_requote_signal): genuinely different from not_located/
+    # wrong_message above, and — per this audit's own Phase 8 rule — the
+    # ONE case where asking the user to re-MARK is actually warranted.
+    no_signal = orch._report_unresolved(
+        "Rashi Mal", "SINGLETON with shruti hassan",
+        [{"media_role": "intro", "take_number": None, "resolution_failure_state": "no_verifiable_signal"}],
+    )
+    assert "no_verifiable_signal" not in no_signal  # never leak the raw machine tag
+    assert "never rendered any identifiable media content" in no_signal
+    assert "Re-send the MARK reply" in no_signal
+
 
 async def test_orchestrator_unresolved_report_names_ishani_not_gunwanti():
     """Full _process_scan_done for the screenshot scenario end-to-end:

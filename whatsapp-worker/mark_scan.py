@@ -724,6 +724,30 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
                 })
                 continue
 
+        if quoted_hash is None and quoted_media_type is None:
+            # 2026-09-11 (Rashi Mal — see _live_requote_signal's own
+            # docstring for the full root cause): the static scan
+            # snapshot's own extraction found NEITHER signal — before
+            # accepting that as final, try ONE bounded live re-read of
+            # THIS reply's quoted block (reusing the same hydration-retry
+            # _wait_for_quoted_message_block already proves reliable for
+            # the reply's own top-level content). A reply row can render
+            # before its nested quoted-preview thumbnail finishes lazy-
+            # loading; without this, that timing alone makes can_attempt_
+            # jump False below and the live jump — the ONE mechanism that
+            # could actually recover it — is never even attempted.
+            reply_id_for_requote = _own_data_id(html)
+            if reply_id_for_requote:
+                live_hash, live_media_type = await _live_requote_signal(page, group_name, reply_id_for_requote)
+                if live_hash or live_media_type:
+                    logger.info(
+                        "mark_scan: live re-quote recovered a signal the static scan snapshot missed "
+                        "reply_id=%s live_hash=%s live_media_type=%s",
+                        reply_id_for_requote, bool(live_hash), live_media_type,
+                    )
+                    quoted_hash = live_hash
+                    quoted_media_type = live_media_type
+
         source = sources_by_hash.get(quoted_hash) if quoted_hash else None
         jump_fallback_used = False
         resolution_failure_state: Optional[str] = None
@@ -795,6 +819,18 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
                     # FAILED report can name it: not_located / wrong_message
                     # / media_not_rendered.
                     resolution_failure_state = jump_result.get("failure_state") or "not_located"
+        elif source is None and not can_attempt_jump:
+            # 2026-09-11 (Rashi Mal, Phase 2 of the production-readiness
+            # audit): a distinct state for "nothing to verify a jump
+            # against, even after the live re-read above" — genuinely
+            # different from "jump attempted and failed to land"
+            # (not_located) or "landed on the wrong content"
+            # (wrong_message). Previously this fell through with
+            # resolution_failure_state left at its None default, which the
+            # backend's own phrase lookup then mapped to the SAME generic
+            # sentence as every other failure — masking exactly which
+            # stage actually failed.
+            resolution_failure_state = "no_verifiable_signal"
         candidates.append({
             "mention_lid": lid,
             "mark_text": mark_text,
@@ -1578,6 +1614,57 @@ async def _wait_for_quoted_message_block(page, group_name: str, reply_data_id: s
             "hydration_attempts": attempt + 1, "restoration_log": restoration_log,
         }
     return {"ok": False, "reason": "unreachable", "restoration_log": restoration_log}
+
+
+async def _live_requote_signal(page, group_name: str, reply_data_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Production fix (2026-09-11 — Rashi Mal / "SINGLETON with shruti
+    hassan": Introduction AND Take 1 both reported MEDIA RESOLUTION FAILED
+    even though both were visibly present and correctly MARKed). ROOT
+    CAUSE: _dump_window's own _capture_step reads each reply's quoted-
+    message sub-block via a SINGLE, one-shot DOM snapshot — never a
+    hydration wait, never a retry — and _smallest_hash/_media_type then
+    regex-extract a hash/media-type signal from that ONE static read.
+    WhatsApp can render a reply row's own top-level content (real HTML,
+    passes _wait_for_quoted_message_block's later stub-length check) while
+    its NESTED quoted-preview's own lazy thumbnail has not yet painted —
+    exactly the same lazy-render timing gap _wait_for_quoted_message_block
+    already recovers for the reply's own content, but that recovery was
+    only ever reachable AFTER _run_scan's own can_attempt_jump gate, which
+    depends on this SAME static, possibly-too-early extraction. A
+    chicken-and-egg gap: the one mechanism that could recover a late-
+    rendering quote thumbnail (the live jump) was never even attempted
+    when that exact lateness was what made both signals read empty.
+
+    Fix: when the static scan snapshot's own quoted_hash AND
+    quoted_media_type both come back None, do ONE bounded LIVE re-read
+    before giving up — reusing _wait_for_quoted_message_block's own
+    already-proven hydration-retry/stub-restoration machinery (never a
+    new DOM primitive) to get a freshly-rendered `quoted` locator, then
+    re-extract hash/media-type from ITS live outerHTML instead of the
+    stale snapshot. Bounded by that function's own MAX_HYDRATION_ATTEMPTS
+    (3 rounds); returns (None, None) exactly as before if the quoted
+    block genuinely never renders any embeddable signal (e.g. a real
+    forwarded-video quote with no thumbnail at all — the existing,
+    legitimate Round 2 case _resolve_single_media_via_jump's own
+    docstring already documents), so a genuinely signal-less quote still
+    falls through to the same honest resolution failure it always did."""
+    try:
+        scope = await sender._resolve_scope(page)
+    except Exception:
+        return None, None
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    try:
+        located = await _wait_for_quoted_message_block(page, group_name, reply_data_id, full_sel)
+    except Exception:
+        return None, None
+    if not located.get("ok"):
+        return None, None
+    quoted = located["quoted"]
+    try:
+        quoted_html = await quoted.first.evaluate("(el) => el.outerHTML", timeout=10000)
+    except Exception:
+        return None, None
+    return _smallest_hash(quoted_html), _media_type(quoted_html)
 
 
 # Bounded "the jump-scroll has settled" poll (Production fix, 2026-09-10)

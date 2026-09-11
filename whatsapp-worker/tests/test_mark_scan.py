@@ -6799,6 +6799,256 @@ def main():
     assert overlay_poll_calls_188["n"] >= 2, "the leftover overlay (no video of THIS item's own to close) must actually be waited out during recovery, not skipped"
     print("188. Rashi Mal EXACT shape closed end-to-end: a click failure with NO <video> ever mounted (a pure leftover overlay from something else) now actively waits for that overlay to clear during recovery, not just when it has its own viewer to close -> round 1 succeeds")
 
+    # ------------------------------------------------------------------
+    # 189-192: Rashi Mal SOURCE-RESOLUTION incident (2026-09-11, second
+    # follow-up) — "UPLOAD - Rashi Mal - Singleton" reported "MEDIA
+    # RESOLUTION FAILED... the marked WhatsApp message could not be
+    # reopened" for BOTH Introduction and Take 1, even though both were
+    # visibly present and correctly MARKed. This is a SCAN-phase failure
+    # (_run_scan's own candidate resolution), NOT a download-phase one —
+    # none of 66e9e00/891e640/6bc9523/80ab29b touch this code path at
+    # all. ROOT CAUSE: _dump_window's one-shot static snapshot can catch
+    # a reply row whose OWN top-level content is real but whose NESTED
+    # quoted-preview thumbnail has not yet lazy-rendered — quoted_hash
+    # AND quoted_media_type both come back None from that single read,
+    # making can_attempt_jump False, so the live jump (the ONE mechanism
+    # that could actually recover it) is never even attempted.
+    # _live_requote_signal fixes this with ONE bounded live re-read,
+    # reusing _wait_for_quoted_message_block's own proven hydration-retry.
+    # ------------------------------------------------------------------
+    class _FakeRequoteQuotedBlock:
+        def __init__(self, live_html, count=1):
+            self._live_html = live_html
+            self._count = count
+        async def count(self):
+            return self._count
+        @property
+        def first(self):
+            return self
+        async def evaluate(self, js, timeout=None):
+            return self._live_html
+
+    class _FakeRequoteReplyMessage:
+        def __init__(self, quoted_block):
+            self._quoted_block = quoted_block
+        def locator(self, sel):
+            assert sel == '[data-testid="quoted-message"]'
+            return self._quoted_block
+
+    class _FakeRequoteLocatorRoot:
+        def __init__(self, by_idx):
+            self._by_idx = by_idx
+        def nth(self, idx):
+            return self._by_idx[idx]
+
+    class _FakeRequotePage:
+        def __init__(self, by_idx):
+            self._by_idx = by_idx
+        def locator(self, sel):
+            return _FakeRequoteLocatorRoot(self._by_idx)
+        async def wait_for_timeout(self, ms):
+            pass
+
+    rashi_thumb_189 = _fake_blob("RASHI189THUMBSTABLE")  # exactly 80 chars, a real embeddable blob
+    rashi_source_html_189 = (
+        '<div data-id="RASHI189SRC" data-testid="conv-msg-RASHI189SRC">'
+        '<div data-testid="video-content">'
+        f'<div style="background-image: url(&quot;data:image/jpeg;base64,{rashi_thumb_189}&quot;);"></div>'
+        '</div></div>'
+    )
+    rashi_reply_html_189 = (
+        '<div data-id="RASHI189REPLY" data-testid="conv-msg-RASHI189REPLY">'
+        '<span data-testid="selectable-text">mark introduction video for singleton</span></div>'
+    )
+    # STATIC scan snapshot: the quoted block rendered as a bare stub —
+    # neither an embeddable hash NOR a recognizable video/image testid
+    # marker. This is exactly the lazy-render timing gap the live
+    # re-quote fix targets.
+    rashi_stub_quote_189 = '<div data-testid="quoted-message"></div>'
+    # LIVE re-read (post-hydration): the SAME quote, now fully rendered,
+    # carrying the byte-identical thumbnail the source message itself has.
+    rashi_live_quote_189 = (
+        '<div data-testid="quoted-message"><div data-testid="video-content">'
+        f'<div style="background-image: url(&quot;data:image/jpeg;base64,{rashi_thumb_189}&quot;);"></div>'
+        '</div></div>'
+    )
+    window_189 = [
+        {"messageHtml": rashi_source_html_189, "quotedHtml": None},
+        {"messageHtml": rashi_reply_html_189, "quotedHtml": rashi_stub_quote_189},
+    ]
+
+    orig_sender_189 = mark_scan.sender
+    orig_dump_window_189 = mark_scan._dump_window
+    orig_find_idx_189 = mark_scan._find_message_index_by_data_id
+
+    mark_scan.sender = _FakeScanSenderWithScope()
+    async def _fake_dump_window_189(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_189
+    mark_scan._dump_window = _fake_dump_window_189
+    idx_by_data_id_189 = {"RASHI189REPLY": 0}
+    async def _fake_find_idx_189(page, group_name, data_id):
+        return idx_by_data_id_189.get(data_id)
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_189
+    quoted_block_189 = _FakeRequoteQuotedBlock(rashi_live_quote_189)
+    by_idx_189 = {0: _FakeRequoteReplyMessage(quoted_block_189)}
+    try:
+        scan_result_189 = asyncio.run(mark_scan._run_scan(
+            page=_FakeRequotePage(by_idx_189), req={"group_name": "Rashi Mal x Talentgram Agency"},
+        ))
+    finally:
+        mark_scan.sender = orig_sender_189
+        mark_scan._dump_window = orig_dump_window_189
+        mark_scan._find_message_index_by_data_id = orig_find_idx_189
+
+    cands_189 = scan_result_189.get("candidates") or []
+    assert len(cands_189) == 1, cands_189
+    cand_189 = cands_189[0]
+    assert cand_189["resolved_source_message_id"] == "RASHI189SRC", cand_189  # recovered via the LIVE re-read, resolved via the cheap in-window lookup, no jump needed
+    assert cand_189["resolved_via_jump_fallback"] is False, cand_189
+    assert cand_189["resolution_failure_state"] is None, cand_189
+    print("189. Rashi Mal SOURCE RESOLUTION: static scan snapshot catches the quoted block as a bare stub (neither hash nor type) -> ONE bounded live re-read recovers the real, byte-identical thumbnail -> resolves directly, no re-MARK required (THE incident's root cause, fixed)")
+
+    # 190: the live re-read ALSO finds nothing (a genuinely empty/stub
+    # quote that never hydrates any content) -> a distinct, honest
+    # resolution_failure_state ("no_verifiable_signal"), never silently
+    # reusing not_located/wrong_message's wording for a different failure
+    # class, and the jump is correctly never attempted (nothing to verify
+    # a jump result against even after the live retry).
+    window_190 = [
+        {"messageHtml": rashi_reply_html_189.replace("RASHI189REPLY", "RASHI190REPLY"), "quotedHtml": rashi_stub_quote_189},
+    ]
+    mark_scan.sender = _FakeScanSenderWithScope()
+    async def _fake_dump_window_190(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_190
+    mark_scan._dump_window = _fake_dump_window_190
+    idx_by_data_id_190 = {"RASHI190REPLY": 0}
+    async def _fake_find_idx_190(page, group_name, data_id):
+        return idx_by_data_id_190.get(data_id)
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_190
+    # The live re-read ALSO returns the bare stub -> genuinely nothing to
+    # extract, matching a real reply-to-a-non-media-message or a quote
+    # that never hydrates at all.
+    quoted_block_190 = _FakeRequoteQuotedBlock(rashi_stub_quote_189)
+    by_idx_190 = {0: _FakeRequoteReplyMessage(quoted_block_190)}
+    try:
+        scan_result_190 = asyncio.run(mark_scan._run_scan(
+            page=_FakeRequotePage(by_idx_190), req={"group_name": "Rashi Mal x Talentgram Agency"},
+        ))
+    finally:
+        mark_scan.sender = orig_sender_189
+        mark_scan._dump_window = orig_dump_window_189
+        mark_scan._find_message_index_by_data_id = orig_find_idx_189
+
+    cands_190 = scan_result_190.get("candidates") or []
+    assert len(cands_190) == 1, cands_190
+    cand_190 = cands_190[0]
+    assert cand_190["resolved_source_message_id"] is None, cand_190
+    assert cand_190["resolution_failure_state"] == "no_verifiable_signal", cand_190
+    print("190. a quote that STILL has no extractable hash/type even after the live re-read -> honest, distinct resolution_failure_state='no_verifiable_signal' (never confused with not_located/wrong_message), no jump attempted since there is genuinely nothing to verify against")
+
+    # 191: two media items in the SAME scan — Take 1 resolves via the
+    # ordinary cheap in-window lookup (its own quote hydrated fine),
+    # Introduction needs the live-requote recovery — both resolve
+    # correctly and independently, no cross-contamination between them.
+    take_thumb_191 = _fake_blob("RASHI191TAKETHUMBSTAB")
+    take_source_html_191 = (
+        '<div data-id="RASHI191TAKESRC" data-testid="conv-msg-RASHI191TAKESRC">'
+        '<div data-testid="video-content">'
+        f'<div style="background-image: url(&quot;data:image/jpeg;base64,{take_thumb_191}&quot;);"></div>'
+        '</div></div>'
+    )
+    take_quote_191 = (
+        '<div data-testid="quoted-message"><div data-testid="video-content">'
+        f'<div style="background-image: url(&quot;data:image/jpeg;base64,{take_thumb_191}&quot;);"></div>'
+        '</div></div>'
+    )
+    take_reply_html_191 = (
+        '<div data-id="RASHI191TAKEREPLY" data-testid="conv-msg-RASHI191TAKEREPLY">'
+        '<span data-testid="selectable-text">mark take 1 for singleton</span></div>'
+    )
+    intro_source_html_191 = rashi_source_html_189.replace("RASHI189SRC", "RASHI191INTROSRC")
+    intro_reply_html_191 = rashi_reply_html_189.replace("RASHI189REPLY", "RASHI191INTROREPLY")
+    window_191 = [
+        {"messageHtml": take_source_html_191, "quotedHtml": None},
+        {"messageHtml": intro_source_html_191, "quotedHtml": None},
+        {"messageHtml": take_reply_html_191, "quotedHtml": take_quote_191},  # resolves via cheap lookup, no live requote needed
+        {"messageHtml": intro_reply_html_191, "quotedHtml": rashi_stub_quote_189},  # needs live requote
+    ]
+    mark_scan.sender = _FakeScanSenderWithScope()
+    async def _fake_dump_window_191(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_191
+    mark_scan._dump_window = _fake_dump_window_191
+    idx_by_data_id_191 = {"RASHI191TAKEREPLY": 0, "RASHI191INTROREPLY": 1}
+    requote_calls_191 = []
+    async def _fake_find_idx_191(page, group_name, data_id):
+        if data_id == "RASHI191TAKEREPLY":
+            requote_calls_191.append(data_id)  # only reached if the (unwanted) live requote ran for Take 1 too
+        return idx_by_data_id_191.get(data_id)
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_191
+    # Reuse the SAME live-quote content as test 189 (a different, real
+    # thumbnail) for Introduction's own live re-read.
+    intro_quoted_block_191 = _FakeRequoteQuotedBlock(rashi_live_quote_189)
+    by_idx_191 = {1: _FakeRequoteReplyMessage(intro_quoted_block_191)}
+    try:
+        scan_result_191 = asyncio.run(mark_scan._run_scan(
+            page=_FakeRequotePage(by_idx_191), req={"group_name": "Rashi Mal x Talentgram Agency"},
+        ))
+    finally:
+        mark_scan.sender = orig_sender_189
+        mark_scan._dump_window = orig_dump_window_189
+        mark_scan._find_message_index_by_data_id = orig_find_idx_189
+
+    cands_191 = scan_result_191.get("candidates") or []
+    assert len(cands_191) == 2, cands_191
+    by_text_191 = {c["mark_text"]: c for c in cands_191}
+    take_cand_191 = by_text_191["mark take 1 for singleton"]
+    intro_cand_191 = by_text_191["mark introduction video for singleton"]
+    assert take_cand_191["resolved_source_message_id"] == "RASHI191TAKESRC", take_cand_191
+    assert intro_cand_191["resolved_source_message_id"] == "RASHI191INTROSRC", intro_cand_191
+    assert requote_calls_191 == [], "Take 1's quote already hydrated fine in the static snapshot -- the live requote path must never run for it"
+    print("191. two media in the SAME scan: Take 1 resolves via the ordinary cheap lookup (its quote hydrated fine), Introduction needs the live-requote recovery -> both resolve correctly to their OWN distinct source, no cross-contamination, the live requote never runs for the item that didn't need it")
+
+    # 192: regression safety — a GENUINE whole-album "N videos" summary
+    # quote (which legitimately has no hash by WhatsApp's own design, and
+    # never will even live) must still be classified as a batch mark, and
+    # the new live-requote path must never run for it or interfere with
+    # that existing, correct detection.
+    summary_quote_192 = '<div data-testid="quoted-message">4 videos</div>'
+    batch_reply_html_192 = (
+        '<div data-id="RASHI192BATCHREPLY" data-testid="conv-msg-RASHI192BATCHREPLY">'
+        '<span data-testid="selectable-text">mark singleton: take 1, take 2, introduction</span></div>'
+    )
+    window_192 = [{"messageHtml": batch_reply_html_192, "quotedHtml": summary_quote_192}]
+    mark_scan.sender = _FakeScanSenderWithScope()
+    async def _fake_dump_window_192(page, group_name, max_messages, diagnostic=None, max_steps=10):
+        return window_192
+    mark_scan._dump_window = _fake_dump_window_192
+    # Not found -> the existing batch-jump path (_resolve_quoted_jump)
+    # reports a clean BATCH_RESOLUTION_FAILED, exactly its own established
+    # behavior, completely unrelated to and untouched by this fix.
+    async def _fake_find_idx_192(page, group_name, data_id):
+        return None
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_192
+    try:
+        scan_result_192 = asyncio.run(mark_scan._run_scan(
+            page=_FakeRequotePage({}), req={"group_name": "Rashi Mal x Talentgram Agency"},
+        ))
+    finally:
+        mark_scan.sender = orig_sender_189
+        mark_scan._dump_window = orig_dump_window_189
+        mark_scan._find_message_index_by_data_id = orig_find_idx_189
+
+    cands_192 = scan_result_192.get("candidates") or []
+    assert len(cands_192) == 1, cands_192
+    # Proves it went through the EXISTING batch-mark code path (which
+    # alone ever sets resolution_status), never fell through to the NEW
+    # single-media live-requote path (which would instead produce a
+    # resolution_failure_state of "no_verifiable_signal" for this same
+    # hash-less quote if it were wrongly reached).
+    assert cands_192[0].get("resolution_status") == "BATCH_RESOLUTION_FAILED", cands_192
+    assert cands_192[0].get("resolution_failure_state") is None, cands_192
+    print("192. regression safety: a genuine whole-album 'N videos' summary quote (which legitimately has no hash, even live) is still correctly classified and routed through the existing batch-mark path, never through the NEW single-media live-requote path")
+
 
 if __name__ == "__main__":
     main()

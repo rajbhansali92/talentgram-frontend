@@ -135,9 +135,17 @@ _UNRESOLVED_STATE_PHRASE = {
     # (2026-09-11 — Zeeshan Ali). Distinguishes "the marked message is
     # genuinely gone / the jump landed elsewhere" (re-mark) from "the
     # marked media just didn't finish rendering this time" (retry).
-    "not_located": "the marked WhatsApp message could not be re-opened",
-    "wrong_message": "the marked WhatsApp message could not be re-opened",
+    "not_located": "the marked WhatsApp message could not be re-opened (the exact original message could not be relocated)",
+    "wrong_message": "the marked WhatsApp message could not be re-opened (the jump landed on different content)",
     "media_not_rendered": "the marked media did not finish loading in WhatsApp Web in time",
+    # 2026-09-11 (Rashi Mal, source-reacquisition audit) — distinct from
+    # BOTH of the above: the reply's own quoted block never carried any
+    # extractable hash or media-type signal at all (even after a live
+    # re-read — see mark_scan._live_requote_signal), so there was nothing
+    # for a jump to even verify against. Per this audit's own Phase 8
+    # rule, this is the one genuine case where asking the user to re-MARK
+    # is actually warranted — not_located/wrong_message above are not.
+    "no_verifiable_signal": "the marked reply's own quoted preview never rendered any identifiable media content to verify against",
 }
 
 

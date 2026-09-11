@@ -2879,6 +2879,21 @@ async def _open_tile_viewer_and_download_hardened(
                     except Exception:
                         vd = {"rootFound": False, "buttons": []}
                     await _close_viewer(page, vd)
+                else:
+                    # 2026-09-11 (production-readiness audit — the EXACT
+                    # Rashi Mal shape): an "intercepts pointer events"
+                    # click failure with NO <video> ever mounted means
+                    # THIS item's own click never opened anything — the
+                    # overlay intercepting it is a LEFTOVER from whatever
+                    # came before (a prior item's still-fading viewer
+                    # close). _close_viewer's own overlay-settle wait
+                    # only runs when it has an actual viewer to close;
+                    # here there's nothing to close, but the SAME leftover
+                    # overlay still needs to be waited out before the
+                    # next round's retry click, or it fails again for the
+                    # identical reason. Bounded, deterministic, never a
+                    # blind sleep — see _wait_for_overlay_clear.
+                    await _wait_for_overlay_clear(page)
             except Exception:
                 pass
             logger.info(
@@ -2991,7 +3006,26 @@ async def _close_viewer(page, viewer_buttons: Dict[str, Any]) -> Dict[str, Any]:
     (2026-08-23): after clicking this exact real Close button
     (aria-label="Close", svg title "ic-close"), the next tile's own click
     point correctly resolves back to that tile via elementFromPoint —
-    confirmed with real evidence via a diagnostic probe, not assumed."""
+    confirmed with real evidence via a diagnostic probe, not assumed.
+
+    2026-09-11 (Rashi Mal follow-up — production-readiness audit): the
+    <video> element itself unmounting is necessary but was never
+    sufficient — WhatsApp's own close TRANSITION can leave the viewer's
+    backdrop/overlay container in the DOM (still `position: fixed`,
+    still covering most of the viewport, still intercepting pointer
+    events) for a brief window after the video is already gone; a shared,
+    proven helper (_diagnose_viewer_close_lifecycle /
+    _OVERLAY_DIAGNOSTIC_JS, 2026-08-23) already exists for detecting
+    exactly this class of leftover element. Once the <video> check
+    passes, a SECOND small bounded poll (_VIEWER_OVERLAY_STILL_PRESENT_JS,
+    up to _OVERLAY_SETTLE_TIMEOUT_S) now also waits for any such
+    leftover overlay to clear before this function reports success — a
+    real, deterministic state check, never a blind sleep. Never blocks
+    indefinitely: if the overlay hasn't cleared by the bound, this still
+    returns closed=True (the <video> signal is real) but flags
+    overlay_lingered=True so callers/logs see it — the caller's own
+    click-retry/round-recovery (2026-09-11, Rashi Mal) remains the real
+    safety net for whatever this settle window doesn't fully absorb."""
     close_btn = None
     for b in (viewer_buttons or {}).get("buttons", []):
         label = " ".join(filter(None, [b.get("ariaLabel"), b.get("dataIcon"), b.get("svgTitle"), b.get("testid")])).lower()
@@ -3021,13 +3055,70 @@ async def _close_viewer(page, viewer_buttons: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             count = -1
         if count == 0:
-            return {"closed": True, "elapsed_s": elapsed, "used_close_button": close_btn is not None}
+            overlay = await _wait_for_overlay_clear(page)
+            return {
+                "closed": True, "elapsed_s": elapsed, "used_close_button": close_btn is not None,
+                "overlay_lingered": not overlay.get("clear", True),
+            }
         await page.wait_for_timeout(300)
         elapsed += 0.3
     return {
         "closed": False, "reason": "video element still present 8s after close attempt",
         "used_close_button": close_btn is not None,
     }
+
+
+_OVERLAY_SETTLE_TIMEOUT_S = 3.0
+_OVERLAY_SETTLE_POLL_MS = 300
+
+# Bounded, purpose-built successor to the 2026-08-23 diagnostic
+# (_OVERLAY_DIAGNOSTIC_JS) — that one enumerates every suspect element for
+# human inspection; this answers one deterministic yes/no question as
+# cheaply as possible: is a full-viewport-covering fixed/absolute element
+# still intercepting pointer events (WhatsApp's own media-viewer backdrop
+# mid fade-out), independent of whether a <video> is still mounted.
+_VIEWER_OVERLAY_STILL_PRESENT_JS = """
+() => {
+  const vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+  if (!vw || !vh) return { present: false };
+  const all = Array.from(document.querySelectorAll('body *'));
+  for (const el of all) {
+    const cs = getComputedStyle(el);
+    if (cs.pointerEvents === 'none') continue;
+    if (cs.position !== 'fixed' && cs.position !== 'absolute') continue;
+    const z = parseInt(cs.zIndex || '0', 10) || 0;
+    if (z <= 0) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width >= vw * 0.6 && r.height >= vh * 0.6) {
+      return {
+        present: true, tag: el.tagName, testid: el.getAttribute('data-testid'),
+        zIndex: z, rect: [r.x, r.y, r.width, r.height],
+      };
+    }
+  }
+  return { present: false };
+}
+"""
+
+
+async def _wait_for_overlay_clear(page, *, timeout_s: float = _OVERLAY_SETTLE_TIMEOUT_S, interval_ms: int = _OVERLAY_SETTLE_POLL_MS) -> Dict[str, Any]:
+    """Bounded poll (never a blind sleep) for any leftover full-viewport
+    backdrop to actually clear after the <video> element is already gone.
+    Best-effort: any JS-evaluation failure is treated as "can't tell,
+    proceed" (clear=True) rather than blocking the caller on a diagnostic
+    that itself failed."""
+    elapsed = 0.0
+    last: Dict[str, Any] = {"present": False}
+    while elapsed < timeout_s:
+        try:
+            last = await _evaluate(page, _VIEWER_OVERLAY_STILL_PRESENT_JS)
+        except Exception:
+            return {"clear": True, "elapsed_s": elapsed, "reason": "overlay check unavailable"}
+        if not last or not last.get("present"):
+            return {"clear": True, "elapsed_s": elapsed}
+        await page.wait_for_timeout(interval_ms)
+        elapsed += interval_ms / 1000.0
+    return {"clear": False, "elapsed_s": elapsed, "last": last}
 
 
 async def _find_message_index_by_data_id(page, group_name: str, data_id: str) -> Optional[int]:

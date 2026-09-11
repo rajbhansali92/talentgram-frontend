@@ -6625,6 +6625,180 @@ def main():
     assert intro_result_184["round"] == 1, intro_result_184
     print("184. order-independence: Introduction FIRST (needs its own recovery) then Take 1 SECOND (opens cleanly) -> both succeed identically regardless of processing order")
 
+    # ------------------------------------------------------------------
+    # 185-187: _close_viewer's own overlay-settle check (2026-09-11,
+    # production-readiness audit) — the <video> unmounting was proven
+    # necessary but never sufficient (Rashi Mal); this exercises the REAL
+    # (unmocked) _close_viewer directly against a leftover full-viewport
+    # backdrop, independent of any <video> presence.
+    # ------------------------------------------------------------------
+    class _FakeOverlayCloseLocator:
+        def __init__(self, n):
+            self._n = n
+        async def count(self):
+            return self._n
+
+    class _FakeOverlayClosePage:
+        def __init__(self):
+            self.mouse = _FakeDownloadMouse()
+            self.keyboard = _FakeDownloadKeyboard()
+            self.wait_calls = 0
+        def locator(self, sel):
+            return _FakeOverlayCloseLocator(0)  # video already gone
+        async def wait_for_timeout(self, ms):
+            self.wait_calls += 1
+
+    viewer_buttons_185 = {"buttons": [{"ariaLabel": "Close", "dataIcon": "ic-close", "svgTitle": None, "testid": None, "rect": [900, 20, 24, 24]}]}
+
+    # 185: overlay present for the first 2 polls, clears on the 3rd ->
+    # closed=True, overlay_lingered=False -> real settle time absorbed
+    # into the bounded wait, never reported as lingering.
+    page_185 = _FakeOverlayClosePage()
+    overlay_calls_185 = {"n": 0}
+    async def _fake_evaluate_185(page, js, arg=None, timeout=10.0):
+        overlay_calls_185["n"] += 1
+        if overlay_calls_185["n"] <= 2:
+            return {"present": True, "tag": "DIV", "zIndex": 100}
+        return {"present": False}
+    orig_evaluate_185 = mark_scan._evaluate
+    mark_scan._evaluate = _fake_evaluate_185
+    try:
+        result_185 = asyncio.run(mark_scan._close_viewer(page_185, viewer_buttons_185))
+    finally:
+        mark_scan._evaluate = orig_evaluate_185
+    assert result_185["closed"] is True, result_185
+    assert result_185["overlay_lingered"] is False, result_185
+    assert overlay_calls_185["n"] == 3, "polled until the overlay genuinely cleared, no more"
+    print("185. _close_viewer: a leftover overlay that clears within the bounded settle window is absorbed silently -> closed=True, overlay_lingered=False")
+
+    # 186: overlay never clears within the bounded settle window ->
+    # _close_viewer still reports closed=True (the <video> signal is
+    # real and is what actually gates the caller's own next click), but
+    # flags overlay_lingered=True for diagnostics.
+    page_186 = _FakeOverlayClosePage()
+    async def _fake_evaluate_186(page, js, arg=None, timeout=10.0):
+        return {"present": True, "tag": "DIV", "zIndex": 100}
+    mark_scan._evaluate = _fake_evaluate_186
+    try:
+        result_186 = asyncio.run(mark_scan._close_viewer(page_186, viewer_buttons_185))
+    finally:
+        mark_scan._evaluate = orig_evaluate_185
+    assert result_186["closed"] is True, result_186
+    assert result_186["overlay_lingered"] is True, result_186
+    print("186. _close_viewer: an overlay that never clears within the bounded settle window is still bounded (never blocks close indefinitely) but is flagged overlay_lingered=True for diagnosis")
+
+    # 187: no leftover overlay at all (the common case) -> single check,
+    # immediate clear, zero added wait -> no latency regression for the
+    # overwhelming majority of real closes.
+    page_187 = _FakeOverlayClosePage()
+    overlay_calls_187 = {"n": 0}
+    async def _fake_evaluate_187(page, js, arg=None, timeout=10.0):
+        overlay_calls_187["n"] += 1
+        return {"present": False}
+    mark_scan._evaluate = _fake_evaluate_187
+    try:
+        result_187 = asyncio.run(mark_scan._close_viewer(page_187, viewer_buttons_185))
+    finally:
+        mark_scan._evaluate = orig_evaluate_185
+    assert result_187["closed"] is True, result_187
+    assert result_187["overlay_lingered"] is False, result_187
+    assert overlay_calls_187["n"] == 1, "the common (no-overlay) case costs exactly one extra check, no added latency"
+    print("187. _close_viewer: no leftover overlay (the common case) -> exactly one extra check, immediate clear, no added latency")
+
+    # 188: the EXACT Rashi Mal shape, closed end-to-end — Introduction's
+    # click fails with an overlay-intercept error and NO <video> EVER
+    # mounts this round (THIS item's own click never opened anything —
+    # the overlay is a pure leftover from something else). The recovery
+    # block must actively wait for that leftover overlay to clear (not
+    # just skip cleanup because there's no viewer of ITS OWN to close),
+    # or round 1's retry click lands on the same still-present overlay
+    # and fails identically.
+    class _RashiOverlayPage:
+        def __init__(self, message_by_index):
+            self._message_by_index = message_by_index
+            self.video_count = {"n": 0}
+        def locator(self, sel):
+            if sel == "video":
+                return _CountLocator(self.video_count["n"])
+            return _FakeHashConvLocator(self._message_by_index)
+        async def wait_for_timeout(self, ms):
+            pass
+
+    intro_tile_188_round0 = _FakeOverlayTile("video-content", _video_tile_html("INTRO188"), fail_times=99)
+
+    class _FakeOverlayTileMountsOnSuccess(_FakeOverlayTile):
+        def __init__(self, testid, html, fail_times, page_ref):
+            super().__init__(testid, html, fail_times)
+            self._page_ref = page_ref
+        async def click(self, timeout=None):
+            await super().click(timeout=timeout)
+            self._page_ref.video_count["n"] = 1  # THIS item's own click genuinely opened a viewer
+
+    page_188 = _RashiOverlayPage({6: _FakeHashMessageLocator([intro_tile_188_round0])})
+    intro_tile_188_round1 = _FakeOverlayTileMountsOnSuccess("video-content", _video_tile_html("INTRO188"), 0, page_188)
+
+    call_state_188 = {"n": 0}
+    def _locator_router_188(sel):
+        if sel == "video":
+            return _CountLocator(page_188.video_count["n"])
+        call_state_188["n"] += 1
+        tiles = [intro_tile_188_round0] if call_state_188["n"] <= mark_scan.MAX_DOWNLOAD_TILE_CLICK_ATTEMPTS else [intro_tile_188_round1]
+        return _FakeHashConvLocator({6: _FakeHashMessageLocator(tiles)})
+    page_188.locator = _locator_router_188
+
+    mark_scan._find_message_index_by_data_id = _make_fake_find_idx_up([6, 6])
+    orig_readiness_188 = mark_scan._wait_for_video_readiness
+    orig_close_188 = mark_scan._close_viewer
+    orig_evaluate_188 = mark_scan._evaluate
+    orig_open_group_188 = mark_scan.sender._open_group_chat
+    orig_scope_188 = mark_scan.sender._resolve_scope
+    orig_emc_188 = mark_scan._ensure_message_content_rendered
+    mark_scan._wait_for_video_readiness = lambda page, **kw: asyncio.sleep(0, result={"reached": True})
+    close_calls_188 = []
+    async def _fake_close_188(page, vb):
+        close_calls_188.append(True)
+        return {"closed": True}
+    mark_scan._close_viewer = _fake_close_188
+    async def _scope_188(page):
+        return "#main"
+    mark_scan.sender._resolve_scope = _scope_188
+    async def _emc_188(page, loc, **kw):
+        pass
+    mark_scan._ensure_message_content_rendered = _emc_188
+    valid_video_188 = _valid_video(b"INTRO188_BYTES")
+    overlay_poll_calls_188 = {"n": 0}
+    async def _fake_evaluate_188(page, js, arg=None, timeout=10.0):
+        if "pointerEvents" in js:  # _VIEWER_OVERLAY_STILL_PRESENT_JS
+            overlay_poll_calls_188["n"] += 1
+            return {"present": overlay_poll_calls_188["n"] <= 2}
+        if "v.src.startsWith('blob:')" in js:
+            return {"ok": True, "base64": _b64(valid_video_188), "contentType": "video/mp4", "byteLength": len(valid_video_188)}
+        return None
+    mark_scan._evaluate = _fake_evaluate_188
+    reopen_calls_188 = []
+    async def _fake_reopen_188(page, group_name):
+        reopen_calls_188.append(group_name)
+        return "OPENED"
+    mark_scan.sender._open_group_chat = _fake_reopen_188
+    try:
+        dl_188 = asyncio.run(mark_scan._open_tile_viewer_and_download_hardened(
+            page_188, "Rashi Mal x Talentgram Agency", "RASHI_INTRO_SRC_188", _hash_of("INTRO188"), 0,
+        ))
+    finally:
+        mark_scan._find_message_index_by_data_id = orig_find_idx_up
+        mark_scan._wait_for_video_readiness = orig_readiness_188
+        mark_scan._close_viewer = orig_close_188
+        mark_scan._evaluate = orig_evaluate_188
+        mark_scan.sender._open_group_chat = orig_open_group_188
+        mark_scan.sender._resolve_scope = orig_scope_188
+        mark_scan._ensure_message_content_rendered = orig_emc_188
+
+    assert dl_188["ok"] is True, dl_188
+    assert dl_188["round"] == 1, dl_188
+    assert dl_188["downloads"][0]["_raw_bytes"] == valid_video_188, dl_188
+    assert overlay_poll_calls_188["n"] >= 2, "the leftover overlay (no video of THIS item's own to close) must actually be waited out during recovery, not skipped"
+    print("188. Rashi Mal EXACT shape closed end-to-end: a click failure with NO <video> ever mounted (a pure leftover overlay from something else) now actively waits for that overlay to clear during recovery, not just when it has its own viewer to close -> round 1 succeeds")
+
 
 if __name__ == "__main__":
     main()

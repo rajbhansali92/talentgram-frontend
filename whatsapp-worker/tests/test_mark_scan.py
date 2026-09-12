@@ -5926,6 +5926,64 @@ def main():
     assert reply_q_164.click_count == 2, f"exactly one bounded re-jump, got {reply_q_164.click_count} clicks"
     print("164. bounded re-jump: first jump lands wrong, second (of _MAX_JUMP_ATTEMPTS) lands right -> resolved, never more than the bounded attempts")
 
+    # 164b: Piyeri Barot (2026-09-12) — "the exact original message could
+    # not be relocated" persisted after commit 1f5cb35 because the retry
+    # loop never reset the underlying page state between its bounded
+    # attempts: the SAME reply-relocation search was simply retried
+    # against the EXACT SAME (possibly stuck-scrolled) page. The source
+    # chat must now be reopened before every retry (never before the
+    # FIRST attempt — a fresh page needs no reset), mirroring the proven
+    # download-phase round-reset pattern.
+    reopen_calls_164b: list = []
+    orig_sender_164b = mark_scan.sender
+
+    class _FakeSenderReopen164b:
+        async def _open_group_chat(self, page, group_name):
+            reopen_calls_164b.append(group_name)
+            return "OPENED"
+        async def _resolve_scope(self, page):
+            return "#main"
+
+    mark_scan.sender = _FakeSenderReopen164b()
+    attempt_164b = {"n": 0}
+
+    async def _fake_find_idx_164b(page, group_name, data_id):
+        # First attempt: the reply is genuinely not found (simulating a
+        # stuck/virtualized scroll position) -> not_located. Only after
+        # the chat reopen does it resolve on the second attempt.
+        attempt_164b["n"] += 1
+        if attempt_164b["n"] == 1:
+            return None
+        return 0
+
+    reply_q_164b = _FakeJumpQuotedBlock(count=1)
+    reply_m_164b = _FakeJumpReplyMessage(reply_q_164b)
+    right_tgt_164b = _FakeJumpTargetMessage(take1_real_161)
+
+    class _FakeJumpPage164b:
+        def locator(self, sel):
+            if "^=" in sel:
+                return _FakeJumpLocatorRoot({0: reply_m_164b})
+            return right_tgt_164b
+        async def wait_for_timeout(self, ms):
+            pass
+
+    async def _fe_164b(p, js, arg=None, timeout=10.0):
+        return {"dataId": "ZEESHAN_TAKE1_SRC", "distancePx": 5, "viaHighlight": True}
+
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_164b
+    mark_scan._evaluate = _fe_164b
+    try:
+        r164b = asyncio.run(mark_scan._resolve_single_media_via_jump(
+            _FakeJumpPage164b(), "Piyeri Barot x Talentgram Agency", "REPLY_164B", take1_hash_161,
+        ))
+    finally:
+        mark_scan.sender = orig_sender_164b
+
+    assert r164b["ok"] is True and r164b["source_message_id"] == "ZEESHAN_TAKE1_SRC", r164b
+    assert reopen_calls_164b == ["Piyeri Barot x Talentgram Agency"], reopen_calls_164b  # reopened exactly once, only before the retry, never before attempt 1
+    print("164b. Piyeri Barot: attempt 1 fails to relocate the reply (stuck scroll) -> the source chat is reopened before the bounded retry, never before the first attempt -> attempt 2 resolves cleanly")
+
     # 165: Take 1 AND Introduction — BOTH need the placeholder-recovery,
     # BOTH resolve to their own DISTINCT exact source (the full incident).
     intro_real_165 = _msg_html_161("ZEESHAN_INTRO_SRC", "ZEESHANINTROREALTHUMB")

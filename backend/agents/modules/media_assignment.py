@@ -60,6 +60,12 @@ ASSIGN_STATUS_MARKED = "marked"
 ASSIGN_STATUS_RESOLVING = "resolving"
 ASSIGN_STATUS_UPLOADED = "uploaded"
 ASSIGN_STATUS_FAILED = "failed"
+# 2026-09-12 (Ameya Saawant / Phase 2-4 production audit) — a prior
+# assignment for the SAME talent+project+slot, replaced because a newer
+# MARK for that slot pointed at a different source. Never deleted (full
+# audit history preserved); simply excluded from already_uploaded's own
+# ASSIGN_STATUS_UPLOADED query and from future to_download consideration.
+ASSIGN_STATUS_SUPERSEDED = "superseded"
 
 MEDIA_ROLES = ("take", "intro", "photos")
 
@@ -452,6 +458,14 @@ class ValidationOutcome:
     project_mismatch: List[Dict[str, Any]] = dataclass_field(default_factory=list)
     project_ambiguous: List[Dict[str, Any]] = dataclass_field(default_factory=list)
     error: Optional[str] = None
+    # 2026-09-12 (Ameya Saawant — "AMBIGUOUS MEDIA ASSIGNMENT" fired even
+    # when one of the two conflicting marks was unambiguously the more
+    # recent one). Informational only, never surfaced as an error: marks
+    # that lost a same-slot recency comparison in validate_candidates
+    # below, kept here purely so the caller can log/audit the automatic
+    # replacement — the winning mark is what actually appears in
+    # `assignments`.
+    superseded: List[Dict[str, Any]] = dataclass_field(default_factory=list)
 
 
 def slot_key(
@@ -662,12 +676,12 @@ def validate_candidates(
     def _key(m: Dict[str, Any]) -> tuple:
         return slot_key(m["media_role"], m["take_number"], m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash"))
 
-    # Group by slot to detect duplicate marks of the exact same slot —
-    # never auto-pick between them.
+    # Group by slot to detect duplicate marks of the exact same slot.
     by_slot: Dict[tuple, List[Dict[str, Any]]] = {}
     for m in valid_marks:
         by_slot.setdefault(_key(m), []).append(m)
 
+    superseded: List[Dict[str, Any]] = []
     for key, marks in by_slot.items():
         # Distinct source media resolving to the SAME slot is the
         # ambiguity the spec calls out; the SAME source media marked twice
@@ -677,7 +691,39 @@ def validate_candidates(
         # two DIFFERENT tiles both claiming the same take) is harmless
         # idempotent duplication, not ambiguity.
         distinct_sources = {(m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) for m in marks}
-        if len(distinct_sources) > 1:
+        if len(distinct_sources) <= 1:
+            continue
+        # 2026-09-12 (Ameya Saawant): a real MARK-then-remark of the SAME
+        # slot is an ordinary, expected workflow — the admin changed their
+        # mind about which take/intro to use — not a system error. Before
+        # treating this as a hard, blocking ambiguity, check whether the
+        # conflicting marks can be safely ordered by recency: mark_scan.py
+        # (2026-09-12) now tags every candidate with its own
+        # mark_window_position — a LOWER value is a genuinely MORE RECENT
+        # reply (_dump_window captures the chat's tail, its own most
+        # recent messages, first). Group by source identity, take each
+        # source's OWN best (lowest/most-recent) position, and only
+        # auto-resolve when there is a single, UNIQUE minimum — never when
+        # recency is missing or tied, which stays a genuine, safe-to-ask
+        # ambiguity exactly as before (never guessed).
+        best_pos_by_source: Dict[tuple, int] = {}
+        marks_by_source: Dict[tuple, List[Dict[str, Any]]] = {}
+        recency_known = True
+        for m in marks:
+            src = (m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash"))
+            pos = m.get("mark_window_position")
+            marks_by_source.setdefault(src, []).append(m)
+            if pos is None:
+                recency_known = False
+                continue
+            if src not in best_pos_by_source or pos < best_pos_by_source[src]:
+                best_pos_by_source[src] = pos
+        winner_source = None
+        if recency_known and len(best_pos_by_source) == len(distinct_sources):
+            ordered = sorted(best_pos_by_source.items(), key=lambda kv: kv[1])
+            if len(ordered) < 2 or ordered[0][1] < ordered[1][1]:
+                winner_source = ordered[0][0]
+        if winner_source is None:
             media_role, take_number = key[0], key[1]
             return ValidationOutcome(
                 ok=False,
@@ -687,6 +733,16 @@ def validate_candidates(
                 },
                 project_mismatch=project_mismatch, project_ambiguous=project_ambiguous,
             )
+        # The newest mark wins — every OTHER source's marks are dropped
+        # from valid_marks (never uploaded/considered further this run)
+        # and recorded as superseded, informational only.
+        for src, src_marks in marks_by_source.items():
+            if src != winner_source:
+                superseded.extend(src_marks)
+        valid_marks = [
+            m for m in valid_marks
+            if _key(m) != key or (m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash")) == winner_source
+        ]
 
     unresolved = [m for m in valid_marks if not m.get("resolved_source_message_id")]
     if unresolved:
@@ -718,6 +774,7 @@ def validate_candidates(
     return ValidationOutcome(
         ok=True, assignments=assignments,
         project_mismatch=project_mismatch, project_ambiguous=project_ambiguous,
+        superseded=superseded,
     )
 
 
@@ -790,7 +847,6 @@ async def record_assignment(
     }
     try:
         await db[ASSIGNMENTS_COLLECTION].insert_one(doc)
-        return doc
     except Exception:
         # Matches the unique index exactly (talent_id, project_id,
         # source_message_id, source_thumbnail_hash) — for an album,
@@ -805,6 +861,49 @@ async def record_assignment(
             {"_id": 0},
         )
         return existing or doc
+    else:
+        # 2026-09-12 (Ameya Saawant / Phase 2-4 production audit) — a
+        # genuinely NEW row for this slot was just inserted (this is the
+        # winning mark validate_candidates already picked when a same-
+        # slot conflict existed this scan). Any OTHER row for the SAME
+        # talent+project+role+take_number with a DIFFERENT source is now
+        # stale — superseded, never left sitting as a second silently-
+        # active "marked" row for the same slot (the concrete persistence
+        # gap this incident exposed: record_assignment's own unique index
+        # is keyed on source identity, not slot identity, so two distinct
+        # sources for the same slot were always two independent rows).
+        # Scoped to take/intro only — "photos" has no true single slot
+        # (see slot_key's own docstring: every photo is its own slot), so
+        # two different photos must never supersede each other here.
+        # NEVER supersedes an already-UPLOADED row — that media is
+        # already live on the submission; only a future, explicit
+        # operation should touch it, never a later MARK silently.
+        if doc["media_role"] in ("take", "intro"):
+            await db[ASSIGNMENTS_COLLECTION].update_many(
+                {
+                    "talent_id": talent_id, "project_id": project_id,
+                    "media_role": doc["media_role"], "take_number": doc["take_number"],
+                    "assignment_id": {"$ne": doc["assignment_id"]},
+                    # A genuinely DIFFERENT source — same convention as
+                    # validate_candidates' own distinct_sources check
+                    # (source_message_id alone is not enough: an album's
+                    # tiles all share it, distinguished only by their own
+                    # thumbnail hash).
+                    "$or": [
+                        {"source_message_id": {"$ne": doc["source_message_id"]}},
+                        {"source_thumbnail_hash": {"$ne": doc["source_thumbnail_hash"]}},
+                    ],
+                    "assignment_status": {"$nin": [ASSIGN_STATUS_UPLOADED, ASSIGN_STATUS_SUPERSEDED]},
+                },
+                {"$set": {
+                    "assignment_status": ASSIGN_STATUS_SUPERSEDED,
+                    "superseded_at": _now(),
+                    "superseded_by_assignment_id": doc["assignment_id"],
+                    "replaced_reason": "newer_mark_same_slot",
+                    "updated_from_source_message_id": doc["source_message_id"],
+                }},
+            )
+        return doc
 
 
 async def mark_assignment_status(

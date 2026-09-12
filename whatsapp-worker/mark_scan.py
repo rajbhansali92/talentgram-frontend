@@ -671,7 +671,7 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
     # outer wait_for (which would cancel the whole scan and discard every
     # result). Still bounded by MAX_JUMP_FALLBACK_ATTEMPTS_PER_SCAN too.
     _jump_deadline = time.monotonic() + _JUMP_FALLBACK_TOTAL_BUDGET_S
-    for item in window:
+    for mark_window_pos, item in enumerate(window):
         quoted_html = item.get("quotedHtml")
         if not quoted_html:
             continue
@@ -844,6 +844,19 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
             "album_tile_index": (source or {}).get("album_tile_index"),
             "resolved_via_jump_fallback": jump_fallback_used,
             "resolution_failure_state": resolution_failure_state,
+            # 2026-09-12 (Ameya Saawant — "AMBIGUOUS MEDIA ASSIGNMENT":
+            # the same slot MARKed twice with different sources always
+            # hard-failed, even when one mark is unambiguously the more
+            # recent of the two). _dump_window captures the chat TAIL
+            # (its own most recent messages) FIRST, then walks upward
+            # into progressively OLDER history, merging in capture order
+            # — so a LOWER position here is a genuinely MORE RECENT
+            # reply, the same recency signal Pass 1 already records for
+            # source messages via its own `window_position`. The backend
+            # uses this to pick the newest mark as the active assignment
+            # when two distinct sources collide on one slot, instead of
+            # unconditionally reporting ambiguity.
+            "mark_window_position": mark_window_pos,
         })
         logger.info(
             "mark_scan: candidate FINAL mark_text=%r reply_message_id=%s -> resolved_source_message_id=%s (via_jump=%s)",
@@ -1990,6 +2003,24 @@ async def _resolve_single_media_via_jump(
         return {"ok": False, "reason": "no expected hash or media type to verify the jump against", "failure_state": "not_located"}
     last_fail: Dict[str, Any] = {"ok": False, "reason": "jump never attempted", "failure_state": "not_located"}
     for jump_attempt in range(1, _MAX_JUMP_ATTEMPTS + 1):
+        if jump_attempt > 1:
+            # 2026-09-12 (Piyeri Barot — "the exact original message could
+            # not be relocated" persisting even after the existing 2 bounded
+            # attempts): every OTHER bounded retry loop in this file resets
+            # the underlying page state between attempts (the DOWNLOAD-
+            # phase round loop in _open_tile_viewer_and_download_hardened
+            # re-opens the group chat before each retry round) — this one
+            # didn't, so a stuck scroll position or a virtualization glitch
+            # that made attempt 1 fail was retried against the EXACT SAME
+            # unchanged page state, virtually guaranteeing attempt 2 fails
+            # identically. Reopening the source chat is a cheap, idempotent
+            # reset (a no-op fast path when it's already the active chat)
+            # that gives the SAME reply-relocation search a genuinely fresh
+            # attempt, mirroring the proven download-phase pattern.
+            try:
+                await sender._open_group_chat(page, group_name)
+            except Exception as exc:
+                logger.warning("mark_scan: chat reopen before jump retry %d failed (continuing anyway): %s", jump_attempt, exc)
         jumped = await _jump_to_quoted_message(page, group_name, reply_data_id)
         if not jumped.get("ok"):
             last_fail = {**jumped, "failure_state": "not_located"}

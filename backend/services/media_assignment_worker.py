@@ -119,13 +119,23 @@ def _report_scan_failed(talent_label: str, project_label: str, error: str) -> st
 
 
 def _report_ambiguous(talent_label: str, project_label: str, ambiguous: Dict[str, Any]) -> str:
+    """2026-09-12 (Ameya Saawant / Phase 2-4 production audit) — this is
+    now a LAST-RESORT state, not the normal result of marking the same
+    slot twice: media_assignment.validate_candidates already auto-
+    resolves a same-slot conflict to whichever mark's own reply is more
+    recent (mark_scan.py's mark_window_position), silently, whenever
+    recency is determinable. This report only fires when that genuinely
+    cannot be established (e.g. missing/tied recency signals) — a real
+    remaining ambiguity the system cannot safely guess, not an ordinary
+    remark-then-remark."""
     role = ambiguous["media_role"]
     take_number = ambiguous.get("take_number")
     slot_label = f"Take {take_number}" if role == "take" else role.capitalize()
     return (
         f"AMBIGUOUS MEDIA ASSIGNMENT\n\n"
-        f"{project_label} {slot_label} has been marked twice, pointing to two different "
-        f"source media messages.\n\nPlease specify which one should be used.\n\n"
+        f"Multiple active sources remain for {project_label} {slot_label} — two different "
+        f"MARKs point to different source media and which is more recent could not be "
+        f"determined.\n\nNo upload was performed. Please MARK the intended media again.\n\n"
         f"Talent: {talent_label}\nProject: {project_label}"
     )
 

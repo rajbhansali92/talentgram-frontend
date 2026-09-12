@@ -111,7 +111,7 @@ async def _cleanup(*, talent_ids=(), project_ids=(), scan_request_ids=(), submis
         await db.submissions.delete_many({"id": {"$in": list(submission_ids)}})
 
 
-def _mark(*, mention_lid, mark_text, source_message_id, media_type="image", sender="Raj Talentgram"):
+def _mark(*, mention_lid, mark_text, source_message_id, media_type="image", sender="Raj Talentgram", mark_window_position=None):
     return {
         "mention_lid": mention_lid,
         "mark_text": mark_text,
@@ -121,6 +121,7 @@ def _mark(*, mention_lid, mark_text, source_message_id, media_type="image", send
         "source_media_type": media_type,
         "source_sender": sender,
         "source_timestamp": "2026-08-22T00:00:00Z",
+        "mark_window_position": mark_window_position,
     }
 
 
@@ -425,6 +426,112 @@ def test_validate_candidates_same_source_marked_twice_is_not_ambiguous():
     assert len(outcome.assignments) == 1
 
 
+def test_validate_candidates_newer_mark_wins_over_older_same_slot():
+    """2026-09-12 (Ameya Saawant — 'AMBIGUOUS MEDIA ASSIGNMENT' fired for
+    an ordinary remark-then-remark, where one mark was unambiguously more
+    recent than the other). mark_scan.py's mark_window_position — a
+    LOWER value means a MORE RECENT reply (_dump_window captures the
+    chat's own tail, its most recent messages, first) — now lets
+    validate_candidates auto-resolve this instead of hard-failing."""
+    candidates = [
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-old", mark_window_position=5),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-new", mark_window_position=1),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok, outcome.ambiguous
+    assert len(outcome.assignments) == 1
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-new"
+    assert len(outcome.superseded) == 1
+    assert outcome.superseded[0]["resolved_source_message_id"] == "src-old"
+
+
+def test_validate_candidates_newer_mark_wins_regardless_of_input_order():
+    """The winner is determined by recency, never by which candidate
+    happens to come first/last in the input list."""
+    candidates = [
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 1", source_message_id="src-new", mark_window_position=0),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 1", source_message_id="src-old", mark_window_position=9),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-new"
+
+
+def test_validate_candidates_tied_recency_still_ambiguous():
+    """Never guessed: an exact tie in mark_window_position (or any other
+    genuinely indeterminate recency) stays a real, safe-to-ask ambiguity,
+    exactly as before this fix."""
+    candidates = [
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-a", mark_window_position=3),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-b", mark_window_position=3),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert not outcome.ok
+    assert outcome.ambiguous is not None
+
+
+def test_validate_candidates_missing_recency_on_one_side_still_ambiguous():
+    """One mark carrying a real position and the other missing it entirely
+    is just as indeterminate as a tie — never guessed."""
+    candidates = [
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-a", mark_window_position=2),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-b", mark_window_position=None),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert not outcome.ok
+    assert outcome.ambiguous is not None
+
+
+def test_validate_candidates_three_way_conflict_newest_of_three_wins():
+    """More than two conflicting marks for the same slot — still resolves
+    cleanly to the single most recent one, the other two superseded."""
+    candidates = [
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 2", source_message_id="src-oldest", mark_window_position=8),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 2", source_message_id="src-middle", mark_window_position=4),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 2", source_message_id="src-newest", mark_window_position=0),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok
+    assert len(outcome.assignments) == 1
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-newest"
+    assert {s["resolved_source_message_id"] for s in outcome.superseded} == {"src-oldest", "src-middle"}
+
+
+def test_validate_candidates_different_slots_never_compared_for_recency():
+    """A recency-based winner in one slot must never affect an unrelated
+    slot in the same scan — Take 1 and Introduction stay fully
+    independent."""
+    candidates = [
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google take 1", source_message_id="take-src", mark_window_position=0),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="intro-old", mark_window_position=5),
+        _mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="intro-new", mark_window_position=1),
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok
+    by_role = {(a["media_role"], a["take_number"]): a["resolved_source_message_id"] for a in outcome.assignments}
+    assert by_role[("take", 1)] == "take-src"
+    assert by_role[("intro", None)] == "intro-new"
+    assert len(outcome.superseded) == 1
+
+
 def test_slot_key_distinguishes_photos_by_source_but_not_takes():
     # "take"/"intro" have exactly one real slot per (role, take_number) —
     # source identity must NOT be part of their key, or two different
@@ -654,6 +761,197 @@ async def test_validate_candidates_agent_identity_never_becomes_talent_identity(
         assert doc["source_sender"] == "Gunwanti Talentgram Team Agent"  # metadata only
     finally:
         await db[ma.ASSIGNMENTS_COLLECTION].delete_one({"assignment_id": doc["assignment_id"]})
+
+
+# ---------------------------------------------------------------------------
+# record_assignment supersede-on-insert (2026-09-12 — Ameya Saawant /
+# Phase 2-4 production audit). record_assignment's own unique index is
+# keyed on SOURCE identity (talent_id, project_id, source_message_id,
+# source_thumbnail_hash), never slot identity — before this fix, a
+# second mark for the SAME talent+project+slot with a DIFFERENT source
+# just inserted a second, independent "marked" row, silently leaving two
+# active assignments for one slot forever.
+# ---------------------------------------------------------------------------
+async def test_record_assignment_supersedes_prior_row_for_same_slot():
+    talent_id = f"talent-{uuid.uuid4().hex[:8]}"
+    project_id = f"proj-{uuid.uuid4().hex[:8]}"
+    old_mark = {
+        "resolved_source_message_id": "src-old", "source_media_type": "video",
+        "quoted_thumbnail_hash": "hash-old", "source_sender": None, "source_timestamp": None,
+        "reply_message_id": "reply-old", "mark_text": "mark singleton intro",
+        "media_role": "intro", "take_number": None,
+    }
+    new_mark = {**old_mark, "resolved_source_message_id": "src-new", "quoted_thumbnail_hash": "hash-new"}
+    old_doc = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=old_mark, created_by="test",
+    )
+    new_doc = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=new_mark, created_by="test",
+    )
+    try:
+        assert new_doc["assignment_status"] == ma.ASSIGN_STATUS_MARKED
+        refreshed_old = await db[ma.ASSIGNMENTS_COLLECTION].find_one(
+            {"assignment_id": old_doc["assignment_id"]}, {"_id": 0},
+        )
+        assert refreshed_old["assignment_status"] == ma.ASSIGN_STATUS_SUPERSEDED
+        assert refreshed_old["superseded_by_assignment_id"] == new_doc["assignment_id"]
+        assert refreshed_old["replaced_reason"] == "newer_mark_same_slot"
+        assert refreshed_old["updated_from_source_message_id"] == "src-new"
+    finally:
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id, "project_id": project_id})
+
+
+async def test_record_assignment_never_supersedes_an_already_uploaded_row():
+    """Rule F (Phase 2): an existing approved/uploaded assignment must
+    never be silently mutated by a later MARK for the same slot."""
+    talent_id = f"talent-{uuid.uuid4().hex[:8]}"
+    project_id = f"proj-{uuid.uuid4().hex[:8]}"
+    uploaded_mark = {
+        "resolved_source_message_id": "src-uploaded", "source_media_type": "video",
+        "quoted_thumbnail_hash": "hash-uploaded", "source_sender": None, "source_timestamp": None,
+        "reply_message_id": "reply-uploaded", "mark_text": "mark singleton take 1",
+        "media_role": "take", "take_number": 1,
+    }
+    uploaded_doc = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=uploaded_mark, created_by="test",
+    )
+    await ma.mark_assignment_status(
+        talent_id, project_id, uploaded_doc["source_message_id"], uploaded_doc["source_thumbnail_hash"],
+        ma.ASSIGN_STATUS_UPLOADED,
+    )
+    new_mark = {**uploaded_mark, "resolved_source_message_id": "src-remark", "quoted_thumbnail_hash": "hash-remark"}
+    new_doc = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=new_mark, created_by="test",
+    )
+    try:
+        refreshed_uploaded = await db[ma.ASSIGNMENTS_COLLECTION].find_one(
+            {"assignment_id": uploaded_doc["assignment_id"]}, {"_id": 0},
+        )
+        assert refreshed_uploaded["assignment_status"] == ma.ASSIGN_STATUS_UPLOADED  # untouched
+        assert "superseded_by_assignment_id" not in refreshed_uploaded
+        assert new_doc["assignment_status"] == ma.ASSIGN_STATUS_MARKED
+    finally:
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id, "project_id": project_id})
+
+
+async def test_record_assignment_never_supersedes_across_different_slots():
+    """Take 1 and Introduction remain fully independent — recording a
+    new Take 1 must never touch an existing Introduction row."""
+    talent_id = f"talent-{uuid.uuid4().hex[:8]}"
+    project_id = f"proj-{uuid.uuid4().hex[:8]}"
+    intro_mark = {
+        "resolved_source_message_id": "src-intro", "source_media_type": "video",
+        "quoted_thumbnail_hash": "hash-intro", "source_sender": None, "source_timestamp": None,
+        "reply_message_id": "reply-intro", "mark_text": "mark singleton intro",
+        "media_role": "intro", "take_number": None,
+    }
+    take_mark = {**intro_mark, "resolved_source_message_id": "src-take1", "quoted_thumbnail_hash": "hash-take1",
+                 "media_role": "take", "take_number": 1}
+    intro_doc = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=intro_mark, created_by="test",
+    )
+    take_doc = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=take_mark, created_by="test",
+    )
+    try:
+        refreshed_intro = await db[ma.ASSIGNMENTS_COLLECTION].find_one(
+            {"assignment_id": intro_doc["assignment_id"]}, {"_id": 0},
+        )
+        assert refreshed_intro["assignment_status"] == ma.ASSIGN_STATUS_MARKED  # untouched, never superseded
+        assert take_doc["assignment_status"] == ma.ASSIGN_STATUS_MARKED
+    finally:
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id, "project_id": project_id})
+
+
+async def test_record_assignment_never_supersedes_across_different_talents_or_projects():
+    talent_a, talent_b = f"talent-{uuid.uuid4().hex[:8]}", f"talent-{uuid.uuid4().hex[:8]}"
+    project_id = f"proj-{uuid.uuid4().hex[:8]}"
+    mark_a = {
+        "resolved_source_message_id": "src-a", "source_media_type": "video",
+        "quoted_thumbnail_hash": "hash-a", "source_sender": None, "source_timestamp": None,
+        "reply_message_id": "reply-a", "mark_text": "mark singleton intro",
+        "media_role": "intro", "take_number": None,
+    }
+    mark_b = {**mark_a, "resolved_source_message_id": "src-b", "quoted_thumbnail_hash": "hash-b"}
+    doc_a = await ma.record_assignment(
+        talent_id=talent_a, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=mark_a, created_by="test",
+    )
+    doc_b = await ma.record_assignment(
+        talent_id=talent_b, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=mark_b, created_by="test",
+    )
+    try:
+        refreshed_a = await db[ma.ASSIGNMENTS_COLLECTION].find_one({"assignment_id": doc_a["assignment_id"]}, {"_id": 0})
+        assert refreshed_a["assignment_status"] == ma.ASSIGN_STATUS_MARKED  # different talent -> never touched
+        assert doc_b["assignment_status"] == ma.ASSIGN_STATUS_MARKED
+    finally:
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": {"$in": [talent_a, talent_b]}, "project_id": project_id})
+
+
+async def test_record_assignment_never_supersedes_photos_slot():
+    """"photos" has no true single slot (see slot_key's own docstring) —
+    two different photos must never supersede each other."""
+    talent_id = f"talent-{uuid.uuid4().hex[:8]}"
+    project_id = f"proj-{uuid.uuid4().hex[:8]}"
+    photo_a = {
+        "resolved_source_message_id": "album-1", "source_media_type": "image",
+        "quoted_thumbnail_hash": "hash-photo-a", "source_sender": None, "source_timestamp": None,
+        "reply_message_id": "reply-photo-a", "mark_text": "mark singleton photos",
+        "media_role": "photos", "take_number": None,
+    }
+    photo_b = {**photo_a, "quoted_thumbnail_hash": "hash-photo-b"}
+    doc_a = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=photo_a, created_by="test",
+    )
+    doc_b = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=photo_b, created_by="test",
+    )
+    try:
+        refreshed_a = await db[ma.ASSIGNMENTS_COLLECTION].find_one({"assignment_id": doc_a["assignment_id"]}, {"_id": 0})
+        assert refreshed_a["assignment_status"] == ma.ASSIGN_STATUS_MARKED  # both photos remain independently active
+        assert doc_b["assignment_status"] == ma.ASSIGN_STATUS_MARKED
+    finally:
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id, "project_id": project_id})
+
+
+async def test_record_assignment_same_mark_processed_twice_is_idempotent():
+    """The SAME MARK message (identical source identity) processed twice
+    — e.g. a duplicate scan, or the worker's own claim retried — must
+    remain exactly ONE active assignment row, never a duplicate and
+    never a spurious supersede-of-itself."""
+    talent_id = f"talent-{uuid.uuid4().hex[:8]}"
+    project_id = f"proj-{uuid.uuid4().hex[:8]}"
+    mark = {
+        "resolved_source_message_id": "src-same", "source_media_type": "video",
+        "quoted_thumbnail_hash": "hash-same", "source_sender": None, "source_timestamp": None,
+        "reply_message_id": "reply-same", "mark_text": "mark singleton take 2",
+        "media_role": "take", "take_number": 2,
+    }
+    doc_1 = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=mark, created_by="test",
+    )
+    doc_2 = await ma.record_assignment(
+        talent_id=talent_id, project_id=project_id, normalized_project="singleton",
+        group_name="G", group_id=None, mark=mark, created_by="test",
+    )
+    try:
+        assert doc_1["assignment_id"] == doc_2["assignment_id"]  # the SAME row, never a duplicate
+        count = await db[ma.ASSIGNMENTS_COLLECTION].count_documents({"talent_id": talent_id, "project_id": project_id})
+        assert count == 1
+        refreshed = await db[ma.ASSIGNMENTS_COLLECTION].find_one({"assignment_id": doc_1["assignment_id"]}, {"_id": 0})
+        assert refreshed["assignment_status"] == ma.ASSIGN_STATUS_MARKED  # never superseded by itself
+    finally:
+        await db[ma.ASSIGNMENTS_COLLECTION].delete_many({"talent_id": talent_id, "project_id": project_id})
 
 
 def test_report_unresolved_names_real_talent_never_presents_agent_as_talent():

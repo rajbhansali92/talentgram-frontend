@@ -2420,6 +2420,24 @@ function TalentDetail({
             }
             if (res?.method === "native_file_share") {
                 toast.success(`Sharing ${res.count} file${res.count === 1 ? "" : "s"} — choose WhatsApp…`);
+            } else if (res?.method === "native_file_share_split") {
+                // Some devices can't send photos and videos together in one
+                // WhatsApp share. The first batch just went out for real — the
+                // rest is offered as a clear, separate next step, never
+                // silently dropped and never implied as already sent.
+                const sentWord = res.sentType === "video" ? "video" : "photo";
+                const remainingWord = res.remainingType === "video" ? "video" : "photo";
+                const remaining = entries.filter((e) => e.type === res.remainingType);
+                toast.success(
+                    `Shared ${res.sentCount} ${sentWord}${res.sentCount === 1 ? "" : "s"} — tap to also share ${res.remainingCount} ${remainingWord}${res.remainingCount === 1 ? "" : "s"}`,
+                    {
+                        duration: 20000,
+                        action: {
+                            label: `Share ${remainingWord}${res.remainingCount === 1 ? "" : "s"}`,
+                            onClick: () => runShare(remaining),
+                        },
+                    },
+                );
             } else if (res?.method === "share_blocked") {
                 // iOS transient rejection after retry — plain, non-technical.
                 toast.error("Couldn't open the share sheet. Please tap Send again.");
@@ -3693,6 +3711,7 @@ function TalentDetail({
                             <li>On mobile, supported files share through your phone's native share menu — choose WhatsApp.</li>
                             <li>On desktop, sharing may use WhatsApp Web and a link, depending on browser support.</li>
                             <li>Images are shared without filenames. Introduction and audition videos use clean labels.</li>
+                            <li>Some devices can't send photos and videos together in one go — if so, they'll send as photos first, then you'll be offered a quick tap to send the videos too (or the other way around).</li>
                         </ul>
                         <button
                             type="button"

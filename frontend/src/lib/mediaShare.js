@@ -178,6 +178,27 @@ async function logDispatch(slug, talentId, method, fileCount, media, sessionId) 
     }
 }
 
+// Attempts ONE native navigator.share({files}) call for an already-ready
+// batch of Files, with the same NotAllowedError-retry-once policy used
+// everywhere else in this module. Extracted so the combined-batch attempt
+// and the mixed-media homogeneous-batch fallback (below) share this exact
+// retry logic instead of duplicating it.
+async function attemptNativeFileShare(filesForBatch, text, titleText) {
+    const shareData = { files: filesForBatch, title: titleText, text };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            await navigator.share(shareData);
+            return { ok: true, attempt };
+        } catch (e) {
+            if (e && e.name === "AbortError") return { ok: false, aborted: true };
+            if (e && e.name === "NotAllowedError" && attempt === 1) continue; // retry immediately
+            if (e && e.name === "NotAllowedError") return { ok: false, blocked: true };
+            return { ok: false, error: e };
+        }
+    }
+    return { ok: false, error: new Error("unreachable") };
+}
+
 function buildWhatsAppMessage(talentName, lines, formText) {
     const parts = [`*${talentName}*`, "Shared via Talentgram", ""];
     for (const l of lines) {
@@ -212,6 +233,15 @@ function buildWhatsAppMessage(talentName, lines, formText) {
  *                                         form-only share — the file-share attempt is skipped and
  *                                         the SAME link-fallback code path sends a text-only message.
  * @returns {Promise<{ method?: string, count?: number, aborted?: boolean }>}
+ *          `method: "native_file_share_split"` is a distinct outcome: a mixed
+ *          image+video selection whose COMBINED canShare() was rejected but
+ *          whose two homogeneous subsets (images alone, videos alone) each
+ *          pass — one subset (`sentType`/`sentCount`) has already been sent
+ *          as a real native file share; the other (`remainingType`/
+ *          `remainingCount`) was NOT sent and must be offered as an explicit,
+ *          separately user-initiated follow-up share (see ClientView.jsx's
+ *          handling of this method) — never silently dropped, never implied
+ *          as already sent.
  *
  * Behaviour matrix (intentional — preserves the existing security model):
  *
@@ -349,50 +379,96 @@ export async function shareMediaViaWhatsApp({
             trace.q3_canShareFiles = canFiles;
             const shareMeta = items.map((it) => ({ id: it.id, type: it.type, name: it.name }));
             const text = [caption || `${talentName} · Shared via Talentgram`, formText].filter(Boolean).join("\n\n");
-            const shareData = {
-                files: goodFiles,
-                title: text.split("\n")[0],
-                text,
-            };
+            const titleText = text.split("\n")[0];
+
             if (canFiles) {
                 // iOS Safari intermittently throws NotAllowedError on the first
                 // attempt even though an immediate retry succeeds. Retry once
                 // before giving up, and NEVER surface the raw exception.
-                for (let attempt = 1; attempt <= 2; attempt++) {
-                    try {
-                        await navigator.share(shareData);
-                        trace.q8_path = attempt === 1 ? "Native File Share" : "Native File Share (retry)";
-                        await logDispatch(slug, talentId, "native_file_share", goodFiles.length, shareMeta, sessionId);
-                        return emit({ method: "native_file_share", count: goodFiles.length });
-                    } catch (e) {
-                        if (e && e.name === "AbortError") {
-                            trace.q8_path = "Native File Share (cancelled)";
-                            trace.q9_reason = "user cancelled the share sheet";
-                            return emit({ aborted: true });
-                        }
-                        if (e && e.name === "NotAllowedError" && attempt === 1) {
-                            trace.q9_reason = "share sheet NotAllowedError (retrying once)";
-                            continue; // retry immediately
-                        }
-                        if (e && e.name === "NotAllowedError") {
-                            // Still blocked after the retry — ask the user to tap
-                            // Send again (a manual second tap attaches the files).
-                            // Do NOT fall back to links here.
-                            trace.q8_path = "Share sheet blocked (retry failed)";
-                            trace.q9_reason = "share sheet blocked by the browser after retry";
-                            return emit({ method: "share_blocked" });
-                        }
-                        // Any other error → fall through to the secure-link path.
-                        trace.q8_path = "Link Fallback";
-                        trace.q9_reason = `navigator.share({files}) threw: ${e?.name}: ${e?.message || ""}`.trim();
-                        break;
-                    }
+                const attemptResult = await attemptNativeFileShare(goodFiles, text, titleText);
+                if (attemptResult.ok) {
+                    trace.q8_path = attemptResult.attempt === 1 ? "Native File Share" : "Native File Share (retry)";
+                    await logDispatch(slug, talentId, "native_file_share", goodFiles.length, shareMeta, sessionId);
+                    return emit({ method: "native_file_share", count: goodFiles.length });
                 }
-            } else {
+                if (attemptResult.aborted) {
+                    trace.q8_path = "Native File Share (cancelled)";
+                    trace.q9_reason = "user cancelled the share sheet";
+                    return emit({ aborted: true });
+                }
+                if (attemptResult.blocked) {
+                    // Still blocked after the retry — ask the user to tap Send
+                    // again (a manual second tap attaches the files). Do NOT
+                    // fall back to links here.
+                    trace.q8_path = "Share sheet blocked (retry failed)";
+                    trace.q9_reason = "share sheet blocked by the browser after retry";
+                    return emit({ method: "share_blocked" });
+                }
+                // Any other error → fall through to the secure-link path.
                 trace.q8_path = "Link Fallback";
-                trace.q9_reason = hasCanShare
-                    ? "navigator.canShare({files}) returned false (browser won't share these file types)"
-                    : "navigator.canShare is unavailable (can't offer file sharing safely)";
+                trace.q9_reason = `navigator.share({files}) threw: ${attemptResult.error?.name}: ${attemptResult.error?.message || ""}`.trim();
+            } else {
+                // ── Mixed-media fallback ─────────────────────────────────────
+                // A combined image+video batch can be rejected by canShare()
+                // even when browsers/devices happily share EACH type alone —
+                // found live on a real Android device: 3 videos alone, and
+                // images alone, share fine; adding even one image to the video
+                // selection makes the combined payload fail canShare(). This is
+                // a genuine platform/device capability boundary, not something
+                // our own file/MIME construction controls (images and videos
+                // already go through identical, correctly-typed File
+                // construction above). Rather than silently downgrading a
+                // mixed selection straight to a links-only message, try the
+                // two type-homogeneous batches as separate native shares —
+                // never claiming more was sent than actually was.
+                const videoPairs = items.map((it, i) => ({ it, file: files[i] })).filter((p) => p.it.type === "video" && p.file);
+                const imagePairs = items.map((it, i) => ({ it, file: files[i] })).filter((p) => p.it.type !== "video" && p.file);
+                const isMixed = videoPairs.length > 0 && imagePairs.length > 0;
+                const videoFiles = videoPairs.map((p) => p.file);
+                const imageFiles = imagePairs.map((p) => p.file);
+                const canVideosAlone = isMixed && hasCanShare ? canShareFiles(videoFiles) : false;
+                const canImagesAlone = isMixed && hasCanShare ? canShareFiles(imageFiles) : false;
+
+                if (isMixed && canVideosAlone && canImagesAlone) {
+                    // Videos first — the larger, empirically-working batch —
+                    // using the SAME retry policy as a normal share.
+                    const videoMeta = videoPairs.map((p) => ({ id: p.it.id, type: p.it.type, name: p.it.name }));
+                    const firstAttempt = await attemptNativeFileShare(videoFiles, text, titleText);
+                    if (firstAttempt.ok) {
+                        trace.q8_path = "Native File Share (split: videos first)";
+                        trace.q9_reason = "combined mixed-media canShare() rejected; shared as two homogeneous batches";
+                        await logDispatch(slug, talentId, "native_file_share", videoFiles.length, videoMeta, sessionId);
+                        return emit({
+                            method: "native_file_share_split",
+                            sentType: "video",
+                            sentCount: videoFiles.length,
+                            remainingType: "image",
+                            remainingCount: imageFiles.length,
+                        });
+                    }
+                    if (firstAttempt.aborted) {
+                        trace.q8_path = "Native File Share (cancelled)";
+                        trace.q9_reason = "user cancelled the share sheet (split attempt, first batch)";
+                        return emit({ aborted: true });
+                    }
+                    if (firstAttempt.blocked) {
+                        trace.q8_path = "Share sheet blocked (retry failed, split attempt)";
+                        trace.q9_reason = "share sheet blocked by the browser after retry (split attempt, first batch)";
+                        return emit({ method: "share_blocked" });
+                    }
+                    // Any other error on the split attempt → fall through to
+                    // the ordinary combined secure-link fallback below (never a
+                    // second, different failure mode to reason about).
+                    trace.q8_path = "Link Fallback";
+                    trace.q9_reason = `split-share attempt threw: ${firstAttempt.error?.name}: ${firstAttempt.error?.message || ""}`.trim();
+                } else {
+                    trace.q8_path = "Link Fallback";
+                    trace.q9_reason = hasCanShare
+                        ? isMixed
+                            ? "navigator.canShare({files}) rejected the combined batch AND at least one homogeneous subset (images/videos alone)"
+                            : "navigator.canShare({files}) returned false (browser won't share these file types)"
+                        : "navigator.canShare is unavailable (can't offer file sharing safely)";
+                }
             }
         }
     } else {

@@ -270,3 +270,155 @@ describe("mediaShare.js — actual runtime File payload (fetch-fallback path, no
         expect(call.text).toContain("Portfolio Image 1");
     });
 });
+
+describe("mediaShare.js — mixed image+video fallback (found live on a real Android device: canShare() rejects the COMBINED batch even though each type alone is accepted)", () => {
+    beforeEach(() => {
+        api.get.mockReset();
+        api.post.mockReset();
+        api.post.mockResolvedValue({ data: { share_id: "sh_1" } });
+    });
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
+    });
+
+    // Simulates the exact reported device behaviour: canShare() returns true
+    // for an all-image or all-video array, but false the moment BOTH a
+    // video/* and an image/* file appear in the same array.
+    function stubMixedRejectingCanShare(shareMock) {
+        vi.stubGlobal("navigator", {
+            ...navigator,
+            share: shareMock,
+            canShare: vi.fn(({ files }) => {
+                const types = new Set(files.map((f) => f.type.split("/")[0]));
+                return types.size <= 1;
+            }),
+            userAgent: "android-chrome-agent",
+        });
+    }
+
+    it("all three videos alone still share as real media in one operation (must stay unaffected)", async () => {
+        api.get.mockResolvedValue({ status: 200, data: new Blob(["x"], { type: "video/mp4" }) });
+        stubMixedRejectingCanShare(vi.fn().mockResolvedValue(undefined));
+        const items = [1, 2, 3].map((n) => ({ id: `t${n}`, name: `Take ${n}`, type: "video", fileUrl: `https://x/t${n}.mp4`, filename: `Harshita - Take ${n}` }));
+        const res = await shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita", items,
+            caption: "Harshita — Project X\n\nAudition Take: Take 1\nAudition Take: Take 2\nAudition Take: Take 3",
+            allowFiles: true, sessionId: "sess1",
+        });
+        expect(res.method).toBe("native_file_share");
+        expect(res.count).toBe(3);
+        expect(navigator.share.mock.calls[0][0].files).toHaveLength(3);
+    });
+
+    it("images alone still share as real media in one operation (must stay unaffected)", async () => {
+        api.get.mockResolvedValue({ status: 200, data: new Blob(["x"], { type: "image/jpeg" }) });
+        stubMixedRejectingCanShare(vi.fn().mockResolvedValue(undefined));
+        const items = [1, 2].map((n) => ({ id: `img${n}`, name: `Portfolio Image ${n}`, type: "image", fileUrl: `https://x/i${n}.jpg`, filename: `Harshita - Portfolio Image ${n}` }));
+        const res = await shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita", items,
+            caption: "Harshita — Project X", allowFiles: true, sessionId: "sess1",
+        });
+        expect(res.method).toBe("native_file_share");
+        expect(res.count).toBe(2);
+    });
+
+    it("3 videos + 1 image: combined canShare() is rejected, so it splits into two real native file shares — videos first, sent immediately; images reported as remaining, NOT silently dropped", async () => {
+        api.get.mockImplementation((url) =>
+            Promise.resolve({ status: 200, data: new Blob(["x"], { type: url.includes("img") ? "image/jpeg" : "video/mp4" }) })
+        );
+        const shareMock = vi.fn().mockResolvedValue(undefined);
+        stubMixedRejectingCanShare(shareMock);
+        const items = [
+            { id: "t1", name: "Take 1", type: "video", fileUrl: "https://x/t1.mp4", filename: "Harshita - Take 1" },
+            { id: "t2", name: "Take 2", type: "video", fileUrl: "https://x/t2.mp4", filename: "Harshita - Take 2" },
+            { id: "t3", name: "Take 3", type: "video", fileUrl: "https://x/t3.mp4", filename: "Harshita - Take 3" },
+            { id: "img1", name: "Portfolio Image 1", type: "image", fileUrl: "https://x/img1.jpg", filename: "Harshita - Portfolio Image 1" },
+        ];
+        const res = await shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita", items,
+            caption: "Harshita — Project X\n\nAudition Take: Take 1\nAudition Take: Take 2\nAudition Take: Take 3",
+            allowFiles: true, sessionId: "sess1",
+        });
+
+        expect(res.method).toBe("native_file_share_split");
+        expect(res.sentType).toBe("video");
+        expect(res.sentCount).toBe(3);
+        expect(res.remainingType).toBe("image");
+        expect(res.remainingCount).toBe(1);
+
+        // Exactly one native share call happened (the video batch) — the
+        // image was NOT silently attempted or dropped, only reported as
+        // remaining for an explicit follow-up (see ClientView.jsx).
+        expect(shareMock).toHaveBeenCalledTimes(1);
+        const sentFiles = shareMock.mock.calls[0][0].files;
+        expect(sentFiles).toHaveLength(3);
+        expect(sentFiles.every((f) => f.type === "video/mp4")).toBe(true);
+    });
+
+    it("3 videos + 2 images: the follow-up share (image batch) sends the correct remaining files when invoked as its own call — proves the caller can simply re-invoke shareMediaViaWhatsApp with the remaining items, no special resume API needed", async () => {
+        api.get.mockResolvedValue({ status: 200, data: new Blob(["x"], { type: "image/jpeg" }) });
+        const shareMock = vi.fn().mockResolvedValue(undefined);
+        stubMixedRejectingCanShare(shareMock);
+        const remainingImageItems = [
+            { id: "img1", name: "Portfolio Image 1", type: "image", fileUrl: "https://x/img1.jpg", filename: "Harshita - Portfolio Image 1" },
+            { id: "img2", name: "Portfolio Image 2", type: "image", fileUrl: "https://x/img2.jpg", filename: "Harshita - Portfolio Image 2" },
+        ];
+        const res = await shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita", items: remainingImageItems,
+            caption: "Harshita — Project X", allowFiles: true, sessionId: "sess1",
+        });
+        expect(res.method).toBe("native_file_share");
+        expect(res.count).toBe(2);
+    });
+
+    it("if EITHER homogeneous subset also fails canShare(), falls through to the existing combined secure-link fallback — no new failure mode", async () => {
+        api.get.mockImplementation((url) =>
+            Promise.resolve({ status: 200, data: new Blob(["x"], { type: url.includes("img") ? "image/jpeg" : "video/mp4" }) })
+        );
+        vi.stubGlobal("navigator", {
+            ...navigator,
+            share: vi.fn().mockResolvedValue(undefined),
+            canShare: vi.fn().mockReturnValue(false), // rejects everything, combined AND each subset
+            userAgent: "android-chrome-agent",
+        });
+        const items = [
+            { id: "t1", name: "Take 1", type: "video", fileUrl: "https://x/t1.mp4", filename: "Harshita - Take 1" },
+            { id: "img1", name: "Portfolio Image 1", type: "image", fileUrl: "https://x/img1.jpg", filename: "Harshita - Portfolio Image 1" },
+        ];
+        const res = await shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita", items,
+            caption: "Harshita — Project X\n\nAudition Take: Take 1", allowFiles: true, sessionId: "sess1",
+        });
+        expect(res.method).toBe("whatsapp_link_share");
+        // Falls back to ONE combined secure-link message for everything —
+        // the existing, already-working behaviour, completely unchanged.
+        const call = navigator.share.mock.calls[0][0];
+        expect(call.text).toContain("Take 1");
+        expect(call.text).toContain("Portfolio Image 1");
+    });
+
+    it("if the platform genuinely supports the combined mixed batch (canShare() returns true), it is still sent as ONE native share — no unnecessary split", async () => {
+        api.get.mockImplementation((url) =>
+            Promise.resolve({ status: 200, data: new Blob(["x"], { type: url.includes("img") ? "image/jpeg" : "video/mp4" }) })
+        );
+        const shareMock = vi.fn().mockResolvedValue(undefined);
+        vi.stubGlobal("navigator", {
+            ...navigator,
+            share: shareMock,
+            canShare: vi.fn().mockReturnValue(true), // this device/browser DOES support mixed combined sharing
+            userAgent: "android-chrome-agent",
+        });
+        const items = [
+            { id: "t1", name: "Take 1", type: "video", fileUrl: "https://x/t1.mp4", filename: "Harshita - Take 1" },
+            { id: "img1", name: "Portfolio Image 1", type: "image", fileUrl: "https://x/img1.jpg", filename: "Harshita - Portfolio Image 1" },
+        ];
+        const res = await shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita", items,
+            caption: "Harshita — Project X\n\nAudition Take: Take 1", allowFiles: true, sessionId: "sess1",
+        });
+        expect(res.method).toBe("native_file_share");
+        expect(res.count).toBe(2);
+        expect(shareMock).toHaveBeenCalledTimes(1);
+    });
+});

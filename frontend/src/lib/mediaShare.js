@@ -314,43 +314,40 @@ export async function shareMediaViaWhatsApp({
         const recs = items.map((it) => ({ name: it.name, type: it.type }));
         trace.perItem = recs;
 
-        // ── iOS Safari fast path (SYNCHRONOUS) ───────────────────────────────
-        // If the caller pre-prepared a real File for EVERY item (on genuine
-        // intent, via prepareShareFile), use them WITHOUT any fetch/await so
-        // navigator.share() runs inside the tap's transient user activation —
-        // which WebKit invalidates across an await. When any File is missing we
-        // fall through to the exact same fetch path as before (never regresses
-        // Android; still works via the manual second tap on iOS).
-        let files;
-        const allPrepared =
-            preparedFiles &&
-            items.length > 0 &&
-            items.every((it) => preparedFiles.get(it.id) instanceof File);
-        if (allPrepared) {
-            files = items.map((it) => preparedFiles.get(it.id));
-            recs.forEach((r) => { r.fetchOk = true; r.httpStatus = 200; r.blobOk = true; r.fileOk = true; r.step = "ok"; });
-            trace.preparedFastPath = true;
-        } else {
-            // Fetch through Talentgram's own authenticated media proxy (same backend,
-            // CORS-enabled) instead of the raw Cloudflare Stream / R2 URL, which sends
-            // no CORS headers and fails the browser fetch. The proxy resolves the real
-            // storage URL server-side (never exposed) and enforces the same viewer
-            // auth + Download permission. urlToFileTraced never throws (records the
-            // failure in its rec), so every item is reported. Parallel keeps total
-            // time short so the transient user-activation for navigator.share holds.
-            const authHeader = { Authorization: `Bearer ${getViewerToken(slug)}` };
-            files = await Promise.all(
-                items.map((it, i) =>
-                    urlToFileTraced(
-                        `/public/links/${slug}/media/${talentId}/${it.id}`,
-                        it.filename || it.name,
-                        it.type === "video" ? "video/mp4" : "image/jpeg",
-                        recs[i],
-                        { headers: authHeader },
-                    ),
-                ),
-            );
-        }
+        // ── Fast path: reuse whatever is ALREADY prepared, per item ──────────
+        // Every item that has a real pre-fetched File (from genuine intent —
+        // opening the talent pre-warms videos, selecting an item pre-warms it
+        // too) is used WITHOUT any fetch/await, so navigator.share() has as
+        // little async work as possible between the tap and the call —
+        // WebKit invalidates transient user activation across an await, and
+        // Chrome's own activation window can equally be exceeded when a
+        // multi-file, video-heavy selection has to fetch everything fresh.
+        // A PARTIALLY prepared selection (the common case for a mixed
+        // image+video pick — videos are pre-warmed well before the tap,
+        // images only start preparing on selection) must still use the
+        // videos that ARE ready rather than discarding them and re-fetching
+        // everything: only the few still-missing items are actually
+        // fetched here, in parallel with each other.
+        const authHeader = { Authorization: `Bearer ${getViewerToken(slug)}` };
+        const files = await Promise.all(
+            items.map((it, i) => {
+                const already = preparedFiles && preparedFiles.get(it.id);
+                if (already instanceof File) {
+                    recs[i].fetchOk = true; recs[i].httpStatus = 200; recs[i].blobOk = true; recs[i].fileOk = true; recs[i].step = "ok";
+                    recs[i].prepared = true;
+                    return already;
+                }
+                return urlToFileTraced(
+                    `/public/links/${slug}/media/${talentId}/${it.id}`,
+                    it.filename || it.name,
+                    it.type === "video" ? "video/mp4" : "image/jpeg",
+                    recs[i],
+                    { headers: authHeader },
+                );
+            }),
+        );
+        trace.preparedFastPath = recs.every((r) => r.prepared === true);
+        trace.preparedCount = recs.filter((r) => r.prepared === true).length;
 
         trace.q4_allFetched = recs.every((r) => r.fetchOk === true);
         trace.q5_allHttp200 = recs.every((r) => r.httpStatus === 200);

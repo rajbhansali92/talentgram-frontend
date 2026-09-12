@@ -422,3 +422,92 @@ describe("mediaShare.js — mixed image+video fallback (found live on a real And
         expect(shareMock).toHaveBeenCalledTimes(1);
     });
 });
+
+describe("mediaShare.js — partial-preparation reuse (the real fix: a mixed selection where videos are pre-warmed on talent-open but images only start preparing on selection must not discard the already-ready videos and re-fetch everything)", () => {
+    beforeEach(() => {
+        api.get.mockReset();
+        api.post.mockReset();
+        api.post.mockResolvedValue({ data: { share_id: "sh_1" } });
+    });
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
+    });
+
+    it("never re-fetches an item that is already a real File in preparedFiles — only the missing ones hit the network", async () => {
+        // If api.get is called for the ALREADY-prepared video, the old
+        // all-or-nothing behaviour has regressed.
+        api.get.mockImplementation((url) => {
+            if (url.includes("v1")) throw new Error("must not re-fetch an already-prepared item");
+            return Promise.resolve({ status: 200, data: new Blob(["x"], { type: "image/jpeg" }) });
+        });
+        vi.stubGlobal("navigator", {
+            ...navigator,
+            share: vi.fn().mockResolvedValue(undefined),
+            canShare: vi.fn().mockReturnValue(true),
+            userAgent: "android-chrome-agent",
+        });
+        const preparedVideo = new File(["x"], "Harshita - Take 1.mp4", { type: "video/mp4" });
+        const preparedFiles = new Map([["v1", preparedVideo]]);
+        const items = [
+            { id: "v1", name: "Take 1", type: "video", fileUrl: "https://x/v1.mp4", filename: "Harshita - Take 1" },
+            { id: "img1", name: "Portfolio Image 1", type: "image", fileUrl: "https://x/img1.jpg", filename: "Harshita - Portfolio Image 1" },
+        ];
+        const res = await shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita", items,
+            caption: "Harshita — Project X\n\nAudition Take: Take 1",
+            allowFiles: true, sessionId: "sess1", preparedFiles,
+        });
+        expect(res.method).toBe("native_file_share");
+        expect(res.count).toBe(2);
+        // The pre-prepared video object itself was used — not a re-fetched copy.
+        expect(navigator.share.mock.calls[0][0].files).toContain(preparedVideo);
+    });
+
+    it("realistic latency: with 3 pre-warmed videos ready instantly and 2 images each taking real time to fetch, navigator.share() is called almost immediately after the missing images resolve — not after a full 5-item re-fetch", async () => {
+        const timeline = [];
+        const record = (label) => timeline.push({ label, t: Date.now() });
+        api.get.mockImplementation((url) => {
+            record(`fetch:${url}`);
+            // Simulate a realistic mobile-network image fetch delay.
+            return new Promise((resolve) =>
+                setTimeout(() => resolve({ status: 200, data: new Blob(["x"], { type: "image/jpeg" }) }), 40)
+            );
+        });
+        const shareMock = vi.fn().mockImplementation(() => {
+            record("navigator.share called");
+            return Promise.resolve(undefined);
+        });
+        vi.stubGlobal("navigator", {
+            ...navigator, share: shareMock, canShare: vi.fn().mockReturnValue(true), userAgent: "android-chrome-agent",
+        });
+        const preparedFiles = new Map([
+            ["v1", new File(["x"], "Take 1.mp4", { type: "video/mp4" })],
+            ["v2", new File(["x"], "Take 2.mp4", { type: "video/mp4" })],
+            ["v3", new File(["x"], "Introduction.mp4", { type: "video/mp4" })],
+        ]);
+        const items = [
+            { id: "v1", name: "Take 1", type: "video", fileUrl: "https://x/v1.mp4", filename: "Take 1" },
+            { id: "v2", name: "Take 2", type: "video", fileUrl: "https://x/v2.mp4", filename: "Take 2" },
+            { id: "v3", name: "Introduction", type: "video", fileUrl: "https://x/v3.mp4", filename: "Introduction" },
+            { id: "img1", name: "Portfolio Image 1", type: "image", fileUrl: "https://x/img1.jpg", filename: "Portfolio Image 1" },
+            { id: "img2", name: "Portfolio Image 2", type: "image", fileUrl: "https://x/img2.jpg", filename: "Portfolio Image 2" },
+        ];
+        const start = Date.now();
+        const res = await shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita", items,
+            caption: "Harshita — Project X", allowFiles: true, sessionId: "sess1", preparedFiles,
+        });
+        const elapsed = Date.now() - start;
+
+        expect(res.method).toBe("native_file_share");
+        expect(res.count).toBe(5);
+        // Only the 2 missing images were fetched — the 3 ready videos never hit the network.
+        expect(api.get).toHaveBeenCalledTimes(2);
+        // Both missing fetches ran in PARALLEL (not sequentially behind each
+        // other or behind the ready videos) — total time close to one
+        // fetch's delay (~40ms), not stacked (~80ms+) or inflated by
+        // needlessly re-fetching the 3 already-ready videos.
+        expect(elapsed).toBeLessThan(120);
+    });
+});

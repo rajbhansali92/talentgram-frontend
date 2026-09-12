@@ -2056,6 +2056,10 @@ function TalentDetail({
     const [sharing, setSharing] = useState(false);
     const [shareMode, setShareMode] = useState(false);
     const [shareSel, setShareSel] = useState(() => new Set());
+    // Bumped whenever a prepareFileForShare() call settles (success or
+    // failure) so the Send button can reactively re-check readiness against
+    // preparedFilesRef (a ref, so it doesn't trigger renders on its own).
+    const [prepTick, setPrepTick] = useState(0);
     const [showFormInShare, setShowFormInShare] = useState(false);
     const [showShareHint, setShowShareHint] = useState(false);
     const shareHintCloseRef = useRef(null);
@@ -2179,7 +2183,12 @@ function TalentDetail({
     // share and whenever the talent/selection changes (lifecycle effect below +
     // exitShareMode + runShare's finally), so memory stays bounded to the media
     // the user is actively engaging with on THIS talent.
-    const preparedFilesRef = useRef(new Map());   // media id -> File (or null while in-flight)
+    // media id -> File (ready) | null (in-flight) | "failed" (settled, gave
+    // up — mediaShare.js's own share-time fetch still gets one more real
+    // attempt; this sentinel exists only so the Send-button readiness check
+    // below can tell "still in-flight" apart from "done trying" and never
+    // gets stuck waiting forever on one broken item).
+    const preparedFilesRef = useRef(new Map());
     const prepGenRef = useRef(0);                 // invalidates in-flight prepares on talent change
     const prepareFileForShare = useCallback((m) => {
         if (!vis.download || !m || !m.id) return;             // file sharing only when downloads allowed
@@ -2199,10 +2208,13 @@ function TalentDetail({
         prepareShareFile({ slug, talentId: talent.id, item: { id: m.id, name: label, type, filename } })
             .then((file) => {
                 if (gen !== prepGenRef.current) return;        // talent changed — drop (keeps memory bounded)
-                if (file) preparedFilesRef.current.set(m.id, file);
-                else preparedFilesRef.current.delete(m.id);    // failed — allow re-prepare / graceful fallback
+                preparedFilesRef.current.set(m.id, file || "failed");
+                setPrepTick((t) => t + 1);                      // let the Send button re-check readiness
             })
-            .catch(() => { if (gen === prepGenRef.current) preparedFilesRef.current.delete(m.id); });
+            .catch(() => {
+                if (gen === prepGenRef.current) preparedFilesRef.current.set(m.id, "failed");
+                setPrepTick((t) => t + 1);
+            });
     }, [vis.download, slug, talent.id, talent.name, shareableMedia, shareLabelById]);
 
     // Combined genuine-intent handler: warm the Stream rendition (existing) AND
@@ -2900,6 +2912,30 @@ function TalentDetail({
         ? "Downloading…"
         : "Preparing Talent Folder...";
     const downloadReadyLabel = !isDownloadingPackage && downloadProgress?.phase === "done" ? "Download Again" : null;
+
+    // True while ANY currently-selected item hasn't SETTLED yet — either
+    // never started (`undefined`) or still in flight (`null`). A settled
+    // item, ready (`File`) or given-up (`"failed"`), does NOT block: a
+    // failed one still gets one real attempt from mediaShare.js's own
+    // share-time fetch, so this can never get stuck waiting forever on one
+    // broken item. Gates the Send button so the tap that actually fires
+    // navigator.share() always has as few pending fetches as possible —
+    // the strongest available guarantee against the OS share sheet's
+    // user-activation window expiring mid-preparation on a multi-file,
+    // video-heavy mixed selection. Irrelevant when downloads are disabled
+    // (file-sharing isn't attempted at all then — see mediaShare.js).
+    // Recomputes on every render (not memoized), so `prepTick` — bumped
+    // whenever a prepare settles — reaching this component in state is what
+    // makes it re-check; preparedFilesRef itself is a ref and triggers no
+    // render on its own.
+    const preparingSelected =
+        prepTick >= 0 &&
+        shareMode &&
+        !!vis.download &&
+        [...shareSel].some((id) => {
+            const v = preparedFilesRef.current.get(id);
+            return v === undefined || v === null;
+        });
 
     return (
         <div
@@ -3668,13 +3704,15 @@ function TalentDetail({
                                 <button
                                     type="button"
                                     onClick={shareSelected}
-                                    disabled={(shareSel.size === 0 && !showFormInShare) || sharing}
-                                    title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
+                                    disabled={(shareSel.size === 0 && !showFormInShare) || sharing || preparingSelected}
+                                    title={downloadsDisabled ? shareHelpText : preparingSelected ? "Preparing your media…" : "Send via WhatsApp"}
                                     data-testid="share-send-selected-btn"
                                     className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-[#111111] hover:bg-black text-white text-xs font-semibold transition-colors min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
-                                    {sharing ? <Loader2 className="w-4 h-4 animate-spin" /> : <WhatsAppGlyph className="w-4 h-4" />}
-                                    Send via WhatsApp{shareSel.size > 0 ? ` (${shareSel.size})` : ""}
+                                    {sharing || preparingSelected ? <Loader2 className="w-4 h-4 animate-spin" /> : <WhatsAppGlyph className="w-4 h-4" />}
+                                    {preparingSelected
+                                        ? "Preparing…"
+                                        : `Send via WhatsApp${shareSel.size > 0 ? ` (${shareSel.size})` : ""}`}
                                 </button>
                             </div>
                         </div>

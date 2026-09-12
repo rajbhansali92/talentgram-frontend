@@ -178,11 +178,15 @@ async function logDispatch(slug, talentId, method, fileCount, media, sessionId) 
     }
 }
 
-function buildWhatsAppMessage(talentName, lines) {
+function buildWhatsAppMessage(talentName, lines, formText) {
     const parts = [`*${talentName}*`, "Shared via Talentgram", ""];
     for (const l of lines) {
         parts.push(l.label);
         parts.push(l.url);
+        parts.push("");
+    }
+    if (formText) {
+        parts.push(formText);
         parts.push("");
     }
     parts.push("Talentgram Agency");
@@ -201,6 +205,12 @@ function buildWhatsAppMessage(talentName, lines) {
  *                                         link's `visibility.download` flag here. See the gate
  *                                         comment below: this is an INTENTIONAL product decision.
  * @param {string=} opts.sessionId
+ * @param {string=} opts.formText          optional Talent Details Form text, appended as its
+ *                                         own segment (separate from `caption`) in both the
+ *                                         native-share text and the link-fallback message. When
+ *                                         `items` is empty and `formText` is set, this is a
+ *                                         form-only share — the file-share attempt is skipped and
+ *                                         the SAME link-fallback code path sends a text-only message.
  * @returns {Promise<{ method?: string, count?: number, aborted?: boolean }>}
  *
  * Behaviour matrix (intentional — preserves the existing security model):
@@ -222,9 +232,11 @@ export async function shareMediaViaWhatsApp({
     allowFiles = true,
     sessionId,
     caption,
+    formText,
     preparedFiles,
 }) {
-    if (!items || items.length === 0) return { aborted: true };
+    items = items || [];
+    if (items.length === 0 && !formText) return { aborted: true };
 
     const hasShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
     const hasCanShare = typeof navigator !== "undefined" && typeof navigator.canShare === "function";
@@ -255,7 +267,7 @@ export async function shareMediaViaWhatsApp({
     // single control over whether an ORIGINAL file may leave Talentgram. Native
     // file sharing is download-equivalent, so it is only offered when downloads
     // are enabled; otherwise we share secure links on every device.
-    const willTryFiles = allowFiles && hasShare;
+    const willTryFiles = allowFiles && hasShare && items.length > 0;
 
     // Desktop popup-safety: window.open() after an await is popup-blocked. We
     // only use window.open on DESKTOP (no native sheet), so pre-open there and
@@ -336,7 +348,7 @@ export async function shareMediaViaWhatsApp({
             const canFiles = hasCanShare ? canShareFiles(goodFiles) : false;
             trace.q3_canShareFiles = canFiles;
             const shareMeta = items.map((it) => ({ id: it.id, type: it.type, name: it.name }));
-            const text = caption || `${talentName} · Shared via Talentgram`;
+            const text = [caption || `${talentName} · Shared via Talentgram`, formText].filter(Boolean).join("\n\n");
             const shareData = {
                 files: goodFiles,
                 title: text.split("\n")[0],
@@ -385,7 +397,9 @@ export async function shareMediaViaWhatsApp({
         }
     } else {
         trace.q8_path = "Link Fallback";
-        trace.q9_reason = !allowFiles
+        trace.q9_reason = items.length === 0
+            ? "form-only share (no media selected)"
+            : !allowFiles
             ? "downloads disabled for this link (files intentionally not shared)"
             : "navigator.share unavailable (no native sharing)";
     }
@@ -399,7 +413,7 @@ export async function shareMediaViaWhatsApp({
             lines.push({ label: it.name, url });
             mediaMeta.push({ id: it.id, type: it.type, name: it.name, share_id: shareId });
         }
-        const text = buildWhatsAppMessage(talentName, lines);
+        const text = buildWhatsAppMessage(talentName, lines, formText);
 
         // Mobile: share the message via the OS sheet (user picks WhatsApp vs
         // Business). wa.me deep-links one app — reserved for DESKTOP.

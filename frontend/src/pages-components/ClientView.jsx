@@ -185,6 +185,38 @@ function classifyLoadFailure(error) {
     return { retryable: true, category: "unknown", message: "Something went wrong. Retrying..." };
 }
 
+// Reusable collapsible section, matching the exact visual pattern already
+// established by the mobile "Talent Details Form" accordion (ChevronDown
+// rotate-180, text-sm font-medium text-black/70 header) rather than the
+// generic shadcn ui/accordion.jsx primitive, to keep this page's look.
+function CollapsibleSection({ title, defaultOpen = false, testid, headerAction, children }) {
+    const [open, setOpen] = useState(defaultOpen);
+    const panelId = `${testid}-panel`;
+    return (
+        <div className="border-b border-black/[0.04] last:border-b-0 mb-2">
+            <div className="flex items-center justify-between gap-2">
+                <button
+                    type="button"
+                    onClick={() => setOpen((o) => !o)}
+                    aria-expanded={open}
+                    aria-controls={panelId}
+                    data-testid={testid}
+                    className="flex-1 text-left py-2.5 text-sm font-medium text-black/70 flex items-center justify-between focus-visible:outline focus-visible:outline-2 focus-visible:outline-black/40 rounded"
+                >
+                    <span>{title}</span>
+                    <ChevronDown className={`w-4 h-4 text-black/40 transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
+                </button>
+                {headerAction}
+            </div>
+            {open && (
+                <div id={panelId} className="pb-6 pt-2 space-y-4 text-sm">
+                    {children}
+                </div>
+            )}
+        </div>
+    );
+}
+
 function AvailabilityBudgetSection({ talent, projectShootDates, projectBudget, vis }) {
     const tProj = (talent.project_id && projectShootDates.find(p => p.project_id === talent.project_id)) || projectShootDates[0] || null;
     const tProjBudget = (talent.project_id && projectBudget.find(p => p.project_id === talent.project_id)) || projectBudget[0] || null;
@@ -2013,6 +2045,8 @@ function TalentDetail({
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [isDetailsExpanded, setIsDetailsExpanded] = useState(true);
     const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
+    // null | { pct: number|null, phase: "preparing"|"downloading"|"done" }
+    const [downloadProgress, setDownloadProgress] = useState(null);
     // C3: in-flight guards prevent duplicate downloads from rapid taps.
     const downloadPackageInFlightRef = useRef(false);
     const downloadingRef = useRef(new Set());
@@ -2022,6 +2056,48 @@ function TalentDetail({
     const [sharing, setSharing] = useState(false);
     const [shareMode, setShareMode] = useState(false);
     const [shareSel, setShareSel] = useState(() => new Set());
+    const [showFormInShare, setShowFormInShare] = useState(false);
+    const [showShareHint, setShowShareHint] = useState(false);
+    const shareHintCloseRef = useRef(null);
+    const shareHintTriggerRef = useRef(null);
+
+    // First-time guidance — reuses the exact tg_hint_seen_${slug} convention
+    // already established above (try/catch-wrapped for Safari private mode),
+    // under a new key, shown once when shareMode first opens.
+    useEffect(() => {
+        if (!shareMode || isSharePreview) return;
+        try {
+            if (!localStorage.getItem(`tg_share_hint_seen_${slug}`)) setShowShareHint(true);
+        } catch (e) { /* storage disabled — skip */ }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [shareMode]);
+
+    const dismissShareHint = useCallback(() => {
+        setShowShareHint(false);
+        try { localStorage.setItem(`tg_share_hint_seen_${slug}`, "1"); } catch (e) { /* ignore */ }
+        // Return focus to whichever control last opened the popover.
+        if (shareHintTriggerRef.current) shareHintTriggerRef.current.focus();
+    }, [slug]);
+
+    // Mirrored into refs so the shared Effect 2 keydown handler (below) can
+    // read the latest values without adding them to its own dependency array
+    // — matches this file's existing viewerActionRef pattern, for the same
+    // reason (avoid re-registering that handler on every share-hint toggle).
+    const showShareHintRef = useRef(showShareHint);
+    const dismissShareHintRef = useRef(dismissShareHint);
+    useEffect(() => {
+        showShareHintRef.current = showShareHint;
+        dismissShareHintRef.current = dismissShareHint;
+    }, [showShareHint, dismissShareHint]);
+
+    useEffect(() => {
+        if (!showShareHint) return;
+        shareHintCloseRef.current?.focus();
+        // Escape itself is handled by the single shared keydown handler below
+        // (Effect 2) — a second window-level Escape listener here would race
+        // with that one (both fire on the same keypress, in registration
+        // order), closing the WHOLE overlay instead of just this popover.
+    }, [showShareHint]);
 
     // Option C — best-effort pre-warm of a video's Cloudflare Stream MP4
     // rendition on genuine user intent (selecting a video for bulk share, or
@@ -2113,7 +2189,11 @@ function TalentDetail({
             ? entry.type
             : ((m.category === "video" || m.category === "take" || m.resource_type === "video" || (m.category || "").startsWith("take")) ? "video" : "image");
         const label = entry ? entry.label : (shareLabelById[m.id] || "Media");
-        const filename = m.original_filename || `${privatizeName(talent.name)} - ${label}`;
+        // NEVER use m.original_filename here — a raw camera name (e.g.
+        // "IMG_4021.MOV") can surface as filename-like text in the OS/WhatsApp
+        // share sheet even though the message caption itself never includes
+        // it. Always use the clean generated name.
+        const filename = `${privatizeName(talent.name)} - ${label}`;
         const gen = prepGenRef.current;
         preparedFilesRef.current.set(m.id, null);             // in-flight marker (blocks duplicate fetches)
         prepareShareFile({ slug, talentId: talent.id, item: { id: m.id, name: label, type, filename } })
@@ -2169,13 +2249,119 @@ function TalentDetail({
     const exitShareMode = useCallback(() => {
         setShareMode(false);
         setShareSel(new Set());
+        setShowFormInShare(false);
         // Release any Files prepared for the (now-cleared) bulk selection.
         preparedFilesRef.current.clear();
     }, []);
 
-    // entries: [{ m, label, caption, type }]
-    const runShare = useCallback(async (entries) => {
-        if (sharing || !entries || entries.length === 0) return;
+    // Bulk selection helpers — operate on the existing shareSel Set via the
+    // existing shareableMedia list; no new selection data structure.
+    const selectAllOfType = useCallback((type) => {
+        setShareSel((prev) => {
+            const n = new Set(prev);
+            shareableMedia.forEach((s) => { if (s.type === type) n.add(s.m.id); });
+            return n;
+        });
+        shareableMedia.forEach((s) => { if (s.type === type) onShareIntent(s.m); });
+    }, [shareableMedia, onShareIntent]);
+
+    const selectAllMedia = useCallback(() => {
+        setShareSel(new Set(shareableMedia.map((s) => s.m.id)));
+        shareableMedia.forEach((s) => onShareIntent(s.m));
+    }, [shareableMedia, onShareIntent]);
+
+    const clearShareSelection = useCallback(() => setShareSel(new Set()), []);
+
+    // Pure text builder — the ONE frontend implementation of "form as text".
+    // Used by both Copy Form and "Include Talent Details Form" in the share
+    // flow, so the two can never drift out of sync.
+    const buildTalentFormText = useCallback(() => {
+        const lines = [];
+        lines.push(`Name: ${privatizeName(talent.name)}`);
+        if (talent.age) lines.push(`Age: ${talent.age}`);
+        if (talent.height) lines.push(`Height: ${talent.height}`);
+        if (talent.location) {
+            const locStr = formatTalentLocation(talent.location);
+            if (locStr) lines.push(`Location: ${locStr}`);
+        }
+        if (talent.ethnicity) lines.push(`Ethnicity: ${talent.ethnicity}`);
+
+        const availLabel = availabilityLabel(talent.availability);
+        if (availLabel) {
+            let val = availLabel;
+            if (talent.availability?.note) {
+                val += ` — ${talent.availability.note}`;
+            }
+            lines.push(`Availability: ${val}`);
+        }
+
+        if (talent.budget?.status) {
+            const bstatus = talent.budget.status;
+            if (bstatus === "custom" && talent.budget.value) {
+                lines.push(`Budget: Counter Budget: ${talent.budget.value}`);
+            } else if (bstatus === "accept") {
+                const tProjBudget = (talent.project_id && projectBudget.find(p => p.project_id === talent.project_id)) || projectBudget[0] || null;
+                const offeredBudget = (() => {
+                    const tLines = (tProjBudget?.talent_budget || []).filter(l => (l.label || "").trim() || (l.value || "").trim());
+                    if (tLines.length > 0) {
+                        const tBudgetLine = tLines.find(l => (l.label || "").toLowerCase().includes("budget")) || tLines[0];
+                        if (tBudgetLine && tBudgetLine.value) {
+                            return tBudgetLine.value;
+                        }
+                    }
+                    if (tProjBudget?.budget_per_day) {
+                        const bpd = tProjBudget.budget_per_day.trim();
+                        if (bpd.toLowerCase().includes("/ day") || bpd.toLowerCase().includes("/day")) {
+                            return bpd;
+                        }
+                        return `${bpd} / day`;
+                    }
+                    return null;
+                })();
+                lines.push(`Budget: Agreed Budget (${offeredBudget || "Project Budget"})`);
+            } else {
+                lines.push(`Budget: ${bstatus.charAt(0).toUpperCase() + bstatus.slice(1)}`);
+            }
+        }
+
+        if (talent.competitive_brand) {
+            lines.push(`Competitive Brand: ${talent.competitive_brand}`);
+        }
+
+        if (talent.instagram_handle) {
+            lines.push(`Instagram: @${talent.instagram_handle.replace("@", "")}`);
+            if (talent.instagram_followers) {
+                lines.push(`Instagram Followers: ${talent.instagram_followers}`);
+            }
+        }
+
+        if ((talent.custom_answers || []).length > 0) {
+            lines.push("");
+            lines.push("Additional Details:");
+            talent.custom_answers.forEach((qa) => {
+                lines.push(`- ${qa.question}: ${qa.answer}`);
+            });
+        }
+
+        if ((talent.work_links || []).length > 0) {
+            lines.push("");
+            lines.push("Work Links:");
+            talent.work_links.forEach((w) => {
+                const { label, url } = parseStoredWorkLink(w);
+                lines.push(label ? `- ${label}: ${url}` : `- ${url}`);
+            });
+        }
+
+        return lines.join("\n");
+    }, [talent, projectBudget]);
+
+    // entries: [{ m, label, caption, type }]; options.includeForm appends the
+    // Talent Details Form as its own text segment (media-only, form-only, or
+    // media+form are all the same call — see mediaShare.js's formText param).
+    const runShare = useCallback(async (entries, { includeForm = false } = {}) => {
+        if (sharing) return;
+        entries = entries || [];
+        if (entries.length === 0 && !includeForm) return;
         // Collect any already-prepared Files for these exact items (real Files
         // only; an absent/in-flight entry is skipped so mediaShare falls back to
         // the fetch path). Built SYNCHRONOUSLY so, on the prepared path,
@@ -2190,7 +2376,9 @@ function TalentDetail({
             const items = entries.map(({ m, label, type }) => {
                 const rawUrl = IMAGE_URL(m);
                 const fileUrl = type === "video" ? getVideoDownloadUrl(rawUrl) : rawUrl;
-                const filename = m.original_filename || `${privatizeName(talent.name)} - ${label}`;
+                // NEVER use m.original_filename — see prepareFileForShare's
+                // matching comment above. Always the clean generated name.
+                const filename = `${privatizeName(talent.name)} - ${label}`;
                 return { id: m.id, name: label, type, fileUrl, filename };
             });
             // Caption: "<Talent> — <Project>" then a blank line then each media
@@ -2206,12 +2394,17 @@ function TalentDetail({
             // for an images-only share instead of leaving a dangling empty line.
             const lines = entries.map((e) => e.caption).filter(Boolean);
             const caption = lines.length ? `${header}\n\n${lines.join("\n")}` : header;
+            // formText is a SEPARATE segment from caption (which stays the
+            // short "Name — Project" + per-video caption text) — kept apart so
+            // callers that don't want the form never see it folded into caption.
+            const formText = includeForm ? buildTalentFormText() : undefined;
             const res = await shareMediaViaWhatsApp({
                 slug,
                 talentId: talent.id,
                 talentName: privatizeName(talent.name),
                 items,
                 caption,
+                formText,
                 // INTENTIONAL: the Download permission also governs whether the
                 // ORIGINAL file may leave Talentgram. When downloads are off we
                 // share secure links only (mobile + desktop) — never raw files —
@@ -2251,7 +2444,7 @@ function TalentDetail({
             // resolves / is cancelled / fails. They never persist beyond this.
             entries.forEach(({ m }) => preparedFilesRef.current.delete(m.id));
         }
-    }, [sharing, slug, talent.id, talent.name, link.brand_name, link.title, vis.download, exitShareMode]);
+    }, [sharing, slug, talent.id, talent.name, link.brand_name, link.title, vis.download, exitShareMode, buildTalentFormText]);
 
     const shareOne = useCallback((m) => {
         // Use the precomputed entry (with its caption) so single-item shares get
@@ -2266,92 +2459,12 @@ function TalentDetail({
 
     const shareSelected = useCallback(() => {
         const entries = shareableMedia.filter((s) => shareSel.has(s.m.id));
-        runShare(entries);
-    }, [shareableMedia, shareSel, runShare]);
+        runShare(entries, { includeForm: showFormInShare });
+    }, [shareableMedia, shareSel, runShare, showFormInShare]);
 
     const handleCopyForm = () => {
         try {
-            const lines = [];
-            lines.push(`Name: ${privatizeName(talent.name)}`);
-            if (talent.age) lines.push(`Age: ${talent.age}`);
-            if (talent.height) lines.push(`Height: ${talent.height}`);
-            if (talent.location) {
-                const locStr = formatTalentLocation(talent.location);
-                if (locStr) lines.push(`Location: ${locStr}`);
-            }
-            if (talent.ethnicity) lines.push(`Ethnicity: ${talent.ethnicity}`);
-            
-            // Availability status
-            const availLabel = availabilityLabel(talent.availability);
-            if (availLabel) {
-                let val = availLabel;
-                if (talent.availability?.note) {
-                    val += ` — ${talent.availability.note}`;
-                }
-                lines.push(`Availability: ${val}`);
-            }
-
-            // Budget status
-            if (talent.budget?.status) {
-                const bstatus = talent.budget.status;
-                if (bstatus === "custom" && talent.budget.value) {
-                    lines.push(`Budget: Counter Budget: ${talent.budget.value}`);
-                } else if (bstatus === "accept") {
-                    // Try to get original budget
-                    const tProjBudget = (talent.project_id && projectBudget.find(p => p.project_id === talent.project_id)) || projectBudget[0] || null;
-                    const offeredBudget = (() => {
-                        const tLines = (tProjBudget?.talent_budget || []).filter(l => (l.label || "").trim() || (l.value || "").trim());
-                        if (tLines.length > 0) {
-                            const tBudgetLine = tLines.find(l => (l.label || "").toLowerCase().includes("budget")) || tLines[0];
-                            if (tBudgetLine && tBudgetLine.value) {
-                                return tBudgetLine.value;
-                            }
-                        }
-                        if (tProjBudget?.budget_per_day) {
-                            const bpd = tProjBudget.budget_per_day.trim();
-                            if (bpd.toLowerCase().includes("/ day") || bpd.toLowerCase().includes("/day")) {
-                                return bpd;
-                            }
-                            return `${bpd} / day`;
-                        }
-                        return null;
-                    })();
-                    lines.push(`Budget: Agreed Budget (${offeredBudget || "Project Budget"})`);
-                } else {
-                    lines.push(`Budget: ${bstatus.charAt(0).toUpperCase() + bstatus.slice(1)}`);
-                }
-            }
-
-            if (talent.competitive_brand) {
-                lines.push(`Competitive Brand: ${talent.competitive_brand}`);
-            }
-
-            if (talent.instagram_handle) {
-                lines.push(`Instagram: @${talent.instagram_handle.replace("@", "")}`);
-                if (talent.instagram_followers) {
-                    lines.push(`Instagram Followers: ${talent.instagram_followers}`);
-                }
-            }
-
-            if ((talent.custom_answers || []).length > 0) {
-                lines.push("");
-                lines.push("Additional Details:");
-                talent.custom_answers.forEach((qa) => {
-                    lines.push(`- ${qa.question}: ${qa.answer}`);
-                });
-            }
-
-            if ((talent.work_links || []).length > 0) {
-                lines.push("");
-                lines.push("Work Links:");
-                talent.work_links.forEach((w) => {
-                    const { label, url } = parseStoredWorkLink(w);
-                    lines.push(label ? `- ${label}: ${url}` : `- ${url}`);
-                });
-            }
-
-            const textToCopy = lines.join("\n");
-            navigator.clipboard.writeText(textToCopy);
+            navigator.clipboard.writeText(buildTalentFormText());
             toast.success("Talent details form copied to clipboard!");
         } catch (err) {
             console.error("Failed to copy form:", err);
@@ -2363,6 +2476,7 @@ function TalentDetail({
         if (downloadPackageInFlightRef.current) return; // C3: block duplicate clicks
         downloadPackageInFlightRef.current = true;
         setIsDownloadingPackage(true);
+        setDownloadProgress({ pct: null, phase: "preparing" });
         try {
             const token = getViewerToken(slug);
             const response = await axios.get(
@@ -2372,6 +2486,19 @@ function TalentDetail({
                     headers: token ? { Authorization: `Bearer ${token}` } : {},
                     responseType: "blob",
                     timeout: 120000, // C5: 2-minute ceiling for server-side ZIP assembly
+                    onDownloadProgress: (evt) => {
+                        // Real byte-based percentage when Content-Length is known;
+                        // otherwise an honest indeterminate state — never a fake number.
+                        // Clamped defensively: some browsers/proxies can report
+                        // evt.loaded slightly over evt.total (compression estimate
+                        // mismatches) — the displayed percentage must never exceed 100.
+                        if (evt.total) {
+                            const pct = Math.min(100, Math.max(0, Math.round((evt.loaded / evt.total) * 100)));
+                            setDownloadProgress({ pct, phase: "downloading" });
+                        } else {
+                            setDownloadProgress({ pct: null, phase: "downloading" });
+                        }
+                    },
                 }
             );
 
@@ -2381,15 +2508,25 @@ function TalentDetail({
             linkElement.href = url;
 
             const cleanName = privatizeName(talent.name || "Talent").trim().replace(/\./g, "").replace(/\s+/g, "_");
-            linkElement.setAttribute("download", `${cleanName}_Package.zip`);
+            const downloadedFileName = `${cleanName}_Package.zip`;
+            linkElement.setAttribute("download", downloadedFileName);
             document.body.appendChild(linkElement);
             linkElement.click();
             linkElement.remove();
             // Delay revoke so the browser can start the download (esp. iOS Safari).
             setTimeout(() => window.URL.revokeObjectURL(url), 1000);
-            toast.success("Talent folder downloaded");
+            // Platform-neutral guidance, never a false claim that this opens the
+            // local Downloads folder — browsers can't reliably do that.
+            toast.success(`Downloaded ${downloadedFileName}`, {
+                description: "Open your device's Downloads or Files app to access it.",
+            });
+            setDownloadProgress({ pct: 100, phase: "done", fileName: downloadedFileName });
+            // Revert the button label back to "Download Folder" after a few
+            // seconds of showing "Download Again".
+            setTimeout(() => setDownloadProgress(null), 5000);
         } catch (err) {
             console.error("Error downloading package:", err);
+            setDownloadProgress(null);
             // C4: friendly, non-technical feedback via the app's toast system.
             let message = "Couldn't prepare the talent folder. Please try again in a moment.";
             if (err.code === "ECONNABORTED") {
@@ -2549,6 +2686,13 @@ function TalentDetail({
             const el = e.target;
             const tag = el && el.tagName;
             if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el && el.isContentEditable)) {
+                return;
+            }
+            // The share guidance popover is a lightweight overlay ON TOP of
+            // this one — Escape should close just that, not cascade into
+            // closing the whole talent overlay underneath it.
+            if (e.key === "Escape" && showShareHintRef.current) {
+                dismissShareHintRef.current();
                 return;
             }
             if (e.key === "Escape" && onClose) {
@@ -2722,6 +2866,23 @@ function TalentDetail({
             </button>
         ) : null;
 
+    // Honest, staged download-status text — never a fabricated percentage.
+    const downloadLabelDesktop = !isDownloadingPackage
+        ? "Download Folder"
+        : downloadProgress?.phase === "downloading" && downloadProgress.pct != null
+        ? `Downloading… ${downloadProgress.pct}%`
+        : downloadProgress?.phase === "downloading"
+        ? "Downloading…"
+        : "Preparing…";
+    const downloadLabelMobile = !isDownloadingPackage
+        ? "Download Talent Folder"
+        : downloadProgress?.phase === "downloading" && downloadProgress.pct != null
+        ? `Downloading… ${downloadProgress.pct}%`
+        : downloadProgress?.phase === "downloading"
+        ? "Downloading…"
+        : "Preparing Talent Folder...";
+    const downloadReadyLabel = !isDownloadingPackage && downloadProgress?.phase === "done" ? "Download Again" : null;
+
     return (
         <div
             ref={overlayRef}
@@ -2783,19 +2944,32 @@ function TalentDetail({
                                 disabled={isDownloadingPackage}
                                 className="hidden md:flex h-9 md:h-10 px-3 md:px-4 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full items-center gap-2 transition-colors duration-150 shadow-sm text-xs font-semibold text-[#111111] disabled:opacity-50 disabled:cursor-not-allowed"
                                 title="Download Talent Folder"
+                                aria-label="Download Talent Folder"
                                 data-testid="header-download-package-btn"
                             >
                                 {isDownloadingPackage ? (
                                     <>
                                         <Loader2 className="w-3.5 h-3.5 animate-spin text-[#333333]" />
-                                        <span className="hidden lg:inline">Preparing...</span>
+                                        <span className="hidden lg:inline">{downloadLabelDesktop}</span>
                                     </>
                                 ) : (
                                     <>
                                         <Download className="w-3.5 h-3.5 text-[#333333]" />
-                                        <span className="hidden lg:inline">Download Folder</span>
+                                        <span className="hidden lg:inline">{downloadReadyLabel || downloadLabelDesktop}</span>
                                     </>
                                 )}
+                            </button>
+                        )}
+                        {!isSharePreview && shareableMedia.length > 0 && (
+                            <button
+                                onClick={() => setShareMode(true)}
+                                className="hidden md:flex h-9 md:h-10 px-3 md:px-4 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 rounded-full items-center gap-2 transition-colors duration-150 shadow-sm text-xs font-semibold text-[#111111]"
+                                title="Share via WhatsApp"
+                                aria-label="Share via WhatsApp"
+                                data-testid="header-share-whatsapp-btn"
+                            >
+                                <WhatsAppGlyph className="w-3.5 h-3.5" />
+                                <span className="hidden lg:inline">Share via WhatsApp</span>
                             </button>
                         )}
                         <button
@@ -2832,27 +3006,40 @@ function TalentDetail({
                     {/* Left Column - Image */}
                     {/* min-h-0: required for iOS Safari — flex children without min-h-0 fail to scroll */}
                     <div className={`w-full md:w-[58%] lg:w-[60%] bg-white overflow-y-auto min-h-0 ${shareMode ? "pb-32" : "pb-10"}`}>
-                        {/* Mobile Download Talent Folder Button */}
-                        {vis.download && (
-                            <div className="md:hidden px-4 py-3 bg-white border-b border-black/[0.04]">
-                                <button
-                                    onClick={handleDownloadPackage}
-                                    disabled={isDownloadingPackage}
-                                    className="w-full h-11 bg-[#1A1A1A] hover:bg-[#111111] disabled:bg-black/40 disabled:cursor-not-allowed text-white rounded-xl flex items-center justify-center gap-2 text-xs font-semibold tracking-wider transition-all duration-150 shadow-sm"
-                                    data-testid="detail-download-package-btn-mobile"
-                                >
-                                    {isDownloadingPackage ? (
-                                        <>
-                                            <Loader2 className="w-4 h-4 animate-spin text-white" />
-                                            <span>Preparing Talent Folder...</span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Download className="w-4 h-4 text-white" />
-                                            <span>Download Talent Folder</span>
-                                        </>
-                                    )}
-                                </button>
+                        {/* Mobile Download Talent Folder + Share via WhatsApp Buttons */}
+                        {(vis.download || (!isSharePreview && shareableMedia.length > 0)) && (
+                            <div className="md:hidden px-4 py-3 bg-white border-b border-black/[0.04] flex gap-2">
+                                {vis.download && (
+                                    <button
+                                        onClick={handleDownloadPackage}
+                                        disabled={isDownloadingPackage}
+                                        className="flex-1 h-11 bg-[#1A1A1A] hover:bg-[#111111] disabled:bg-black/40 disabled:cursor-not-allowed text-white rounded-xl flex items-center justify-center gap-2 text-xs font-semibold tracking-wider transition-all duration-150 shadow-sm"
+                                        data-testid="detail-download-package-btn-mobile"
+                                    >
+                                        {isDownloadingPackage ? (
+                                            <>
+                                                <Loader2 className="w-4 h-4 animate-spin text-white" />
+                                                <span>{downloadLabelMobile}</span>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Download className="w-4 h-4 text-white" />
+                                                <span>{downloadReadyLabel || downloadLabelMobile}</span>
+                                            </>
+                                        )}
+                                    </button>
+                                )}
+                                {!isSharePreview && shareableMedia.length > 0 && (
+                                    <button
+                                        onClick={() => setShareMode(true)}
+                                        className="flex-1 h-11 border border-[#eaeaea] hover:border-[#d4d4d4] hover:bg-slate-50 text-[#111111] rounded-xl flex items-center justify-center gap-2 text-xs font-semibold tracking-wider transition-all duration-150 shadow-sm"
+                                        aria-label="Share via WhatsApp"
+                                        data-testid="detail-share-whatsapp-btn-mobile"
+                                    >
+                                        <WhatsAppGlyph className="w-4 h-4" />
+                                        <span>Share via WhatsApp</span>
+                                    </button>
+                                )}
                             </div>
                         )}
                         {/* Mobile Details Accordion */}
@@ -3156,13 +3343,15 @@ function TalentDetail({
                             {/* Mobile-only Decisions, Comments and Feedback */}
                             {!isSharePreview && (
                                 <div className="md:hidden border-t border-black/[0.06] pt-6 mt-6 space-y-6">
-                                    <div>
-                                        <div className="flex items-center justify-between mb-4">
-                                            <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Your Decision</p>
+                                    <CollapsibleSection
+                                        title="Your Decision"
+                                        defaultOpen={true}
+                                        testid="decision-section-mobile"
+                                        headerAction={
                                             <button
                                                 onClick={() => onMarkReviewed(talent.id)}
                                                 disabled={isReviewed}
-                                                className={`flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] border rounded-full text-xs font-medium transition-colors duration-150 ${
+                                                className={`flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] border rounded-full text-xs font-medium transition-colors duration-150 shrink-0 ${
                                                     isReviewed
                                                         ? "bg-[#E6F4EA] text-[#137333] border-[#E6F4EA]"
                                                         : "border-[#eaeaea] hover:border-black/20 text-[#4A4A4A]"
@@ -3172,7 +3361,8 @@ function TalentDetail({
                                                 <Check className="w-3.5 h-3.5" />
                                                 {isReviewed ? "Reviewed" : "Mark Reviewed"}
                                             </button>
-                                        </div>
+                                        }
+                                    >
                                         <div className="grid grid-cols-2 gap-2 mb-6">
                                             {visibleActions.map((a) => {
                                                 const active = viewerAction?.action === a.key;
@@ -3184,28 +3374,28 @@ function TalentDetail({
                                                 );
                                             })}
                                         </div>
-                                    </div>
 
-                                    <div>
-                                        <div className="flex items-center gap-2 mb-2">
-                                            <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
-                                            <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <MessageSquare className="w-3.5 h-3.5 text-[#8A8A8A]" />
+                                                <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Comment</p>
+                                            </div>
+                                            <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input-mobile" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
+                                            <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 inline-flex items-center min-h-[44px] text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
+                                            <SectionErrorBoundary label="comments" getDiagnostics={getSectionDiagnostics}>{renderCommentsHistory()}</SectionErrorBoundary>
                                         </div>
-                                        <textarea value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)} rows={3} placeholder="Share any notes about this talent..." data-testid="detail-comment-input-mobile" className="w-full bg-transparent border border-[#eaeaea] focus:border-black/25 rounded-xl p-3 text-sm outline-none transition-colors duration-150 text-[#111111] placeholder:text-black/30" />
-                                        <button onClick={saveComment} data-testid="detail-save-comment-btn-mobile" className="mt-3 inline-flex items-center min-h-[44px] text-xs px-4 py-2 border border-[#eaeaea] hover:border-black/25 rounded-full transition-colors duration-150 text-[#4A4A4A] hover:text-[#111111]">Save comment</button>
-                                        <SectionErrorBoundary label="comments" getDiagnostics={getSectionDiagnostics}>{renderCommentsHistory()}</SectionErrorBoundary>
-                                    </div>
 
-                                    {talent.submission_id && talent.project_id && (
-                                        <div className="pt-6 border-t border-black/[0.06]">
-                                            <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Voice Note Feedback</p>
-                                            <VoiceRecorder
-                                                onSend={(blob) => saveVoiceNote(talent.id, blob)}
-                                                sending={sendingVoice}
-                                            />
-                                            <SectionErrorBoundary label="feedback" getDiagnostics={getSectionDiagnostics}>{renderVoiceHistory()}</SectionErrorBoundary>
-                                        </div>
-                                    )}
+                                        {talent.submission_id && talent.project_id && (
+                                            <div className="pt-6 border-t border-black/[0.06]">
+                                                <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Voice Note Feedback</p>
+                                                <VoiceRecorder
+                                                    onSend={(blob) => saveVoiceNote(talent.id, blob)}
+                                                    sending={sendingVoice}
+                                                />
+                                                <SectionErrorBoundary label="feedback" getDiagnostics={getSectionDiagnostics}>{renderVoiceHistory()}</SectionErrorBoundary>
+                                            </div>
+                                        )}
+                                    </CollapsibleSection>
 
                                     {nextUnreviewed && (
                                         <div className="pt-6 border-t border-black/[0.06]">
@@ -3269,12 +3459,14 @@ function TalentDetail({
                             </div>
 
                             <SectionErrorBoundary label="metadata" getDiagnostics={getSectionDiagnostics}>
-                                <AvailabilityBudgetSection
-                                    talent={talent}
-                                    projectShootDates={projectShootDates}
-                                    projectBudget={projectBudget}
-                                    vis={vis}
-                                />
+                                <CollapsibleSection title="Availability &amp; Budget" defaultOpen={false} testid="availability-budget-section">
+                                    <AvailabilityBudgetSection
+                                        talent={talent}
+                                        projectShootDates={projectShootDates}
+                                        projectBudget={projectBudget}
+                                        vis={vis}
+                                    />
+                                </CollapsibleSection>
                             </SectionErrorBoundary>
 
                             {(talent.custom_answers || []).length > 0 && (
@@ -3298,20 +3490,21 @@ function TalentDetail({
                             </div>
 
                             {vis.work_links && (talent.work_links || []).length > 0 && (
-                                <div className="mb-8">
-                                    <p className="eyebrow tracking-[0.12em] mb-3 text-[#4A4A4A]">Work Links</p>
+                                <CollapsibleSection title="Work Links" defaultOpen={false} testid="work-links-section">
                                     <WorkLinksDisplay links={talent.work_links} variant="list" />
-                                </div>
+                                </CollapsibleSection>
                             )}
 
                             {!isSharePreview && (
-                                <div className="border-t border-black/[0.06] pt-6 mt-6">
-                                    <div className="flex items-center justify-between mb-4">
-                                        <p className="eyebrow tracking-[0.12em] text-[#4A4A4A]">Your Decision</p>
+                                <CollapsibleSection
+                                    title="Your Decision"
+                                    defaultOpen={true}
+                                    testid="decision-section"
+                                    headerAction={
                                         <button
                                             onClick={() => onMarkReviewed(talent.id)}
                                             disabled={isReviewed}
-                                            className={`flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] border rounded-full text-xs font-medium transition-colors duration-150 ${
+                                            className={`flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] border rounded-full text-xs font-medium transition-colors duration-150 shrink-0 ${
                                                 isReviewed
                                                     ? "bg-[#E6F4EA] text-[#137333] border-[#E6F4EA]"
                                                     : "border-[#eaeaea] hover:border-black/20 text-[#4A4A4A]"
@@ -3321,7 +3514,8 @@ function TalentDetail({
                                             <Check className="w-3.5 h-3.5" />
                                             {isReviewed ? "Reviewed" : "Mark Reviewed"}
                                         </button>
-                                    </div>
+                                    }
+                                >
                                     <div className="grid grid-cols-2 gap-2 mb-6">
                                         {visibleActions.map((a) => {
                                             const active = viewerAction?.action === a.key;
@@ -3354,7 +3548,7 @@ function TalentDetail({
                                             <SectionErrorBoundary label="feedback" getDiagnostics={getSectionDiagnostics}>{renderVoiceHistory()}</SectionErrorBoundary>
                                         </div>
                                     )}
-                                </div>
+                                </CollapsibleSection>
                             )}
 
                             {isSharePreview && (
@@ -3388,42 +3582,125 @@ function TalentDetail({
                     fold on mobile (Android). */}
                 {shareMode && (
                     <div
-                        className="fixed bottom-0 left-0 right-0 z-[60] border-t border-[#eaeaea] bg-white px-4 md:px-6 py-3 flex items-center justify-between gap-3 shadow-[0_-4px_20px_rgba(0,0,0,0.10)]"
+                        className="fixed bottom-0 left-0 right-0 z-[60] border-t border-[#eaeaea] bg-white px-4 md:px-6 py-3 flex flex-col gap-2.5 shadow-[0_-4px_20px_rgba(0,0,0,0.10)]"
                         style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
                         data-testid="share-action-bar"
                     >
-                        <div className="flex items-center gap-2 min-w-0">
-                            <span className="text-sm font-semibold text-[#111111] shrink-0">
-                                {shareSel.size} selected
-                            </span>
-                            <span className="text-[11px] text-[#8A8A8A] truncate">
-                                {downloadsDisabled
-                                    ? "Shared as secure Talentgram links (downloads disabled)"
-                                    : shareSel.size === 0
-                                    ? "Pick media to send together"
-                                    : "Shared together in one WhatsApp message"}
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                            <button
-                                type="button"
-                                onClick={exitShareMode}
-                                className="px-3 py-2 rounded-full text-xs font-medium text-[#4A4A4A] hover:bg-slate-100 transition-colors min-h-[40px]"
-                            >
-                                Cancel
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                            <button type="button" onClick={() => selectAllOfType("image")} data-testid="share-select-all-images" className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors">
+                                Select all images
+                            </button>
+                            <button type="button" onClick={() => selectAllOfType("video")} data-testid="share-select-all-videos" className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors">
+                                Select all videos
+                            </button>
+                            <button type="button" onClick={selectAllMedia} data-testid="share-select-all-media" className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors">
+                                Select all media
                             </button>
                             <button
                                 type="button"
-                                onClick={shareSelected}
-                                disabled={shareSel.size === 0 || sharing}
-                                title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
-                                data-testid="share-send-selected-btn"
-                                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-[#111111] hover:bg-black text-white text-xs font-semibold transition-colors min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={clearShareSelection}
+                                disabled={shareSel.size === 0}
+                                data-testid="share-clear-selection"
+                                className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                             >
-                                {sharing ? <Loader2 className="w-4 h-4 animate-spin" /> : <WhatsAppGlyph className="w-4 h-4" />}
-                                Send via WhatsApp{shareSel.size > 0 ? ` (${shareSel.size})` : ""}
+                                Clear
+                            </button>
+                            <label className="flex items-center gap-1.5 text-[11px] text-[#4A4A4A] shrink-0 ml-1 cursor-pointer min-h-[36px]">
+                                <input
+                                    type="checkbox"
+                                    checked={showFormInShare}
+                                    onChange={(e) => setShowFormInShare(e.target.checked)}
+                                    data-testid="share-include-form-checkbox"
+                                    className="w-4 h-4"
+                                />
+                                Include Talent Details Form
+                            </label>
+                            <button
+                                type="button"
+                                ref={shareHintTriggerRef}
+                                onClick={() => setShowShareHint(true)}
+                                aria-label="How sharing works"
+                                data-testid="share-hint-btn"
+                                className="w-9 h-9 rounded-full border border-black/10 flex items-center justify-center text-[#8A8A8A] hover:text-[#111111] hover:bg-slate-50 transition-colors shrink-0 ml-auto"
+                            >
+                                <HelpCircle className="w-3.5 h-3.5" />
                             </button>
                         </div>
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-sm font-semibold text-[#111111] shrink-0">
+                                    {shareSel.size} selected
+                                </span>
+                                <span className="text-[11px] text-[#8A8A8A] truncate">
+                                    {downloadsDisabled
+                                        ? "Shared as secure Talentgram links (downloads disabled)"
+                                        : shareSel.size === 0 && !showFormInShare
+                                        ? "Pick media to send together"
+                                        : "Shared together in one WhatsApp message"}
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                                <button
+                                    type="button"
+                                    onClick={exitShareMode}
+                                    className="px-3 py-2 rounded-full text-xs font-medium text-[#4A4A4A] hover:bg-slate-100 transition-colors min-h-[40px]"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={shareSelected}
+                                    disabled={(shareSel.size === 0 && !showFormInShare) || sharing}
+                                    title={downloadsDisabled ? shareHelpText : "Send via WhatsApp"}
+                                    data-testid="share-send-selected-btn"
+                                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-[#111111] hover:bg-black text-white text-xs font-semibold transition-colors min-h-[44px] disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {sharing ? <Loader2 className="w-4 h-4 animate-spin" /> : <WhatsAppGlyph className="w-4 h-4" />}
+                                    Send via WhatsApp{shareSel.size > 0 ? ` (${shareSel.size})` : ""}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* First-time "How sharing works" guidance — reuses the exact
+                    tg_hint_seen_${slug} localStorage convention already used
+                    elsewhere on this page, under a new key. Non-modal, closes on
+                    Escape or the close button, reopenable via the "?" icon above. */}
+                {shareMode && showShareHint && (
+                    <div
+                        role="dialog"
+                        aria-modal="false"
+                        aria-label="How sharing works"
+                        data-testid="share-hint-popover"
+                        className="fixed bottom-[100px] md:bottom-[92px] left-4 right-4 md:left-auto md:right-6 md:w-[360px] z-[70] bg-white border border-[#eaeaea] rounded-2xl shadow-2xl p-4"
+                    >
+                        <div className="flex items-start justify-between gap-3 mb-2">
+                            <span className="text-sm font-bold text-[#111111]">How sharing works</span>
+                            <button
+                                type="button"
+                                ref={shareHintCloseRef}
+                                onClick={dismissShareHint}
+                                aria-label="Close"
+                                className="w-6 h-6 rounded-full hover:bg-slate-100 flex items-center justify-center text-[#8A8A8A] hover:text-[#111111] shrink-0"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <ul className="text-xs text-[#4A4A4A] space-y-1.5 list-disc pl-4">
+                            <li>Select all media or choose individual files.</li>
+                            <li>You can include the Talent Details Form as text.</li>
+                            <li>On mobile, supported files share through your phone's native share menu — choose WhatsApp.</li>
+                            <li>On desktop, sharing may use WhatsApp Web and a link, depending on browser support.</li>
+                            <li>Images are shared without filenames. Introduction and audition videos use clean labels.</li>
+                        </ul>
+                        <button
+                            type="button"
+                            onClick={dismissShareHint}
+                            className="mt-3 w-full h-9 rounded-full bg-[#111111] hover:bg-black text-white text-xs font-semibold transition-colors"
+                        >
+                            Got it
+                        </button>
                     </div>
                 )}
 

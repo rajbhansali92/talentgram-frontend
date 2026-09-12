@@ -1188,6 +1188,7 @@ async def track_link_event(
 
 
 from datetime import datetime, timedelta, timezone
+import asyncio
 import io
 import zipfile
 import httpx
@@ -1822,6 +1823,37 @@ def _generate_talent_details_pdf(talent_doc: dict, agreed_val: Optional[str], cl
             
     return pdf.output()
 
+# Bounded concurrency for ZIP-member fetches — parallel network I/O, but
+# zipfile.ZipFile itself is not safe for concurrent writes, so bytes are
+# gathered concurrently here and written into the ZIP sequentially by the
+# caller. One retry per item before giving up: a real reliability win for
+# transient provider hiccups WITHOUT changing the existing product decision
+# that a talent folder must never silently ship missing photos/video (see
+# the "C2" hard-fail check that still runs after this in both endpoints).
+_ZIP_FETCH_CONCURRENCY = 4
+
+
+async def _fetch_zip_item_bytes(client: httpx.AsyncClient, sem: asyncio.Semaphore, filename: str, url: str) -> tuple:
+    """Fetch one ZIP member's bytes under a bounded semaphore, retrying once
+    on failure. Returns (filename, bytes_or_None, error_reason_or_None).
+    Never raises — a failure is reported in the tuple, not an exception."""
+    async with sem:
+        last_err = None
+        for attempt in range(2):  # first attempt + one retry
+            try:
+                async with client.stream("GET", url) as response:
+                    if response.status_code == 200:
+                        chunks = bytearray()
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            chunks.extend(chunk)
+                        return filename, bytes(chunks), None
+                    last_err = f"HTTP {response.status_code}"
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"Fetch attempt {attempt + 1} failed for {filename}: {last_err}")
+        return filename, None, last_err
+
+
 @router.get("/public/links/{slug}/download/talent/{talent_id}")
 async def download_talent_zip(
     slug: str,
@@ -1977,8 +2009,41 @@ async def download_talent_zip(
     zip_timeout = httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(follow_redirects=True, timeout=zip_timeout) as client:
         try:
+            # 1) Resolve each item's download URL — sequential (these are small
+            # provider metadata calls, e.g. enabling a Stream MP4 rendition, not
+            # media bytes, so parallelizing them isn't the win here).
+            resolved = []  # [(filename, url_or_None)]
+            for item in work_items:
+                m = item["media"]
+                filename = item["filename"]
+                try:
+                    if item["kind"] == "video":
+                        raw = raw_media_by_id.get(m.get("id"), m)
+                        dl_url = await _resolve_video_download_url(client, raw, m.get("url"))
+                    else:
+                        dl_url = m.get("url")
+                except Exception:
+                    logger.exception(f"Error resolving URL for {filename}")
+                    dl_url = None
+                if not dl_url:
+                    logger.warning(f"No download URL resolved for {filename}")
+                resolved.append((filename, dl_url))
+
+            # 2) Fetch bytes concurrently (bounded), each with one retry.
+            sem = asyncio.Semaphore(_ZIP_FETCH_CONCURRENCY)
+            fetch_results = await asyncio.gather(*[
+                _fetch_zip_item_bytes(client, sem, fn, url)
+                for fn, url in resolved if url
+            ])
+            fetch_by_filename = {fn: (data, err) for fn, data, err in fetch_results}
+            any_timeout = any(
+                err and ("timeout" in err.lower() or "timed out" in err.lower())
+                for _fn, _data, err in fetch_results
+            )
+
+            # 3) Write into the ZIP sequentially (zipfile isn't safe for
+            # concurrent writes) — fast, since all bytes are already in memory.
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                # Add dynamic PDF details first
                 pdf_filename = "Talent Form.pdf"
                 if project_doc and project_doc.get("brand_name"):
                     pdf_filename = f"{project_doc.get('brand_name')} - Talent Form.pdf"
@@ -1989,30 +2054,16 @@ async def download_talent_zip(
                 pdf_filename = "".join(c for c in pdf_filename if c.isalnum() or c in (" ", "-", "_", ".")).strip()
                 zf.writestr(pdf_filename, pdf_bytes)
 
-                for item in work_items:
-                    m = item["media"]
-                    filename = item["filename"]
-                    try:
-                        if item["kind"] == "video":
-                            raw = raw_media_by_id.get(m.get("id"), m)
-                            dl_url = await _resolve_video_download_url(client, raw, m.get("url"))
-                        else:
-                            dl_url = m.get("url")
-                        if not dl_url:
-                            logger.warning(f"No download URL resolved for {filename}")
-                            failed_media.append(filename)
-                            continue
-                        async with client.stream("GET", dl_url) as response:
-                            if response.status_code == 200:
-                                with zf.open(filename, "w") as dest:
-                                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                                        dest.write(chunk)
-                            else:
-                                logger.warning(f"Download returned status {response.status_code} for {filename}")
-                                failed_media.append(filename)
-                    except Exception:
-                        logger.exception(f"Error packaging {filename}")
+                for filename, url in resolved:
+                    if not url:
                         failed_media.append(filename)
+                        continue
+                    data, err = fetch_by_filename.get(filename, (None, "not fetched"))
+                    if data is None:
+                        logger.warning(f"Failed to fetch {filename} after retry: {err}")
+                        failed_media.append(filename)
+                        continue
+                    zf.writestr(filename, data)
 
             logger.info("ZIP CREATED")
         except Exception:
@@ -2034,12 +2085,15 @@ async def download_talent_zip(
 
     # C2: fail loudly if any required media could not be retrieved, rather than
     # silently shipping a folder missing photos/video. (Internal file lists are
-    # NOT exposed to the client.)
+    # NOT exposed to the client.) Each item was already retried once (see
+    # _fetch_zip_item_bytes) before landing here, so this is a genuine failure.
     if failed_media:
-        raise HTTPException(
-            status_code=502,
-            detail="Some media could not be retrieved for this folder. Please try again in a moment.",
+        detail = (
+            "Some large video files are taking longer than usual to prepare. Please try again in a moment."
+            if any_timeout
+            else "Some media could not be retrieved for this folder. Please try again in a moment."
         )
+        raise HTTPException(status_code=502, detail=detail)
     if expected_media > 0 and len(infolist) <= 1:
         raise HTTPException(
             status_code=502,
@@ -2077,7 +2131,13 @@ async def download_talent_zip(
     return StreamingResponse(
         event_generator(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_filename}"',
+            # The ZIP is already fully materialized in `buffer` above (zip_size
+            # is its exact byte length) — this lets the client show a real,
+            # byte-based download percentage instead of an indeterminate spinner.
+            "Content-Length": str(zip_size),
+        },
     )
 
 
@@ -2365,29 +2425,46 @@ async def download_campaign_bundle_zip(
     bundle_timeout = httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(follow_redirects=True, timeout=bundle_timeout) as client:
         try:
+            # 1) Resolve each item's download URL — sequential (small provider
+            # metadata calls, not media bytes).
+            resolved = []  # [(filename, url_or_None)]
+            for item in zip_items:
+                filename = item["filename"]
+                url = item["url"]
+                try:
+                    # Provider-aware: Cloudflare Stream URLs must be resolved to
+                    # an MP4 download URL; Cloudinary/R2 URLs are used as-is.
+                    if url and "cloudflarestream.com" in url:
+                        url = await _resolve_video_download_url(client, {}, url)
+                except Exception:
+                    logger.exception(f"Error resolving URL for {filename}")
+                    url = None
+                resolved.append((filename, url))
+
+            # 2) Fetch bytes concurrently (bounded), each with one retry.
+            sem = asyncio.Semaphore(_ZIP_FETCH_CONCURRENCY)
+            fetch_results = await asyncio.gather(*[
+                _fetch_zip_item_bytes(client, sem, fn, url)
+                for fn, url in resolved if url
+            ])
+            fetch_by_filename = {fn: (data, err) for fn, data, err in fetch_results}
+            any_timeout = any(
+                err and ("timeout" in err.lower() or "timed out" in err.lower())
+                for _fn, _data, err in fetch_results
+            )
+
+            # 3) Write into the ZIP sequentially.
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                for item in zip_items:
-                    filename = item["filename"]
-                    url = item["url"]
-                    try:
-                        # Provider-aware: Cloudflare Stream URLs must be resolved to
-                        # an MP4 download URL; Cloudinary/R2 URLs are used as-is.
-                        if url and "cloudflarestream.com" in url:
-                            url = await _resolve_video_download_url(client, {}, url)
-                        if not url:
-                            failed_media.append(filename)
-                            continue
-                        async with client.stream("GET", url) as response:
-                            if response.status_code == 200:
-                                with zf.open(filename, "w") as dest:
-                                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                                        dest.write(chunk)
-                            else:
-                                logger.warning(f"Download returned status {response.status_code} for {filename}")
-                                failed_media.append(filename)
-                    except Exception:
-                        logger.exception(f"Error zipping {filename}")
+                for filename, url in resolved:
+                    if not url:
                         failed_media.append(filename)
+                        continue
+                    data, err = fetch_by_filename.get(filename, (None, "not fetched"))
+                    if data is None:
+                        logger.warning(f"Failed to fetch {filename} after retry: {err}")
+                        failed_media.append(filename)
+                        continue
+                    zf.writestr(filename, data)
 
             logger.info("ZIP CREATED")
         except Exception:
@@ -2408,12 +2485,15 @@ async def download_campaign_bundle_zip(
 
     logger.info(f"BUNDLE ZIP SIZE={zip_size} bytes; FILES={len(infolist)}; expected_media={expected_media}; failed={len(failed_media)}")
 
-    # C2: fail loudly if any media could not be retrieved.
+    # C2: fail loudly if any media could not be retrieved. Each item was
+    # already retried once (see _fetch_zip_item_bytes) before landing here.
     if failed_media:
-        raise HTTPException(
-            status_code=502,
-            detail="Some media could not be retrieved for this bundle. Please try again in a moment.",
+        detail = (
+            "Some large video files are taking longer than usual to prepare. Please try again in a moment."
+            if any_timeout
+            else "Some media could not be retrieved for this bundle. Please try again in a moment."
         )
+        raise HTTPException(status_code=502, detail=detail)
     if expected_media > 0 and len(infolist) == 0:
         raise HTTPException(
             status_code=502,
@@ -2451,5 +2531,8 @@ async def download_campaign_bundle_zip(
     return StreamingResponse(
         event_generator(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_filename}"',
+            "Content-Length": str(zip_size),
+        },
     )

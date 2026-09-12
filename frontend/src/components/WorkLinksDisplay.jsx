@@ -14,7 +14,8 @@
  *          domain.com                    ← subtitle
  *   [Open ↗]                             ← clickable button
  */
-import React from "react";
+import React, { useState } from "react";
+import { Copy, Check } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Parser — same logic used by TalentEdit / SubmissionPage / ApplicationPage
@@ -72,7 +73,18 @@ export function getLinkMeta(url) {
  * @param {Function}  [renderExtra]  Optional: (url, index) => ReactNode injected after the Open button (e.g. delete button)
  */
 export default function WorkLinksDisplay({ links, className = "", renderExtra, variant = "cards" }) {
+    const [copiedIdx, setCopiedIdx] = useState(null);
     if (!links || links.length === 0) return null;
+
+    const copyUrl = async (url, i) => {
+        try {
+            await navigator.clipboard.writeText(url);
+            setCopiedIdx(i);
+            setTimeout(() => setCopiedIdx((cur) => (cur === i ? null : cur)), 1500);
+        } catch {
+            // Clipboard unsupported — the URL is still visible/selectable text, no-op.
+        }
+    };
 
     // Compact single-container grouped list (used by the client review panel).
     // One bordered container with divided rows — no stacked cards.
@@ -94,8 +106,23 @@ export default function WorkLinksDisplay({ links, className = "", renderExtra, v
                             <a href={url} target="_blank" rel="noopener noreferrer" className="min-w-0 flex-1 no-underline">
                                 <p className="text-xs font-semibold text-neutral-800 truncate leading-snug">{label || meta.platform}</p>
                                 <p className="text-[10px] text-neutral-400 truncate leading-snug" title={url}>{meta.domain}</p>
+                                <p
+                                    className="text-[10px] text-neutral-400 truncate leading-snug break-all"
+                                    title={url}
+                                    data-testid={`work-link-url-${i}`}
+                                >
+                                    {url}
+                                </p>
                             </a>
                             <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                    type="button"
+                                    onClick={() => copyUrl(url, i)}
+                                    aria-label="Copy link"
+                                    className="min-w-[36px] min-h-[36px] flex items-center justify-center text-neutral-400 hover:text-black rounded-lg transition-colors"
+                                >
+                                    {copiedIdx === i ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                                </button>
                                 <a
                                     href={url}
                                     target="_blank"

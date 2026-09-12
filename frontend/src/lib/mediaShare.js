@@ -47,15 +47,34 @@ export function deviceSupportsFileShare() {
     }
 }
 
+// Hard ceiling on the COMPLETE fetch→blob→File chain for one media item.
+// This is independent of whatever timeout (if any) the underlying Request
+// Manager / axios transport enforces internally — found live: with no
+// explicit timeout passed to this call, a single item's promise that never
+// settles (a hung connection, a service-worker interception, any transport
+// edge case) left the Send button's readiness check waiting forever, since
+// it can only react to a settled promise. This guarantees urlToFileTraced
+// ALWAYS resolves within FILE_PREP_TIMEOUT_MS, no matter what the network
+// or transport layer does.
+export const FILE_PREP_TIMEOUT_MS = 25_000;
+
 // Fully instrumented fetch→Blob→File, via the shared `api` transport (same
 // Request Manager retry/circuit-breaker/dedup/request-ID coverage as every
 // other Client View call — `url` is a relative path; `responseType: "blob"`
 // makes publicApiTransport classify this as a "download" and route it
 // direct-to-Railway, same as it always has). Writes every step's outcome
 // into `rec` (mutated in place) so the caller can report the exact runtime
-// reason, and returns the File on success or null on failure (never throws).
+// reason, and returns the File on success or null on failure (never throws,
+// and never stays pending longer than FILE_PREP_TIMEOUT_MS).
 async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
     rec.url = url;
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+        timedOut = true;
+        try { controller.abort("client_timeout"); } catch { /* ignore */ }
+    }, FILE_PREP_TIMEOUT_MS);
+
     // Step 5 — HTTP fetch
     let res;
     try {
@@ -71,10 +90,25 @@ async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
         // share rarely accumulates enough failures alone to trip it. Scoping
         // media downloads to their own circuit isolates them from that
         // unrelated background traffic without removing breaker protection
-        // for a genuinely broken media endpoint.
-        res = await axios.get(url, { ...init, responseType: "blob", circuitKey: "get:media-download" });
+        // for a genuinely broken media endpoint. `signal` + an EXPLICIT
+        // `timeout` are both set to this same ceiling so the request is
+        // genuinely cancelled (not just ignored) the moment it's exceeded,
+        // instead of relying solely on whatever default the transport would
+        // otherwise apply.
+        res = await axios.get(url, {
+            ...init,
+            responseType: "blob",
+            circuitKey: "get:media-download",
+            signal: controller.signal,
+            timeout: FILE_PREP_TIMEOUT_MS,
+        });
     } catch (e) {
-        if (e?.response) {
+        clearTimeout(timeoutId);
+        if (timedOut || e?.name === "AbortError" || e?.name === "CanceledError" || e?.code === "ECONNABORTED" || e?.classification === "timeout") {
+            rec.fetchOk = false;
+            rec.step = "timeout";
+            rec.fetchThrew = `timed out after ${FILE_PREP_TIMEOUT_MS}ms`;
+        } else if (e?.response) {
             // Server responded with a non-2xx status.
             rec.httpStatus = e.response.status;
             rec.fetchOk = false;
@@ -89,6 +123,7 @@ async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
         }
         return null;
     }
+    clearTimeout(timeoutId);
     rec.httpStatus = res.status;
     rec.fetchOk = true;
     // Step 6 — Blob (axios's `responseType: "blob"` already materializes it —
@@ -114,6 +149,7 @@ async function urlToFileTraced(url, filename, mimeHint, rec, init = {}) {
         rec.fileOk = true;
         rec.fileType = file.type;
         rec.fileName = file.name;
+        rec.fileSize = file.size;
         rec.step = "ok";
         return file;
     } catch (e) {

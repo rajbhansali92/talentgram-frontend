@@ -40,7 +40,7 @@ import {
     Copy,
     CheckSquare,
 } from "lucide-react";
-import { shareMediaViaWhatsApp, prepareShareFile } from "@/lib/mediaShare";
+import { shareMediaViaWhatsApp, prepareShareFile, FILE_PREP_TIMEOUT_MS } from "@/lib/mediaShare";
 
 // All backend calls use relative paths (e.g. `/public/links/...`) through the
 // `api` client (imported as `axios` above) so every request resolves through
@@ -2205,11 +2205,31 @@ function TalentDetail({
         const filename = `${privatizeName(talent.name)} - ${label}`;
         const gen = prepGenRef.current;
         preparedFilesRef.current.set(m.id, null);             // in-flight marker (blocks duplicate fetches)
-        prepareShareFile({ slug, talentId: talent.id, item: { id: m.id, name: label, type, filename } })
+        // Second, fully independent guarantee that this ALWAYS settles within
+        // FILE_PREP_TIMEOUT_MS — on top of mediaShare.js's own internal
+        // AbortController-based timeout on the fetch itself. This one is a
+        // plain setTimeout race with zero dependency on axios, the Request
+        // Manager, or any transport behaving correctly; it only needs the JS
+        // event loop to be running. Found live in production: with no bound
+        // at all here, a single item's promise that never settled left the
+        // Send button stuck on "Preparing…" indefinitely, since the
+        // readiness check can only react to a promise that actually resolves
+        // or rejects.
+        let settledByTimeout = false;
+        const hardTimeout = new Promise((resolve) => {
+            setTimeout(() => { settledByTimeout = true; resolve(null); }, FILE_PREP_TIMEOUT_MS + 2000);
+        });
+        Promise.race([
+            prepareShareFile({ slug, talentId: talent.id, item: { id: m.id, name: label, type, filename } }),
+            hardTimeout,
+        ])
             .then((file) => {
                 if (gen !== prepGenRef.current) return;        // talent changed — drop (keeps memory bounded)
                 preparedFilesRef.current.set(m.id, file || "failed");
                 setPrepTick((t) => t + 1);                      // let the Send button re-check readiness
+                if (settledByTimeout) {
+                    console.error("[tg-share] media prep hard-timed-out (never settled on its own)", { id: m.id, label });
+                }
             })
             .catch(() => {
                 if (gen === prepGenRef.current) preparedFilesRef.current.set(m.id, "failed");
@@ -2265,6 +2285,43 @@ function TalentDetail({
         // Release any Files prepared for the (now-cleared) bulk selection.
         preparedFilesRef.current.clear();
     }, []);
+
+    // Re-attempt preparation for every currently-selected item that settled
+    // as "failed" — the dedup guard in prepareFileForShare only skips an id
+    // already in the map, so deleting it first is what allows a fresh try.
+    const retryFailedSelected = useCallback(() => {
+        shareSel.forEach((id) => {
+            if (preparedFilesRef.current.get(id) === "failed") {
+                preparedFilesRef.current.delete(id);
+                const entry = shareableMedia.find((s) => s.m.id === id);
+                if (entry) onShareIntent(entry.m);
+            }
+        });
+        setPrepTick((t) => t + 1);
+    }, [shareSel, shareableMedia, onShareIntent]);
+
+    // Deselect every currently-selected item that settled as "failed", so
+    // the user can still share the rest without that one item blocking or
+    // silently dragging the whole selection down to a caption-only share.
+    // The failed ids are computed up front (not inside the setShareSel
+    // updater) and the ref mutation happens here, once — a setState updater
+    // must be a pure function of its previous state. Putting the
+    // preparedFilesRef.delete() side effect inside the updater (the original
+    // version of this function) broke under React's dev-mode double-invoke:
+    // the second call saw the ref entry already deleted, so its own
+    // "=== failed" check came back false and it returned prev unchanged —
+    // the id silently stayed in shareSel while its ref entry was gone
+    // (undefined), which reads as "still in flight" and never settles again.
+    const removeFailedSelected = useCallback(() => {
+        const failedIds = [...shareSel].filter((id) => preparedFilesRef.current.get(id) === "failed");
+        if (failedIds.length === 0) return;
+        failedIds.forEach((id) => preparedFilesRef.current.delete(id));
+        setShareSel((prev) => {
+            const n = new Set(prev);
+            failedIds.forEach((id) => n.delete(id));
+            return n;
+        });
+    }, [shareSel]);
 
     // Bulk selection helpers — operate on the existing shareSel Set via the
     // existing shareableMedia list; no new selection data structure.
@@ -2936,6 +2993,14 @@ function TalentDetail({
             const v = preparedFilesRef.current.get(id);
             return v === undefined || v === null;
         });
+
+    // Currently-selected items that gave up preparing — surfaced explicitly
+    // (never silently dropped, never silently downgraded to a caption-only
+    // share) so the user can retry or remove them before sending.
+    const failedSelectedIds =
+        prepTick >= 0 && shareMode
+            ? [...shareSel].filter((id) => preparedFilesRef.current.get(id) === "failed")
+            : [];
 
     return (
         <div
@@ -3680,6 +3745,34 @@ function TalentDetail({
                                 <HelpCircle className="w-3.5 h-3.5" />
                             </button>
                         </div>
+                        {failedSelectedIds.length > 0 && (
+                            <div
+                                className="flex items-center gap-2 flex-wrap text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2"
+                                data-testid="share-failed-items-banner"
+                                role="alert"
+                            >
+                                <span className="flex-1 min-w-[140px]">
+                                    Couldn't prepare {failedSelectedIds.length} item{failedSelectedIds.length === 1 ? "" : "s"}:{" "}
+                                    {failedSelectedIds.map((id) => shareLabelById[id] || "Media").join(", ")}
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={retryFailedSelected}
+                                    data-testid="share-retry-failed"
+                                    className="text-[10px] font-semibold px-2.5 py-1 rounded-full border border-rose-300 bg-white hover:bg-rose-100 text-rose-700 transition-colors shrink-0"
+                                >
+                                    Retry
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={removeFailedSelected}
+                                    data-testid="share-remove-failed"
+                                    className="text-[10px] font-semibold px-2.5 py-1 rounded-full border border-rose-300 bg-white hover:bg-rose-100 text-rose-700 transition-colors shrink-0"
+                                >
+                                    Remove
+                                </button>
+                            </div>
+                        )}
                         <div className="flex items-center justify-between gap-3">
                             <div className="flex items-center gap-2 min-w-0">
                                 <span className="text-sm font-semibold text-[#111111] shrink-0">
@@ -3749,7 +3842,6 @@ function TalentDetail({
                             <li>On mobile, supported files share through your phone's native share menu — choose WhatsApp.</li>
                             <li>On desktop, sharing may use WhatsApp Web and a link, depending on browser support.</li>
                             <li>Images are shared without filenames. Introduction and audition videos use clean labels.</li>
-                            <li>Some devices can't send photos and videos together in one go — if so, they'll send as photos first, then you'll be offered a quick tap to send the videos too (or the other way around).</li>
                         </ul>
                         <button
                             type="button"

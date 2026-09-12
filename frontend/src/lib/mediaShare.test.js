@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { shareMediaViaWhatsApp } from "./mediaShare";
+import { shareMediaViaWhatsApp, prepareShareFile, FILE_PREP_TIMEOUT_MS } from "./mediaShare";
 
 vi.mock("@/lib/api", () => ({
     api: { get: vi.fn(), post: vi.fn() },
@@ -509,5 +509,82 @@ describe("mediaShare.js — partial-preparation reuse (the real fix: a mixed sel
         // fetch's delay (~40ms), not stacked (~80ms+) or inflated by
         // needlessly re-fetching the 3 already-ready videos.
         expect(elapsed).toBeLessThan(120);
+    });
+});
+
+describe("mediaShare.js — hard per-file timeout (the real Part-1 bug: with no bound at all, a single item's promise that never settled on its own left preparation stuck forever)", () => {
+    beforeEach(() => {
+        api.get.mockReset();
+        api.post.mockReset();
+        vi.useFakeTimers();
+    });
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+    });
+
+    it("urlToFileTraced (via prepareShareFile) ALWAYS settles within FILE_PREP_TIMEOUT_MS, even when the transport's own request never resolves or rejects on its own", async () => {
+        // Mirrors real axios/Request Manager behaviour (confirmed by reading
+        // RequestManager.js: config.signal is genuinely wired to an internal
+        // AbortController) — the mock only ever settles in response to the
+        // signal firing, exactly like a real hung connection that only ends
+        // because OUR OWN client-side timeout aborts it.
+        api.get.mockImplementation((url, config) => {
+            return new Promise((resolve, reject) => {
+                config?.signal?.addEventListener("abort", () => {
+                    const err = new Error("aborted");
+                    err.name = "AbortError";
+                    reject(err);
+                });
+                // Deliberately never resolves/rejects on its own — simulates
+                // a genuinely hung connection.
+            });
+        });
+
+        const resultPromise = prepareShareFile({
+            slug: "s1", talentId: "t1",
+            item: { id: "v1", name: "Take 1", type: "video", filename: "Take 1" },
+        });
+
+        // Advance past the hard timeout — nothing else can make this settle.
+        await vi.advanceTimersByTimeAsync(FILE_PREP_TIMEOUT_MS + 1000);
+
+        const result = await resultPromise;
+        expect(result).toBeNull(); // failed to prepare — but SETTLED, not hung
+    });
+
+    it("a hung item does not block the overall preparation — shareMediaViaWhatsApp still resolves (falls back to the secure-link path once the timeout is exhausted, rather than hanging)", async () => {
+        api.get.mockImplementation((url, config) => {
+            return new Promise((resolve, reject) => {
+                config?.signal?.addEventListener("abort", () => {
+                    const err = new Error("aborted");
+                    err.name = "AbortError";
+                    reject(err);
+                });
+            });
+        });
+        api.post.mockResolvedValue({ data: { share_id: "sh_1" } });
+        vi.stubGlobal("navigator", {
+            ...navigator,
+            share: vi.fn().mockResolvedValue(undefined),
+            canShare: vi.fn().mockReturnValue(true),
+            userAgent: "android-chrome-agent",
+        });
+
+        const resultPromise = shareMediaViaWhatsApp({
+            slug: "s1", talentId: "t1", talentName: "Harshita",
+            items: [{ id: "v1", name: "Take 1", type: "video", fileUrl: "https://x/v1.mp4", filename: "Take 1" }],
+            caption: "Harshita — Project X", allowFiles: true, sessionId: "sess1",
+        });
+
+        await vi.advanceTimersByTimeAsync(FILE_PREP_TIMEOUT_MS + 2000);
+
+        const result = await resultPromise;
+        // The important assertion: it SETTLED at all (never hung), and with
+        // a real, non-misleading outcome — not silently reporting success.
+        expect(result).toBeDefined();
+        expect(["whatsapp_link_share", "error"]).toContain(result.method);
+
+        vi.unstubAllGlobals();
     });
 });

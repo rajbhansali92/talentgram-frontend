@@ -73,6 +73,19 @@ function privatizeName(raw) {
 }
 
 /**
+ * Product rule: one WhatsApp share is all-images or all-videos, never both —
+ * WhatsApp/Android's handling of a mixed-MIME batch proved unreliable, so
+ * mixing is prevented at selection time rather than worked around at share
+ * time. Pure and exported so the one rule every selection call site
+ * (toggleShareSel, selectAllOfType, the per-tile SelectCheck) defers to can
+ * be tested directly, without mounting the whole page.
+ * `currentSelectedType` is null when nothing is selected yet (either type OK).
+ */
+export function isShareSelectionTypeAllowed(itemType, currentSelectedType) {
+    return !currentSelectedType || currentSelectedType === itemType;
+}
+
+/**
  * Map the talent's availability response to one of three labels the client
  * sees. A note on a "yes" or "no" response upgrades the label to
  * "Conditional" because the talent has qualified the answer.
@@ -2173,6 +2186,19 @@ function TalentDetail({
         [shareableMedia],
     );
 
+    // Product rule: one share is all-images or all-videos, never both —
+    // WhatsApp/Android's handling of a mixed-MIME batch proved unreliable, so
+    // mixing is prevented at selection time instead of being worked around at
+    // share time. null when nothing is selected yet (either type is open).
+    const selectedShareType = useMemo(() => {
+        if (shareSel.size === 0) return null;
+        const firstId = shareSel.values().next().value;
+        return shareableMedia.find((s) => s.m.id === firstId)?.type || null;
+    }, [shareSel, shareableMedia]);
+
+    const MIXED_SHARE_SELECTION_MESSAGE =
+        "Please share images and videos separately. You can select multiple images together or multiple videos together.";
+
     // ── Transient, intent-based File preparation (iOS Safari first-tap fix) ──
     // On genuine PER-MEDIA intent we build the actual share File AHEAD of the
     // tap — reusing prepareShareFile → urlToFileTraced (same proxy, token, and
@@ -2266,17 +2292,29 @@ function TalentDetail({
     }, [talent.id]);
 
     const toggleShareSel = useCallback((id) => {
-        setShareSel((prev) => {
-            const n = new Set(prev);
-            if (n.has(id)) n.delete(id); else n.add(id);
-            return n;
-        });
+        const entry = shareableMedia.find((s) => s.m.id === id);
+        if (!entry) return;
+        if (shareSel.has(id)) {
+            setShareSel((prev) => {
+                const n = new Set(prev);
+                n.delete(id);
+                return n;
+            });
+            return;
+        }
+        // Same-type-only rule: block selecting a video while images are
+        // selected (or vice versa) instead of letting a mixed batch reach
+        // navigator.share() at all.
+        if (!isShareSelectionTypeAllowed(entry.type, selectedShareType)) {
+            toast(MIXED_SHARE_SELECTION_MESSAGE);
+            return;
+        }
+        setShareSel((prev) => new Set(prev).add(id));
         // Genuine intent: selecting media for bulk share warms its Stream
         // rendition and prepares its File (dedup-guarded — a later toggle is a
         // harmless no-op; the File is released on share / exit / talent change).
-        const entry = shareableMedia.find((s) => s.m.id === id);
-        if (entry) onShareIntent(entry.m);
-    }, [shareableMedia, onShareIntent]);
+        onShareIntent(entry.m);
+    }, [shareableMedia, shareSel, selectedShareType, onShareIntent]);
 
     const exitShareMode = useCallback(() => {
         setShareMode(false);
@@ -2323,21 +2361,22 @@ function TalentDetail({
         });
     }, [shareSel]);
 
-    // Bulk selection helpers — operate on the existing shareSel Set via the
-    // existing shareableMedia list; no new selection data structure.
+    // Bulk selection helper — operates on the existing shareSel Set via the
+    // existing shareableMedia list; no new selection data structure. Guarded
+    // against the other type even though the calling button is also disabled
+    // in that state — belt and suspenders, same rule as toggleShareSel.
     const selectAllOfType = useCallback((type) => {
+        if (!isShareSelectionTypeAllowed(type, selectedShareType)) {
+            toast(MIXED_SHARE_SELECTION_MESSAGE);
+            return;
+        }
         setShareSel((prev) => {
             const n = new Set(prev);
             shareableMedia.forEach((s) => { if (s.type === type) n.add(s.m.id); });
             return n;
         });
         shareableMedia.forEach((s) => { if (s.type === type) onShareIntent(s.m); });
-    }, [shareableMedia, onShareIntent]);
-
-    const selectAllMedia = useCallback(() => {
-        setShareSel(new Set(shareableMedia.map((s) => s.m.id)));
-        shareableMedia.forEach((s) => onShareIntent(s.m));
-    }, [shareableMedia, onShareIntent]);
+    }, [shareableMedia, selectedShareType, onShareIntent]);
 
     const clearShareSelection = useCallback(() => setShareSel(new Set()), []);
 
@@ -2489,24 +2528,6 @@ function TalentDetail({
             }
             if (res?.method === "native_file_share") {
                 toast.success(`Sharing ${res.count} file${res.count === 1 ? "" : "s"} — choose WhatsApp…`);
-            } else if (res?.method === "native_file_share_split") {
-                // Some devices can't send photos and videos together in one
-                // WhatsApp share. The first batch just went out for real — the
-                // rest is offered as a clear, separate next step, never
-                // silently dropped and never implied as already sent.
-                const sentWord = res.sentType === "video" ? "video" : "photo";
-                const remainingWord = res.remainingType === "video" ? "video" : "photo";
-                const remaining = entries.filter((e) => e.type === res.remainingType);
-                toast.success(
-                    `Shared ${res.sentCount} ${sentWord}${res.sentCount === 1 ? "" : "s"} — tap to also share ${res.remainingCount} ${remainingWord}${res.remainingCount === 1 ? "" : "s"}`,
-                    {
-                        duration: 20000,
-                        action: {
-                            label: `Share ${remainingWord}${res.remainingCount === 1 ? "" : "s"}`,
-                            onClick: () => runShare(remaining),
-                        },
-                    },
-                );
             } else if (res?.method === "share_blocked") {
                 // iOS transient rejection after retry — plain, non-technical.
                 toast.error("Couldn't open the share sheet. Please tap Send again.");
@@ -2912,22 +2933,33 @@ function TalentDetail({
     }, [logDownload, talent.id, talent.name]);
 
     // Selection checkbox overlaid on a media tile while in multi-share mode.
-    const SelectCheck = ({ id }) =>
-        shareMode ? (
+    // Same-type-only rule: a tile whose type doesn't match the in-progress
+    // selection reads as disabled (still clickable so the toast in
+    // toggleShareSel can explain why, per the "simple disabled state plus a
+    // short toast" requirement — not a real `disabled` attribute).
+    const SelectCheck = ({ id }) => {
+        if (!shareMode) return null;
+        const selected = shareSel.has(id);
+        const itemType = shareableMedia.find((s) => s.m.id === id)?.type;
+        const blocked = !selected && !isShareSelectionTypeAllowed(itemType, selectedShareType);
+        return (
             <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleShareSel(id); }}
-                aria-label={shareSel.has(id) ? "Deselect media" : "Select media"}
+                aria-label={selected ? "Deselect media" : blocked ? "Only one media type per share" : "Select media"}
                 data-testid={`share-select-${id}`}
                 className={`absolute top-3 left-3 z-20 w-7 h-7 rounded-md border flex items-center justify-center transition-all duration-150 shadow-sm ${
-                    shareSel.has(id)
+                    selected
                         ? "bg-[#111111] border-[#111111] text-white"
+                        : blocked
+                        ? "bg-white/60 border-black/10 text-transparent opacity-50 cursor-not-allowed"
                         : "bg-white/90 border-black/25 text-transparent"
                 }`}
             >
                 <Check className="w-4 h-4" strokeWidth={3} />
             </button>
-        ) : null;
+        );
+    };
 
     // When the link's Download permission is off, sharing falls back to secure
     // links on every device (see lib/mediaShare.js). Surface that so a viewer
@@ -3706,14 +3738,23 @@ function TalentDetail({
                         data-testid="share-action-bar"
                     >
                         <div className="flex items-center gap-1.5 flex-wrap">
-                            <button type="button" onClick={() => selectAllOfType("image")} data-testid="share-select-all-images" className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors">
+                            <button
+                                type="button"
+                                onClick={() => selectAllOfType("image")}
+                                disabled={selectedShareType === "video"}
+                                data-testid="share-select-all-images"
+                                className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
                                 Select all images
                             </button>
-                            <button type="button" onClick={() => selectAllOfType("video")} data-testid="share-select-all-videos" className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors">
+                            <button
+                                type="button"
+                                onClick={() => selectAllOfType("video")}
+                                disabled={selectedShareType === "image"}
+                                data-testid="share-select-all-videos"
+                                className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
                                 Select all videos
-                            </button>
-                            <button type="button" onClick={selectAllMedia} data-testid="share-select-all-media" className="text-[10px] px-2.5 min-h-[36px] rounded-full border border-black/10 hover:bg-slate-50 text-[#333333] transition-colors">
-                                Select all media
                             </button>
                             <button
                                 type="button"

@@ -216,9 +216,7 @@ async function logDispatch(slug, talentId, method, fileCount, media, sessionId) 
 
 // Attempts ONE native navigator.share({files}) call for an already-ready
 // batch of Files, with the same NotAllowedError-retry-once policy used
-// everywhere else in this module. Extracted so the combined-batch attempt
-// and the mixed-media homogeneous-batch fallback (below) share this exact
-// retry logic instead of duplicating it.
+// everywhere else in this module.
 async function attemptNativeFileShare(filesForBatch, text, titleText) {
     const shareData = { files: filesForBatch, title: titleText, text };
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -269,15 +267,12 @@ function buildWhatsAppMessage(talentName, lines, formText) {
  *                                         form-only share — the file-share attempt is skipped and
  *                                         the SAME link-fallback code path sends a text-only message.
  * @returns {Promise<{ method?: string, count?: number, aborted?: boolean }>}
- *          `method: "native_file_share_split"` is a distinct outcome: a mixed
- *          image+video selection whose COMBINED canShare() was rejected but
- *          whose two homogeneous subsets (images alone, videos alone) each
- *          pass — one subset (`sentType`/`sentCount`) has already been sent
- *          as a real native file share; the other (`remainingType`/
- *          `remainingCount`) was NOT sent and must be offered as an explicit,
- *          separately user-initiated follow-up share (see ClientView.jsx's
- *          handling of this method) — never silently dropped, never implied
- *          as already sent.
+ *
+ * `items` is always a single media type (all images or all videos) —
+ * ClientView.jsx enforces that at selection time, since WhatsApp/Android's
+ * handling of a mixed-MIME batch proved unreliable. This function no longer
+ * needs to special-case a mixed batch: one canShare/share call on the whole
+ * (homogeneous) `items` array is always the right shape.
  *
  * Behaviour matrix (intentional — preserves the existing security model):
  *
@@ -357,13 +352,11 @@ export async function shareMediaViaWhatsApp({
         // little async work as possible between the tap and the call —
         // WebKit invalidates transient user activation across an await, and
         // Chrome's own activation window can equally be exceeded when a
-        // multi-file, video-heavy selection has to fetch everything fresh.
-        // A PARTIALLY prepared selection (the common case for a mixed
-        // image+video pick — videos are pre-warmed well before the tap,
-        // images only start preparing on selection) must still use the
-        // videos that ARE ready rather than discarding them and re-fetching
-        // everything: only the few still-missing items are actually
-        // fetched here, in parallel with each other.
+        // multi-file selection has to fetch everything fresh. A PARTIALLY
+        // prepared selection (videos pre-warm on talent-open; images only
+        // start preparing on selection) must still use whatever IS ready
+        // rather than discarding it and re-fetching everything: only the few
+        // still-missing items are actually fetched here, in parallel.
         const authHeader = { Authorization: `Bearer ${getViewerToken(slug)}` };
         const files = await Promise.all(
             items.map((it, i) => {
@@ -408,6 +401,9 @@ export async function shareMediaViaWhatsApp({
                 : "one or more files could not be prepared";
         } else {
             // Files are ready — ask the platform if it will share them.
+            // `items` is always one media type (see the function's own JSDoc):
+            // a single canShare/share call on the whole batch is always the
+            // right shape — no mixed-media split-batch fallback needed.
             const canFiles = hasCanShare ? canShareFiles(goodFiles) : false;
             trace.q3_canShareFiles = canFiles;
             const shareMeta = items.map((it) => ({ id: it.id, type: it.type, name: it.name }));
@@ -441,67 +437,10 @@ export async function shareMediaViaWhatsApp({
                 trace.q8_path = "Link Fallback";
                 trace.q9_reason = `navigator.share({files}) threw: ${attemptResult.error?.name}: ${attemptResult.error?.message || ""}`.trim();
             } else {
-                // ── Mixed-media fallback ─────────────────────────────────────
-                // A combined image+video batch can be rejected by canShare()
-                // even when browsers/devices happily share EACH type alone —
-                // found live on a real Android device: 3 videos alone, and
-                // images alone, share fine; adding even one image to the video
-                // selection makes the combined payload fail canShare(). This is
-                // a genuine platform/device capability boundary, not something
-                // our own file/MIME construction controls (images and videos
-                // already go through identical, correctly-typed File
-                // construction above). Rather than silently downgrading a
-                // mixed selection straight to a links-only message, try the
-                // two type-homogeneous batches as separate native shares —
-                // never claiming more was sent than actually was.
-                const videoPairs = items.map((it, i) => ({ it, file: files[i] })).filter((p) => p.it.type === "video" && p.file);
-                const imagePairs = items.map((it, i) => ({ it, file: files[i] })).filter((p) => p.it.type !== "video" && p.file);
-                const isMixed = videoPairs.length > 0 && imagePairs.length > 0;
-                const videoFiles = videoPairs.map((p) => p.file);
-                const imageFiles = imagePairs.map((p) => p.file);
-                const canVideosAlone = isMixed && hasCanShare ? canShareFiles(videoFiles) : false;
-                const canImagesAlone = isMixed && hasCanShare ? canShareFiles(imageFiles) : false;
-
-                if (isMixed && canVideosAlone && canImagesAlone) {
-                    // Videos first — the larger, empirically-working batch —
-                    // using the SAME retry policy as a normal share.
-                    const videoMeta = videoPairs.map((p) => ({ id: p.it.id, type: p.it.type, name: p.it.name }));
-                    const firstAttempt = await attemptNativeFileShare(videoFiles, text, titleText);
-                    if (firstAttempt.ok) {
-                        trace.q8_path = "Native File Share (split: videos first)";
-                        trace.q9_reason = "combined mixed-media canShare() rejected; shared as two homogeneous batches";
-                        await logDispatch(slug, talentId, "native_file_share", videoFiles.length, videoMeta, sessionId);
-                        return emit({
-                            method: "native_file_share_split",
-                            sentType: "video",
-                            sentCount: videoFiles.length,
-                            remainingType: "image",
-                            remainingCount: imageFiles.length,
-                        });
-                    }
-                    if (firstAttempt.aborted) {
-                        trace.q8_path = "Native File Share (cancelled)";
-                        trace.q9_reason = "user cancelled the share sheet (split attempt, first batch)";
-                        return emit({ aborted: true });
-                    }
-                    if (firstAttempt.blocked) {
-                        trace.q8_path = "Share sheet blocked (retry failed, split attempt)";
-                        trace.q9_reason = "share sheet blocked by the browser after retry (split attempt, first batch)";
-                        return emit({ method: "share_blocked" });
-                    }
-                    // Any other error on the split attempt → fall through to
-                    // the ordinary combined secure-link fallback below (never a
-                    // second, different failure mode to reason about).
-                    trace.q8_path = "Link Fallback";
-                    trace.q9_reason = `split-share attempt threw: ${firstAttempt.error?.name}: ${firstAttempt.error?.message || ""}`.trim();
-                } else {
-                    trace.q8_path = "Link Fallback";
-                    trace.q9_reason = hasCanShare
-                        ? isMixed
-                            ? "navigator.canShare({files}) rejected the combined batch AND at least one homogeneous subset (images/videos alone)"
-                            : "navigator.canShare({files}) returned false (browser won't share these file types)"
-                        : "navigator.canShare is unavailable (can't offer file sharing safely)";
-                }
+                trace.q8_path = "Link Fallback";
+                trace.q9_reason = hasCanShare
+                    ? "navigator.canShare({files}) returned false (browser won't share these file types)"
+                    : "navigator.canShare is unavailable (can't offer file sharing safely)";
             }
         }
     } else {

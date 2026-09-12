@@ -5724,6 +5724,69 @@ def main():
         assert tile3 is None and reason3 == "message_not_found", (tile3, reason3)
         assert jump_called_157["n"] == 0, "no mark reply -> jump is never attempted"
         print("157. UPLOAD download-phase: index misses and no mark reply available -> clean 'message_not_found', jump never attempted, never a guess")
+
+        # 157b: Piyeri Barot (2026-09-12) — _resolve_video_tile_by_hash is
+        # the THIRD independent call site that used to attempt the jump
+        # exactly once with no reset on failure (the hardened video
+        # DOWNLOAD path, distinct from both _resolve_single_media_via_jump
+        # (SCAN) and _locate_download_message (the simple/photo DOWNLOAD
+        # path)). All three now share _jump_to_quoted_message_with_retry.
+        scroll_calls_157b = []
+        orig_scroll_157b = mark_scan._scroll_to_true_bottom
+        async def _fake_scroll_157b(page, full_sel):
+            scroll_calls_157b.append(full_sel)
+            return {"ok": True}
+        mark_scan._scroll_to_true_bottom = _fake_scroll_157b
+        mark_scan._find_message_index_by_data_id = _find_none_155
+        attempt_157b = {"n": 0}
+        async def _jump_first_fails_157b(page, group_name, reply_data_id):
+            attempt_157b["n"] += 1
+            if attempt_157b["n"] == 1:
+                return {"ok": False, "reason": "no message found near viewport center after jump"}
+            return {"ok": True, "data_id": "TAKE1_SRC_155", "locator": _MsgLoc155([take1_tile_155]), "html": "", "centered": {}}
+        mark_scan._jump_to_quoted_message = _jump_first_fails_157b
+        try:
+            tile4, _m4, ridx4, reason4 = asyncio.run(mark_scan._resolve_video_tile_by_hash(
+                _Page155(), "Piyeri Barot x Talentgram Agency", "TAKE1_SRC_155",
+                _blob_hash("SAHALTAKE1"), 0, mark_reply_message_id="REPLY_TAKE1_157B",
+            ))
+        finally:
+            mark_scan._scroll_to_true_bottom = orig_scroll_157b
+        assert reason4 is None, reason4
+        assert tile4 is take1_tile_155, tile4
+        assert attempt_157b["n"] == 2, "attempt 1 failed, the bounded retry succeeded"
+        assert len(scroll_calls_157b) == 1, "reset exactly once, only before the retry"
+        print("157b. Piyeri Barot: _resolve_video_tile_by_hash (the hardened video DOWNLOAD path) -> attempt 1 fails to relocate, a real scroll-to-bottom reset runs before the bounded retry -> attempt 2 resolves cleanly")
+
+        # 157c: Piyeri Barot — _locate_download_message (the simple/photo
+        # DOWNLOAD path) is the SECOND of the three sibling call sites,
+        # same fix, same shared wrapper.
+        scroll_calls_157c = []
+        orig_scroll_157c = mark_scan._scroll_to_true_bottom
+        async def _fake_scroll_157c(page, full_sel):
+            scroll_calls_157c.append(full_sel)
+            return {"ok": True}
+        mark_scan._scroll_to_true_bottom = _fake_scroll_157c
+        mark_scan._find_message_index_by_data_id = _find_none_155
+        attempt_157c = {"n": 0}
+        async def _jump_first_fails_157c(page, group_name, reply_data_id):
+            attempt_157c["n"] += 1
+            if attempt_157c["n"] == 1:
+                return {"ok": False, "reason": "reply message not found in scanned window"}
+            return {"ok": True, "data_id": "TAKE1_SRC_155", "locator": _MsgLoc155([take1_tile_155]), "html": "", "centered": {}}
+        mark_scan._jump_to_quoted_message = _jump_first_fails_157c
+        try:
+            idx5, msg5, reason5 = asyncio.run(mark_scan._locate_download_message(
+                _Page155(), "Piyeri Barot x Talentgram Agency", "TAKE1_SRC_155", "REPLY_TAKE1_157C",
+                source_thumbnail_hash=None,
+            ))
+        finally:
+            mark_scan._scroll_to_true_bottom = orig_scroll_157c
+        assert reason5 is None, reason5
+        assert msg5 is not None, msg5
+        assert attempt_157c["n"] == 2, "attempt 1 failed, the bounded retry succeeded"
+        assert len(scroll_calls_157c) == 1, "reset exactly once, only before the retry"
+        print("157c. Piyeri Barot: _locate_download_message (the simple/photo DOWNLOAD path) -> attempt 1 fails to relocate, a real scroll-to-bottom reset runs before the bounded retry -> attempt 2 resolves cleanly")
     finally:
         mark_scan._find_message_index_by_data_id = orig_find_idx_155
         mark_scan._jump_to_quoted_message = orig_jump_155
@@ -5927,30 +5990,35 @@ def main():
     print("164. bounded re-jump: first jump lands wrong, second (of _MAX_JUMP_ATTEMPTS) lands right -> resolved, never more than the bounded attempts")
 
     # 164b: Piyeri Barot (2026-09-12) — "the exact original message could
-    # not be relocated" persisted after commit 1f5cb35 because the retry
-    # loop never reset the underlying page state between its bounded
-    # attempts: the SAME reply-relocation search was simply retried
-    # against the EXACT SAME (possibly stuck-scrolled) page. The source
-    # chat must now be reopened before every retry (never before the
-    # FIRST attempt — a fresh page needs no reset), mirroring the proven
-    # download-phase round-reset pattern.
-    reopen_calls_164b: list = []
-    orig_sender_164b = mark_scan.sender
+    # not be relocated" recurred in production even AFTER the first
+    # attempt at this fix (commit 6f980af, which called
+    # sender._open_group_chat before the retry). That fix was itself a
+    # no-op in practice: _open_group_chat's own fast path ("already
+    # ready and header found -> return OPENED") never re-scrolls when the
+    # requested group is already the active chat — which it always is
+    # here, since this function only ever runs mid-scan, already inside
+    # the target group. _scroll_to_true_bottom's OWN docstring already
+    # documents this exact gap for a different call site. The retry must
+    # use THAT proven reset primitive instead.
+    scroll_reset_calls_164b: list = []
+    orig_scroll_reset_164b = mark_scan._scroll_to_true_bottom
 
-    class _FakeSenderReopen164b:
-        async def _open_group_chat(self, page, group_name):
-            reopen_calls_164b.append(group_name)
-            return "OPENED"
-        async def _resolve_scope(self, page):
-            return "#main"
+    async def _fake_scroll_reset_164b(page, full_sel):
+        scroll_reset_calls_164b.append(full_sel)
+        return {"ok": True}
 
-    mark_scan.sender = _FakeSenderReopen164b()
+    async def _fake_resolve_scope_164b(page):
+        return "#main"
+
+    orig_resolve_scope_164b = mark_scan.sender._resolve_scope
+    mark_scan._scroll_to_true_bottom = _fake_scroll_reset_164b
+    mark_scan.sender._resolve_scope = _fake_resolve_scope_164b
     attempt_164b = {"n": 0}
 
     async def _fake_find_idx_164b(page, group_name, data_id):
         # First attempt: the reply is genuinely not found (simulating a
         # stuck/virtualized scroll position) -> not_located. Only after
-        # the chat reopen does it resolve on the second attempt.
+        # the scroll-to-bottom reset does it resolve on the second attempt.
         attempt_164b["n"] += 1
         if attempt_164b["n"] == 1:
             return None
@@ -5978,11 +6046,12 @@ def main():
             _FakeJumpPage164b(), "Piyeri Barot x Talentgram Agency", "REPLY_164B", take1_hash_161,
         ))
     finally:
-        mark_scan.sender = orig_sender_164b
+        mark_scan._scroll_to_true_bottom = orig_scroll_reset_164b
+        mark_scan.sender._resolve_scope = orig_resolve_scope_164b
 
     assert r164b["ok"] is True and r164b["source_message_id"] == "ZEESHAN_TAKE1_SRC", r164b
-    assert reopen_calls_164b == ["Piyeri Barot x Talentgram Agency"], reopen_calls_164b  # reopened exactly once, only before the retry, never before attempt 1
-    print("164b. Piyeri Barot: attempt 1 fails to relocate the reply (stuck scroll) -> the source chat is reopened before the bounded retry, never before the first attempt -> attempt 2 resolves cleanly")
+    assert scroll_reset_calls_164b == ["#main [data-testid^='conv-msg-']"], scroll_reset_calls_164b  # reset exactly once, only before the retry, never before attempt 1
+    print("164b. Piyeri Barot: attempt 1 fails to relocate the reply (stuck scroll) -> a REAL scroll-to-bottom reset (not the no-op chat-reopen fast path) runs before the bounded retry, never before the first attempt -> attempt 2 resolves cleanly")
 
     # 165: Take 1 AND Introduction — BOTH need the placeholder-recovery,
     # BOTH resolve to their own DISTINCT exact source (the full incident).

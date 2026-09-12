@@ -721,6 +721,15 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
                     "mention_lid": lid, "mark_text": mark_text,
                     "reply_message_id": _own_data_id(html), "item_count": item_count,
                     "batch": batch, "single_photos_project": single_photos_m.group(1).strip() if single_photos_m else None,
+                    # 2026-09-12 (production-readiness audit) — propagated
+                    # into every per-tile candidate this batch mark expands
+                    # into below, so a take/intro tile from a batch mark can
+                    # still participate correctly in the SAME same-slot
+                    # recency comparison an ordinary single mark uses; a
+                    # batch-derived candidate missing this entirely would
+                    # force recency_known=False and fall back to a hard
+                    # ambiguity even when the real recency is knowable.
+                    "mark_window_position": mark_window_pos,
                 })
                 continue
 
@@ -939,6 +948,7 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
                     "resolved_source_message_id": jump["data_id"], "source_media_type": media_type,
                     "source_sender": None, "source_timestamp": None,
                     "is_album_tile": True, "album_tile_index": tile_index,
+                    "mark_window_position": bc.get("mark_window_position"),
                 })
         else:
             # "mark <project> photos" against a whole photo album — every
@@ -1898,6 +1908,38 @@ async def _jump_to_quoted_message(page, group_name: str, reply_data_id: str) -> 
     }
 
 
+async def _jump_to_quoted_message_with_retry(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
+    """Shared bounded-retry wrapper around _jump_to_quoted_message
+    (2026-09-12, Piyeri Barot / production-readiness audit). Every one of
+    this codebase's THREE independent call sites for the reply-relocation
+    jump (_resolve_single_media_via_jump for SCAN, _locate_download_message
+    and _resolve_video_tile_by_hash for DOWNLOAD) used to attempt it exactly
+    ONCE with no reset on failure — a stuck scroll position or transient
+    virtualization glitch that failed the first attempt was never given a
+    genuine second chance. Between attempts (never before the first): an
+    explicit scroll-to-bottom reset — the ACTUAL primitive proven to clear
+    this class of stuck state (see _scroll_to_true_bottom's own docstring).
+    NOT sender._open_group_chat: its own fast path ("already the active
+    chat -> return OPENED") is a no-op here, since every one of these three
+    callers already runs mid-scan/mid-download, already inside the target
+    group — reopening it was found, live, to fix nothing.
+    Bounded to _MAX_JUMP_ATTEMPTS, matching the existing per-attempt
+    settle/verify budget these callers already build on top of this."""
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+    jumped: Dict[str, Any] = {"ok": False, "reason": "jump never attempted"}
+    for attempt in range(1, _MAX_JUMP_ATTEMPTS + 1):
+        if attempt > 1:
+            try:
+                await _scroll_to_true_bottom(page, full_sel)
+            except Exception as exc:
+                logger.warning("mark_scan: scroll-to-bottom reset before jump retry %d failed (continuing anyway): %s", attempt, exc)
+        jumped = await _jump_to_quoted_message(page, group_name, reply_data_id)
+        if jumped.get("ok"):
+            return jumped
+    return jumped
+
+
 async def _resolve_quoted_jump(page, group_name: str, reply_data_id: str) -> Dict[str, Any]:
     """Clicks a reply's own quoted-message block and jumps to the original
     message — the resolution path for a reply whose quoted block carries
@@ -2005,22 +2047,24 @@ async def _resolve_single_media_via_jump(
     for jump_attempt in range(1, _MAX_JUMP_ATTEMPTS + 1):
         if jump_attempt > 1:
             # 2026-09-12 (Piyeri Barot — "the exact original message could
-            # not be relocated" persisting even after the existing 2 bounded
-            # attempts): every OTHER bounded retry loop in this file resets
-            # the underlying page state between attempts (the DOWNLOAD-
-            # phase round loop in _open_tile_viewer_and_download_hardened
-            # re-opens the group chat before each retry round) — this one
-            # didn't, so a stuck scroll position or a virtualization glitch
-            # that made attempt 1 fail was retried against the EXACT SAME
-            # unchanged page state, virtually guaranteeing attempt 2 fails
-            # identically. Reopening the source chat is a cheap, idempotent
-            # reset (a no-op fast path when it's already the active chat)
-            # that gives the SAME reply-relocation search a genuinely fresh
-            # attempt, mirroring the proven download-phase pattern.
+            # not be relocated" recurring even after the FIRST attempt at
+            # this fix, which called sender._open_group_chat before the
+            # retry). THAT fix was itself a no-op in practice:
+            # _open_group_chat's own fast path — "already ready and header
+            # found -> return OPENED" — never re-scrolls when the requested
+            # group is already the active chat, which it always is here
+            # (this whole function only ever runs mid-scan, already inside
+            # the target group). _scroll_to_true_bottom's OWN docstring
+            # already documents this exact gap for a different call site
+            # ("_open_group_chat's own fast path... never re-scrolls to
+            # correct it"). The REAL reset this retry needs is that same
+            # proven primitive — an explicit scroll-to-bottom, not a
+            # chat-open call that short-circuits into nothing.
             try:
-                await sender._open_group_chat(page, group_name)
+                scope = await sender._resolve_scope(page)
+                await _scroll_to_true_bottom(page, f"{scope} [data-testid^='conv-msg-']")
             except Exception as exc:
-                logger.warning("mark_scan: chat reopen before jump retry %d failed (continuing anyway): %s", jump_attempt, exc)
+                logger.warning("mark_scan: scroll-to-bottom reset before jump retry %d failed (continuing anyway): %s", jump_attempt, exc)
         jumped = await _jump_to_quoted_message(page, group_name, reply_data_id)
         if not jumped.get("ok"):
             last_fail = {**jumped, "failure_state": "not_located"}
@@ -2770,7 +2814,12 @@ async def _resolve_video_tile_by_hash(
     if idx is not None:
         message_locator = page.locator(full_sel).nth(idx)
     elif mark_reply_message_id:
-        jumped = await _jump_to_quoted_message(page, group_name, mark_reply_message_id)
+        # 2026-09-12 (Piyeri Barot / production-readiness audit): shared,
+        # bounded, scroll-reset-then-retry wrapper — see
+        # _jump_to_quoted_message_with_retry's own docstring. This
+        # function previously attempted the jump exactly once with no
+        # reset on failure, one of three places this exact gap existed.
+        jumped = await _jump_to_quoted_message_with_retry(page, group_name, mark_reply_message_id)
         if jumped.get("ok") and jumped.get("locator") is not None:
             message_locator = jumped["locator"]
             logger.info(
@@ -8006,7 +8055,14 @@ async def _locate_download_message(
         await _ensure_message_content_rendered(page, msg)
         return idx, msg, None
     if mark_reply_message_id:
-        jumped = await _jump_to_quoted_message(page, group_name, mark_reply_message_id)
+        # 2026-09-12 (Piyeri Barot / production-readiness audit): this
+        # sibling download-phase function had ZERO retry at all — a single
+        # jump attempt, no reset on failure. Now uses the SAME shared,
+        # bounded, scroll-reset-then-retry wrapper _resolve_single_media_
+        # via_jump (the SCAN-phase caller) and _resolve_video_tile_by_hash
+        # (the hardened video download-phase caller) both use — one fix,
+        # applied consistently everywhere this exact primitive is used.
+        jumped = await _jump_to_quoted_message_with_retry(page, group_name, mark_reply_message_id)
         if jumped.get("ok") and jumped.get("locator") is not None:
             logger.info(
                 "mark_scan: UPLOAD download-phase jump fallback for source=%s via reply=%s -> landed on %s (settle_confident=%s)",

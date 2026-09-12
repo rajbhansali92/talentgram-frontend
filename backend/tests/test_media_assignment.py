@@ -494,6 +494,51 @@ def test_validate_candidates_missing_recency_on_one_side_still_ambiguous():
     assert outcome.ambiguous is not None
 
 
+def test_validate_candidates_cross_source_positions_never_compared():
+    """2026-09-12 (production-readiness audit) — mark_window_position is
+    only meaningful WITHIN one scan/source: position 0 in a group's own
+    scan and position 0 in an individual phone chat's own scan are not
+    comparable at all (each is independently numbered from that source's
+    own _dump_window result). The mixed-source path stamps each
+    candidate with its own source_type/source_group_name; two conflicting
+    marks from DIFFERENT sources must never be auto-resolved by comparing
+    their positions, even when those positions look confidently orderable
+    — that would risk silently picking the WRONG one as "newest", a worse
+    outcome than a safe, honest ambiguity."""
+    candidates = [
+        {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-group", mark_window_position=0),
+         "source_type": "group", "source_group_name": "Talent Group"},
+        {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-phone", mark_window_position=0),
+         "source_type": "phone", "source_group_name": "919999999999"},
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert not outcome.ok
+    assert outcome.ambiguous is not None
+
+
+def test_validate_candidates_same_source_identity_still_resolves_by_recency():
+    """Regression safety for the fix above: when every conflicting mark
+    DOES share the same source_type/source_group_name (the ordinary
+    single-source case, and the mixed-source case where the conflict
+    happens to be within the SAME one source), recency-based
+    auto-resolution must still work exactly as before."""
+    candidates = [
+        {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-old", mark_window_position=5),
+         "source_type": "group", "source_group_name": "Talent Group"},
+        {**_mark(mention_lid=GUNWANTI_LID, mark_text="mark google intro", source_message_id="src-new", mark_window_position=1),
+         "source_type": "group", "source_group_name": "Talent Group"},
+    ]
+    outcome = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-google",
+        requested_project_label="Google", projects=_projects(), talent_id="t1",
+    )
+    assert outcome.ok, outcome.ambiguous
+    assert outcome.assignments[0]["resolved_source_message_id"] == "src-new"
+
+
 def test_validate_candidates_three_way_conflict_newest_of_three_wins():
     """More than two conflicting marks for the same slot — still resolves
     cleanly to the single most recent one, the other two superseded."""
@@ -989,7 +1034,11 @@ def test_report_unresolved_distinguishes_transient_from_remark_states():
         "Zeeshan Ali", "Mahindra Thar Film 1 & 2",
         [{"media_role": "take", "take_number": 1, "resolution_failure_state": "not_located"}],
     )
-    assert "could not be re-opened" in gone
+    # 2026-09-12 (Part 5 wording audit) — precise about WHICH stage failed
+    # (message relocation, not "video could not be opened"), and explicit
+    # that bounded automatic recovery was already exhausted before this
+    # was ever reported.
+    assert "could not be recovered after bounded automatic recovery" in gone
     assert "Re-send the MARK reply" in gone
 
     # 2026-09-11 (Rashi Mal, source-reacquisition audit) — a distinct

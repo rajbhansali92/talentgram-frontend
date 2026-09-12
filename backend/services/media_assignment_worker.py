@@ -145,8 +145,8 @@ _UNRESOLVED_STATE_PHRASE = {
     # (2026-09-11 — Zeeshan Ali). Distinguishes "the marked message is
     # genuinely gone / the jump landed elsewhere" (re-mark) from "the
     # marked media just didn't finish rendering this time" (retry).
-    "not_located": "the marked WhatsApp message could not be re-opened (the exact original message could not be relocated)",
-    "wrong_message": "the marked WhatsApp message could not be re-opened (the jump landed on different content)",
+    "not_located": "the exact marked source could not be recovered after bounded automatic recovery (the original message could not be relocated)",
+    "wrong_message": "the exact marked source could not be recovered after bounded automatic recovery (the jump landed on different content)",
     "media_not_rendered": "the marked media did not finish loading in WhatsApp Web in time",
     # 2026-09-11 (Rashi Mal, source-reacquisition audit) — distinct from
     # BOTH of the above: the reply's own quoted block never carried any
@@ -162,7 +162,7 @@ _UNRESOLVED_STATE_PHRASE = {
 def _report_unresolved(talent_label: str, project_label: str, unresolved: List[Dict[str, Any]]) -> str:
     def _line(u: Dict[str, Any]) -> str:
         role = ("Take " + str(u.get("take_number"))) if u.get("media_role") == "take" else (u.get("media_role") or "").capitalize()
-        phrase = _UNRESOLVED_STATE_PHRASE.get(u.get("resolution_failure_state") or "", "the marked WhatsApp message could not be re-opened")
+        phrase = _UNRESOLVED_STATE_PHRASE.get(u.get("resolution_failure_state") or "", "the exact marked source could not be recovered after bounded automatic recovery")
         return f"- {project_label} {role} — {phrase}"
 
     items = "\n".join(_line(u) for u in unresolved)
@@ -797,6 +797,20 @@ async def _process_scan_done() -> bool:
         media_assignment.slot_key(a["media_role"], a.get("take_number"), a.get("source_message_id"), a.get("source_thumbnail_hash"))
         for a in already
     }
+
+    # 2026-09-12 (production-readiness audit) — complete auditability for
+    # every automatic same-slot supersede decision (Phase 4/6): never
+    # surfaced to the user (an ordinary remark-then-remark should be
+    # invisible to them), but always visible in Railway logs so a real
+    # incident can be traced without guessing whether auto-resolution
+    # fired at all.
+    for s in outcome.superseded:
+        logger.info(
+            "media_assignment_worker: auto-superseded a same-slot MARK talent_id=%s project_id=%s "
+            "media_role=%s take_number=%s superseded_source_message_id=%s reply_message_id=%s",
+            talent_id, project_id, s.get("media_role"), s.get("take_number"),
+            s.get("resolved_source_message_id"), s.get("reply_message_id"),
+        )
 
     for m in outcome.assignments:
         await media_assignment.record_assignment(

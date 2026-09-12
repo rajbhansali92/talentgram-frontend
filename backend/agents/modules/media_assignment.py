@@ -706,9 +706,25 @@ def validate_candidates(
         # auto-resolve when there is a single, UNIQUE minimum — never when
         # recency is missing or tied, which stays a genuine, safe-to-ask
         # ambiguity exactly as before (never guessed).
+        # mark_window_position is only meaningful WITHIN one scan/source —
+        # position 0 in a group's own scan window and position 0 in an
+        # individual phone chat's own scan window are not comparable at
+        # all (each is independently numbered from that source's own
+        # _dump_window result). The mixed-source path
+        # (casting_pipeline._scan_and_validate_multi_source) merges
+        # candidates from MULTIPLE independent scans into one list before
+        # this ever runs, stamping each with its own source_type/
+        # source_group_name; the single-source path never sets those
+        # fields at all (every candidate implicitly shares the one scan).
+        # Recency is only trusted when every conflicting mark shares the
+        # SAME scan identity — comparing across different sources would
+        # silently risk picking the WRONG one as "newest", not just fail
+        # to resolve, so this is stricter than merely "position missing".
+        scan_identities = {(m.get("source_type"), m.get("source_group_name")) for m in marks}
+        cross_source_conflict = len(scan_identities) > 1
         best_pos_by_source: Dict[tuple, int] = {}
         marks_by_source: Dict[tuple, List[Dict[str, Any]]] = {}
-        recency_known = True
+        recency_known = not cross_source_conflict
         for m in marks:
             src = (m.get("resolved_source_message_id"), m.get("quoted_thumbnail_hash"))
             pos = m.get("mark_window_position")

@@ -445,7 +445,7 @@ export default function LinkResults() {
             } else if (e.event_type === "watch_video") {
                 act = e.video_action === "play" ? "Played Video" : (e.video_action === "completion" ? "Completed Video" : "Watched Video");
             }
-            timeline.push({ time: new Date(e.created_at), viewer: e.viewer_name || e.viewer_email || "Client", act, detail });
+            timeline.push({ time: new Date(e.created_at), viewer: e.viewer_name || e.viewer_email || "Guest", act, detail });
         });
         tDownloads.forEach(d => {
             timeline.push({ time: new Date(d.created_at), viewer: d.viewer_name || d.viewer_email, act: `Downloaded ${getDownloadItemDesc(d)}` });
@@ -867,7 +867,7 @@ export default function LinkResults() {
                                                                         return (
                                                                             <span key={ah.id || ahIdx} className={`inline-flex items-center gap-1 px-2.5 py-1 rounded border ${am.bg} ${am.color} font-medium`}>
                                                                                 <span>{formatTime(ah.created_at)}</span>
-                                                                                <span className="font-bold">{ah.viewer_name || "Client"}</span>
+                                                                                <span className="font-bold">{ah.viewer_name || ah.viewer_email || "Guest"}</span>
                                                                                 <span>{am.label}</span>
                                                                             </span>
                                                                         );

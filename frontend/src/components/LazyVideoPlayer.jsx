@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { api as axios } from "@/lib/api";
+import { api as axios, getViewerToken } from "@/lib/api";
 
 /**
  * Premium Lazy Video Player component.
@@ -21,12 +21,18 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
 
         const trackVideoEvent = (action) => {
             const sid = sessionStorage.getItem("client_session_id") || "guest-session";
+            // Authorization is required — without it the backend's
+            // decode_viewer() has no way to attribute this event, and it
+            // gets stored (and later displayed) as an anonymous "Guest"
+            // watch even for a fully identified viewer.
             axios.post(`/public/links/${slug}/track`, {
                 event_type: "watch_video",
                 session_id: sid,
                 media_id: mediaId,
                 talent_id: talentId,
                 video_action: action
+            }, {
+                headers: { Authorization: `Bearer ${getViewerToken(slug)}` },
             }).catch(() => {});
         };
 
@@ -45,6 +51,8 @@ export default function LazyVideoPlayer({ src, poster, label, className = "", me
                         media_id: mediaId,
                         talent_id: talentId,
                         watch_time: delta
+                    }, {
+                        headers: { Authorization: `Bearer ${getViewerToken(slug)}` },
                     }).catch(() => {});
                 }
                 lastTrackedTimeRef.current = current;

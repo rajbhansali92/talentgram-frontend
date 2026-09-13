@@ -671,9 +671,20 @@ function ClientView() {
             setReviewedIds(new Set(data?.client_state?.reviewed_talent_ids || []));
             loadRetryCountRef.current = 0;
             setStartupPhase("ready");
+            // Authorization is required here — see the identity-attribution
+            // audit: every /track call in this file was missing this header,
+            // so the backend's decode_viewer(authorization) always returned
+            // None and every "open"/"view_talent"/"view_media" event was
+            // stored with viewer_email/viewer_name = null, rendering as
+            // "Guest"/"Client" on the admin results page even for a fully
+            // identified viewer. loadData only runs after identify()
+            // succeeds (see the `identified` gate above), so a valid token
+            // always exists here.
             axios.post(`/public/links/${slug}/track`, {
                 event_type: "open",
                 session_id: getSessionId(),
+            }, {
+                headers: { Authorization: `Bearer ${getViewerToken(slug)}` },
             }).catch(() => {});
         } catch (e) {
             if (!loadDataMountedRef.current) return;
@@ -783,6 +794,8 @@ function ClientView() {
                     event_type: "review_talent",
                     session_id: getSessionId(),
                     talent_id: talentId,
+                }, {
+                    headers: { Authorization: `Bearer ${getViewerToken(slug)}` },
                 }).catch(() => {});
             }
             try {
@@ -1185,6 +1198,8 @@ function ClientView() {
                     event_type: "view_talent",
                     session_id: getSessionId(),
                     talent_id: talentId,
+                }, {
+                    headers: { Authorization: `Bearer ${getViewerToken(slug)}` },
                 }).catch(() => {});
             }
             setSeenIds((prev) => {
@@ -2707,16 +2722,16 @@ function TalentDetail({
     const trackMediaView = useCallback((mediaId) => {
         if (!mediaId || trackedMediaRefs.current.has(mediaId)) return;
         trackedMediaRefs.current.add(mediaId);
-        
-        let sid = sessionStorage.getItem("client_session_id") || "guest-session";
+
         axios.post(
             `/public/links/${slug}/track`,
             {
                 event_type: "view_media",
-                session_id: sid,
+                session_id: getSessionId(),
                 media_id: mediaId,
                 talent_id: talent.id
-            }
+            },
+            { headers: { Authorization: `Bearer ${getViewerToken(slug)}` } },
         ).catch(() => {});
     }, [slug, talent.id]);
 

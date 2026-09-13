@@ -245,7 +245,7 @@ function FeedbackCard({ fb, project, onApprove, onReject, onEdit, onDelete }) {
                         </span>
                     </div>
                     <div className="font-display text-lg truncate text-black/90">
-                        {fb.client_viewer_name || fb.client_viewer_email || "Client"}
+                        {fb.client_viewer_name || fb.client_viewer_email || "Guest"}
                     </div>
                     <div className="text-[11px] tg-mono text-black/45 mt-0.5 truncate">
                         {project?.brand_name || "—"} · sub {fb.submission_id?.slice(0, 8)} · {timeAgo(fb.created_at)}

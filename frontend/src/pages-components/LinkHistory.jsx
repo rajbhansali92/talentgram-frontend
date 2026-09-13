@@ -47,8 +47,64 @@ export default function LinkHistory() {
     const [pendingDelete, setPendingDelete] = useState(null);
     const [selected, setSelected] = useState(new Set());
     const [bulkConfirm, setBulkConfirm] = useState(false);
+    const [togglingPublicIds, setTogglingPublicIds] = useState(new Set());
     const canDelete = isAdmin();
     const canCreate = isAdmin();
+
+    // Same field/mechanism as the edit page's "Public link (anyone with link
+    // + identity)" checkbox (LinkGenerator.jsx) — PUT /links/{id} with the
+    // full LinkIn shape (the backend route replaces the whole document, not
+    // a partial patch), just with only `is_public` flipped. `l` already
+    // carries every field the row needs because GET /links returns the full
+    // stored document, so no extra fetch is required. Optimistic with
+    // rollback: flips immediately, reverts and toasts on failure, and the
+    // in-flight id is tracked so a second click can't fire a duplicate
+    // request while the first is still pending.
+    const togglePublic = async (l) => {
+        if (togglingPublicIds.has(l.id)) return;
+        const prevIsPublic = !!l.is_public;
+        const nextIsPublic = !prevIsPublic;
+        setTogglingPublicIds((prev) => new Set(prev).add(l.id));
+        setLinks((prev) =>
+            prev.map((x) => (x.id === l.id ? { ...x, is_public: nextIsPublic } : x)),
+        );
+        try {
+            const payload = {
+                title: l.title,
+                brand_name: l.brand_name ?? null,
+                talent_ids: l.talent_ids || [],
+                submission_ids: l.submission_ids || [],
+                visibility: l.visibility || {},
+                talent_field_visibility: l.talent_field_visibility || {},
+                auto_pull: !!l.auto_pull,
+                auto_project_id: l.auto_project_id ?? null,
+                is_public: nextIsPublic,
+                password: l.password ?? null,
+                notes: l.notes ?? null,
+                client_budget_override: l.client_budget_override ?? null,
+            };
+            const { data } = await adminApi.put(`/links/${l.id}`, payload);
+            // Reconcile with the server's own response rather than trusting
+            // the optimistic flip blindly — keeps the row byte-for-byte in
+            // sync with what the edit page would show on next load.
+            setLinks((prev) =>
+                prev.map((x) => (x.id === l.id ? { ...x, ...data } : x)),
+            );
+        } catch (e) {
+            setLinks((prev) =>
+                prev.map((x) => (x.id === l.id ? { ...x, is_public: prevIsPublic } : x)),
+            );
+            toast.error(
+                e?.response?.data?.detail || "Couldn't update the public link setting",
+            );
+        } finally {
+            setTogglingPublicIds((prev) => {
+                const next = new Set(prev);
+                next.delete(l.id);
+                return next;
+            });
+        }
+    };
 
     const toggle = (id) =>
         setSelected((prev) => {
@@ -260,6 +316,29 @@ export default function LinkHistory() {
                                                     );
                                                 })()}
                                             </div>
+                                            <label className="flex items-center gap-2 mt-2 cursor-pointer w-fit">
+                                                <span className="text-[10px] tracking-wide uppercase text-black/40">
+                                                    Public link
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => togglePublic(l)}
+                                                    disabled={togglingPublicIds.has(l.id)}
+                                                    aria-pressed={!!l.is_public}
+                                                    aria-label={
+                                                        l.is_public
+                                                            ? "Public link enabled — anyone with the link and identity can view it. Click to make private."
+                                                            : "Public link disabled. Click to make it public."
+                                                    }
+                                                    title="Public link: anyone with the link + identity can view it"
+                                                    data-testid={`link-public-toggle-${l.id}`}
+                                                    className={`shrink-0 w-9 h-5 rounded-full relative transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed ${l.is_public ? "bg-black" : "bg-black/15"}`}
+                                                >
+                                                    <span
+                                                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-150 ${l.is_public ? "translate-x-4" : ""}`}
+                                                    />
+                                                </button>
+                                            </label>
                                         </div>
                                     </div>
                                     <div className="col-span-2 text-sm text-black/70">
@@ -368,6 +447,32 @@ export default function LinkHistory() {
                                             );
                                         })()}
                                     </div>
+
+                                    {/* Public link toggle — compact secondary row so it never
+                                        crowds the title or the action buttons on narrow screens. */}
+                                    <label className="flex items-center gap-2 -my-1 py-1 cursor-pointer w-fit min-h-[36px]">
+                                        <span className="text-[10px] tracking-wide uppercase text-black/40">
+                                            Public link
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => togglePublic(l)}
+                                            disabled={togglingPublicIds.has(l.id)}
+                                            aria-pressed={!!l.is_public}
+                                            aria-label={
+                                                l.is_public
+                                                    ? "Public link enabled — anyone with the link and identity can view it. Click to make private."
+                                                    : "Public link disabled. Click to make it public."
+                                            }
+                                            title="Public link: anyone with the link + identity can view it"
+                                            data-testid={`link-public-toggle-mobile-${l.id}`}
+                                            className={`shrink-0 w-9 h-5 rounded-full relative transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed ${l.is_public ? "bg-black" : "bg-black/15"}`}
+                                        >
+                                            <span
+                                                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-150 ${l.is_public ? "translate-x-4" : ""}`}
+                                            />
+                                        </button>
+                                    </label>
 
                                     {/* Statistics Grid */}
                                     <div className="grid grid-cols-3 gap-2 bg-black/[0.01] border border-black/[0.04] rounded-xl p-3 text-center">

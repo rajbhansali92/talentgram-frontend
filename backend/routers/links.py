@@ -1159,13 +1159,25 @@ async def track_link_event(
         
     await db.links.update_one({"slug": slug}, {"$set": {"analytics": analytics}})
 
-    # Decode viewer securely if possible
+    # Decode viewer securely if possible. Unlike every other identity-bearing
+    # endpoint in this file (/seen, /reviewed, /action, /download-log, …),
+    # this one intentionally still accepts a request with NO viewer at all
+    # (anonymous analytics beacons are allowed) — but a token whose own
+    # `slug` claim doesn't match THIS link must be treated exactly like a
+    # missing token, not trusted: without this check, a viewer's legitimate
+    # token for one link could be replayed to attribute fabricated tracking
+    # events to their own (real) identity on an unrelated link. This can't
+    # be used to impersonate a DIFFERENT person — only to misattribute
+    # cross-link — but the same server-authoritative scoping every other
+    # endpoint already enforces belongs here too.
     viewer = None
     if authorization:
         try:
             viewer = decode_viewer(authorization)
         except Exception:
             pass
+        if viewer and viewer.get("slug") != slug:
+            viewer = None
 
     # Log granular non-creepy timeline events to db.link_events
     event_doc = {

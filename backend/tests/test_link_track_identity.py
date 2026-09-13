@@ -178,3 +178,35 @@ async def test_track_event_with_expired_token_stores_null_identity():
         assert events[0]["viewer_email"] is None
     finally:
         await _cleanup_test_link(link_id)
+
+
+async def test_track_event_with_a_token_scoped_to_a_different_link_stores_null_identity():
+    """Hardening-pass finding: every other identity-bearing endpoint in this
+    file (/seen, /reviewed, /action, /download-log, …) rejects a token whose
+    own `slug` claim doesn't match the link being acted on; track_link_event
+    was the one exception. A viewer's legitimate token for link A must not be
+    usable to attribute fabricated tracking events to their own identity on
+    unrelated link B — it should degrade to anonymous, exactly like a missing
+    token, never to a hard failure (this endpoint intentionally still accepts
+    genuinely anonymous beacons) and never by trusting the mismatched scope."""
+    link_a_id, slug_a = await _make_test_link()
+    link_b_id, slug_b = await _make_test_link()
+    try:
+        token_for_a = _viewer_token(slug_a, "aman@example.com", "Aman Gupta")
+
+        await track_link_event(
+            slug_b,
+            LinkTrackIn(event_type="view_talent", session_id="sess-5", talent_id="t1"),
+            authorization=f"Bearer {token_for_a}",
+        )
+
+        events_b = await db.link_events.find({"link_id": link_b_id}).to_list(10)
+        assert len(events_b) == 1
+        assert events_b[0]["viewer_email"] is None
+        assert events_b[0]["viewer_name"] is None
+
+        events_a = await db.link_events.find({"link_id": link_a_id}).to_list(10)
+        assert len(events_a) == 0
+    finally:
+        await _cleanup_test_link(link_a_id)
+        await _cleanup_test_link(link_b_id)

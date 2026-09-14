@@ -3136,16 +3136,44 @@ function WEAuditLogPanel({ workers = [], defaultWorkerId = "" }) {
   const [limit, setLimit] = useState(100);
   const [workerFilter, setWorkerFilter] = useState(defaultWorkerId || "");
 
+  // Re-sync the filter to the parent's currently-selected worker whenever it
+  // changes (e.g. switching the top worker strip while already on the
+  // Analytics tab) — matches WESessionPanel/WEHistoryPanel/WEConfigPanel's
+  // behavior of always reflecting the current selection. The operator can
+  // still independently pick "All Workers" (or a different worker) via this
+  // panel's own dropdown; it resets to the parent's selection again the next
+  // time that selection changes.
+  useEffect(() => {
+    setWorkerFilter(defaultWorkerId || "");
+  }, [defaultWorkerId]);
+
+  // Same out-of-order-response guard as WESessionPanel/WEHistoryPanel/
+  // WEConfigPanel — a fast filter A -> B -> A switch (via the parent worker
+  // strip or this panel's own dropdown) must never let A's late-arriving
+  // FIRST response overwrite what A's second (current) fetch already loaded.
+  const currentFilterRef = useRef(workerFilter);
+  useEffect(() => { currentFilterRef.current = workerFilter; }, [workerFilter]);
+
+  // Switching the filter: clear the PREVIOUS selection's logs immediately so
+  // they can never be mistaken for the newly-selected filter's own data
+  // while the fresh fetch is still in flight.
+  useEffect(() => {
+    setLoading(true);
+    setLogs([]);
+  }, [workerFilter]);
+
   const fetchLogs = useCallback(async () => {
+    const requestedFor = workerFilter;
     try {
       const params = { limit };
       if (workerFilter) params.worker_id = workerFilter;
       const data = await getAuditLog(params);
+      if (currentFilterRef.current !== requestedFor) return; // superseded by a newer selection
       setLogs(data);
     } catch (err) {
       toast.error("Failed to load audit trail logs");
     } finally {
-      setLoading(false);
+      if (currentFilterRef.current === requestedFor) setLoading(false);
     }
   }, [limit, workerFilter]);
 

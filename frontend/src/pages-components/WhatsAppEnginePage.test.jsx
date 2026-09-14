@@ -105,6 +105,10 @@ async function goToSettingsSafety() {
   fireEvent.click(await screen.findByText("Safety Configuration"));
 }
 
+async function goToAnalytics() {
+  fireEvent.click(await screen.findByText("Analytics"));
+}
+
 describe("WhatsAppEnginePage — multi-worker", () => {
   it("(a) selects Worker 1 (default) by default, before the registry even resolves", async () => {
     whatsappApi.getWorkers.mockResolvedValue([WORKER1]);
@@ -381,5 +385,96 @@ describe("WhatsAppEnginePage — multi-worker", () => {
       const params = def.slice(0, def.indexOf(")"));
       expect(params).toMatch(/workerId/);
     }
+  });
+
+  // --- Audit Log panel: stale-response guard (parity fix with WESessionPanel/
+  // WEHistoryPanel/WEConfigPanel) ---
+
+  const LOG_DEFAULT = {
+    id: "log-default-1", timestamp: "2026-09-14T10:00:00Z",
+    event_type: "sent", destination: "Worker1Group", actor: "crm-agent",
+    message_preview: "default-worker-event",
+  };
+  const LOG_WORKER2 = {
+    id: "log-worker2-1", timestamp: "2026-09-14T10:05:00Z",
+    event_type: "sent", destination: "Worker2Group", actor: "crm-agent",
+    message_preview: "worker2-event",
+  };
+
+  it("(Audit Log) switching the parent worker selection re-syncs the filter and clears the previous worker's rows immediately", async () => {
+    whatsappApi.getWorkers.mockResolvedValue([WORKER1, WORKER2_REGISTERED]);
+    let resolveWorker2Logs;
+    whatsappApi.getAuditLog.mockImplementation(({ worker_id } = {}) => {
+      if (worker_id === "worker-2") return new Promise((res) => { resolveWorker2Logs = res; });
+      return Promise.resolve([LOG_DEFAULT]);
+    });
+
+    render(<WhatsAppEnginePage />);
+    await goToAnalytics();
+    await waitFor(() => expect(screen.getByText("default-worker-event")).toBeTruthy());
+    expect(screen.getByTestId("we-audit-worker-filter").value).toBe("default");
+
+    fireEvent.click(screen.getByTestId("we-worker-tab-worker-2"));
+
+    // The filter re-syncs to worker-2 and the previous worker's rows must be
+    // gone immediately — before worker-2's own (still in-flight) fetch
+    // resolves — rather than lingering under the new selection.
+    await waitFor(() => expect(screen.queryByText("default-worker-event")).toBeNull());
+    // Still loading — worker-2's own fetch hasn't resolved yet, so the panel
+    // shows its spinner rather than a (stale or empty) table.
+    expect(screen.queryByTestId("we-audit-worker-filter")).toBeNull();
+
+    resolveWorker2Logs([LOG_WORKER2]);
+    await waitFor(() => expect(screen.getByText("worker2-event")).toBeTruthy());
+    expect(screen.getByTestId("we-audit-worker-filter").value).toBe("worker-2");
+  });
+
+  it("(Audit Log) a late-arriving response from the previously-selected worker is ignored, never overwriting the current worker's already-rendered rows", async () => {
+    whatsappApi.getWorkers.mockResolvedValue([WORKER1, WORKER2_REGISTERED]);
+    let resolveDefaultLogs;
+    whatsappApi.getAuditLog.mockImplementation(({ worker_id } = {}) => {
+      if (worker_id === "worker-2") return Promise.resolve([LOG_WORKER2]);
+      return new Promise((res) => { resolveDefaultLogs = res; });
+    });
+
+    render(<WhatsAppEnginePage />);
+    await goToAnalytics();
+    // Worker 1 ("default") is selected first; its request is held open.
+
+    fireEvent.click(screen.getByTestId("we-worker-tab-worker-2"));
+    // Worker 2's request resolves immediately and its row renders normally —
+    // the current worker's response is still rendered correctly.
+    await waitFor(() => expect(screen.getByText("worker2-event")).toBeTruthy());
+
+    // Now the stale Worker 1 response (issued before the switch) finally
+    // arrives. It must be discarded, not overwrite worker-2's rows.
+    resolveDefaultLogs([LOG_DEFAULT]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText("worker2-event")).toBeTruthy();
+    expect(screen.queryByText("default-worker-event")).toBeNull();
+  });
+
+  it("(Audit Log) existing functionality is unchanged: default worker filter, limit selection, and 'All Workers' still work", async () => {
+    whatsappApi.getWorkers.mockResolvedValue([WORKER1, WORKER2_REGISTERED]);
+    whatsappApi.getAuditLog.mockResolvedValue([LOG_DEFAULT]);
+
+    render(<WhatsAppEnginePage />);
+    await goToAnalytics();
+
+    // Initial load is scoped to the currently-selected worker (unchanged
+    // default behavior), not "All Workers".
+    await waitFor(() => expect(whatsappApi.getAuditLog).toHaveBeenCalledWith({ limit: 100, worker_id: "default" }));
+    expect(screen.getByText("default-worker-event")).toBeTruthy();
+
+    whatsappApi.getAuditLog.mockClear();
+    whatsappApi.getAuditLog.mockResolvedValue([LOG_DEFAULT, LOG_WORKER2]);
+    fireEvent.change(screen.getByTestId("we-audit-worker-filter"), { target: { value: "" } });
+    await waitFor(() => expect(whatsappApi.getAuditLog).toHaveBeenCalledWith({ limit: 100 }));
+    await waitFor(() => expect(screen.getByText("worker2-event")).toBeTruthy());
+
+    whatsappApi.getAuditLog.mockClear();
+    const limitSelect = screen.getAllByRole("combobox").find((el) => el.value === "100");
+    fireEvent.change(limitSelect, { target: { value: "50" } });
+    await waitFor(() => expect(whatsappApi.getAuditLog).toHaveBeenCalledWith({ limit: 50 }));
   });
 });

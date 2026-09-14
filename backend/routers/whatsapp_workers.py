@@ -127,6 +127,13 @@ async def _seed_default_worker() -> None:
         "label": "Worker 1",
         "session_instance": DEFAULT_WORKER_ID,
         "active": True,
+        # Sending-permission gate (2026-09-14, Worker 2 incident follow-up) —
+        # Worker 1 is the pre-existing, already-live production number, so
+        # its seed explicitly permits sending from day one. This only
+        # affects a genuinely fresh seed (the real production doc already
+        # exists and is backfilled separately, once, as an explicit
+        # deployment step — this default is what a NEW environment gets).
+        "sending_enabled": True,
         "created_at": _now(),
         "created_by": "system_migration",
     }
@@ -238,6 +245,12 @@ async def create_worker(payload: WorkerCreateIn, admin: dict = Depends(current_a
         "label": payload.label.strip(),
         "session_instance": worker_id,
         "active": True,
+        # Sending-permission gate — a newly registered worker can never send
+        # real traffic until an admin explicitly calls
+        # POST /{worker_id}/enable-sending as its own, separate, deliberate
+        # action. Registration alone (this route) must never imply send
+        # permission — see _create_batch_internal's fail-closed check.
+        "sending_enabled": False,
         "created_at": _now(),
         "created_by": admin["id"],
     }
@@ -302,3 +315,28 @@ async def reset_worker_session(worker_id: str, admin: dict = Depends(current_adm
         }},
         upsert=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# ── SENDING PERMISSION (2026-09-14, Worker 2 incident follow-up) ───────────
+#
+# A worker can be registered and fully authenticated (real WhatsApp session,
+# real heartbeat) while still being unable to send a single real message —
+# registration and authentication only ever establish IDENTITY, never send
+# permission. The actual gate lives in whatsapp.py's _create_batch_internal
+# (checked against this same `sending_enabled` field); this route is the
+# ONLY way that field is ever set to True, and it is a deliberate,
+# stand-alone admin action, never implied by any other route above.
+# ---------------------------------------------------------------------------
+
+@router.post("/{worker_id}/enable-sending")
+async def enable_worker_sending(worker_id: str, admin: dict = Depends(current_admin)) -> Dict[str, Any]:
+    """Admin-only. Flips ONLY this worker's `sending_enabled` to True — no
+    other field, document, or collection is touched, and nothing is sent,
+    queued, retried, or replayed by this call. Sending remains blocked for
+    every other worker until this is called for them explicitly."""
+    doc = await require_worker(worker_id)
+    await db[COLLECTION].update_one({"id": worker_id}, {"$set": {"sending_enabled": True}})
+    logger.info("whatsapp_workers: sending enabled for worker %s by admin %s", worker_id, admin["id"])
+    updated = {**doc, "sending_enabled": True}
+    return await _enrich(updated)

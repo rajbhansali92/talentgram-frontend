@@ -1451,7 +1451,25 @@ async def _create_batch_internal(payload: BatchIn, admin: dict) -> dict:
     # Backend validation of worker identity (multi-worker support) — an
     # unregistered worker_id must never be able to create jobs a worker
     # process will pick up under a different, unowned identity.
-    await require_worker(payload.worker_id)
+    worker_doc = await require_worker(payload.worker_id)
+
+    # Sending-permission gate (2026-09-14, Worker 2 incident follow-up) —
+    # a worker can be registered and fully authenticated while still being
+    # unable to send: authentication establishes IDENTITY, never send
+    # PERMISSION. Fail closed — only the literal boolean True permits
+    # sending; False, a missing field, None, and any non-boolean value are
+    # all rejected. This is the single enforcement point for every real
+    # send path (POST /batches and send_casting_call both call this
+    # function); session/QR/status/heartbeat routes never call it and are
+    # deliberately unaffected.
+    if worker_doc.get("sending_enabled") is not True:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Worker '{payload.worker_id}' is not enabled for sending. "
+                "An admin must explicitly enable sending for this worker first."
+            ),
+        )
 
     # Validate template
     template = await db.whatsapp_templates.find_one({"id": payload.template_id}, {"_id": 0})

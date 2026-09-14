@@ -27,6 +27,19 @@ class ExecContext:
     sender_phone: str
     sender_name: Optional[str] = None
     conversation_id: Optional[str] = None
+    # Multi-worker support (2026-09-13) — which authenticated WhatsApp
+    # worker/session the inbound message that led to this executor call
+    # actually arrived through (dispatcher.handle_inbound_message's own
+    # worker_id parameter, threaded through every ExecContext construction
+    # site). Default "default" is a plain literal, not an import of
+    # agents.registry.DEFAULT_WORKER_ID — registry.py already imports
+    # AgentDefinition from this module, so importing registry back here
+    # would be circular. An executor that dispatches further async work
+    # tied to a specific worker (e.g. casting_pipeline.py's UPLOAD/SEND
+    # executors creating a media_assignment scan_request whose eventual
+    # completion report must be sent from the SAME worker the command
+    # arrived on) should read this field rather than assume "default".
+    worker_id: str = "default"
 
 
 @dataclass

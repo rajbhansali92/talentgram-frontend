@@ -134,7 +134,8 @@ async def _clear_or_handoff(
 
 
 async def _collect_or_advance(
-    agent, intent, conv: dict, text: str, *, sender_name: Optional[str] = None
+    agent, intent, conv: dict, text: str, *, sender_name: Optional[str] = None,
+    worker_id: str = "default",
 ) -> DispatchResult:
     """Handle one turn while the conversation is in "collecting" or
     "editing" step. Returns the reply; caller is responsible for the
@@ -150,6 +151,7 @@ async def _collect_or_advance(
                 sender_phone=phone,
                 sender_name=sender_name,
                 conversation_id=str(conv.get("_id") or ""),
+                worker_id=worker_id,
             )
             edits = await intent.parse_edits_async(text, collected, intent.fields, edit_ctx)
         else:
@@ -194,6 +196,7 @@ async def _collect_or_advance(
         sender_phone=phone,
         sender_name=sender_name,
         conversation_id=str(conv.get("_id") or ""),
+        worker_id=worker_id,
     )
     if intent.auto_confirm:
         exec_result = await intent.executor(collected, ctx)
@@ -242,6 +245,7 @@ _OPERATION_ID_SCAN_RE = re.compile(r"(CP-\d{8}-[0-9A-Fa-f]{4})", re.IGNORECASE)
 
 async def _advance_task(
     agent, task: dict, text: str, *, group_name: str, phone: str, sender_name: Optional[str],
+    worker_id: str = "default",
 ) -> DispatchResult:
     """Task-engine counterpart of `_collect_or_advance` (+ the "confirming"
     step block inside handle_inbound_message below) — a deliberately
@@ -262,7 +266,7 @@ async def _advance_task(
     status = task.get("status")
     ctx = ExecContext(
         agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
-        sender_name=sender_name, conversation_id=op_id,
+        sender_name=sender_name, conversation_id=op_id, worker_id=worker_id,
     )
 
     if status == tasks.STATUS_CONFIRMING:
@@ -348,6 +352,7 @@ async def _advance_task(
 
 async def _advance_disambiguation(
     agent, conv: dict, text: str, *, group_name: str, phone: str, sender_name: Optional[str],
+    worker_id: str = "default",
 ) -> DispatchResult:
     """Sprint 1 (2026-08-09) — Shared Interactive Disambiguation Engine.
     Handles one turn while the conversation is in the "disambiguating"
@@ -436,6 +441,7 @@ async def _advance_disambiguation(
     ctx = ExecContext(
         agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
         sender_name=sender_name, conversation_id=str(conv.get("_id") or ""),
+        worker_id=worker_id,
     )
     await conversation.update_conversation(
         agent.agent_id, phone, collected=collected, step="confirming"
@@ -485,6 +491,15 @@ async def handle_inbound_message(
     # first whenever it IS available (a stronger, non-text identifier), per
     # "avoid brittle string matching whenever a stronger identifier exists".
     replied_quoted_text: Optional[str] = None,
+    # Multi-worker support (2026-09-13) — which authenticated WhatsApp
+    # number/session this message actually arrived through. Defaults to the
+    # pre-existing worker's id, so every current caller (every test in this
+    # suite, and the production /inbound route until the transport starts
+    # sending its own identity) resolves against exactly the same configs
+    # it always has. See agents/registry.py's resolve_agent_for_group for
+    # why this is what makes two workers' identically-named groups route
+    # independently instead of colliding.
+    worker_id: str = registry.DEFAULT_WORKER_ID,
 ) -> DispatchResult:
     phone = _normalize_sender(sender_phone)
     raw_message = text or ""
@@ -508,7 +523,7 @@ async def handle_inbound_message(
 
     try:
         with request_scope.stage("auth"):
-            resolved = await registry.resolve_agent_for_group(group_name)
+            resolved = await registry.resolve_agent_for_group(group_name, worker_id)
             if not resolved:
                 # Messages from groups no agent owns are silently ignored.
                 return DispatchResult(handled=False)
@@ -661,6 +676,7 @@ async def handle_inbound_message(
             task_result = await _advance_task(
                 agent, replied_task, working_message,
                 group_name=group_name, phone=phone, sender_name=sender_name,
+                worker_id=worker_id,
             )
             await audit.log_turn(
                 agent_id=agent.agent_id,
@@ -728,6 +744,7 @@ async def handle_inbound_message(
             editing_ctx = ExecContext(
                 agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
                 sender_name=sender_name, conversation_id=str(conv.get("_id") or ""),
+                worker_id=worker_id,
             )
             editing_immune_to_fresh_trigger = bool(
                 await editing_intent.claims_editing_reply(
@@ -765,7 +782,7 @@ async def handle_inbound_message(
                 # in-progress intent's own "reply with a number" handling.
                 bare_ctx = ExecContext(
                     agent_id=agent.agent_id, group_name=group_name,
-                    sender_phone=phone, sender_name=sender_name,
+                    sender_phone=phone, sender_name=sender_name, worker_id=worker_id,
                 )
                 bare_reply_resolution = await agent.resolve_bare_reply(working_message, bare_ctx)
                 if bare_reply_resolution is not None:
@@ -850,6 +867,7 @@ async def handle_inbound_message(
                 sender_phone=phone,
                 sender_name=sender_name,
                 conversation_id=str(conv.get("_id") or ""),
+                worker_id=worker_id,
             )
             if intent.auto_confirm:
                 # Nothing to approve — reply immediately and don't leave a
@@ -949,6 +967,7 @@ async def handle_inbound_message(
                 edit_ctx = ExecContext(
                     agent_id=agent.agent_id, group_name=group_name, sender_phone=phone,
                     sender_name=sender_name, conversation_id=str(conv.get("_id") or ""),
+                    worker_id=worker_id,
                 )
                 intercepted = await intent.handle_confirming_reply(
                     working_message, conv.get("collected") or {}, edit_ctx
@@ -984,6 +1003,7 @@ async def handle_inbound_message(
                     sender_phone=phone,
                     sender_name=sender_name,
                     conversation_id=str(conv.get("_id") or ""),
+                    worker_id=worker_id,
                 )
                 exec_result = await intent.executor(conv.get("collected") or {}, ctx)
                 await _clear_or_handoff(agent.agent_id, phone, group_name, exec_result)
@@ -1011,6 +1031,7 @@ async def handle_inbound_message(
                     sender_phone=phone,
                     sender_name=sender_name,
                     conversation_id=str(conv.get("_id") or ""),
+                    worker_id=worker_id,
                 )
                 edit_reply = await _render_edit_prompt(intent, conv.get("collected") or {}, edit_ctx)
                 await audit.log_turn(
@@ -1034,6 +1055,7 @@ async def handle_inbound_message(
                         sender_phone=phone,
                         sender_name=sender_name,
                         conversation_id=str(conv.get("_id") or ""),
+                        worker_id=worker_id,
                     )
                     cancel_reply = await intent.build_cancel_message(conv.get("collected") or {}, cancel_ctx)
                 await audit.log_turn(
@@ -1061,12 +1083,12 @@ async def handle_inbound_message(
         if conv["step"] == "disambiguating":
             return await _advance_disambiguation(
                 agent, conv, working_message, group_name=group_name, phone=phone,
-                sender_name=sender_name,
+                sender_name=sender_name, worker_id=worker_id,
             )
 
         # step in ("collecting", "editing")
         result = await _collect_or_advance(
-            agent, intent, conv, working_message, sender_name=sender_name
+            agent, intent, conv, working_message, sender_name=sender_name, worker_id=worker_id,
         )
         await audit.log_turn(
             agent_id=agent.agent_id,

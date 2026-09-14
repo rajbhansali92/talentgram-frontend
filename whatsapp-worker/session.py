@@ -161,14 +161,21 @@ class WhatsAppSession:
     Manages a single persistent Playwright / WhatsApp Web session.
 
     Usage:
-        session = WhatsAppSession()
+        session = WhatsAppSession(worker_id="default")
         await session.start()          # launches browser, handles QR if needed
         page = session.page            # ready-to-use authenticated page
         await session.heartbeat()      # call periodically to verify still connected
         await session.stop()           # clean shutdown
     """
 
-    def __init__(self) -> None:
+    def __init__(self, worker_id: str = config.WORKER_ID) -> None:
+        # Multi-worker support (2026-09-13) — every whatsapp_sessions write
+        # below targets {"id": self.worker_id} instead of the literal
+        # "default" this class used to hardcode. Defaults to config.WORKER_ID
+        # (itself "default" unless the process's own WORKER_ID env var says
+        # otherwise), so worker.py's normal `WhatsAppSession()` call keeps
+        # writing to exactly the same document Worker 1 always has.
+        self.worker_id = worker_id
         self._pw = None
         self._context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -521,7 +528,7 @@ class WhatsAppSession:
             if matched:
                 self._healthy = True
                 await get_db().whatsapp_sessions.update_one(
-                    {"id": "default"},
+                    {"id": self.worker_id},
                     {"$set": {"last_heartbeat": _utcnow()}},
                     upsert=True,
                 )
@@ -553,7 +560,8 @@ class WhatsAppSession:
         error_message: Optional[str] = None,
         extra: Optional[dict] = None,
     ) -> None:
-        """Upsert the singleton session document in MongoDB."""
+        """Upsert this worker's own session document in MongoDB (one doc per
+        worker_id — no longer a true singleton once a second worker exists)."""
         try:
             updates: dict = {
                 "status": status,
@@ -563,7 +571,7 @@ class WhatsAppSession:
             if extra:
                 updates.update(extra)
             await get_db().whatsapp_sessions.update_one(
-                {"id": "default"},
+                {"id": self.worker_id},
                 {"$set": updates},
                 upsert=True,
             )

@@ -5,6 +5,18 @@ Reads all settings from environment variables with safe defaults.
 import os
 
 
+# Multi-worker support (2026-09-13) — the identity of THIS worker process.
+# Defaults to "default", the id every session/job/config document in
+# production has always implicitly used (hardcoded before this change) —
+# so a Railway service that doesn't set this env var (Worker 1's existing
+# service) behaves byte-for-byte as it did before multi-worker support
+# existed. A second worker's Railway service sets WORKER_ID explicitly
+# (e.g. "wa-worker-2", matching the id returned by POST /api/whatsapp/workers)
+# and everything below — its own session doc, its own SESSION_DIR, its own
+# job-queue filter, its own known-groups/inbound identity — falls out of
+# this single value.
+WORKER_ID: str = os.environ.get("WORKER_ID", "default")
+
 # MongoDB connection
 MONGO_URL: str = os.environ["MONGO_URL"]
 MONGO_DB_NAME: str = os.environ.get("MONGO_DB_NAME", "talentgram")

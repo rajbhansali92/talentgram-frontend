@@ -210,9 +210,23 @@ def _join_names(names: List[str]) -> str:
 # 7/8). No new outbound mechanism, no hardcoded group.
 # ---------------------------------------------------------------------------
 async def _management_agent_group() -> Optional[str]:
-    cfg = await db[registry.CONFIG_COLLECTION].find_one(
-        {"agent_id": "management-agent", "active": True}
-    )
+    # Multi-worker support (2026-09-13) — this is a periodic background
+    # TIMER, never triggered by an inbound WhatsApp message, so there is
+    # genuinely no per-invocation worker_id to thread through the way
+    # dispatcher.py/services/media_assignment_worker.py do (those are
+    # driven by a specific command that arrived on a specific worker's
+    # session). Rather than leave this query unscoped — which would
+    # silently pick whichever management-agent config Mongo happens to
+    # return first the moment a second worker ever gets one — it explicitly
+    # targets Worker 1 (registry.DEFAULT_WORKER_ID), since that's the only
+    # place management-agent is configured today. If management-agent is
+    # ever configured for a second worker and this reminder should follow
+    # it, this is the one place to change (or promote to a setting) —
+    # never a silent, arbitrary pick.
+    cfg = await db[registry.CONFIG_COLLECTION].find_one({
+        "agent_id": "management-agent", "active": True,
+        **registry.worker_match_filter(registry.DEFAULT_WORKER_ID),
+    })
     names = (cfg or {}).get("group_names") or []
     return names[0] if names else None
 
@@ -239,6 +253,11 @@ async def _send_reminder(message_text: str) -> bool:
             ]),
             template_id=custom_template["id"],
             variable_data={"message": message_text},
+            # Multi-worker support — matches _management_agent_group's own
+            # explicit Worker 1 targeting above; the actual send must go
+            # out through the same worker its group config was resolved
+            # from, not silently fall back to whichever worker is default.
+            worker_id=registry.DEFAULT_WORKER_ID,
         )
         await create_batch(batch_in, admin=admin)
         return True
@@ -677,15 +696,27 @@ async def _daily_briefing_text() -> Optional[str]:
 
 
 async def _maybe_send_daily_briefing() -> int:
+    # Multi-worker support (2026-09-13) — same reasoning as
+    # _management_agent_group above: a periodic timer, no per-invocation
+    # worker_id available, so every query below is EXPLICITLY scoped to
+    # Worker 1 (registry.DEFAULT_WORKER_ID) rather than left unscoped
+    # (which would silently touch whichever management-agent config Mongo
+    # returns first once a second one exists — including the idempotency
+    # claim below, which absolutely must target the SAME document every
+    # cycle or the daily-once guarantee breaks).
     now_ist = datetime.now(IST)
     if now_ist.hour < DAILY_BRIEFING_HOUR_IST:
         return 0
     today_str = now_ist.date().isoformat()
-    cfg = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": "management-agent", "active": True}, {"_id": 0, "last_daily_briefing_date": 1})
+    worker_filter = registry.worker_match_filter(registry.DEFAULT_WORKER_ID)
+    cfg = await db[registry.CONFIG_COLLECTION].find_one(
+        {"agent_id": "management-agent", "active": True, **worker_filter},
+        {"_id": 0, "last_daily_briefing_date": 1},
+    )
     if (cfg or {}).get("last_daily_briefing_date") == today_str:
         return 0
     claimed = await db[registry.CONFIG_COLLECTION].find_one_and_update(
-        {"agent_id": "management-agent", "active": True, "last_daily_briefing_date": {"$ne": today_str}},
+        {"agent_id": "management-agent", "active": True, "last_daily_briefing_date": {"$ne": today_str}, **worker_filter},
         {"$set": {"last_daily_briefing_date": today_str}},
     )
     if not claimed:
@@ -701,7 +732,7 @@ async def _maybe_send_daily_briefing() -> int:
     # spending the day's one briefing slot on emptiness or a transient
     # send failure.
     await db[registry.CONFIG_COLLECTION].update_one(
-        {"agent_id": "management-agent"}, {"$set": {"last_daily_briefing_date": None}}
+        {"agent_id": "management-agent", **worker_filter}, {"$set": {"last_daily_briefing_date": None}}
     )
     return 0
 

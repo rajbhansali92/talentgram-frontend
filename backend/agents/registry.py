@@ -27,6 +27,27 @@ _AGENTS: Dict[str, AgentDefinition] = {}
 
 CONFIG_COLLECTION = "whatsapp_agent_config"
 
+# Multi-worker support (2026-09-13) — the id every existing config doc
+# implicitly belongs to (they predate the worker_id field entirely). See
+# worker_match_filter's docstring for why this must stay a fallback filter,
+# never a backfill write.
+DEFAULT_WORKER_ID = "default"
+
+
+def worker_match_filter(worker_id: str) -> dict:
+    """Mongo filter fragment matching documents that belong to `worker_id`.
+
+    Every whatsapp_agent_config doc created before multi-worker support
+    simply has no `worker_id` field at all — treating that absence as
+    "belongs to the default worker" (rather than running a one-time backfill
+    write) is what lets Worker 1's existing group mappings keep resolving
+    with zero migration and zero risk to production. A non-default
+    worker_id has no legacy documents to account for, so it's a plain
+    equality match."""
+    if worker_id == DEFAULT_WORKER_ID:
+        return {"$or": [{"worker_id": DEFAULT_WORKER_ID}, {"worker_id": {"$exists": False}}]}
+    return {"worker_id": worker_id}
+
 
 def register_agent(agent: AgentDefinition) -> None:
     """Register (or replace) an agent definition. Idempotent — safe to call
@@ -64,6 +85,7 @@ async def seed_agent_config(
     group_names: List[str],
     allowed_senders: Optional[List[str]] = None,
     security_mode: Optional[str] = None,
+    worker_id: str = DEFAULT_WORKER_ID,
 ) -> None:
     """Seed a default config doc for an agent if one doesn't exist yet.
     Never overwrites an existing (possibly admin-edited) config.
@@ -71,12 +93,22 @@ async def seed_agent_config(
     `security_mode` is optional and omitted from the doc when None, so
     existing callers (e.g. crm-agent, which relies on the "allowlist"
     default applied by is_sender_allowed) are unaffected — only an agent
-    that explicitly wants "group_members" access needs to pass it."""
-    existing = await db[CONFIG_COLLECTION].find_one({"agent_id": agent_id})
+    that explicitly wants "group_members" access needs to pass it.
+
+    `worker_id` defaults to the pre-existing worker's id, so every current
+    call site (agents/__init__.py's ensure_agents_ready) keeps seeding
+    exactly the configs it always has, unchanged. An agent that should also
+    be reachable from a second worker's number needs its own config doc —
+    call this again with a different worker_id (agent_id + worker_id is the
+    real key now, not agent_id alone)."""
+    existing = await db[CONFIG_COLLECTION].find_one({
+        "agent_id": agent_id, **worker_match_filter(worker_id),
+    })
     if existing:
         return
     doc = {
         "agent_id": agent_id,
+        "worker_id": worker_id,
         "group_names": group_names,
         "allowed_senders": allowed_senders or [],
         "active": True,
@@ -86,11 +118,14 @@ async def seed_agent_config(
     if security_mode is not None:
         doc["security_mode"] = security_mode
     await db[CONFIG_COLLECTION].insert_one(doc)
-    logger.info("seeded whatsapp_agent_config for %s: groups=%s", agent_id, group_names)
+    logger.info("seeded whatsapp_agent_config for %s (worker=%s): groups=%s",
+                agent_id, worker_id, group_names)
 
 
-async def get_agent_config(agent_id: str) -> Optional[dict]:
-    return await db[CONFIG_COLLECTION].find_one({"agent_id": agent_id})
+async def get_agent_config(agent_id: str, worker_id: str = DEFAULT_WORKER_ID) -> Optional[dict]:
+    return await db[CONFIG_COLLECTION].find_one({
+        "agent_id": agent_id, **worker_match_filter(worker_id),
+    })
 
 
 async def find_agents_with_empty_group_names() -> List[str]:
@@ -114,15 +149,26 @@ async def find_agents_with_empty_group_names() -> List[str]:
     return broken
 
 
-async def resolve_agent_for_group(group_name: str) -> Optional[Tuple[AgentDefinition, dict]]:
+async def resolve_agent_for_group(
+    group_name: str, worker_id: str = DEFAULT_WORKER_ID,
+) -> Optional[Tuple[AgentDefinition, dict]]:
     """Given the WhatsApp group a message arrived in, find the (agent,
     config) it should route to, or None if no active agent owns that
     group. This is the *only* place group names are matched against
-    agents — everywhere else in the platform operates on agent_id."""
+    agents — everywhere else in the platform operates on agent_id.
+
+    `worker_id` scopes the match to configs belonging to the WORKER the
+    message actually arrived through (defaults to the pre-existing worker,
+    so every caller that doesn't pass one — dispatcher.py's production
+    path before the transport sends its own identity, every existing test
+    — keeps resolving exactly as before). This is what prevents two
+    different workers/numbers with identically-named groups from ever
+    cross-routing to each other's agent: a group name is only ever unique
+    *within* one worker's own mapped set, never globally."""
     target = _norm_group_name(group_name)
     if not target:
         return None
-    cursor = db[CONFIG_COLLECTION].find({"active": True})
+    cursor = db[CONFIG_COLLECTION].find({"active": True, **worker_match_filter(worker_id)})
     async for cfg in cursor:
         names = [_norm_group_name(g) for g in (cfg.get("group_names") or [])]
         if target in names:

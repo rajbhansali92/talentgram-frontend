@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from core import _now, current_team_or_admin, current_admin, db
+from routers.whatsapp_workers import DEFAULT_WORKER_ID, require_worker, worker_match_filter
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,12 @@ async def _write_audit(
     message_preview: Optional[str] = None,
     is_dry_run: bool = False,
     metadata: Optional[Dict[str, Any]] = None,
+    worker_id: Optional[str] = None,
 ) -> None:
-    """Append an immutable audit log entry."""
+    """Append an immutable audit log entry. `worker_id` is None for entries
+    not tied to a specific batch (e.g. template/config edits) — history/
+    audit is worker-FILTERABLE, not worker-locked, so a None here just means
+    that entry only ever shows up in the unfiltered view."""
     doc = {
         "id": _new_id(),
         "event_type": event_type,
@@ -75,6 +80,7 @@ async def _write_audit(
         "is_dry_run": is_dry_run,
         "actor": actor,
         "metadata": metadata or {},
+        "worker_id": worker_id,
         "timestamp": _utcnow(),
     }
     await db.whatsapp_audit_log.insert_one(doc)
@@ -93,6 +99,11 @@ async def _ensure_indexes() -> None:
     await db.whatsapp_jobs.create_index(
         [("talent_id", 1), ("created_at", -1)], name="job_talent_history_idx"
     )
+    # Multi-worker support — each worker's own poll_and_process_jobs query
+    # filters by worker_id first; non-unique (many jobs per worker).
+    await db.whatsapp_jobs.create_index(
+        [("worker_id", 1), ("status", 1)], name="job_worker_status_idx"
+    )
 
     # whatsapp_batches
     await db.whatsapp_batches.create_index(
@@ -100,6 +111,9 @@ async def _ensure_indexes() -> None:
     )
     await db.whatsapp_batches.create_index(
         [("status", 1), ("created_at", -1)], name="batch_status_idx"
+    )
+    await db.whatsapp_batches.create_index(
+        [("worker_id", 1), ("status", 1)], name="batch_worker_status_idx"
     )
 
     # whatsapp_audit_log
@@ -115,6 +129,13 @@ async def _ensure_indexes() -> None:
 
     # whatsapp_templates
     await db.whatsapp_templates.create_index([("slug", 1)], unique=True, name="template_slug_idx")
+
+    # whatsapp_config — multi-worker support: one row per (key, worker_id).
+    # No prior index existed on this small collection, so this is a plain
+    # additive create — nothing to drop/migrate.
+    await db.whatsapp_config.create_index(
+        [("key", 1), ("worker_id", 1)], unique=True, name="config_key_worker_unique"
+    )
 
     # whatsapp_pins (Slice 3) — one pin per (user, project)
     await db.whatsapp_pins.create_index(
@@ -383,6 +404,23 @@ class BatchIn(BaseModel):
     is_dry_run: bool = False
     min_delay_sec: int = 8
     max_delay_sec: int = 15
+    # Multi-worker support (2026-09-13) — explicit "send from" assignment.
+    #
+    # BACKWARD-COMPATIBILITY FALLBACK ONLY: defaults to the pre-existing
+    # worker so every caller that predates the worker picker (the campaign
+    # launcher UI before Phase 5 ships, /casting-call/send, any existing
+    # script or integration) keeps sending through exactly the number it
+    # always has, byte-for-byte unchanged. This default exists purely to
+    # avoid breaking those callers — it is NOT a statement that omitting
+    # worker_id is the preferred or recommended way to launch a campaign.
+    # Once the frontend's worker tab UI ships (Phase 5), every NEW campaign
+    # it creates must explicitly pass the operator's selected worker_id —
+    # the frontend must never rely on this fallback. The backend
+    # deliberately does not (and should not) try to infer or auto-select a
+    # worker on the caller's behalf: an ambiguous sender is a caller-side
+    # bug to fix at the call site, not something to silently paper over
+    # here by guessing.
+    worker_id: str = DEFAULT_WORKER_ID
 
 
 class ConfigUpdateIn(BaseModel):
@@ -1410,6 +1448,11 @@ async def _create_batch_internal(payload: BatchIn, admin: dict) -> dict:
     template rendering, job/batch document shape — instead of a second,
     parallel implementation. The route below is now a thin wrapper.
     """
+    # Backend validation of worker identity (multi-worker support) — an
+    # unregistered worker_id must never be able to create jobs a worker
+    # process will pick up under a different, unowned identity.
+    await require_worker(payload.worker_id)
+
     # Validate template
     template = await db.whatsapp_templates.find_one({"id": payload.template_id}, {"_id": 0})
     if not template:
@@ -1467,6 +1510,9 @@ async def _create_batch_internal(payload: BatchIn, admin: dict) -> dict:
         jobs.append({
             "id": _new_id(),
             "batch_id": batch_id,
+            # Denormalized from the batch (same pattern as template_name
+            # below) so the worker's job-claim query never needs a join.
+            "worker_id": payload.worker_id,
             # Template ref for the comm timeline (Slice 4).
             "template_id": payload.template_id,
             "template_name": template.get("name") or template.get("slug") or "",
@@ -1494,6 +1540,7 @@ async def _create_batch_internal(payload: BatchIn, admin: dict) -> dict:
     # Create batch document
     batch_doc = {
         "id": batch_id,
+        "worker_id": payload.worker_id,      # Multi-worker support — explicit sender
         "source_type": source_type,          # Feature 7
         "source_label": source_label,
         # Legacy fields retained for existing UI/back-compat.
@@ -1537,6 +1584,7 @@ async def _create_batch_internal(payload: BatchIn, admin: dict) -> dict:
         admin["id"],
         batch_id=batch_id,
         is_dry_run=payload.is_dry_run,
+        worker_id=payload.worker_id,
         metadata={
             "project_id": payload.project_id,
             "template_slug": template.get("slug"),
@@ -1729,12 +1777,18 @@ async def send_casting_call(payload: CastingCallSendIn, admin: dict = Depends(cu
 @router.get("/batches")
 async def list_batches(
     project_id: Optional[str] = None,
+    worker_id: Optional[str] = None,
     limit: int = 50,
     admin: dict = Depends(current_team_or_admin),
 ):
+    """History is worker-FILTERABLE, not worker-locked: omitting worker_id
+    (the existing default — every current caller) returns every worker's
+    batches exactly as today; passing it narrows to one worker's."""
     filt: Dict[str, Any] = {}
     if project_id:
         filt["project_id"] = project_id
+    if worker_id:
+        filt.update(worker_match_filter(worker_id))
     docs = (
         await db.whatsapp_batches.find(filt, {"_id": 0})
         .sort("created_at", -1)
@@ -1802,6 +1856,7 @@ async def batch_action(
         f"batch_{action}d",
         admin["id"],
         batch_id=batch_id,
+        worker_id=batch.get("worker_id", DEFAULT_WORKER_ID),
         metadata={"previous_status": current_status, "new_status": new_status},
     )
 
@@ -1867,6 +1922,7 @@ async def retry_job(
         job_id=job_id,
         talent_id=job.get("talent_id"),
         talent_name=job.get("talent_name"),
+        worker_id=job.get("worker_id", DEFAULT_WORKER_ID),
     )
 
     return {"job_id": job_id, "status": "pending"}
@@ -1959,10 +2015,16 @@ async def get_audit_log(
     batch_id: Optional[str] = None,
     talent_id: Optional[str] = None,
     event_type: Optional[str] = None,
+    worker_id: Optional[str] = None,
     limit: int = 100,
     admin: dict = Depends(current_team_or_admin),
 ):
-    """Fetch audit log entries, optionally filtered."""
+    """Fetch audit log entries, optionally filtered. worker_id is worker-
+    FILTERABLE like the batch list above — omitted (the default) returns
+    every worker's entries; entries not tied to any batch (template/config
+    edits) never carry a worker_id and so are excluded once a worker_id
+    filter is applied, which is the correct behavior for "show me Worker 2's
+    activity"."""
     filt: Dict[str, Any] = {}
     if batch_id:
         filt["batch_id"] = batch_id
@@ -1970,6 +2032,8 @@ async def get_audit_log(
         filt["talent_id"] = talent_id
     if event_type:
         filt["event_type"] = event_type
+    if worker_id:
+        filt.update(worker_match_filter(worker_id))
 
     docs = (
         await db.whatsapp_audit_log.find(filt, {"_id": 0})
@@ -1985,8 +2049,17 @@ async def get_audit_log(
 # ---------------------------------------------------------------------------
 
 @router.get("/config")
-async def get_config(admin: dict = Depends(current_team_or_admin)):
-    docs = await db.whatsapp_config.find({}, {"_id": 0}).to_list(50)
+async def get_config(
+    worker_id: str = DEFAULT_WORKER_ID,
+    admin: dict = Depends(current_team_or_admin),
+):
+    """Circuit-breaker / retry / delay settings for one worker (multi-worker
+    support, item 9 — each worker's safety limits are independent). Defaults
+    to the pre-existing worker, so an un-migrated caller sees exactly the
+    same settings as before."""
+    docs = await db.whatsapp_config.find(
+        worker_match_filter(worker_id), {"_id": 0}
+    ).to_list(50)
     return {d["key"]: d["value"] for d in docs}
 
 
@@ -1994,6 +2067,7 @@ async def get_config(admin: dict = Depends(current_team_or_admin)):
 async def update_config(
     key: str,
     payload: ConfigUpdateIn,
+    worker_id: str = DEFAULT_WORKER_ID,
     admin: dict = Depends(current_admin),
 ):
     allowed_keys = {
@@ -2006,13 +2080,21 @@ async def update_config(
     if key not in allowed_keys:
         raise HTTPException(400, f"Unknown config key '{key}'")
 
+    # Matches the legacy (pre-worker_id) doc for the default worker via
+    # worker_match_filter, then $set writes worker_id onto it explicitly —
+    # self-healing, no separate backfill needed (same pattern used for
+    # whatsapp_agent_config in agents_whatsapp.py:update_config).
     await db.whatsapp_config.update_one(
-        {"key": key},
-        {"$set": {"key": key, "value": payload.value}},
+        {"key": key, **worker_match_filter(worker_id)},
+        {"$set": {"key": key, "value": payload.value, "worker_id": worker_id}},
         upsert=True,
     )
-    await _write_audit("config_updated", admin["id"], metadata={"key": key, "value": payload.value})
-    return {"key": key, "value": payload.value}
+    await _write_audit(
+        "config_updated", admin["id"],
+        worker_id=worker_id,
+        metadata={"key": key, "value": payload.value},
+    )
+    return {"key": key, "value": payload.value, "worker_id": worker_id}
 
 
 # ---------------------------------------------------------------------------

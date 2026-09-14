@@ -74,6 +74,12 @@ class InboundMessageIn(BaseModel):
     # reply" or "couldn't read the quote" — either way the task-routing
     # tier that uses this is simply skipped, fully backward compatible.
     replied_quoted_text: Optional[str] = None
+    # Multi-worker support (2026-09-13) — which authenticated WhatsApp
+    # session this message arrived through, set by the transport
+    # (whatsapp-worker/inbound.py) once it knows its own WORKER_ID. None
+    # (every transport call before that ships, and any test that doesn't
+    # pass it) means "the pre-existing worker" — see registry.DEFAULT_WORKER_ID.
+    worker_id: Optional[str] = None
 
 
 class TaskSentIn(BaseModel):
@@ -83,19 +89,30 @@ class TaskSentIn(BaseModel):
 
 
 @router.get("/known-groups")
-async def known_groups(x_internal_secret: Optional[str] = Header(default=None)):
+async def known_groups(
+    worker_id: str = registry.DEFAULT_WORKER_ID,
+    x_internal_secret: Optional[str] = Header(default=None),
+):
     """Flat, de-duplicated list of every WhatsApp group name currently
-    mapped to an active agent, across all agents. This is the ONLY thing a
+    mapped to an active agent FOR THIS WORKER. This is the ONLY thing a
     transport (the Playwright worker, or any future one) needs from the
     Agent Registry to decide which chats are worth watching at all — it
     never needs to know which agent owns which group, just which group
     names matter, so group names are never hardcoded in the transport.
     Same shared-secret gate as /inbound since it's still an unauthenticated
-    (no admin session) endpoint."""
+    (no admin session) endpoint.
+
+    `worker_id` defaults to the pre-existing worker, so a transport that
+    hasn't been upgraded to send its own identity yet (or a second worker's
+    process before it exists) sees exactly the same group list as before
+    multi-worker support — a second worker only sees its OWN mapped
+    groups once agent configs are actually created with its worker_id."""
     if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     names: set[str] = set()
-    cursor = db[registry.CONFIG_COLLECTION].find({"active": True})
+    cursor = db[registry.CONFIG_COLLECTION].find(
+        {"active": True, **registry.worker_match_filter(worker_id)}
+    )
     async for cfg in cursor:
         for g in cfg.get("group_names") or []:
             if g and g.strip():
@@ -132,6 +149,7 @@ async def inbound_message(
         media_type=payload.media_type,
         replied_to_message_id=payload.replied_to_message_id,
         replied_quoted_text=payload.replied_quoted_text,
+        worker_id=payload.worker_id or registry.DEFAULT_WORKER_ID,
     )
     t_dispatch_done = time.monotonic()
     # operation_id is only ever set when `reply` is a task's confirmation/
@@ -462,6 +480,7 @@ class AgentConfigUpdate(BaseModel):
 def _serialise_config(doc: dict) -> dict:
     return {
         "agent_id": doc["agent_id"],
+        "worker_id": doc.get("worker_id") or registry.DEFAULT_WORKER_ID,
         "group_names": doc.get("group_names") or [],
         "allowed_senders": doc.get("allowed_senders") or [],
         "security_mode": doc.get("security_mode") or "allowlist",
@@ -478,12 +497,18 @@ def _serialise_config(doc: dict) -> dict:
 
 
 @router.get("/agents")
-async def list_agents(_admin: dict = Depends(current_admin)):
+async def list_agents(
+    worker_id: str = registry.DEFAULT_WORKER_ID,
+    _admin: dict = Depends(current_admin),
+):
     """All registered agents (code-level) alongside their current routing
-    config (DB-level), for an admin settings screen."""
+    config for the given worker (DB-level), for an admin settings screen.
+    An agent with no config doc for this worker (i.e. not mapped to this
+    worker's number at all) shows config=None — that's expected once a
+    second worker exists and only some agents have been mapped to it."""
     out = []
     for agent in registry.list_agents():
-        cfg = await registry.get_agent_config(agent.agent_id)
+        cfg = await registry.get_agent_config(agent.agent_id, worker_id)
         out.append({
             "agent_id": agent.agent_id,
             "name": agent.name,
@@ -495,15 +520,30 @@ async def list_agents(_admin: dict = Depends(current_admin)):
 
 
 @router.get("/config/{agent_id}")
-async def get_config(agent_id: str, _admin: dict = Depends(current_admin)):
-    doc = await registry.get_agent_config(agent_id)
+async def get_config(
+    agent_id: str,
+    worker_id: str = registry.DEFAULT_WORKER_ID,
+    _admin: dict = Depends(current_admin),
+):
+    doc = await registry.get_agent_config(agent_id, worker_id)
     if not doc:
-        raise HTTPException(status_code=404, detail="No config for this agent_id")
+        raise HTTPException(status_code=404, detail="No config for this agent_id/worker_id")
     return _serialise_config(doc)
 
 
 @router.put("/config/{agent_id}")
-async def update_config(agent_id: str, payload: AgentConfigUpdate, _admin: dict = Depends(current_admin)):
+async def update_config(
+    agent_id: str,
+    payload: AgentConfigUpdate,
+    worker_id: str = registry.DEFAULT_WORKER_ID,
+    _admin: dict = Depends(current_admin),
+):
+    """Creates or edits the (agent_id, worker_id) config doc — agent_id
+    alone is no longer a unique key: the same agent can have a separate
+    group mapping per worker. `worker_id` defaults to the pre-existing
+    worker, so every caller that predates multi-worker support (the
+    current admin UI, existing scripts) edits exactly the doc it always
+    has, unchanged."""
     if not registry.get_agent(agent_id):
         raise HTTPException(status_code=404, detail="Unknown agent_id")
     upd = {}
@@ -521,15 +561,23 @@ async def update_config(agent_id: str, payload: AgentConfigUpdate, _admin: dict 
         raise HTTPException(status_code=400, detail="No fields to update")
     from datetime import datetime, timezone
     upd["updated_at"] = datetime.now(timezone.utc)
+    upd["worker_id"] = worker_id
     # Correcting the config clears any INVALID_CONFIGURATION flag the worker
     # raised, so the operator sees the error resolve as soon as they fix the
     # mapping (the worker re-probes the group on its next groups refresh).
     unset = {"config_status": "", "config_error": "",
              "config_error_group": "", "config_error_at": ""}
+    # Matches the legacy (pre-worker_id) doc for the default worker via
+    # worker_match_filter, then $set writes worker_id onto it explicitly —
+    # self-healing: the first edit after this migration normalizes the doc,
+    # no separate backfill script needed. A non-default worker_id has no
+    # legacy doc to match, so this is a plain upsert-by-equality for it.
     res = await db[registry.CONFIG_COLLECTION].update_one(
-        {"agent_id": agent_id}, {"$set": upd, "$unset": unset}, upsert=True
+        {"agent_id": agent_id, **registry.worker_match_filter(worker_id)},
+        {"$set": upd, "$unset": unset},
+        upsert=True,
     )
-    doc = await registry.get_agent_config(agent_id)
+    doc = await registry.get_agent_config(agent_id, worker_id)
     return _serialise_config(doc)
 
 

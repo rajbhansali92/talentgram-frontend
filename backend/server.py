@@ -38,6 +38,7 @@ from routers import (
     users,
     webhooks,
     whatsapp,
+    whatsapp_workers,
     workflow,
     cloudflare_stream,
     imports,
@@ -152,6 +153,7 @@ app.include_router(workflow.router)
 app.include_router(portal.router)
 app.include_router(cloudinary_admin.router)
 app.include_router(whatsapp.router)
+app.include_router(whatsapp_workers.router)
 app.include_router(webhooks.router)
 app.include_router(cloudflare_stream.router)
 app.include_router(imports.router)
@@ -606,6 +608,14 @@ async def on_startup():
             await whatsapp.ensure_whatsapp_ready()
         except Exception as _e:
             logger.warning("WhatsApp Engine startup init failed (non-fatal): %s", _e)
+
+        # WhatsApp Engine — worker registry (multi-worker support). Seeds the
+        # "default" worker row for the existing production session; additive,
+        # never touches whatsapp_sessions/whatsapp_jobs/whatsapp_batches.
+        try:
+            await whatsapp_workers.ensure_workers_ready()
+        except Exception as _e:
+            logger.warning("WhatsApp Worker Registry startup init failed (non-fatal): %s", _e)
 
         # WhatsApp Agent Platform — registers domain agents (CRM first),
         # seeds default group routing, creates conversation/audit indexes.

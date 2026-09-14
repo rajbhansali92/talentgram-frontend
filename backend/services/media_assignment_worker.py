@@ -65,7 +65,7 @@ async def _fetch_ongoing_projects_raw() -> List[Dict[str, str]]:
     return [{"id": d["id"], "label": d.get("brand_name") or "(untitled project)"} for d in docs]
 
 
-async def _send_report(report_text: str) -> None:
+async def _send_report(report_text: str, worker_id: str = "default") -> None:
     # Production fix (routing hardening) — real bug: this hardcoded
     # "casting-agent" lookup predates the Talentgram Scouting Agent
     # consolidation, which moved every real UPLOAD/SEND/ADD/MOVE command
@@ -77,7 +77,17 @@ async def _send_report(report_text: str) -> None:
     # still being posted into the now-inactive Casting Pipeline group
     # regardless of which group the command actually came from — this is
     # the actual routing fix, not a message-hiding workaround.
-    cfg = await db[registry.CONFIG_COLLECTION].find_one({"agent_id": "whatsapp-campaign-agent", "active": True})
+    #
+    # Multi-worker support (2026-09-13) — `worker_id` (the worker the
+    # original UPLOAD/SEND command arrived through, threaded here from the
+    # scan_request document's own worker_id field — see _finish's own
+    # comment) scopes this lookup so the completion report is sent through
+    # the SAME worker the command came from, never an arbitrary
+    # whatsapp-campaign-agent config a different worker happens to own.
+    cfg = await db[registry.CONFIG_COLLECTION].find_one({
+        "agent_id": "whatsapp-campaign-agent", "active": True,
+        **registry.worker_match_filter(worker_id),
+    })
     group_names = (cfg or {}).get("group_names") or []
     if not group_names:
         logger.warning("media_assignment_worker: no whatsapp-campaign-agent group configured, cannot send report")
@@ -94,16 +104,30 @@ async def _send_report(report_text: str) -> None:
         ]),
         template_id=custom_template["id"],
         variable_data={"message": report_text},
+        # Multi-worker support — the report must actually be SENT through
+        # the same worker its destination group config was resolved from
+        # above, not silently fall back to Worker 1's queue.
+        worker_id=worker_id,
     )
     await create_batch(batch_in, admin=admin)
 
 
-async def _finish(request_id: str, report_text: str) -> None:
+async def _finish(request_id: str, report_text: str, worker_id: str = "default") -> None:
+    # `worker_id` (multi-worker support, 2026-09-13): every call site below
+    # passes the ORIGINATING scan_request document's own worker_id field
+    # (media_assignment.create_scan_request / media_send.create_send_
+    # scan_request both stamp it at creation — see those functions'
+    # comments), never a guess — this is what makes the completion report
+    # in _send_report come back through the same worker the command
+    # originally arrived on. .get(..., "default") on the read side handles
+    # a request created before this field existed (none in practice, since
+    # this collection has no long-lived backlog, but a safe default is
+    # free).
     await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
         {"id": request_id},
         {"$set": {"status": media_assignment.STATUS_FINISHED, "report": report_text, "completed_at": _now()}},
     )
-    await _send_report(report_text)
+    await _send_report(report_text, worker_id=worker_id)
 
 
 def _fmt_list(lines: List[str], ok: bool) -> str:
@@ -489,6 +513,10 @@ async def _finish_multi_source_scan_sibling(doc: Dict[str, Any]) -> None:
 
     primary = siblings[0]
     primary_id = primary["id"]
+    # Multi-worker support — every sibling was created (by the same
+    # _send_one_pair call, see media_send.create_send_scan_request) with
+    # the same worker_id; reading it off `primary` is correct, not a guess.
+    primary_worker_id = primary.get("worker_id", "default")
     others = [s["id"] for s in siblings[1:]]
 
     talent_id, project_id = primary["talent_id"], primary["project_id"]
@@ -502,6 +530,7 @@ async def _finish_multi_source_scan_sibling(doc: Dict[str, Any]) -> None:
             f"SEND FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
             "The Gunwanti agent identity is not configured (missing WhatsApp LID) — "
             "cannot validate @mentions. Contact an admin before retrying.",
+            worker_id=primary_worker_id,
         )
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
         return
@@ -520,6 +549,7 @@ async def _finish_multi_source_scan_sibling(doc: Dict[str, Any]) -> None:
             primary_id,
             f"SEND FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
             f"Could not inspect WhatsApp: {'; '.join(hard_errors)}\n\nNothing has been sent.",
+            worker_id=primary_worker_id,
         )
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
         return
@@ -532,15 +562,15 @@ async def _finish_multi_source_scan_sibling(doc: Dict[str, Any]) -> None:
     )
 
     if outcome.batch_failures:
-        await _finish(primary_id, _report_batch_failed(talent_label, project_label, outcome.batch_failures))
+        await _finish(primary_id, _report_batch_failed(talent_label, project_label, outcome.batch_failures), worker_id=primary_worker_id)
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
         return
     if outcome.ambiguous:
-        await _finish(primary_id, _report_ambiguous(talent_label, project_label, outcome.ambiguous))
+        await _finish(primary_id, _report_ambiguous(talent_label, project_label, outcome.ambiguous), worker_id=primary_worker_id)
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
         return
     if outcome.unresolved:
-        await _finish(primary_id, _report_unresolved(talent_label, project_label, outcome.unresolved))
+        await _finish(primary_id, _report_unresolved(talent_label, project_label, outcome.unresolved), worker_id=primary_worker_id)
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
         return
 
@@ -550,7 +580,7 @@ async def _finish_multi_source_scan_sibling(doc: Dict[str, Any]) -> None:
         default_source_type=primary.get("source_type") or "group", default_group_name=primary.get("group_name"),
     )
     if not send_targets and not primary.get("form_message") and not send_marker_on_success:
-        await _finish(primary_id, _report_already_sent(talent_label, project_label, destination_group, already))
+        await _finish(primary_id, _report_already_sent(talent_label, project_label, destination_group, already), worker_id=primary_worker_id)
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": others}})
         return
 
@@ -653,9 +683,14 @@ async def _process_scan_done() -> bool:
     talent_id, project_id = doc["talent_id"], doc["project_id"]
     talent_label, project_label = doc["talent_label"], doc["project_label"]
     group_name = doc["group_name"]
+    # Multi-worker support — the worker this UPLOAD/SEND command arrived
+    # through (stamped at creation by media_assignment.create_scan_request /
+    # media_send.create_send_scan_request), read back so the eventual
+    # report goes out through the same worker, never guessed.
+    doc_worker_id = doc.get("worker_id", "default")
 
     if doc.get("scan_error"):
-        await _finish(doc["id"], _report_scan_failed(talent_label, project_label, doc["scan_error"]))
+        await _finish(doc["id"], _report_scan_failed(talent_label, project_label, doc["scan_error"]), worker_id=doc_worker_id)
         return True
 
     identity = await media_assignment.get_gunwanti_identity()
@@ -665,6 +700,7 @@ async def _process_scan_done() -> bool:
             f"UPLOAD FAILED\n\nTalent: {talent_label}\nProject: {project_label}\n\n"
             "The Gunwanti agent identity is not configured (missing WhatsApp LID) — "
             "cannot validate @mentions. Contact an admin before retrying.",
+            worker_id=doc_worker_id,
         )
         return True
 
@@ -711,7 +747,7 @@ async def _process_scan_done() -> bool:
         return True
 
     if outcome.batch_failures:
-        await _finish(doc["id"], _report_batch_failed(talent_label, project_label, outcome.batch_failures))
+        await _finish(doc["id"], _report_batch_failed(talent_label, project_label, outcome.batch_failures), worker_id=doc_worker_id)
         return True
     # project_mismatch/project_ambiguous (2026-08-25) are advisory, never
     # blocking — see validate_candidates' own comment. UPLOAD's report
@@ -720,10 +756,10 @@ async def _process_scan_done() -> bool:
     # at all — this task is UPLOAD-only.
     upload_advisory = _project_advisory_note(project_label, outcome.project_mismatch, outcome.project_ambiguous)
     if outcome.ambiguous:
-        await _finish(doc["id"], _report_ambiguous(talent_label, project_label, outcome.ambiguous))
+        await _finish(doc["id"], _report_ambiguous(talent_label, project_label, outcome.ambiguous), worker_id=doc_worker_id)
         return True
     if outcome.unresolved:
-        await _finish(doc["id"], _report_unresolved(talent_label, project_label, outcome.unresolved))
+        await _finish(doc["id"], _report_unresolved(talent_label, project_label, outcome.unresolved), worker_id=doc_worker_id)
         return True
 
     if doc.get("workflow") == "send":
@@ -764,7 +800,7 @@ async def _process_scan_done() -> bool:
         # ☑️ marker alone (nothing left to forward, form already sent)
         # still needs one more worker pass if it hasn't gone out yet.
         if not send_targets and not doc.get("form_message") and not send_marker_on_success:
-            await _finish(doc["id"], _report_already_sent(talent_label, project_label, destination_group, already))
+            await _finish(doc["id"], _report_already_sent(talent_label, project_label, destination_group, already), worker_id=doc_worker_id)
             return True
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
             {"id": doc["id"]},
@@ -835,9 +871,9 @@ async def _process_scan_done() -> bool:
             # THIS project, so outcome.assignments came back empty and
             # the old code reported ALREADY COMPLETED with an empty item
             # list — while the submission had zero media.
-            await _finish(doc["id"], _report_no_marks_found(talent_label, project_label) + upload_advisory)
+            await _finish(doc["id"], _report_no_marks_found(talent_label, project_label) + upload_advisory, worker_id=doc_worker_id)
             return True
-        await _finish(doc["id"], _report_already_uploaded(talent_label, project_label, already) + upload_advisory)
+        await _finish(doc["id"], _report_already_uploaded(talent_label, project_label, already) + upload_advisory, worker_id=doc_worker_id)
         return True
 
     download_targets = [{
@@ -1022,7 +1058,7 @@ async def _process_download_done() -> bool:
             talent_label, project_label, destination_group, sent_labels, failed_items, ctx.get("already") or [],
             form_status_line=form_status_line, marker_status_line=marker_status_line,
         )
-        await _finish(doc["id"], report)
+        await _finish(doc["id"], report, worker_id=doc.get("worker_id", "default"))
         return True
 
     ctx = doc.get("pending_report_context") or {}
@@ -1058,7 +1094,7 @@ async def _process_download_done() -> bool:
             failed_items.append({"label": label, "error": (item_result or {}).get("error") or "no result reported"})
 
     report = _report_upload_result(talent_label, project_label, uploaded_labels, failed_items, ctx.get("already") or [])
-    await _finish(doc["id"], report + (ctx.get("upload_advisory") or ""))
+    await _finish(doc["id"], report + (ctx.get("upload_advisory") or ""), worker_id=doc.get("worker_id", "default"))
     return True
 
 

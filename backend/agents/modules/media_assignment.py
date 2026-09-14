@@ -388,13 +388,23 @@ def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
 # ---------------------------------------------------------------------------
 async def create_scan_request(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str, group_name: str,
+    worker_id: str = "default",
 ) -> str:
+    """`worker_id` (multi-worker support, 2026-09-13) is the WhatsApp
+    worker/session the UPLOAD command that triggered this scan actually
+    arrived through — the sole caller (casting_pipeline.py's
+    _upload_executor) passes ctx.worker_id, itself threaded all the way
+    from dispatcher.handle_inbound_message's own worker_id parameter.
+    Stored on the request doc so services/media_assignment_worker.py's
+    eventual completion report is sent from the SAME worker the command
+    came from, never guessed."""
     req_id = str(uuid.uuid4())
     await db[SCAN_REQUESTS_COLLECTION].insert_one({
         "id": req_id,
         "mode": "scan",
         "status": SCAN_STATUS_PENDING,
         "group_name": group_name,
+        "worker_id": worker_id,
         "talent_id": talent_id,
         "talent_label": talent_label,
         "project_id": project_id,

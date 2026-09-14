@@ -110,10 +110,11 @@ export async function createBatch(data) {
   return res.data;
 }
 
-export async function getBatches(projectId = null) {
-  const res = await adminApi.get("/whatsapp/batches", {
-    params: projectId ? { project_id: projectId } : {}
-  });
+export async function getBatches(projectId = null, workerId = null) {
+  const params = {};
+  if (projectId) params.project_id = projectId;
+  if (workerId) params.worker_id = workerId;
+  const res = await adminApi.get("/whatsapp/batches", { params });
   return res.data;
 }
 
@@ -148,7 +149,9 @@ export async function sendCastingCall(body) {
   return res.data;
 }
 
-// --- SESSIONS ---
+// --- SESSIONS (legacy singleton — always worker_id="default") ---
+// Kept unchanged for backward compatibility; the multi-worker UI below uses
+// the worker-scoped endpoints instead (getWorkerSession et al.), never these.
 export async function getSessionStatus() {
   const res = await adminApi.get("/whatsapp/session");
   return res.data;
@@ -162,22 +165,71 @@ export async function resetSession() {
   await adminApi.post("/whatsapp/session/reset");
 }
 
-// Agents + their routing config. Surfaces config_status ===
+// --- WORKERS (multi-worker support) ---
+// Matches backend/routers/whatsapp_workers.py's actual routes/shapes
+// exactly — GET/POST /whatsapp/workers, GET/POST /whatsapp/workers/{id}/session*.
+// Every worker row returned by getWorkers()/getWorker() is already enriched
+// with a `session` sub-object (same shape getWorkerSession() returns on its
+// own) — the strip that lists every worker never needs a second call per row.
+export async function getWorkers() {
+  const res = await adminApi.get("/whatsapp/workers");
+  return res.data;
+}
+
+export async function getWorker(workerId) {
+  const res = await adminApi.get(`/whatsapp/workers/${workerId}`);
+  return res.data;
+}
+
+// payload: { label, worker_id? } — worker_id omitted lets the backend
+// auto-generate one; the multi-worker UI always passes an explicit stable
+// id (e.g. "worker-2") per the backend's own documented convention.
+export async function createWorker(payload) {
+  const res = await adminApi.post("/whatsapp/workers", payload);
+  return res.data;
+}
+
+export async function getWorkerSession(workerId) {
+  const res = await adminApi.get(`/whatsapp/workers/${workerId}/session`);
+  return res.data;
+}
+
+export async function clearWorkerQrCode(workerId) {
+  await adminApi.post(`/whatsapp/workers/${workerId}/session/clear-qr`);
+}
+
+export async function resetWorkerSession(workerId) {
+  await adminApi.post(`/whatsapp/workers/${workerId}/session/reset`);
+}
+
+// Agents + their routing config for one worker. Surfaces config_status ===
 // "INVALID_CONFIGURATION", which the worker sets when a mapped WhatsApp group
-// cannot be found in the connected account.
-export async function getWhatsAppAgents() {
-  const res = await adminApi.get("/agents/whatsapp/agents");
+// cannot be found in the connected account. `workerId` omitted preserves the
+// exact prior behavior (backend defaults to worker_id="default").
+export async function getWhatsAppAgents(workerId) {
+  const res = await adminApi.get("/agents/whatsapp/agents", {
+    params: workerId ? { worker_id: workerId } : {},
+  });
   return res.data;
 }
 
 // --- CONFIG ---
-export async function getWaConfig() {
-  const res = await adminApi.get("/whatsapp/config");
+// Circuit-breaker/retry/delay safety settings — WORKER-SPECIFIC on the
+// backend (backend/routers/whatsapp.py: GET/PUT /whatsapp/config[/{key}],
+// each storing a separate {key, worker_id, value} document; verified
+// directly against the route source, not assumed). `workerId` omitted
+// preserves the exact prior behavior (backend defaults to worker_id="default").
+export async function getWaConfig(workerId) {
+  const res = await adminApi.get("/whatsapp/config", {
+    params: workerId ? { worker_id: workerId } : {},
+  });
   return res.data;
 }
 
-export async function updateWaConfig(key, value) {
-  const res = await adminApi.put(`/whatsapp/config/${key}`, { value: String(value) });
+export async function updateWaConfig(key, value, workerId) {
+  const res = await adminApi.put(`/whatsapp/config/${key}`, { value: String(value) }, {
+    params: workerId ? { worker_id: workerId } : {},
+  });
   return res.data;
 }
 

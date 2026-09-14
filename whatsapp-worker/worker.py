@@ -34,6 +34,25 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _worker_scope_filter() -> dict:
+    """Mongo filter fragment matching whatsapp_batches/whatsapp_jobs
+    documents that belong to THIS process's own worker (config.WORKER_ID).
+
+    Every batch/job created before multi-worker support has no worker_id
+    field at all — treating that absence as "belongs to the default
+    worker" (rather than a backfill write against potentially-large,
+    actively-written collections) is what lets an in-flight production
+    batch keep being picked up by Worker 1 across this exact deploy, with
+    zero migration. A non-default worker_id has no legacy documents to
+    account for, so it's a plain equality match — and, critically, it
+    means a job/batch belonging to a DIFFERENT worker_id (or with no
+    worker_id at all) is never returned to this one: this is what makes
+    the job queue worker-owned instead of global."""
+    if config.WORKER_ID == "default":
+        return {"$or": [{"worker_id": "default"}, {"worker_id": {"$exists": False}}]}
+    return {"worker_id": config.WORKER_ID}
+
+
 async def write_audit_log(
     event_type: str,
     actor: str = "worker",
@@ -117,7 +136,7 @@ async def _reclaim_orphaned_jobs(db) -> None:
     cutoff = (datetime.now(timezone.utc)
               - timedelta(seconds=config.ORPHAN_TIMEOUT_SEC)).isoformat()
     res = await db.whatsapp_jobs.update_many(
-        {"status": "sending", "worker_picked_at": {"$lt": cutoff}},
+        {"status": "sending", "worker_picked_at": {"$lt": cutoff}, **_worker_scope_filter()},
         {"$set": {"status": "pending", "worker_picked_at": None,
                   "error_message": "Reclaimed after worker stall (orphaned send)"}},
     )
@@ -133,10 +152,12 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
     # 0. Recover orphaned 'sending' jobs before claiming new work.
     await _reclaim_orphaned_jobs(db)
 
-    # 1. Look for a batch in 'running' or 'pending' state
-    # We only process jobs for active batches
+    # 1. Look for a batch in 'running' or 'pending' state, OWNED BY THIS
+    # WORKER. We only process jobs for active batches belonging to us —
+    # this is what stops Worker 2 from ever claiming Worker 1's campaign
+    # jobs (or vice versa) when both processes poll the same Mongo.
     active_batches = await db.whatsapp_batches.find(
-        {"status": {"$in": ["running", "pending"]}, "is_dry_run": False}
+        {"status": {"$in": ["running", "pending"]}, "is_dry_run": False, **_worker_scope_filter()}
     ).to_list(100)
 
     if not active_batches:
@@ -450,16 +471,18 @@ async def poll_and_process_jobs(session: WhatsAppSession) -> None:
 async def _maybe_reset_session() -> None:
     """Honor an admin-requested session reset BEFORE the browser launches.
 
-    An admin sets `reset_requested=True` on the singleton whatsapp_sessions
-    doc (via POST /api/whatsapp/session/reset). On the next (re)start the
-    worker wipes the persisted Chromium profile in config.SESSION_DIR so
-    WhatsApp Web falls back to a fresh QR linking screen. Runs before
+    An admin sets `reset_requested=True` on THIS worker's own whatsapp_sessions
+    doc (via POST /api/whatsapp/workers/{worker_id}/session/reset — or the
+    legacy singleton POST /api/whatsapp/session/reset, for worker_id="default").
+    On the next (re)start the worker wipes the persisted Chromium profile in
+    config.SESSION_DIR (this process's own volume — never another worker's)
+    so WhatsApp Web falls back to a fresh QR linking screen. Runs before
     session.start(), so it recovers even when a corrupt session crash-loops
     the worker. The mount point itself is preserved — only its contents are
     cleared — and the flag is cleared so the wipe happens exactly once.
     """
     db = get_db()
-    doc = await db.whatsapp_sessions.find_one({"id": "default"})
+    doc = await db.whatsapp_sessions.find_one({"id": config.WORKER_ID})
     if not doc or not doc.get("reset_requested"):
         return
 
@@ -492,7 +515,7 @@ async def _maybe_reset_session() -> None:
         logger.error("worker: failed to clear session dir: %s", exc)
 
     await db.whatsapp_sessions.update_one(
-        {"id": "default"},
+        {"id": config.WORKER_ID},
         {"$set": {"reset_requested": False, "status": "qr_pending", "error_message": None}},
     )
 
@@ -533,8 +556,9 @@ async def main() -> None:
     import uuid
     config.str_uuid = lambda: str(uuid.uuid4())
 
-    session = WhatsAppSession()
-    
+    logger.info("worker: starting as worker_id=%r", config.WORKER_ID)
+    session = WhatsAppSession(config.WORKER_ID)
+
     # Task to run heartbeat checking periodically
     async def heartbeat_loop():
         while True:
@@ -591,7 +615,7 @@ async def main() -> None:
         while True:
             # Check for admin session reset request dynamically
             db = get_db()
-            doc = await db.whatsapp_sessions.find_one({"id": "default"})
+            doc = await db.whatsapp_sessions.find_one({"id": config.WORKER_ID})
             if doc and doc.get("reset_requested"):
                 logger.warning("worker: session reset requested by admin, exiting to trigger clean container restart...")
                 break
@@ -608,7 +632,7 @@ async def main() -> None:
                 # every account-specific cache/global on its very next
                 # cycle — no process restart needed for that part either.
                 await db.whatsapp_sessions.update_one(
-                    {"id": "default"}, {"$set": {"worker_ready": False}}, upsert=True,
+                    {"id": config.WORKER_ID}, {"$set": {"worker_ready": False}}, upsert=True,
                 )
                 await session.stop()
                 await asyncio.sleep(10)

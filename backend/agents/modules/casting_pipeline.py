@@ -5231,7 +5231,7 @@ async def _upload_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     await media_assignment.create_scan_request(
         talent_id=authoritative_talent_id, talent_label=authoritative_talent_label,
         project_id=project["id"], project_label=project["label"],
-        group_name=group_name,
+        group_name=group_name, worker_id=ctx.worker_id,
     )
     return ExecResult(
         ok=True,
@@ -10176,6 +10176,7 @@ async def _send_one_pair(
             form_message=form_message, submission_id=submission["id"], content_hash=form_built["content_hash"],
             source_type=src_type, skip_validation=(multi_scan_group_id is not None),
             multi_scan_group_id=multi_scan_group_id, total_sources=len(sources) if multi_scan_group_id else None,
+            worker_id=ctx.worker_id,
         )
     return ExecResult(
         ok=True,

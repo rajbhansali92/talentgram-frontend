@@ -13,7 +13,8 @@ import {
   getPipelineSummary,
   createBatch, getBatches, runBatchAction,
   getJobs, retryJob,
-  getSessionStatus, clearQrCode, resetSession, getWhatsAppAgents,
+  getWhatsAppAgents,
+  getWorkers, createWorker, getWorkerSession, resetWorkerSession,
   getWaConfig, updateWaConfig,
   getAuditLog,
   resolveTargets, getCrmContactTypes, validateManual,
@@ -66,15 +67,70 @@ function waFirstNameOf(name) {
   return parts[0] || "";
 }
 
+// Multi-worker support — Worker 1's permanent, pre-existing identity
+// (matches backend/routers/whatsapp_workers.py's DEFAULT_WORKER_ID) and the
+// stable literal id this rollout's second worker will register under. Both
+// are real worker_id values the backend already understands; WORKER2_ID is
+// NOT assumed to exist as a registered worker — see displayWorkers below.
+const DEFAULT_WORKER_ID = "default";
+const WORKER2_ID = "worker-2";
+
 export default function WhatsAppEnginePage() {
   const [activeTab, setActiveTab] = useState("campaigns"); // campaigns | templates | analytics | settings
   const [campaignSubTab, setCampaignSubTab] = useState("launch"); // launch | history
   const [settingsSubTab, setSettingsSubTab] = useState("status"); // status | safety
 
+  // Multi-worker support — the worker registry (GET /whatsapp/workers),
+  // fetched once at load and refreshed on its own slow interval so the
+  // strip's status dots stay live without competing with each panel's own,
+  // faster, SELECTED-WORKER-ONLY polling further down (WESessionPanel,
+  // WEHistoryPanel) — those re-subscribe on worker change and clean up
+  // their own interval, so switching tabs never stacks duplicate polling.
+  const [workers, setWorkers] = useState([]);
+  const [workersLoading, setWorkersLoading] = useState(true);
+  // Worker 1 stays the default selection — required for backward
+  // compatibility with every existing single-worker workflow.
+  const [selectedWorkerId, setSelectedWorkerId] = useState(DEFAULT_WORKER_ID);
+
+  const fetchWorkers = useCallback(async () => {
+    try {
+      const list = await getWorkers();
+      setWorkers(list);
+    } catch (err) {
+      console.error("Failed to load WhatsApp worker registry", err);
+    } finally {
+      setWorkersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchWorkers();
+    const timer = setInterval(fetchWorkers, 8000);
+    return () => clearInterval(timer);
+  }, [fetchWorkers]);
+
+  // A worker the registry hasn't returned yet (today: "worker-2", before an
+  // admin explicitly registers it) still gets a tab — built ENTIRELY
+  // client-side from a plain constant, never written to the backend, never
+  // given a fake session/status. Selecting it renders WEWorkerNotProvisioned
+  // instead of mounting any worker-scoped panel, so no worker-scoped
+  // request is ever made for an id the backend doesn't recognize.
+  const registeredIds = useMemo(() => new Set(workers.map((w) => w.id)), [workers]);
+  const displayWorkers = useMemo(() => {
+    const list = [...workers];
+    if (!registeredIds.has(WORKER2_ID)) {
+      list.push({ id: WORKER2_ID, label: "Worker 2", __placeholder: true });
+    }
+    return list;
+  }, [workers, registeredIds]);
+
+  const selectedWorker = displayWorkers.find((w) => w.id === selectedWorkerId) || null;
+  const selectedIsPlaceholder = !!selectedWorker?.__placeholder;
+
   return (
     <div className="min-h-screen bg-[#F8F8F7] px-8 py-12 text-[#111111] font-sans antialiased">
       <div className="max-w-7xl mx-auto space-y-12">
-        
+
         {/* Header */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4">
           <div>
@@ -84,6 +140,15 @@ export default function WhatsAppEnginePage() {
             </p>
           </div>
         </div>
+
+        {/* Worker Strip — selects which worker every tab below is scoped to */}
+        <WEWorkerStrip
+          workers={displayWorkers}
+          loading={workersLoading}
+          selectedWorkerId={selectedWorkerId}
+          onSelect={setSelectedWorkerId}
+          onWorkerRegistered={fetchWorkers}
+        />
 
         {/* Tab Navigation */}
         <div className="flex flex-wrap gap-2 border-b border-black/[0.04] pb-px">
@@ -137,13 +202,21 @@ export default function WhatsAppEnginePage() {
                 </button>
               </div>
 
-              {campaignSubTab === "launch" ? <WECampaignLauncher /> : <WEHistoryPanel />}
+              {campaignSubTab === "launch" ? (
+                <WECampaignLauncher
+                  workerId={selectedWorkerId}
+                  workerLabel={selectedWorker?.label}
+                  workerUnavailable={selectedIsPlaceholder}
+                />
+              ) : (
+                <WEHistoryPanel workerId={selectedWorkerId} workerUnavailable={selectedIsPlaceholder} />
+              )}
             </div>
           )}
 
           {activeTab === "contact-lists" && <WEContactListsTab />}
           {activeTab === "templates" && <WETemplateManager />}
-          {activeTab === "analytics" && <WEAuditLogPanel />}
+          {activeTab === "analytics" && <WEAuditLogPanel workers={displayWorkers} defaultWorkerId={selectedWorkerId} />}
 
           {activeTab === "settings" && (
             <div className="space-y-8">
@@ -167,7 +240,17 @@ export default function WhatsAppEnginePage() {
                 </button>
               </div>
 
-              {settingsSubTab === "status" ? <WESessionPanel /> : <WEConfigPanel />}
+              {settingsSubTab === "status" ? (
+                selectedIsPlaceholder ? (
+                  <WEWorkerNotProvisioned worker={selectedWorker} onRegistered={fetchWorkers} />
+                ) : (
+                  <WESessionPanel workerId={selectedWorkerId} workerLabel={selectedWorker?.label} />
+                )
+              ) : selectedIsPlaceholder ? (
+                <WEWorkerNotProvisioned worker={selectedWorker} onRegistered={fetchWorkers} />
+              ) : (
+                <WEConfigPanel workerId={selectedWorkerId} workerLabel={selectedWorker?.label} />
+              )}
             </div>
           )}
         </div>
@@ -178,9 +261,166 @@ export default function WhatsAppEnginePage() {
 }
 
 // ==========================================
+// 0. WORKER STRIP — multi-worker selector
+// ==========================================
+// Renders a card per worker (real, from GET /whatsapp/workers, plus the
+// always-present "worker-2" placeholder when not yet registered). Phone
+// numbers/status are read ONLY from each worker's own `session` sub-object
+// — never invented, never hardcoded. Registering the placeholder worker is
+// the one explicit, confirmation-gated write this component can trigger;
+// everything else here is read-only.
+function WEWorkerStrip({ workers, loading, selectedWorkerId, onSelect, onWorkerRegistered }) {
+  const [registering, setRegistering] = useState(false);
+
+  const handleRegisterWorker2 = async (e) => {
+    e.stopPropagation();
+    if (registering) return;
+    if (
+      !window.confirm(
+        "Register Worker 2's identity in the WhatsApp Engine?\n\n" +
+        "This only reserves the worker_id \"worker-2\" so it can be configured " +
+        "and later authenticated — it does NOT create the Railway service, " +
+        "does NOT start a browser session, and does NOT scan any QR code."
+      )
+    ) {
+      return;
+    }
+    setRegistering(true);
+    try {
+      await createWorker({ label: "Worker 2", worker_id: WORKER2_ID });
+      toast.success("Worker 2 registered. Deploy its Railway service, then scan its QR to connect.");
+      await onWorkerRegistered();
+    } catch (err) {
+      toast.error(formatErrorDetail(err, "Failed to register Worker 2."));
+    } finally {
+      setRegistering(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex gap-3">
+        {[0, 1].map((i) => (
+          <div key={i} className="h-16 w-56 bg-white rounded-xl shadow-sm animate-pulse" />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap gap-3" data-testid="we-worker-strip">
+      {workers.map((w) => {
+        const active = w.id === selectedWorkerId;
+        const isPlaceholder = !!w.__placeholder;
+        const status = w.session?.status;
+        const phone = w.session?.connected_phone_number;
+        const statusDotClass = isPlaceholder
+          ? "bg-gray-300"
+          : status === "authenticated" ? "bg-emerald-500"
+          : status === "qr_pending" ? "bg-amber-500"
+          : "bg-red-500";
+        const subLabel = isPlaceholder
+          ? "Not provisioned"
+          : phone || (status === "authenticated" ? "Connected"
+              : status === "qr_pending" ? "Scan QR to connect"
+              : "Disconnected");
+        return (
+          <button
+            key={w.id}
+            onClick={() => onSelect(w.id)}
+            data-testid={`we-worker-tab-${w.id}`}
+            className={`flex items-center gap-3 px-5 py-3 rounded-xl bg-white shadow-sm text-left transition-all duration-150 min-w-[200px] ${
+              active ? "ring-2 ring-[#111111]" : "ring-1 ring-black/[0.04] hover:ring-black/20"
+            }`}
+          >
+            <Smartphone className={`w-5 h-5 shrink-0 ${isPlaceholder ? "text-gray-300" : "text-[#111111]/60"}`} />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-[#111111] truncate">{w.label}</div>
+              <div className="flex items-center gap-1.5 text-[11px] text-[#6B7280]">
+                <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${statusDotClass}`} />
+                <span className="truncate">{subLabel}</span>
+              </div>
+            </div>
+            {isPlaceholder && (
+              <button
+                type="button"
+                onClick={handleRegisterWorker2}
+                disabled={registering}
+                data-testid="we-register-worker-2"
+                className="ml-auto shrink-0 text-[10px] font-semibold uppercase tracking-wide text-[#111111] border border-black/10 hover:border-black rounded-lg px-2.5 py-1.5 disabled:opacity-50"
+              >
+                {registering ? "…" : "Register"}
+              </button>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ==========================================
+// 0b. WORKER NOT PROVISIONED — placeholder state
+// ==========================================
+// Shown in place of WESessionPanel for a worker id the registry has not
+// returned yet (the "worker-2" placeholder before it's registered). Never
+// polls, never fetches, never shows a QR — there is no session to show.
+function WEWorkerNotProvisioned({ worker, onRegistered }) {
+  const [registering, setRegistering] = useState(false);
+
+  const handleRegister = async () => {
+    if (registering) return;
+    if (
+      !window.confirm(
+        `Register ${worker?.label || "this worker"}'s identity in the WhatsApp Engine?\n\n` +
+        "This only reserves the worker_id so it can be configured and later " +
+        "authenticated — it does NOT create the Railway service, does NOT " +
+        "start a browser session, and does NOT scan any QR code."
+      )
+    ) {
+      return;
+    }
+    setRegistering(true);
+    try {
+      await createWorker({ label: worker?.label || "Worker 2", worker_id: worker?.id || WORKER2_ID });
+      toast.success(`${worker?.label || "Worker"} registered. Deploy its Railway service, then scan its QR to connect.`);
+      await onRegistered();
+    } catch (err) {
+      toast.error(formatErrorDetail(err, "Failed to register worker."));
+    } finally {
+      setRegistering(false);
+    }
+  };
+
+  return (
+    <div
+      className="flex flex-col items-center justify-center p-12 bg-white rounded-2xl min-h-[300px] shadow-sm text-center space-y-4"
+      data-testid="we-worker-not-provisioned"
+    >
+      <div className="w-16 h-16 bg-black/[0.03] rounded-full flex items-center justify-center mx-auto">
+        <Smartphone className="w-8 h-8 text-[#6B7280]" />
+      </div>
+      <h3 className="text-lg font-semibold text-[#111111]">{worker?.label || "Worker"} — Not Provisioned</h3>
+      <p className="text-xs text-[#6B7280] leading-relaxed max-w-sm">
+        This worker's identity has not been registered yet. Registering it reserves
+        worker_id "{worker?.id}" so its own Railway service and WhatsApp session can
+        be set up next — it does not connect anything on its own.
+      </p>
+      <button
+        onClick={handleRegister}
+        disabled={registering}
+        className="text-xs font-semibold uppercase tracking-widest text-white bg-[#111111] hover:bg-black px-5 py-3 rounded-lg transition-colors disabled:opacity-50"
+      >
+        {registering ? "Registering…" : `Register ${worker?.label || "Worker"}`}
+      </button>
+    </div>
+  );
+}
+
+// ==========================================
 // 1. SESSION PANEL (QR & Connection Status)
 // ==========================================
-function WESessionPanel() {
+function WESessionPanel({ workerId = DEFAULT_WORKER_ID, workerLabel }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [polling, setPolling] = useState(true);
@@ -188,25 +428,57 @@ function WESessionPanel() {
   // stops polling such a group entirely, so without this the operator would
   // see a healthy session and silently receive nothing from that group.
   const [invalidAgents, setInvalidAgents] = useState([]);
+  // Every agent mapped to THIS worker (multi-worker support) — same fetch
+  // the invalid-config check above already needs, reused rather than a
+  // second call, filtered down to ones actually assigned a group.
+  const [assignedAgents, setAssignedAgents] = useState([]);
 
-  const fetchSession = async () => {
+  // Guards against an out-of-order response: if the operator switches
+  // worker A -> B -> A again faster than A's own first request round-trips,
+  // that late-arriving response must never overwrite what the CURRENT
+  // selection already correctly loaded. Every commit below checks this ref
+  // (always the latest workerId, updated synchronously — never stale
+  // itself) before calling setState.
+  const currentWorkerIdRef = useRef(workerId);
+  useEffect(() => { currentWorkerIdRef.current = workerId; }, [workerId]);
+
+  // Every session/status/agent-config request below is scoped to `workerId`
+  // — re-created whenever the selected worker changes, so a stale closure
+  // over a PREVIOUS worker's id can never fire after switching tabs.
+  const fetchSession = useCallback(async () => {
+    const requestedFor = workerId;
     try {
-      const data = await getSessionStatus();
+      const data = await getWorkerSession(workerId);
+      if (currentWorkerIdRef.current !== requestedFor) return; // superseded by a newer selection
       setSession(data);
     } catch (err) {
       console.error("Failed to load WhatsApp session status", err);
     } finally {
-      setLoading(false);
+      if (currentWorkerIdRef.current === requestedFor) setLoading(false);
     }
     try {
-      const agents = await getWhatsAppAgents();
+      const agents = await getWhatsAppAgents(workerId);
+      if (currentWorkerIdRef.current !== requestedFor) return; // superseded by a newer selection
       setInvalidAgents(
         (agents || []).filter((a) => a?.config?.config_status === "INVALID_CONFIGURATION")
+      );
+      setAssignedAgents(
+        (agents || []).filter((a) => (a?.config?.group_names || []).length > 0)
       );
     } catch (err) {
       console.error("Failed to load WhatsApp agent config", err);
     }
-  };
+  }, [workerId]);
+
+  // Switching workers must show a fresh loading state, never the PREVIOUS
+  // worker's session while the new one is still in flight — otherwise
+  // Worker 1's data would visibly flash as if it were Worker 2's.
+  useEffect(() => {
+    setLoading(true);
+    setSession(null);
+    setInvalidAgents([]);
+    setAssignedAgents([]);
+  }, [workerId]);
 
   useEffect(() => {
     fetchSession();
@@ -215,7 +487,7 @@ function WESessionPanel() {
       timer = setInterval(fetchSession, 4000);
     }
     return () => clearInterval(timer);
-  }, [polling]);
+  }, [polling, fetchSession]);
 
   if (loading) {
     return (
@@ -257,8 +529,13 @@ function WESessionPanel() {
       
       {/* Status Summary */}
       <div className="bg-white p-8 rounded-2xl space-y-6 shadow-sm">
-        <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Connection Status</h3>
-        
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Connection Status</h3>
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-[#6B7280] bg-black/[0.03] px-2 py-1 rounded-md">
+            {workerLabel || workerId}
+          </span>
+        </div>
+
         <div className="flex items-center gap-3">
           <div className={`w-3.5 h-3.5 rounded-full ${
             status === "authenticated" ? "bg-emerald-500 animate-pulse" :
@@ -281,8 +558,12 @@ function WESessionPanel() {
 
         <div className="pt-4 space-y-3 text-xs border-t border-black/[0.04]">
           <div className="flex justify-between">
+            <span className="text-[#6B7280] font-medium">Worker ID</span>
+            <span className="font-mono text-[#111111]">{workerId}</span>
+          </div>
+          <div className="flex justify-between">
             <span className="text-[#6B7280] font-medium">Session Instance</span>
-            <span className="font-mono text-[#111111]">default</span>
+            <span className="font-mono text-[#111111]">{session?.session_instance || workerId}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-[#6B7280] font-medium">Last Heartbeat</span>
@@ -355,7 +636,9 @@ function WESessionPanel() {
           </div>
           <div className="flex justify-between">
             <span className="text-[#6B7280] font-medium">Connected Account</span>
-            <span className="text-[#111111] font-mono">{session?.connected_phone_number || "Unknown"}</span>
+            <span className="text-[#111111] font-mono" data-testid="we-connected-account">
+              {session?.connected_phone_number || "Unknown"}
+            </span>
           </div>
         </div>
 
@@ -385,6 +668,32 @@ function WESessionPanel() {
           </div>
         ))}
 
+        {/* Assigned Agent Groups (multi-worker support) — read-only: which
+            agents/groups this SPECIFIC worker owns, via the same
+            worker-scoped GET /agents/whatsapp/agents?worker_id= call the
+            invalid-config check above already makes. Editable group
+            assignment already has a working backend endpoint (PUT
+            /agents/whatsapp/config/{agent_id}?worker_id=) but no existing
+            frontend precedent to extend — left read-only here deliberately,
+            not because the backend can't do it; see the session's report. */}
+        <div className="pt-4 space-y-2.5 text-xs border-t border-black/[0.04]" data-testid="we-assigned-groups">
+          <p className="text-[#6B7280] font-semibold uppercase tracking-wide text-[10px] mb-1">
+            Assigned Agent Groups
+          </p>
+          {assignedAgents.length === 0 ? (
+            <p className="text-[#6B7280] italic">No agent groups mapped to this worker yet.</p>
+          ) : (
+            assignedAgents.map((a) => (
+              <div key={a.agent_id} className="flex items-start justify-between gap-3">
+                <span className="text-[#111111] font-medium shrink-0">{a.name || a.agent_id}</span>
+                <span className="text-[#6B7280] font-mono text-right">
+                  {(a.config?.group_names || []).join(", ")}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+
         <div className="pt-4 space-y-3">
           <button
             onClick={() => setPolling(!polling)}
@@ -394,10 +703,10 @@ function WESessionPanel() {
           </button>
           <button
             onClick={async () => {
-              if (!window.confirm("Reset the WhatsApp session? This unlinks the current device and requires scanning a new QR code. The worker must restart to complete the reset.")) return;
+              if (!window.confirm(`Reset ${workerLabel || workerId}'s WhatsApp session? This unlinks the current device and requires scanning a new QR code. That worker's own process must restart to complete the reset.`)) return;
               try {
-                await resetSession();
-                toast.success("Session reset requested. Restart the worker, then scan the new QR code.");
+                await resetWorkerSession(workerId);
+                toast.success("Session reset requested. Restart that worker's process, then scan the new QR code.");
                 fetchSession();
               } catch (err) {
                 toast.error(formatErrorDetail(err, "Failed to reset session."));
@@ -455,7 +764,7 @@ function WESessionPanel() {
 // ==========================================
 // 2. CAMPAIGN LAUNCHER (Compose & Launch)
 // ==========================================
-function WECampaignLauncher() {
+function WECampaignLauncher({ workerId = DEFAULT_WORKER_ID, workerLabel, workerUnavailable = false }) {
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [pipelineSummary, setPipelineSummary] = useState(null);
   const [selectedStages, setSelectedStages] = useState([]);
@@ -696,6 +1005,9 @@ function WECampaignLauncher() {
     setSelectedRowIds(new Set());
   };
 
+  // Multi-worker support — worker_id is ALWAYS included explicitly here,
+  // read from the currently selected worker (never omitted so the backend's
+  // own "default" fallback is never what actually decides the sender).
   const _batchPayload = (isDryRun) => ({
     source_type: sourceType,
     source_params: buildSourceParams(),
@@ -704,6 +1016,7 @@ function WECampaignLauncher() {
     variable_data: variables,
     media_url: mediaUrl || null,
     is_dry_run: isDryRun,
+    worker_id: workerId,
   });
 
   const handleDryRun = async () => {
@@ -744,6 +1057,24 @@ function WECampaignLauncher() {
   // Get active target name for preview (Task 8.2)
   const activePreviewRecipient = filteredRecipients[previewTargetIndex] || null;
 
+  // Multi-worker support — a worker that isn't registered yet has no
+  // session/queue to send through at all; block the launcher entirely
+  // rather than let a campaign be built against it (which would otherwise
+  // reach the backend's own worker-existence validation only at submit
+  // time, after the operator has already done the work of composing it).
+  if (workerUnavailable) {
+    return (
+      <div className="flex flex-col items-center justify-center p-12 bg-white rounded-2xl shadow-sm text-center space-y-2">
+        <p className="text-sm font-semibold text-[#111111]">
+          {workerLabel || "This worker"} is not provisioned yet
+        </p>
+        <p className="text-xs text-[#6B7280] max-w-sm">
+          Register this worker's identity (in the worker strip above) before launching campaigns through it.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       <ProjectSearchModal
@@ -751,6 +1082,10 @@ function WECampaignLauncher() {
         onClose={() => setProjectModalOpen(false)}
         onSelect={(p) => { handleProjectChange(p.id); setSelectedProjectName(p.name || p.brand_name || ""); }}
       />
+      <div className="flex items-center gap-2 text-xs font-semibold text-[#6B7280] bg-black/[0.03] px-4 py-2.5 rounded-lg w-fit">
+        <Send className="w-3.5 h-3.5" />
+        Sending from <span className="text-[#111111]">{workerLabel || workerId}</span>
+      </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
         {/* Configurations column */}
@@ -785,7 +1120,7 @@ function WECampaignLauncher() {
               SAVED_LISTS sections below. Nothing about those sections
               changes. */}
           {sourceType === "ONGOING_PIPELINE" ? (
-            <OngoingPipelinePanel templates={templates} />
+            <OngoingPipelinePanel templates={templates} workerId={workerId} />
           ) : (
           <>
 
@@ -1503,7 +1838,7 @@ function OngoingTalentCard({ talent, checked, onToggle, onQuickView }) {
   );
 }
 
-function OngoingPipelinePanel({ templates }) {
+function OngoingPipelinePanel({ templates, workerId = DEFAULT_WORKER_ID }) {
   const [talents, setTalents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshedAt, setRefreshedAt] = useState(null);
@@ -1609,6 +1944,7 @@ function OngoingPipelinePanel({ templates }) {
         template_id: customTemplateId,
         variable_data: {},
         is_dry_run: false,
+        worker_id: workerId,
       });
       toast.success(`Reminder queued for ${selected.size} talent(s)`);
       setConfirmOpen(false);
@@ -1817,7 +2153,7 @@ function OngoingPipelinePanel({ templates }) {
 // ==========================================
 // 3. CAMPAIGN HISTORY
 // ==========================================
-function WEHistoryPanel() {
+function WEHistoryPanel({ workerId = DEFAULT_WORKER_ID, workerUnavailable = false }) {
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedBatchId, setSelectedBatchId] = useState(null);
@@ -1825,33 +2161,54 @@ function WEHistoryPanel() {
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [sessionOnline, setSessionOnline] = useState(false);
 
-  const fetchHistory = async () => {
+  // Same out-of-order-response guard as WESessionPanel — a fast
+  // A -> B -> A worker switch must never let A's late-arriving FIRST
+  // response overwrite what A's second (current) fetch already loaded.
+  const currentWorkerIdRef = useRef(workerId);
+  useEffect(() => { currentWorkerIdRef.current = workerId; }, [workerId]);
+
+  const fetchHistory = useCallback(async () => {
+    const requestedFor = workerId;
     try {
-      const list = await getBatches();
+      const list = await getBatches(null, workerId);
+      if (currentWorkerIdRef.current !== requestedFor) return; // superseded by a newer selection
       setBatches(list);
     } catch (err) {
       toast.error("Failed to load campaign history");
     } finally {
-      setLoading(false);
+      if (currentWorkerIdRef.current === requestedFor) setLoading(false);
     }
-  };
+  }, [workerId]);
+
+  // Switching workers: clear the PREVIOUS worker's batches/jobs immediately
+  // so they can never be mistaken for the newly-selected worker's data
+  // while the fresh fetch is still in flight.
+  useEffect(() => {
+    setLoading(true);
+    setBatches([]);
+    setSelectedBatchId(null);
+    setJobs([]);
+  }, [workerId]);
 
   useEffect(() => {
+    if (workerUnavailable) { setLoading(false); return; }
     fetchHistory();
-  }, []);
+  }, [fetchHistory, workerUnavailable]);
 
   // Live progress: while any batch is actively running, poll batches + the open
   // batch's jobs + the worker session so Resume shows real movement (and a
-  // re-pause surfaces its reason) instead of appearing to do nothing.
+  // re-pause surfaces its reason) instead of appearing to do nothing. Scoped
+  // to the SAME worker as the initial fetch above — re-subscribes (and its
+  // cleanup tears down the previous interval) whenever workerId changes.
   const anyRunning = batches.some((b) => b.status === "running" || b.status === "processing");
   useEffect(() => {
-    if (!anyRunning) return;
+    if (!anyRunning || workerUnavailable) return;
     let active = true;
     const tick = async () => {
       try {
         const [list, sess] = await Promise.all([
-          getBatches(),
-          getSessionStatus().catch(() => null),
+          getBatches(null, workerId),
+          getWorkerSession(workerId).catch(() => null),
         ]);
         if (!active) return;
         setBatches(list);
@@ -1864,7 +2221,16 @@ function WEHistoryPanel() {
     };
     const timer = setInterval(tick, 3000);
     return () => { active = false; clearInterval(timer); };
-  }, [anyRunning, selectedBatchId]);
+  }, [anyRunning, selectedBatchId, workerId, workerUnavailable]);
+
+  if (workerUnavailable) {
+    return (
+      <div className="flex flex-col items-center justify-center p-12 bg-white rounded-2xl shadow-sm text-center space-y-2">
+        <p className="text-sm font-semibold text-[#111111]">No campaign history for this worker yet</p>
+        <p className="text-xs text-[#6B7280]">This worker has not been registered, so it has never sent anything.</p>
+      </div>
+    );
+  }
 
   const handleBatchClick = async (batchId) => {
     setSelectedBatchId(batchId);
@@ -2491,7 +2857,13 @@ function WETemplateManager() {
 // ==========================================
 // 5. CONFIGURATION PANEL (Admin only)
 // ==========================================
-function WEConfigPanel() {
+// Safety Controls (circuit-breaker/retry/delay) — WORKER-SPECIFIC on the
+// backend: verified directly against backend/routers/whatsapp.py's actual
+// GET/PUT /whatsapp/config[/{key}] route source (not assumed) — each is a
+// separate {key, worker_id, value} document, compound-unique-indexed on
+// (key, worker_id). `workerId` is required here, not optional, so this
+// panel can never silently read/write the wrong worker's limits.
+function WEConfigPanel({ workerId = DEFAULT_WORKER_ID, workerLabel }) {
   const [config, setConfig] = useState({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -2501,7 +2873,12 @@ function WEConfigPanel() {
   const [testingNotification, setTestingNotification] = useState(false);
   const [testResult, setTestResult] = useState(null);
 
-  // TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION
+  // TEMP TEST TOOL / REMOVE AFTER WHATSAPP VALIDATION — backend route
+  // (POST /admin/whatsapp/test-internal-notification, submissions.py) reads
+  // whatsapp_config's internal_notification_group_name with NO worker_id
+  // scoping at all; flagged in this session's audit as a pre-existing gap
+  // in disposable test infrastructure already marked for removal, not
+  // fixed here (out of scope for frontend hardening — see report).
   const handleTestNotification = async () => {
     setTestingNotification(true);
     setTestResult(null);
@@ -2516,20 +2893,36 @@ function WEConfigPanel() {
     }
   };
 
-  const fetchConfig = async () => {
+  // Same out-of-order-response guard as WESessionPanel/WEHistoryPanel — a
+  // fast A -> B -> A worker switch must never let A's late-arriving FIRST
+  // config response overwrite what A's second (current) fetch already loaded.
+  const currentWorkerIdRef = useRef(workerId);
+  useEffect(() => { currentWorkerIdRef.current = workerId; }, [workerId]);
+
+  const fetchConfig = useCallback(async () => {
+    const requestedFor = workerId;
     try {
-      const data = await getWaConfig();
+      const data = await getWaConfig(workerId);
+      if (currentWorkerIdRef.current !== requestedFor) return; // superseded by a newer selection
       setConfig(data);
     } catch (err) {
       toast.error("Failed to load WhatsApp safety configurations");
     } finally {
-      setLoading(false);
+      if (currentWorkerIdRef.current === requestedFor) setLoading(false);
     }
-  };
+  }, [workerId]);
+
+  // Switching workers: clear the PREVIOUS worker's config values
+  // immediately so they can never be mistaken for the newly-selected
+  // worker's own limits while the fresh fetch is still in flight.
+  useEffect(() => {
+    setLoading(true);
+    setConfig({});
+  }, [workerId]);
 
   useEffect(() => {
     fetchConfig();
-  }, []);
+  }, [fetchConfig]);
 
   const handleChange = (key, value) => {
     setConfig({ ...config, [key]: value });
@@ -2542,9 +2935,9 @@ function WEConfigPanel() {
       const safetyConfig = { ...config };
       delete safetyConfig.internal_notification_group_name;
       await Promise.all(
-        Object.entries(safetyConfig).map(([key, val]) => updateWaConfig(key, val))
+        Object.entries(safetyConfig).map(([key, val]) => updateWaConfig(key, val, workerId))
       );
-      toast.success("Configurations updated successfully");
+      toast.success(`Configurations updated for ${workerLabel || workerId}`);
       fetchConfig();
     } catch (err) {
       toast.error("Failed saving safety variables");
@@ -2558,8 +2951,8 @@ function WEConfigPanel() {
     setSavingGroup(true);
     try {
       const val = config.internal_notification_group_name || "";
-      await updateWaConfig("internal_notification_group_name", val);
-      toast.success("Internal notification group updated successfully");
+      await updateWaConfig("internal_notification_group_name", val, workerId);
+      toast.success(`Internal notification group updated for ${workerLabel || workerId}`);
       fetchConfig();
     } catch (err) {
       toast.error("Failed saving group name configuration");
@@ -2578,9 +2971,17 @@ function WEConfigPanel() {
 
   return (
     <div className="max-w-2xl bg-white p-8 rounded-2xl shadow-sm space-y-8">
-      <div className="border-b border-black/[0.04] pb-4">
-        <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Safety Controls & Anti-Ban</h3>
-        <p className="text-xs text-[#6B7280] mt-1.5 leading-relaxed">Adjust delivery parameters. Slower execution reduces risk of meta banning. ONLY system admins can override these.</p>
+      <div className="border-b border-black/[0.04] pb-4 flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Safety Controls & Anti-Ban</h3>
+          <p className="text-xs text-[#6B7280] mt-1.5 leading-relaxed">Adjust delivery parameters. Slower execution reduces risk of meta banning. ONLY system admins can override these.</p>
+        </div>
+        <span
+          className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-[#6B7280] bg-black/[0.03] px-2 py-1 rounded-md"
+          data-testid="we-config-worker-badge"
+        >
+          Editing: {workerLabel || workerId}
+        </span>
       </div>
 
       <form onSubmit={handleSave} className="space-y-6">
@@ -2724,25 +3125,33 @@ function WEConfigPanel() {
 // ==========================================
 // 6. AUDIT LOG PANEL
 // ==========================================
-function WEAuditLogPanel() {
+// `workers` (for the filter dropdown's labels) and `defaultWorkerId` (the
+// page's currently-selected worker, used only as this dropdown's INITIAL
+// value) are optional — analytics stays a global view by default, with an
+// explicit per-worker filter layered on top, matching this codebase's
+// existing "global with worker filters" convention for cross-worker views.
+function WEAuditLogPanel({ workers = [], defaultWorkerId = "" }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [limit, setLimit] = useState(100);
+  const [workerFilter, setWorkerFilter] = useState(defaultWorkerId || "");
 
-  const fetchLogs = async () => {
+  const fetchLogs = useCallback(async () => {
     try {
-      const data = await getAuditLog({ limit });
+      const params = { limit };
+      if (workerFilter) params.worker_id = workerFilter;
+      const data = await getAuditLog(params);
       setLogs(data);
     } catch (err) {
       toast.error("Failed to load audit trail logs");
     } finally {
       setLoading(false);
     }
-  };
+  }, [limit, workerFilter]);
 
   useEffect(() => {
     fetchLogs();
-  }, [limit]);
+  }, [fetchLogs]);
 
   if (loading) {
     return (
@@ -2759,15 +3168,28 @@ function WEAuditLogPanel() {
           <h3 className="text-xs font-bold uppercase tracking-widest text-[#6B7280]">Immutable Audit Logs</h3>
           <p className="text-xs text-[#6B7280] mt-0.5">Continuous delivery auditing of automation flows.</p>
         </div>
-        <select
-          value={limit}
-          onChange={(e) => setLimit(Number(e.target.value))}
-          className="text-xs bg-[#f8f8f7] border border-black/10 rounded-lg p-2 focus:outline-none"
-        >
-          <option value="50">Show 50</option>
-          <option value="100">Show 100</option>
-          <option value="200">Show 200</option>
-        </select>
+        <div className="flex gap-2">
+          <select
+            value={workerFilter}
+            onChange={(e) => setWorkerFilter(e.target.value)}
+            className="text-xs bg-[#f8f8f7] border border-black/10 rounded-lg p-2 focus:outline-none"
+            data-testid="we-audit-worker-filter"
+          >
+            <option value="">All Workers</option>
+            {workers.filter((w) => !w.__placeholder).map((w) => (
+              <option key={w.id} value={w.id}>{w.label}</option>
+            ))}
+          </select>
+          <select
+            value={limit}
+            onChange={(e) => setLimit(Number(e.target.value))}
+            className="text-xs bg-[#f8f8f7] border border-black/10 rounded-lg p-2 focus:outline-none"
+          >
+            <option value="50">Show 50</option>
+            <option value="100">Show 100</option>
+            <option value="200">Show 200</option>
+          </select>
+        </div>
       </div>
 
       <div className="overflow-x-auto">

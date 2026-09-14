@@ -145,7 +145,33 @@ async def ensure_agents_ready() -> None:
         )
         await db["whatsapp_agent_audit_log"].create_index([("timestamp", -1)])
         await db["whatsapp_agent_audit_log"].create_index([("agent_id", 1), ("timestamp", -1)])
-        await db[registry.CONFIG_COLLECTION].create_index("agent_id", unique=True)
+
+        # Multi-worker support (2026-09-13) — agent_id + worker_id is the
+        # real uniqueness key now (an agent can be mapped to more than one
+        # worker's number, each with its own group_names). Only the two
+        # ADDITIVE indexes below are created here, at every boot, matching
+        # this function's existing best-effort/non-fatal convention for
+        # every other index in this block — neither of these ever removes
+        # data or an existing constraint, so "log and continue on failure"
+        # is safe for them exactly like it is for the indexes above.
+        #
+        # The pre-existing single-field unique index on {agent_id: 1} alone
+        # (which would still reject a second worker's config for an
+        # agent_id Worker 1 already has) is DELIBERATELY NOT dropped here.
+        # Dropping a production index is destructive and must be
+        # observable and fail loudly, not silently folded into this
+        # broad, best-effort startup try/except alongside a dozen unrelated
+        # additive index calls. See
+        # backend/migrations/whatsapp_agent_config_worker_index.py — a
+        # separately invoked, explicit migration (--dry-run / --apply) is
+        # what actually removes that old index, identifying it by its real
+        # key pattern rather than assuming a literal name.
+        await db[registry.CONFIG_COLLECTION].create_index(
+            [("agent_id", 1), ("worker_id", 1)], unique=True, name="agent_id_worker_id_unique",
+        )
+        await db[registry.CONFIG_COLLECTION].create_index(
+            [("worker_id", 1), ("active", 1)], name="worker_active_idx",
+        )
         # Concurrent Task Engine (2026-08-05) — MANY docs per (agent_id,
         # phone), unlike whatsapp_conversations' single-slot unique index
         # above, so this index is deliberately non-unique.

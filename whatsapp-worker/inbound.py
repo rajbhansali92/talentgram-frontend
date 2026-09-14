@@ -234,6 +234,20 @@ async def _claim_message(message_id: str) -> bool:
         await db[SEEN_COLLECTION].insert_one({
             "message_id": message_id, "status": _STATUS_IN_PROGRESS,
             "claimed_at": now, "created_at": now,
+            # Forensic breadcrumb only (multi-worker support, 2026-09-13) —
+            # deliberately NOT part of the unique index or any query filter
+            # in this function. message_id is already the sole identity a
+            # real WhatsApp message carries, and this claim/ack state
+            # machine has already caused two real production incidents
+            # (quadruple- and sextuple-send) from careless changes to its
+            # exact semantics — narrowing the unique index to
+            # (worker_id, message_id) would only matter for the rare
+            # fallback hash-id collision case (two different accounts with
+            # identically-named groups and identical text in the same TTL
+            # window), and isn't worth that risk. worker_id here is purely
+            # for "which process claimed this" visibility if that's ever
+            # investigated.
+            "worker_id": config.WORKER_ID,
         })
         _seen_cache.add(message_id)
         _cap_seen_cache()
@@ -354,7 +368,10 @@ async def _claim_ack(message_id: str) -> bool:
     db = get_db()
     now = _now()
     try:
-        await db[ACK_COLLECTION].insert_one({"message_id": message_id, "created_at": now})
+        await db[ACK_COLLECTION].insert_one({
+            "message_id": message_id, "created_at": now,
+            "worker_id": config.WORKER_ID,  # forensic breadcrumb only — see _claim_message
+        })
         _acked_cache.add(message_id)
         if len(_acked_cache) > 5000:
             _acked_cache.clear()
@@ -426,6 +443,7 @@ class KnownGroupsCache:
         try:
             resp = await self._http.get(
                 f"{config.AGENTS_BACKEND_URL}/api/agents/whatsapp/known-groups",
+                params={"worker_id": config.WORKER_ID},
                 headers=_auth_headers(),
                 timeout=15.0,
             )
@@ -920,6 +938,7 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
                 "media_type": media_type,
                 "replied_to_message_id": replied_to_message_id,
                 "replied_quoted_text": replied_quoted_text,
+                "worker_id": config.WORKER_ID,
             },
             timeout=_INBOUND_DISPATCH_TIMEOUT_SEC,
         )
@@ -1091,17 +1110,18 @@ _last_written_status: Dict[str, object] = {}
 
 
 async def _update_worker_status(**fields) -> None:
-    """Upsert onto the SAME whatsapp_sessions singleton doc session.py
-    already owns (session.py:_update_session_doc) — deliberately not a new
-    collection. Only writes when something actually changed, so this never
-    turns into a write on every 2s poll cycle for fields that rarely move."""
+    """Upsert onto the SAME whatsapp_sessions doc session.py already owns
+    for THIS worker (session.py:_update_session_doc, config.WORKER_ID) —
+    deliberately not a new collection. Only writes when something actually
+    changed, so this never turns into a write on every 2s poll cycle for
+    fields that rarely move."""
     changed = {k: v for k, v in fields.items() if _last_written_status.get(k) != v}
     if not changed:
         return
     _last_written_status.update(changed)
     try:
         await get_db().whatsapp_sessions.update_one(
-            {"id": "default"}, {"$set": changed}, upsert=True,
+            {"id": config.WORKER_ID}, {"$set": changed}, upsert=True,
         )
     except Exception:
         logger.exception("inbound: failed to write worker status %s", changed)

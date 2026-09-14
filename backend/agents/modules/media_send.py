@@ -129,6 +129,7 @@ async def create_send_scan_request(
     content_hash: Optional[str] = None, source_type: str = "group",
     preview_only: bool = False, skip_validation: bool = False,
     multi_scan_group_id: Optional[str] = None, total_sources: Optional[int] = None,
+    worker_id: str = "default",
 ) -> str:
     """Same shape/lifecycle as media_assignment.create_scan_request — mode
     stays "scan" (the worker's scan logic is 100% shared/unchanged between
@@ -201,7 +202,22 @@ async def create_send_scan_request(
     multiple async poll-loop passes instead of one blocking wait. None
     for a normal single-source send (every existing caller) — that path
     is completely unaffected, still transitions directly scan->send on
-    its own doc exactly as before."""
+    its own doc exactly as before.
+
+    `worker_id` (multi-worker support, 2026-09-13): the WhatsApp worker/
+    session the SEND command that triggered this actually arrived through
+    — real, per-worker-correct value for the REAL async-send path
+    (_send_one_pair passes ctx.worker_id, itself threaded all the way from
+    dispatcher.handle_inbound_message). The synchronous preview_only path
+    (casting_pipeline._preview_send_marks / _scan_raw_candidates_for_source)
+    deliberately does NOT thread it through and leaves the "default" literal
+    default in place: that request is read once and deleted immediately
+    (never reaches services/media_assignment_worker.py's report-sending
+    code — see _process_scan_done's preview_only special-case), so there is
+    no report-routing decision this value could ever affect for that path;
+    threading it through several more layers of plain talent/project-id
+    functions for a value that's provably never read would be exactly the
+    kind of unnecessary complexity worth avoiding."""
     req_id = str(uuid.uuid4())
     await db[SCAN_REQUESTS_COLLECTION].insert_one({
         "id": req_id,
@@ -209,6 +225,7 @@ async def create_send_scan_request(
         "workflow": "send",
         "status": SCAN_STATUS_PENDING,
         "group_name": group_name,
+        "worker_id": worker_id,
         "source_type": source_type,
         "preview_only": preview_only,
         "skip_validation": skip_validation,

@@ -1,0 +1,1521 @@
+{
+  "generated_at": "2026-08-31T07:27:21.499023+00:00",
+  "aborted": null,
+  "manifest_id": "pm_5645ad40b835e64f3a29",
+  "candidate_hash_of_passed": "40922369f247787a5d657f4dad84c2a636d8a3252d8b8f3d34396776759b5936",
+  "passed_count": 25,
+  "proposed_ids": [
+    "b47e8e918e732114e654c8a107996ac1",
+    "cf4130b7e84fd4c2c0bbc17576689365",
+    "9af755d6a4e4cb880df5bdc4c37806c0",
+    "c4c81a2a654bb7ff2e6d70251da890ac",
+    "f50f5333febc649dc9e9a109689e7449",
+    "17fc735d3ca6716ea7550d5123e10725",
+    "cc8db576e519f5c0b2348188ceac07d4",
+    "5e7e978afbee64b80b5f78a3e8474915",
+    "6c53ab2b116398905a6f66855d6165ac",
+    "975ebd9ca2dc85936d2392c0ef310c61",
+    "cd41e778f1a559bfa223f42fb5ff1a3d",
+    "8f44d38b6083bcd7f7a0a42ccdca5a96",
+    "dd17b8eb5ce871b181cfbfaeb7e03fd9",
+    "3945703b4060ee8025878bf8717bc590",
+    "c0f0d9277fc80b0f1c46448f2a309c67",
+    "8103c6f57ad5e6c85a282394ee903c5e",
+    "a981026dec7254d5740d54989c7be5e6",
+    "e07ea51987af3ba6e455287cd77c46e7",
+    "2fd838b16610d8acb1e440b50fa005d5",
+    "fbba1b5db2bb56980fa3a54b23637cbb",
+    "cb30360ab928b81e40681503f8d2538b",
+    "3727771efb8ef56dd0b4577738cea184",
+    "acf9b1719d6232224cabdba11edcea3b",
+    "c576fe394fe368197c7bdbe6b93f308e",
+    "dffda2516e22d6ef689b6ca90738b141"
+  ],
+  "approval_id": "ap_821ac23afcddf44f3c22",
+  "batch_id": "b_519efa200642013b9668",
+  "explicit_precheck": [
+    {
+      "derived_id": "b47e8e918e732114e654c8a107996ac1",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 3064379,
+      "cloudinary_bytes": 3064379,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "cf4130b7e84fd4c2c0bbc17576689365",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 3401104,
+      "cloudinary_bytes": 3401104,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "9af755d6a4e4cb880df5bdc4c37806c0",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 3446898,
+      "cloudinary_bytes": 3446898,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "c4c81a2a654bb7ff2e6d70251da890ac",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 3705075,
+      "cloudinary_bytes": 3705075,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "f50f5333febc649dc9e9a109689e7449",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 3878744,
+      "cloudinary_bytes": 3878744,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "17fc735d3ca6716ea7550d5123e10725",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 4052285,
+      "cloudinary_bytes": 4052285,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "cc8db576e519f5c0b2348188ceac07d4",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 4605314,
+      "cloudinary_bytes": 4605314,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "5e7e978afbee64b80b5f78a3e8474915",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 3,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 4784155,
+      "cloudinary_bytes": 4784155,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "6c53ab2b116398905a6f66855d6165ac",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 5097189,
+      "cloudinary_bytes": 5097189,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "975ebd9ca2dc85936d2392c0ef310c61",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 5215110,
+      "cloudinary_bytes": 5215110,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "cd41e778f1a559bfa223f42fb5ff1a3d",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 5406695,
+      "cloudinary_bytes": 5406695,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "8f44d38b6083bcd7f7a0a42ccdca5a96",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 6134078,
+      "cloudinary_bytes": 6134078,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "dd17b8eb5ce871b181cfbfaeb7e03fd9",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 6654465,
+      "cloudinary_bytes": 6654465,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "3945703b4060ee8025878bf8717bc590",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 7244696,
+      "cloudinary_bytes": 7244696,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "c0f0d9277fc80b0f1c46448f2a309c67",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 7594871,
+      "cloudinary_bytes": 7594871,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "8103c6f57ad5e6c85a282394ee903c5e",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 8100315,
+      "cloudinary_bytes": 8100315,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "a981026dec7254d5740d54989c7be5e6",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 8308655,
+      "cloudinary_bytes": 8308655,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "e07ea51987af3ba6e455287cd77c46e7",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 9811410,
+      "cloudinary_bytes": 9811410,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "2fd838b16610d8acb1e440b50fa005d5",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 10742977,
+      "cloudinary_bytes": 10742977,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "fbba1b5db2bb56980fa3a54b23637cbb",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 11277421,
+      "cloudinary_bytes": 11277421,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "cb30360ab928b81e40681503f8d2538b",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 11310518,
+      "cloudinary_bytes": 11310518,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "3727771efb8ef56dd0b4577738cea184",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 11772187,
+      "cloudinary_bytes": 11772187,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "acf9b1719d6232224cabdba11edcea3b",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 12121098,
+      "cloudinary_bytes": 12121098,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "c576fe394fe368197c7bdbe6b93f308e",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 14023164,
+      "cloudinary_bytes": 14023164,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "dffda2516e22d6ef689b6ca90738b141",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 14286012,
+      "cloudinary_bytes": 14286012,
+      "ALL_PASS": true
+    }
+  ],
+  "p9_manifest_rows": [
+    {
+      "derived_id": "b47e8e918e732114e654c8a107996ac1",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/8779dfca-886a-43a0-8993-34555713383b/auditions/f7b9ed14-a700-4820-bd20-f4064583fc67_sharvari-kashid/submission_de79c988-0727-4783-81af-af93a3ca7b75/intro_video",
+        "cloudinary_derived": {
+          "id": "b47e8e918e732114e654c8a107996ac1",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 3064379
+        }
+      }
+    },
+    {
+      "derived_id": "cf4130b7e84fd4c2c0bbc17576689365",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f973d131-406f-46f9-b951-4c12ff392e94/auditions/unknown_talent_sniggy-chops/submission_8aacaf50-0a00-41e1-8ab0-234a0e943951/intro_video",
+        "cloudinary_derived": {
+          "id": "cf4130b7e84fd4c2c0bbc17576689365",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 3401104
+        }
+      }
+    },
+    {
+      "derived_id": "9af755d6a4e4cb880df5bdc4c37806c0",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/3213d62c-57ef-4504-ab1e-722602191533/auditions/unknown_talent/submission_1b53ac98-eee1-4d3d-bdd5-93f123f06b65/intro_video",
+        "cloudinary_derived": {
+          "id": "9af755d6a4e4cb880df5bdc4c37806c0",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 3446898
+        }
+      }
+    },
+    {
+      "derived_id": "c4c81a2a654bb7ff2e6d70251da890ac",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent/submission_8eeaf722-d032-48c8-9320-71b3e325f35f/intro_video",
+        "cloudinary_derived": {
+          "id": "c4c81a2a654bb7ff2e6d70251da890ac",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 3705075
+        }
+      }
+    },
+    {
+      "derived_id": "f50f5333febc649dc9e9a109689e7449",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/aafee923-5ba7-48f2-8a99-3da91bd54abb/auditions/unknown_talent_nikhil-bhambri/submission_34abcb89-82b5-4b09-83dc-d48aab593bf3/intro_video",
+        "cloudinary_derived": {
+          "id": "f50f5333febc649dc9e9a109689e7449",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 3878744
+        }
+      }
+    },
+    {
+      "derived_id": "17fc735d3ca6716ea7550d5123e10725",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/3213d62c-57ef-4504-ab1e-722602191533/auditions/unknown_talent_janhvi-rai/submission_917422f0-7d90-4871-b368-c933e30ff892/intro_video",
+        "cloudinary_derived": {
+          "id": "17fc735d3ca6716ea7550d5123e10725",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 4052285
+        }
+      }
+    },
+    {
+      "derived_id": "cc8db576e519f5c0b2348188ceac07d4",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/3213d62c-57ef-4504-ab1e-722602191533/auditions/unknown_talent_divija-gambhir/submission_eca0f022-a2bc-4007-adb9-3a1550caa630/intro_video",
+        "cloudinary_derived": {
+          "id": "cc8db576e519f5c0b2348188ceac07d4",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 4605314
+        }
+      }
+    },
+    {
+      "derived_id": "5e7e978afbee64b80b5f78a3e8474915",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 3,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 3,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent_arshiya-khatri/submission_77bf1c30-00db-4a3c-a343-378b55c39b54/intro_video",
+        "cloudinary_derived": {
+          "id": "5e7e978afbee64b80b5f78a3e8474915",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 4784155
+        }
+      }
+    },
+    {
+      "derived_id": "6c53ab2b116398905a6f66855d6165ac",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f973d131-406f-46f9-b951-4c12ff392e94/auditions/unknown_talent_srijita-ghosh/submission_72f420f0-40c7-484c-9be0-8c36a7d24827/intro_video",
+        "cloudinary_derived": {
+          "id": "6c53ab2b116398905a6f66855d6165ac",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 5097189
+        }
+      }
+    },
+    {
+      "derived_id": "975ebd9ca2dc85936d2392c0ef310c61",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/fecd1329-1b24-4997-8f8f-b805e1a9bdfd/auditions/9ea93dbe-1e51-4fb9-89aa-004479cfcd82_isha-nandal/submission_aa65aeee-874d-457d-bbed-f4e3af08cc2f/intro_video",
+        "cloudinary_derived": {
+          "id": "975ebd9ca2dc85936d2392c0ef310c61",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 5215110
+        }
+      }
+    },
+    {
+      "derived_id": "cd41e778f1a559bfa223f42fb5ff1a3d",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f973d131-406f-46f9-b951-4c12ff392e94/auditions/unknown_talent_kripa-trivedi/submission_a50a46a4-0603-49c2-beac-07e2c605d987/intro_video",
+        "cloudinary_derived": {
+          "id": "cd41e778f1a559bfa223f42fb5ff1a3d",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 5406695
+        }
+      }
+    },
+    {
+      "derived_id": "8f44d38b6083bcd7f7a0a42ccdca5a96",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f973d131-406f-46f9-b951-4c12ff392e94/auditions/unknown_talent_shivani-jadhav/submission_5e6198b8-1d54-451b-ac69-d112f1d4dfe3/intro_video",
+        "cloudinary_derived": {
+          "id": "8f44d38b6083bcd7f7a0a42ccdca5a96",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 6134078
+        }
+      }
+    },
+    {
+      "derived_id": "dd17b8eb5ce871b181cfbfaeb7e03fd9",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/fecd1329-1b24-4997-8f8f-b805e1a9bdfd/auditions/unknown_talent_arlette-evita-grao/submission_47932d2e-c367-486f-b46d-c1751d7dcd15/intro_video",
+        "cloudinary_derived": {
+          "id": "dd17b8eb5ce871b181cfbfaeb7e03fd9",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 6654465
+        }
+      }
+    },
+    {
+      "derived_id": "3945703b4060ee8025878bf8717bc590",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/9fc1f243-ad33-44b6-9091-cd89ce3b7785_prachi-darbar/submission_f4b741aa-9953-4b3e-94a2-7b1e2e1b1fac/intro_video",
+        "cloudinary_derived": {
+          "id": "3945703b4060ee8025878bf8717bc590",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 7244696
+        }
+      }
+    },
+    {
+      "derived_id": "c0f0d9277fc80b0f1c46448f2a309c67",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent_vanshika-choudhary/submission_2071ac72-af47-4a7f-b8c1-5e59a6e3176a/intro_video",
+        "cloudinary_derived": {
+          "id": "c0f0d9277fc80b0f1c46448f2a309c67",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 7594871
+        }
+      }
+    },
+    {
+      "derived_id": "8103c6f57ad5e6c85a282394ee903c5e",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/fecd1329-1b24-4997-8f8f-b805e1a9bdfd/auditions/unknown_talent_ahana-pocha/submission_85a9152a-20ca-4a4d-b284-38a26a576c95/intro_video",
+        "cloudinary_derived": {
+          "id": "8103c6f57ad5e6c85a282394ee903c5e",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 8100315
+        }
+      }
+    },
+    {
+      "derived_id": "a981026dec7254d5740d54989c7be5e6",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f973d131-406f-46f9-b951-4c12ff392e94/auditions/unknown_talent_devyani-shorey/submission_c72a5ee2-bb7e-44bb-acbe-b072ef8d9106/intro_video",
+        "cloudinary_derived": {
+          "id": "a981026dec7254d5740d54989c7be5e6",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 8308655
+        }
+      }
+    },
+    {
+      "derived_id": "e07ea51987af3ba6e455287cd77c46e7",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent_mahim-suhalka/submission_1709cff4-048d-4324-9e56-54cd0f2d4b22/intro_video",
+        "cloudinary_derived": {
+          "id": "e07ea51987af3ba6e455287cd77c46e7",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 9811410
+        }
+      }
+    },
+    {
+      "derived_id": "2fd838b16610d8acb1e440b50fa005d5",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f1f25731-5d71-4b53-8213-f40dc39bbd01/auditions/unknown_talent/submission_c452c2c3-2e23-4e7b-89b8-00962c191f3a/intro_video",
+        "cloudinary_derived": {
+          "id": "2fd838b16610d8acb1e440b50fa005d5",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 10742977
+        }
+      }
+    },
+    {
+      "derived_id": "fbba1b5db2bb56980fa3a54b23637cbb",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/3527853d-a1ae-4cd4-951c-49f5ed7ac112_bishakha-thapa/submission_b800f279-7cbf-467b-bc63-1eec632be956/intro_video",
+        "cloudinary_derived": {
+          "id": "fbba1b5db2bb56980fa3a54b23637cbb",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 11277421
+        }
+      }
+    },
+    {
+      "derived_id": "cb30360ab928b81e40681503f8d2538b",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent_ruchika-singh/submission_48fb5fac-f119-49f2-8f2e-434482269259/intro_video",
+        "cloudinary_derived": {
+          "id": "cb30360ab928b81e40681503f8d2538b",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 11310518
+        }
+      }
+    },
+    {
+      "derived_id": "3727771efb8ef56dd0b4577738cea184",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f1f25731-5d71-4b53-8213-f40dc39bbd01/auditions/dfd73164-e183-4d84-8fdd-da7af3759ce2_sara-soni/submission_5e5e736f-f86b-4f69-ad1e-7e6404f92ff2/intro_video",
+        "cloudinary_derived": {
+          "id": "3727771efb8ef56dd0b4577738cea184",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 11772187
+        }
+      }
+    },
+    {
+      "derived_id": "acf9b1719d6232224cabdba11edcea3b",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/ac346fe5-4050-4360-bc11-e812ddfe6743/auditions/2720f5e4-e260-4707-822d-73832f5af96b_priya-singh/submission_1590d2fb-d1c9-45fb-934c-aff7335b212c/intro_video",
+        "cloudinary_derived": {
+          "id": "acf9b1719d6232224cabdba11edcea3b",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 12121098
+        }
+      }
+    },
+    {
+      "derived_id": "c576fe394fe368197c7bdbe6b93f308e",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent_ricky-karkera/submission_3c9156e4-488c-426c-b7ae-e2641d641942/intro_video",
+        "cloudinary_derived": {
+          "id": "c576fe394fe368197c7bdbe6b93f308e",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 14023164
+        }
+      }
+    },
+    {
+      "derived_id": "dffda2516e22d6ef689b6ca90738b141",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/fecd1329-1b24-4997-8f8f-b805e1a9bdfd/auditions/unknown_talent_harshita-k-chundawat/submission_7230095b-0473-4004-abaf-6ac667a862bc/intro_video",
+        "cloudinary_derived": {
+          "id": "dffda2516e22d6ef689b6ca90738b141",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 14286012
+        }
+      }
+    }
+  ],
+  "execution": {
+    "batch_id": "b_519efa200642013b9668",
+    "dry_run": false,
+    "attempted": 25,
+    "deleted": 25,
+    "skipped": 0,
+    "blocked": 0,
+    "stopped": false,
+    "stop_reason": null,
+    "per_asset": [
+      {
+        "derived_id": "17fc735d3ca6716ea7550d5123e10725",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "2fd838b16610d8acb1e440b50fa005d5",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "3727771efb8ef56dd0b4577738cea184",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "3945703b4060ee8025878bf8717bc590",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "5e7e978afbee64b80b5f78a3e8474915",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "6c53ab2b116398905a6f66855d6165ac",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "8103c6f57ad5e6c85a282394ee903c5e",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "8f44d38b6083bcd7f7a0a42ccdca5a96",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "975ebd9ca2dc85936d2392c0ef310c61",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "9af755d6a4e4cb880df5bdc4c37806c0",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "a981026dec7254d5740d54989c7be5e6",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "acf9b1719d6232224cabdba11edcea3b",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "b47e8e918e732114e654c8a107996ac1",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "c0f0d9277fc80b0f1c46448f2a309c67",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "c4c81a2a654bb7ff2e6d70251da890ac",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "c576fe394fe368197c7bdbe6b93f308e",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "cb30360ab928b81e40681503f8d2538b",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "cc8db576e519f5c0b2348188ceac07d4",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "cd41e778f1a559bfa223f42fb5ff1a3d",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "cf4130b7e84fd4c2c0bbc17576689365",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "dd17b8eb5ce871b181cfbfaeb7e03fd9",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "dffda2516e22d6ef689b6ca90738b141",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "e07ea51987af3ba6e455287cd77c46e7",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "f50f5333febc649dc9e9a109689e7449",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "fbba1b5db2bb56980fa3a54b23637cbb",
+        "result": "deleted"
+      }
+    ]
+  },
+  "delete_calls_made": [
+    [
+      "17fc735d3ca6716ea7550d5123e10725"
+    ],
+    [
+      "2fd838b16610d8acb1e440b50fa005d5"
+    ],
+    [
+      "3727771efb8ef56dd0b4577738cea184"
+    ],
+    [
+      "3945703b4060ee8025878bf8717bc590"
+    ],
+    [
+      "5e7e978afbee64b80b5f78a3e8474915"
+    ],
+    [
+      "6c53ab2b116398905a6f66855d6165ac"
+    ],
+    [
+      "8103c6f57ad5e6c85a282394ee903c5e"
+    ],
+    [
+      "8f44d38b6083bcd7f7a0a42ccdca5a96"
+    ],
+    [
+      "975ebd9ca2dc85936d2392c0ef310c61"
+    ],
+    [
+      "9af755d6a4e4cb880df5bdc4c37806c0"
+    ],
+    [
+      "a981026dec7254d5740d54989c7be5e6"
+    ],
+    [
+      "acf9b1719d6232224cabdba11edcea3b"
+    ],
+    [
+      "b47e8e918e732114e654c8a107996ac1"
+    ],
+    [
+      "c0f0d9277fc80b0f1c46448f2a309c67"
+    ],
+    [
+      "c4c81a2a654bb7ff2e6d70251da890ac"
+    ],
+    [
+      "c576fe394fe368197c7bdbe6b93f308e"
+    ],
+    [
+      "cb30360ab928b81e40681503f8d2538b"
+    ],
+    [
+      "cc8db576e519f5c0b2348188ceac07d4"
+    ],
+    [
+      "cd41e778f1a559bfa223f42fb5ff1a3d"
+    ],
+    [
+      "cf4130b7e84fd4c2c0bbc17576689365"
+    ],
+    [
+      "dd17b8eb5ce871b181cfbfaeb7e03fd9"
+    ],
+    [
+      "dffda2516e22d6ef689b6ca90738b141"
+    ],
+    [
+      "e07ea51987af3ba6e455287cd77c46e7"
+    ],
+    [
+      "f50f5333febc649dc9e9a109689e7449"
+    ],
+    [
+      "fbba1b5db2bb56980fa3a54b23637cbb"
+    ]
+  ],
+  "post_delete_checks": [
+    {
+      "derived_id": "b47e8e918e732114e654c8a107996ac1",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "cf4130b7e84fd4c2c0bbc17576689365",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "9af755d6a4e4cb880df5bdc4c37806c0",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "c4c81a2a654bb7ff2e6d70251da890ac",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "f50f5333febc649dc9e9a109689e7449",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "17fc735d3ca6716ea7550d5123e10725",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "cc8db576e519f5c0b2348188ceac07d4",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "5e7e978afbee64b80b5f78a3e8474915",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "6c53ab2b116398905a6f66855d6165ac",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "975ebd9ca2dc85936d2392c0ef310c61",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "cd41e778f1a559bfa223f42fb5ff1a3d",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "8f44d38b6083bcd7f7a0a42ccdca5a96",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "dd17b8eb5ce871b181cfbfaeb7e03fd9",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "3945703b4060ee8025878bf8717bc590",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "c0f0d9277fc80b0f1c46448f2a309c67",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "8103c6f57ad5e6c85a282394ee903c5e",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "a981026dec7254d5740d54989c7be5e6",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "e07ea51987af3ba6e455287cd77c46e7",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "2fd838b16610d8acb1e440b50fa005d5",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "fbba1b5db2bb56980fa3a54b23637cbb",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "cb30360ab928b81e40681503f8d2538b",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "3727771efb8ef56dd0b4577738cea184",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "acf9b1719d6232224cabdba11edcea3b",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "c576fe394fe368197c7bdbe6b93f308e",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "dffda2516e22d6ef689b6ca90738b141",
+      "derived_gone": true,
+      "parent_exists": true
+    }
+  ],
+  "protected_group_check": {
+    "CURRENT_COMPATIBLE": "4/4",
+    "UNKNOWN": "6/6",
+    "REVIEW_LINKED_CANDIDATE": "35/35"
+  },
+  "usage_before": {
+    "storage": 19604077694,
+    "derived": 8416,
+    "transformations": 71252
+  },
+  "usage_after": {
+    "storage": 19604077694,
+    "derived": 8416,
+    "transformations": 71252
+  }
+}

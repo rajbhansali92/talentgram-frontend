@@ -45,6 +45,10 @@ from routers import (
 )
 import scout_capture
 
+# Simple Assistant — isolated, additive module (own router, own package).
+# Off by default (SIMPLE_ASSISTANT_ENABLED). See backend/simple_assistant/.
+from simple_assistant import router as simple_assistant_router
+
 
 _docs_url = None if os.environ.get("DISABLE_DOCS", "true").lower() in ("1", "true", "yes") else "/docs"
 _redoc_url = None if os.environ.get("DISABLE_DOCS", "true").lower() in ("1", "true", "yes") else "/redoc"
@@ -160,6 +164,7 @@ app.include_router(imports.router)
 app.include_router(agents_whatsapp.router)
 app.include_router(casting_desk.router)
 app.include_router(ai_scout.router)
+app.include_router(simple_assistant_router.router)
 
 
 

@@ -1,4 +1,5 @@
 """Public submission flow + admin review."""
+import hashlib
 import uuid
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
@@ -3660,6 +3661,357 @@ async def admin_add_media_from_talent(
     await db.submissions.update_one({"id": sid}, {"$push": {"media": {"$each": new_items}}})
     fresh_sub = await db.submissions.find_one({"id": sid}, {"_id": 0})
     return fresh_sub
+
+
+_ATTACHABLE_LIBRARY_CATEGORIES = {"intro_video"} | PORTFOLIO_IMAGE_CATEGORIES
+
+
+async def attach_existing_talent_media_to_submission(
+    *,
+    submission: dict,
+    requested_source_media_ids: List[str],
+    admin: dict,
+    authoritative_talent_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Canonical service — attach EXISTING Global Talent Library media
+    (the talent's own intro video / portfolio images) to a project
+    submission as admin-added, project-specific media, BY REFERENCE:
+    the new submission media dict shares the source's exact Cloudinary
+    ``public_id``/``url`` — no re-upload, no new Cloudinary asset, no new
+    ``asset_metadata`` row (identical to ``admin_add_media_from_talent``'s
+    copy semantics).
+
+    Duplicate prevention + ownership + atomicity reuse the two mechanisms
+    already in this module:
+      * candidate pool = ``build_prefill_media(talent)`` — the one canonical
+        "what is in this talent's library" builder. A requested id not in it
+        belongs to someone else or does not exist → reported, never guessed.
+      * the push is guarded ``{"media.source_talent_media_id": {"$ne": id}}``
+        (same atomic guard ``submission_add_media_from_library`` uses), so an
+        item already sourced from that library id is SKIPPED, never
+        duplicated — even under a concurrent double-fire.
+
+    Audition takes are project-specific and never live in the library, so
+    they are never attached here. Talent resolution is the record whose
+    email owns this submission; ``authoritative_talent_id`` (already
+    tie-broken by ``resolve_authoritative_talent_for_upload`` for a
+    duplicate-record set) wins when supplied.
+
+    Returns:
+      {attached:[{submission_media_id, source_talent_media_id, category, label}],
+       skipped_already_attached:[id], not_found:[id], invalid_category:[id],
+       submission:<fresh doc>, error:str|None}
+    Never raises for a per-item problem — only for a missing submission/talent.
+    """
+    sid = submission.get("id")
+    pid = submission.get("project_id")
+    requested = [m for m in (requested_source_media_ids or []) if isinstance(m, str) and m.strip()]
+
+    talent = None
+    if authoritative_talent_id:
+        talent = await db.talents.find_one({"id": authoritative_talent_id}, {"_id": 0})
+    if not talent:
+        talent = await resolve_canonical_talent(email=submission.get("talent_email"))
+    if not talent:
+        return {"attached": [], "skipped_already_attached": [], "not_found": requested,
+                "invalid_category": [], "submission": submission, "error": "no_talent_profile"}
+
+    library = await build_prefill_media(talent, email=talent.get("email"))
+    lib_by_id = {m.get("id"): m for m in library if m.get("id")}
+
+    fresh = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0}) or submission
+    already_src = {
+        m.get("source_talent_media_id")
+        for m in (fresh.get("media") or [])
+        if m.get("source_talent_media_id")
+    }
+
+    attached: List[Dict[str, Any]] = []
+    skipped: List[str] = []
+    not_found: List[str] = []
+    invalid_cat: List[str] = []
+    new_intro_id: Optional[str] = None
+
+    for mid in requested:
+        src = lib_by_id.get(mid)
+        if not src or not (src.get("url") or src.get("public_id")):
+            not_found.append(mid)
+            continue
+        cat = src.get("category")
+        if cat == "portfolio":
+            cat = "image"
+        if cat not in _ATTACHABLE_LIBRARY_CATEGORIES:
+            invalid_cat.append(mid)
+            continue
+        if mid in already_src:
+            skipped.append(mid)
+            continue
+
+        new_id = f"adm_{str(uuid.uuid4())[:8]}"
+        item = {k: v for k, v in src.items() if k != "id"}
+        item.update({
+            "id": new_id,
+            "category": cat,
+            "created_at": _now(),
+            "scope": "admin_added",
+            "submission_id": sid,
+            "project_id": pid,
+            "admin_added": True,
+            "admin_added_by": admin.get("email"),
+            "client_visible": True,
+            "origin": "project",
+            "from_global_profile": True,
+            "source_talent_media_id": mid,
+            "label": src.get("label") or cat,
+        })
+        res = await db.submissions.update_one(
+            {"id": sid, "media.source_talent_media_id": {"$ne": mid}},
+            {"$push": {"media": item}},
+        )
+        if res.matched_count == 0:
+            skipped.append(mid)
+            continue
+        attached.append({
+            "submission_media_id": new_id, "source_talent_media_id": mid,
+            "category": cat, "label": item["label"],
+        })
+        if cat == "intro_video":
+            new_intro_id = new_id
+
+    # intro_video is a single slot — evict any OTHER intro once a new one landed
+    # (excluded by the freshly-generated id, so this can never remove what was
+    # just pushed). Same pattern submission_add_media_from_library uses.
+    if new_intro_id:
+        await db.submissions.update_one(
+            {"id": sid},
+            {"$pull": {"media": {"category": "intro_video", "id": {"$ne": new_intro_id}}}},
+        )
+
+    fresh2 = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
+    return {
+        "attached": attached, "skipped_already_attached": skipped,
+        "not_found": not_found, "invalid_category": invalid_cat,
+        "submission": fresh2, "error": None,
+    }
+
+
+# --------------------------------------------------------------------------
+# Canonical service — ingest a genuinely NEW incoming audition file
+# (intro video / audition take) and attach it to a submission.
+#
+# DISTINCT from attach_existing_talent_media_to_submission() above: that
+# one copies EXISTING Global Talent Library media by reference (no upload).
+# This one is for a file that does not exist in Talentgram yet — it goes
+# through the SAME Cloudinary pipeline the talent-facing upload uses
+# (core.upload_and_track_asset), producing exactly one canonical original
+# + one asset_metadata row, then pushes onto submission.media[].
+# --------------------------------------------------------------------------
+_INGESTIBLE_AUDITION_CATEGORIES = {"intro_video", "take", "take_1", "take_2", "take_3"}
+_AUDITION_SINGLE_SLOT = {"intro_video", "take_1", "take_2", "take_3"}
+_INGEST_VIDEO_EXT = (".mp4", ".mov", ".avi", ".webm", ".mkv", ".3gp")
+
+
+def _ingest_err(submission: dict, code: str, message: str) -> Dict[str, Any]:
+    return {
+        "attached": [], "skipped_duplicate": [], "validation_error": code,
+        "message": message, "submission": submission, "error": None,
+    }
+
+
+async def ingest_new_audition_media_to_submission(
+    *,
+    submission: dict,
+    file_bytes: bytes,
+    filename: Optional[str],
+    content_type: Optional[str],
+    category: str,
+    label: Optional[str],
+    admin: dict,
+    authoritative_talent_id: Optional[str] = None,
+    expected_sha256: Optional[str] = None,
+    operation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Canonical service — ingest a NEW incoming audition video file and
+    attach it to a project submission through Talentgram's existing
+    Cloudinary pipeline.
+
+    Reuses, unchanged:
+      * the validation rules + constants ``submission_upload`` enforces —
+        ``SUBMISSION_UPLOAD_CATEGORIES`` membership, the video MIME/
+        extension gate, ``MAX_SUBMISSION_VIDEO_BYTES``, ``MAX_SUBMISSION_TAKES``,
+        ``LEGACY_TAKE_CATEGORIES``, the single-slot ``$pull``, and the
+        ``Take N`` auto-numbering.
+      * ``core.upload_and_track_asset`` — the canonical Cloudinary upload +
+        ``asset_metadata`` tracker the Railway talent path calls. One
+        canonical original per file, no eager derivatives.
+      * ``_resolve_submission_talent`` for the Cloudinary folder / owner,
+        overridden by ``authoritative_talent_id`` when the caller has
+        already tie-broken a duplicate-record set
+        (``resolve_authoritative_talent_for_upload``).
+
+    Duplicate prevention (canonical content identity, never filename):
+    every item this service writes carries ``content_sha256``. If the
+    submission already holds an item with the same hash the upload is
+    SKIPPED — no Cloudinary call. The atomic push is guarded
+    ``{"media.content_sha256": {"$ne": sha}}`` so a concurrent double-fire
+    cannot double-attach.
+
+    Integrity: ``expected_sha256`` (pinned in the signed plan at preview
+    time) must equal the SHA-256 of the bytes that actually arrived, or
+    the ingest is refused before any upload.
+
+    Returns:
+      {attached:[{submission_media_id, category, label}],
+       skipped_duplicate:[sha], validation_error:str|None,
+       submission:<fresh doc>, error:str|None}
+    Never raises — a validation failure comes back as ``validation_error``.
+    """
+    sid = submission.get("id")
+    pid = submission.get("project_id")
+    data = file_bytes or b""
+
+    if category not in _INGESTIBLE_AUDITION_CATEGORIES:
+        return _ingest_err(submission, "unsupported_category",
+                           f"{category!r} is not an audition media category.")
+
+    ct = (content_type or "").lower()
+    fn = (filename or "").lower()
+    if not (ct.startswith("video/") or fn.endswith(_INGEST_VIDEO_EXT)):
+        return _ingest_err(submission, "unsupported_format",
+                           "Unsupported video format — upload MP4, MOV, or WEBM.")
+
+    size_bytes = len(data)
+    if size_bytes == 0:
+        return _ingest_err(submission, "empty_file", "That file is empty.")
+    if size_bytes > MAX_SUBMISSION_VIDEO_BYTES:
+        cap_mb = MAX_SUBMISSION_VIDEO_BYTES // (1024 * 1024)
+        return _ingest_err(
+            submission, "file_too_large",
+            f"Video is too large ({size_bytes // (1024 * 1024)} MB). Max {cap_mb} MB.",
+        )
+
+    sha = hashlib.sha256(data).hexdigest()
+    if expected_sha256 and expected_sha256 != sha:
+        return _ingest_err(submission, "file_mismatch",
+                           "The file that arrived doesn't match the one you previewed.")
+
+    fresh = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0}) or submission
+
+    for m in (fresh.get("media") or []):
+        if m.get("content_sha256") and m.get("content_sha256") == sha:
+            return {
+                "attached": [], "skipped_duplicate": [sha], "validation_error": None,
+                "submission": fresh, "error": None,
+                "duplicate_of": {"id": m.get("id"), "label": m.get("label") or m.get("category")},
+            }
+
+    if category == "take" or category in LEGACY_TAKE_CATEGORIES:
+        existing_takes = sum(
+            1 for m in (fresh.get("media") or [])
+            if m.get("category") == "take" or m.get("category") in LEGACY_TAKE_CATEGORIES
+        )
+        if category == "take" and existing_takes >= MAX_SUBMISSION_TAKES:
+            return _ingest_err(
+                fresh, "take_limit",
+                f"Maximum {MAX_SUBMISSION_TAKES} takes reached — delete one to add another.",
+            )
+    else:
+        existing_takes = 0
+
+    tid = authoritative_talent_id
+    tname = None
+    if tid:
+        tdoc = await db.talents.find_one({"id": tid}, {"_id": 0, "name": 1})
+        tname = (tdoc or {}).get("name")
+    if not tid:
+        tid, tname = await _resolve_submission_talent(fresh)
+
+    op_id = operation_id or str(uuid.uuid4())
+    asset_type = "intro_video" if category == "intro_video" else "audition_video"
+    try:
+        result = await upload_and_track_asset(
+            data,
+            resource_type="video",
+            content_type=content_type,
+            asset_type=asset_type,
+            talent_id=tid,
+            talent_name=tname,
+            project_id=pid,
+            submission_id=sid,
+            keep_original=(asset_type != "audition_video"),
+            operation_id=op_id,
+        )
+    except Exception as e:  # pragma: no cover - network failure path
+        logger.warning("ingest_new_audition_media: upload failed for %s: %s", sid, e)
+        return _ingest_err(fresh, "upload_failed",
+                           "The upload didn't complete — nothing was attached.")
+
+    media_id = f"adm_{str(uuid.uuid4())[:8]}"
+    delivery_url = result["url"]
+    needs_compat = video_needs_compat_delivery(result.get("format"), result.get("video_codec"))
+    if needs_compat:
+        c = compat_video_delivery_url(result["public_id"])
+        if c:
+            delivery_url = c
+    poster = video_poster_url(result["public_id"])
+
+    if category == "take":
+        final_label = (label or "").strip() or f"Take {existing_takes + 1}"
+    elif category in LEGACY_TAKE_CATEGORIES:
+        final_label = (label or "").strip() or f"Take {category.split('_')[1]}"
+    else:
+        final_label = (label or "").strip() or "Intro Video"
+
+    item: Dict[str, Any] = {
+        "id": media_id,
+        "category": category,
+        "url": delivery_url,
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "content_type": content_type or "video/mp4",
+        "original_filename": filename,
+        "size": result.get("bytes") or size_bytes,
+        "content_sha256": sha,
+        "created_at": _now(),
+        "scope": "admin_added",
+        "submission_id": sid,
+        "project_id": pid,
+        "duration": result.get("duration"),
+        "thumbnail_url": poster,
+        "poster_url": poster,
+        "origin": "project",
+        "admin_added": True,
+        "admin_added_by": admin.get("email"),
+        "client_visible": True,
+        "source": "simple_assistant_ingest",
+        "label": final_label,
+    }
+    if needs_compat:
+        item["original_url"] = result["url"]
+        item["needs_compat_delivery"] = True
+
+    if category in _AUDITION_SINGLE_SLOT:
+        await db.submissions.update_one(
+            {"id": sid}, {"$pull": {"media": {"category": category}}}
+        )
+
+    res = await db.submissions.update_one(
+        {"id": sid, "media.content_sha256": {"$ne": sha}},
+        {"$push": {"media": item}},
+    )
+    fresh2 = await db.submissions.find_one({"id": sid, "project_id": pid}, {"_id": 0})
+    if res.matched_count == 0:
+        # a concurrent ingest of the identical file already won the slot
+        return {
+            "attached": [], "skipped_duplicate": [sha], "validation_error": None,
+            "submission": fresh2, "error": None,
+        }
+
+    return {
+        "attached": [{"submission_media_id": media_id, "category": category, "label": final_label}],
+        "skipped_duplicate": [], "validation_error": None,
+        "submission": fresh2, "error": None,
+    }
 
 
 @router.delete("/projects/{pid}/submissions/{sid}/media/{media_id}")

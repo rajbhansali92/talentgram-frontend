@@ -23,6 +23,7 @@ import WhatsAppEnginePage from "@/pages/WhatsAppEnginePage";
 import SubmissionDiagnostics from "@/pages/SubmissionDiagnostics";
 import ImportWizard from "@/pages/ImportWizard";
 import CastingDesk from "@/pages/CastingDesk";
+import SimpleAssistant from "@/pages/SimpleAssistant";
 
 
 export default function AdminApp() {
@@ -39,6 +40,7 @@ export default function AdminApp() {
                     }
                 >
                     <Route index element={<Dashboard />} />
+                    <Route path="simple-assistant" element={<SimpleAssistant />} />
                     <Route path="casting-desk" element={<CastingDesk />} />
                     <Route path="casting-desk/:sessionId" element={<CastingDesk />} />
                     <Route path="talents" element={<TalentList />} />

@@ -1994,6 +1994,24 @@ async def seed_admin() -> None:
         # the same way DRAFT/ARCHIVED already are; indexed here since it's
         # now a real filter value, not just a UI label.
         ("talents", [("status", 1), ("merged_into", 1)], {"sparse": True, "name": "talents_status_merged_into"}),
+        # Phase 7 (Simple Assistant) — canonical inbound-WhatsApp message
+        # history (backend/inbound_messages.py). `message_key` is UNIQUE: the
+        # atomic dedup guard against a concurrent re-delivery of the same
+        # WhatsApp message id. Retention matches `interactions` /
+        # `whatsapp_agent_audit_log` — permanent, no TTL (communication
+        # history). Growth is bounded: only Agent-Registry group messages
+        # flow, and dedup prevents reprocessing.
+        ("whatsapp_inbound_messages", [("message_key", 1)],
+         {"unique": True, "name": "inbound_message_key_unique"}),
+        ("whatsapp_inbound_messages", [("sender_phone_key", 1), ("received_at", -1)],
+         {"name": "inbound_sender_phone_key"}),
+        ("whatsapp_inbound_messages", [("talent_id", 1), ("received_at", -1)],
+         {"sparse": True, "name": "inbound_talent_received_at"}),
+        ("whatsapp_inbound_messages", [("project_id", 1), ("received_at", -1)],
+         {"sparse": True, "name": "inbound_project_received_at"}),
+        ("whatsapp_inbound_messages", [("group_name", 1), ("received_at", -1)],
+         {"name": "inbound_group_received_at"}),
+        ("whatsapp_inbound_messages", [("received_at", -1)], {"name": "inbound_received_at"}),
     ]
     for coll, keys, opts in p0_indexes:
         try:

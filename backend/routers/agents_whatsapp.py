@@ -34,6 +34,10 @@ from core import (
 from agents import registry, tasks
 from agents.dispatcher import handle_inbound_message
 from agents.modules import media_assignment
+# Phase 7 (Simple Assistant) — canonical, read-only inbound-message capture.
+# Off by default (SA_INBOUND_CAPTURE_ENABLED); a no-op when disabled, and it
+# never affects this endpoint's behaviour or response.
+import inbound_messages
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +143,25 @@ async def inbound_message(
     if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     t_auth_done = time.monotonic()
+
+    # Phase 7 — persist the canonical inbound record BEFORE dispatch, so the
+    # message is captured even if the agent dispatcher later errors. Fully
+    # additive: swallows its own errors, and is an outright no-op unless
+    # SA_INBOUND_CAPTURE_ENABLED is set. Zero outbound / pipeline effect.
+    try:
+        await inbound_messages.capture_inbound(
+            message_id=payload.message_id,
+            sender_phone=payload.sender_phone,
+            text=payload.text,
+            sender_name=payload.sender_name,
+            group_name=payload.group_name,
+            media_type=payload.media_type,
+            replied_to_message_id=payload.replied_to_message_id,
+            worker_id=payload.worker_id or registry.DEFAULT_WORKER_ID,
+        )
+    except Exception:
+        logger.exception("inbound capture failed (non-fatal)")
+
     result = await handle_inbound_message(
         group_name=payload.group_name,
         sender_phone=payload.sender_phone,

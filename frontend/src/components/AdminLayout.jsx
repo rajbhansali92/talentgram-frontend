@@ -23,7 +23,9 @@ import {
   MessageCircle,
   FileSpreadsheet,
   Sparkles,
+  Radar,
 } from "lucide-react";
+import { SIMPLE_ASSISTANT_ENABLED } from "@/lib/simpleAssistant";
 
 // ============================================================================
 // LAZY LOADED MODAL (ISSUE 4 FIX)
@@ -86,6 +88,9 @@ class LayoutErrorBoundary extends React.Component {
 export const NAV_ITEMS = {
   base: [
     { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true },
+    ...(SIMPLE_ASSISTANT_ENABLED
+      ? [{ to: "/admin/simple-assistant", label: "Assistant", icon: Radar }]
+      : []),
     { to: "/admin/casting-desk", label: "AI Casting Desk", icon: Sparkles },
     { to: "/admin/talents", label: "Talents", icon: Users },
     { to: "/admin/applications", label: "Applications", icon: UserPlus },

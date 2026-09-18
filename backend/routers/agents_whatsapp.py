@@ -31,7 +31,7 @@ from core import (
     media_url,
     video_poster_url,
 )
-from agents import registry, tasks
+from agents import audit, registry, tasks
 from agents.dispatcher import handle_inbound_message
 from agents.modules import media_assignment
 # Phase 7 (Simple Assistant) — canonical, read-only inbound-message capture.
@@ -175,11 +175,47 @@ async def inbound_message(
         worker_id=payload.worker_id or registry.DEFAULT_WORKER_ID,
     )
     t_dispatch_done = time.monotonic()
+
+    # Sending-permission gate for agent-generated replies (2026-09-18,
+    # Worker 2 agent-platform follow-up) — handle_inbound_message()'s own
+    # reply is sent to WhatsApp by the WORKER directly (whatsapp-worker/
+    # inbound.py's _send_reply), entirely outside _create_batch_internal's
+    # existing sending_enabled check, so without this a disabled worker
+    # could still have a real reply go out. Only runs when there's
+    # actually a reply to suppress — the common (no-reply) turn pays no
+    # extra lookup. Re-resolving the agent here (rather than adding an
+    # agent_id field to DispatchResult) keeps this fix isolated to this
+    # one function — dispatcher.py/models.py are untouched.
+    reply = result.reply
+    if reply:
+        worker_id = payload.worker_id or registry.DEFAULT_WORKER_ID
+        worker_doc = await db["whatsapp_workers"].find_one(
+            {"id": worker_id},
+            {"sending_enabled": 1},
+        )
+        if worker_doc is None or worker_doc.get("sending_enabled") is not True:
+            logger.warning(
+                "inbound: reply suppressed — worker %r not sending_enabled",
+                worker_id,
+            )
+            agent_id = None
+            resolved = await registry.resolve_agent_for_group(payload.group_name, worker_id)
+            if resolved:
+                agent_id = resolved[0].agent_id
+            await audit.log_turn(
+                agent_id=agent_id,
+                group_name=payload.group_name,
+                sender_phone=payload.sender_phone,
+                raw_message=payload.text,
+                confirmation_action="reply_suppressed_sending_disabled",
+            )
+            reply = None
+
     # operation_id is only ever set when `reply` is a task's confirmation/
     # clarification card (Concurrent Task Engine) — None for every CRM
     # turn and every casting-agent turn that isn't task-related, so
     # existing callers that ignore this new field see no behavior change.
-    response = {"handled": result.handled, "reply": result.reply, "operation_id": result.operation_id}
+    response = {"handled": result.handled, "reply": reply, "operation_id": result.operation_id}
     http_request_ms = (t_auth_done - t_http_start) * 1000
     http_response_ms = (time.monotonic() - t_dispatch_done) * 1000
     logger.info(

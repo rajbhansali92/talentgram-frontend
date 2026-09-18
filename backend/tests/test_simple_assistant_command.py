@@ -375,6 +375,73 @@ def test_read_queries_return_real_data():
     print("12. read queries return real data OK")
 
 
+# ---- generic "overview" phrasing → the EXISTING read-only overview handler
+def test_overview_phrasings_route_to_existing_overview_handler():
+    """Every one of these must reach the same Intent.READ / _handle_read()
+    "default: counts" branch that already exists — reusing build_overview()
+    unchanged, no second overview implementation, no confirmation plan."""
+    _install(make_db())
+    phrases = [
+        "Show me the overview",
+        "Show the overview",
+        "Give me an overview",
+        "What is the overview?",
+        "Give me a summary",
+        "What's happening across Talentgram?",
+        "Show the current overview",
+    ]
+    for msg in phrases:
+        assert commands.detect_intent(msg) == commands.Intent.READ, msg
+        r = run(commands.run_command(message=msg, conversation_id=None, context=None, user=USER))
+        assert r["state"] == "answer", (msg, r)
+        assert r["intent"] == commands.Intent.READ
+        assert r["answer"]["kind"] == "counts"
+        assert r["answer"]["summary"]["active_projects"] == 3  # same fixture as test_read_queries_return_real_data
+        # the overview answer never creates a plan or a signed confirm context
+        assert r["plan"] is None
+        assert r["context"] is None
+        assert r["requires_confirmation"] is False
+    print("12b. generic overview phrasings route to the existing read-only overview handler, "
+          "no confirmation plan OK")
+
+
+def test_overview_phrase_with_pipeline_keyword_still_answers_pipeline():
+    """A message that mentions BOTH 'summary'/'overview'-style wording AND a
+    specific project/pipeline keyword must still resolve to the MORE
+    SPECIFIC answer — _handle_read() checks its own patterns in order and
+    only falls through to the generic overview when none of them match."""
+    _install(make_db())
+    r = run(commands.run_command(message="Give me a summary of the Google AI pipeline",
+                                 conversation_id=None, context=None, user=USER))
+    assert r["state"] == "answer"
+    assert r["answer"]["kind"] == "project_pipeline"
+    print("12c. 'summary' + a specific pipeline keyword still answers the specific pipeline, not the generic overview OK")
+
+
+def test_overview_command_causes_no_write_and_no_side_effect():
+    """Same write-trap proof test_preview_never_writes already uses, scoped
+    to the new overview phrasings specifically — no DB mutation, and (since
+    the command layer never imports whatsapp_send/Cloudinary at all) no
+    WhatsApp job/batch or Cloudinary call is even reachable from this path."""
+    _install(make_db(cls=WriteTrapDB))
+    for msg in ("Show me the overview", "Give me a summary", "What's happening across Talentgram?"):
+        r = run(commands.run_command(message=msg, conversation_id=None, context=None, user=USER))
+        assert r["state"] == "answer", (msg, r)
+    print("12d. overview commands cause zero writes (WriteTrapDB would have raised) OK")
+
+
+def test_unsupported_commands_still_fall_back_normally():
+    """The existing UNKNOWN fallback for genuinely unsupported input must be
+    completely unchanged by the new overview pattern."""
+    _install(make_db())
+    for msg in ("florble the wibbit", "do something cool", "asdkjhaskjd"):
+        assert commands.detect_intent(msg) == commands.Intent.UNKNOWN, msg
+        r = run(commands.run_command(message=msg, conversation_id=None, context=None, user=USER))
+        assert r["state"] == "blocked", (msg, r)
+        assert r["plan"] is None
+    print("12e. genuinely unsupported commands still fall back exactly as before OK")
+
+
 def test_preview_never_writes():
     """run_command (understand → resolve → preview) against a DB that
     raises on any write op. Execution is a separate endpoint (execute.py)
@@ -424,6 +491,10 @@ if __name__ == "__main__":
     test_preview_carries_signed_confirm_context()
     test_unclear_command_is_safe()
     test_read_queries_return_real_data()
+    test_overview_phrasings_route_to_existing_overview_handler()
+    test_overview_phrase_with_pipeline_keyword_still_answers_pipeline()
+    test_overview_command_causes_no_write_and_no_side_effect()
+    test_unsupported_commands_still_fall_back_normally()
     test_preview_never_writes()
     test_readonly_db_guard_blocks_writes()
     print("\nALL SIMPLE ASSISTANT COMMAND TESTS PASSED")

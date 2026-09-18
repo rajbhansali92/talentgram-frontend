@@ -107,6 +107,16 @@ _TESTS_RE = re.compile(
     re.I,
 )
 _PIPELINE_RE = re.compile(r"\bpipeline\b|\bshow\s+me\s+.+\b(?:project|casting)\b", re.I)
+# A generic request for the situational-awareness overview — distinct from
+# the more specific pipeline/tests/priorities patterns above. Routes to the
+# SAME Intent.READ / _handle_read() as those; _handle_read() re-checks the
+# specific patterns first and only falls through to its existing "default:
+# counts" branch (already the overview summary, unchanged) when none of
+# them match — so a message like "give me a summary of the Google AI
+# pipeline" still correctly lands on the pipeline-specific answer.
+_OVERVIEW_RE = re.compile(
+    r"\boverview\b|\bsummary\b|\bwhat'?s?\s+happening\b", re.I,
+)
 
 _SCOPE_RE_FOR = re.compile(
     r"\b(?:for|on|to|from|in)\s+(?:the\s+)?(.+?)(?:\s+(?:project|campaign|shoot|casting))?\s*(?:[.?!]|,\s|$)",
@@ -198,6 +208,7 @@ def detect_intent(message: str) -> str:
         or _PRIORITIES_RE.search(msg)
         or _TESTS_RE.search(msg)
         or _PIPELINE_RE.search(msg)
+        or _OVERVIEW_RE.search(msg)
     ):
         return Intent.READ
     if _UPDATE_FIELD_RE.search(msg):

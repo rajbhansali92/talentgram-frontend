@@ -23,6 +23,9 @@ os.environ.setdefault("ADMIN_PASSWORD", "x")
 for _k in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
     os.environ.setdefault(_k, "x")
 os.environ["SIMPLE_ASSISTANT_ENABLED"] = "true"
+# This file exercises the real confirm_and_send path, so the new independent
+# execution kill-switch must be explicitly on here.
+os.environ["SA_EXECUTION_ENABLED"] = "true"
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

@@ -20,6 +20,9 @@ os.environ.setdefault("ADMIN_PASSWORD", "x")
 for _k in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
     os.environ.setdefault(_k, "x")
 os.environ["SIMPLE_ASSISTANT_ENABLED"] = "true"
+# This file exercises the real confirm_and_send_ai approval path, so the new
+# independent execution kill-switch must be explicitly on here.
+os.environ["SA_EXECUTION_ENABLED"] = "true"
 os.environ["SA_INBOUND_CAPTURE_ENABLED"] = "true"
 os.environ["SA_INBOUND_INTELLIGENCE_ENABLED"] = "true"
 os.environ["SA_AI_RESPONSE_ENABLED"] = "true"

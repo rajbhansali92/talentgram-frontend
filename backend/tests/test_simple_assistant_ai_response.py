@@ -23,6 +23,11 @@ os.environ.setdefault("ADMIN_PASSWORD", "x")
 for _k in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
     os.environ.setdefault(_k, "x")
 os.environ["SIMPLE_ASSISTANT_ENABLED"] = "true"
+# This file exercises the real confirm_and_send_ai approval path (Phase 9),
+# so the new independent execution kill-switch must be explicitly on here.
+# (test_simple_assistant_phase13.py and test_simple_assistant_conversation.py
+# import this module and inherit this setting.)
+os.environ["SA_EXECUTION_ENABLED"] = "true"
 os.environ["SA_INBOUND_CAPTURE_ENABLED"] = "true"
 os.environ["SA_INBOUND_INTELLIGENCE_ENABLED"] = "true"
 os.environ["SA_AI_RESPONSE_ENABLED"] = "true"
@@ -519,6 +524,42 @@ def test_legit_approval_creates_exactly_one_job():
     print("STEP 16/17/22. before: 0 jobs; after one approval: exactly one job/batch + audit OK")
 
 
+def test_execution_disabled_blocks_confirm_ai_response_and_calls_nothing():
+    """SA_EXECUTION_ENABLED gates only the approve-&-send step
+    (confirm_and_send_ai) — it is independent of, and does not touch,
+    SA_AI_RESPONSE_ENABLED (which gates draft generation, tested separately
+    by test_flag_off_no_ai). The draft is generated normally here; only the
+    final send is blocked."""
+    db, r = _prep_approvable()  # draft generation is unaffected either way
+    assert r["intelligence"]["ai_draft"]["text"]  # a real draft was produced
+
+    old = os.environ.get("SA_EXECUTION_ENABLED")
+    try:
+        os.environ["SA_EXECUTION_ENABLED"] = "false"
+        e = run(approve(r["context"]))
+        assert e["state"] == "blocked", e
+        assert "disabled" in e["message"].lower()
+        assert db.whatsapp_jobs.docs == [] and db.whatsapp_batches.docs == []
+        real = [c for c in _BATCH_CALLS if not c["dry_run"]]
+        assert real == []
+        appr = [x for x in db.whatsapp_agent_audit_log.docs
+                if (x.get("sa_action") or {}).get("action_type") == "approve_ai_response"]
+        assert appr == []  # not falsely recorded as approved/sent
+
+        # the draft is not consumed — re-enabling lets the SAME context send
+        os.environ["SA_EXECUTION_ENABLED"] = "true"
+        e2 = run(approve(r["context"]))
+        assert e2["state"] == "queued", e2
+        assert len([c for c in _BATCH_CALLS if not c["dry_run"]]) == 1
+    finally:
+        if old is None:
+            os.environ.pop("SA_EXECUTION_ENABLED", None)
+        else:
+            os.environ["SA_EXECUTION_ENABLED"] = old
+    print("STEP 28. execution disabled -> confirm_ai_response blocked, nothing sent, draft not "
+          "consumed; re-enabling lets the SAME draft send OK")
+
+
 def test_idempotent_double_approval():
     db, r = _prep_approvable()
     e1 = run(approve(r["context"]))
@@ -582,7 +623,7 @@ if __name__ == "__main__":
         test_changed_destination_blocks, test_edited_message_revalidated_then_sent,
         test_legit_approval_creates_exactly_one_job, test_idempotent_double_approval,
         test_pipeline_and_submissions_untouched, test_provider_failure_shows_no_send,
-        test_flag_off_no_ai,
+        test_flag_off_no_ai, test_execution_disabled_blocks_confirm_ai_response_and_calls_nothing,
     ]:
         fn()
     print("\nALL SIMPLE ASSISTANT AI-RESPONSE (PHASE 9) TESTS PASSED")

@@ -26,7 +26,7 @@ from routers.submissions import (
     build_prefill_media,
     ingest_new_audition_media_to_submission,
 )
-from simple_assistant import audit
+from simple_assistant import EXECUTION_DISABLED_MESSAGE, audit, is_execution_enabled
 from simple_assistant.commands import _envelope, _verified_pending, build_overview
 from simple_assistant.readonly_db import RDB
 from simple_assistant.submission_plan import ATTACH, INGEST
@@ -48,6 +48,15 @@ async def confirm_and_attach(*, conversation_id, context, user) -> dict:
         return _blocked(cid, "I couldn't verify that submission plan. Please ask me again so I can prepare a fresh one.", need_refresh=True)
     if pending.get("kind") != "confirm_submission":
         return _blocked(cid, "There's no pending submission update to confirm.")
+
+    # ---- SA-execution-gate: independent kill-switch, checked before ANY
+    # further processing — idempotency, live re-resolution, and the
+    # canonical attach call are all below this and never reached while
+    # execution is disabled. Not recorded to the audit log, so a still-valid
+    # plan can be confirmed again once enabled. ----
+    if not is_execution_enabled():
+        return _blocked(cid, EXECUTION_DISABLED_MESSAGE)
+
     plan = pending.get("sub_plan") or {}
     plan_id = pending.get("plan_id")
 
@@ -262,6 +271,15 @@ async def confirm_and_ingest(*, conversation_id, context, user, file) -> dict:
         return _blocked(cid, "I couldn't verify that upload plan. Please ask me again so I can prepare a fresh one.", need_refresh=True)
     if pending.get("kind") != "confirm_upload":
         return _blocked(cid, "There's no pending audition upload to confirm.")
+
+    # ---- SA-execution-gate: independent kill-switch, checked before ANY
+    # further processing — in particular before the multipart file body is
+    # ever read into memory, let alone reaching Cloudinary or MongoDB. Not
+    # recorded to the audit log, so a still-valid plan can be confirmed
+    # again once execution is enabled. ----
+    if not is_execution_enabled():
+        return _blocked(cid, EXECUTION_DISABLED_MESSAGE)
+
     plan = pending.get("sub_plan") or {}
     plan_id = pending.get("plan_id")
     if plan.get("action_type") != INGEST:

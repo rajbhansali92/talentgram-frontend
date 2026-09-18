@@ -19,6 +19,9 @@ os.environ.setdefault("ADMIN_PASSWORD", "x")
 for _k in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
     os.environ.setdefault(_k, "x")
 os.environ["SIMPLE_ASSISTANT_ENABLED"] = "true"
+# This file exercises the real confirm_and_send path (Phase 4A), so the new
+# independent execution kill-switch must be explicitly on here.
+os.environ["SA_EXECUTION_ENABLED"] = "true"
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -479,6 +482,34 @@ def test_expired_comm_plan_refuses_even_with_a_valid_signature():
     print("25. genuinely expired-but-validly-signed confirm_comm → blocked, nothing sent OK")
 
 
+# ---- execution kill-switch (independent of SIMPLE_ASSISTANT_ENABLED) -----
+def test_execution_disabled_blocks_confirm_comm_and_calls_nothing():
+    old = os.environ.get("SA_EXECUTION_ENABLED")
+    try:
+        os.environ["SA_EXECUTION_ENABLED"] = "false"
+        r = _preview_media()  # preview still works with execution off
+        real_before = len([c for c in _BATCH_CALLS if not c["dry_run"]])
+
+        e = run(confirm(r["context"]))
+        assert e["state"] == "blocked", e
+        assert "disabled" in e["message"].lower()
+        # no real send — only the preview's own dry-run (if any) is allowed
+        assert len([c for c in _BATCH_CALLS if not c["dry_run"]]) == real_before
+
+        # the plan is not consumed by the block — re-enabling lets it send
+        os.environ["SA_EXECUTION_ENABLED"] = "true"
+        e2 = run(confirm(r["context"]))
+        assert e2["state"] == "queued", e2
+        assert len([c for c in _BATCH_CALLS if not c["dry_run"]]) == real_before + 1
+    finally:
+        if old is None:
+            os.environ.pop("SA_EXECUTION_ENABLED", None)
+        else:
+            os.environ["SA_EXECUTION_ENABLED"] = old
+    print("26. execution disabled -> confirm_comm blocked, nothing sent, plan not consumed; "
+          "re-enabling lets the SAME plan send OK")
+
+
 if __name__ == "__main__":
     for fn in [
         test_talent_with_group_uses_group, test_talent_with_only_number, test_talent_with_neither,
@@ -493,6 +524,7 @@ if __name__ == "__main__":
         test_partial_media_failure_reported, test_missing_destination_safe,
         test_fresh_comm_plan_carries_a_30min_expiry_and_still_sends,
         test_expired_comm_plan_refuses_even_with_a_valid_signature,
+        test_execution_disabled_blocks_confirm_comm_and_calls_nothing,
     ]:
         fn()
     print("\nALL SIMPLE ASSISTANT COMM TESTS PASSED")

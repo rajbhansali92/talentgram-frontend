@@ -19,6 +19,9 @@ os.environ.setdefault("ADMIN_PASSWORD", "x")
 for _k in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
     os.environ.setdefault(_k, "x")
 os.environ["SIMPLE_ASSISTANT_ENABLED"] = "true"
+# This file exercises the real confirm_and_attach path, so the new
+# independent execution kill-switch must be explicitly on here.
+os.environ["SA_EXECUTION_ENABLED"] = "true"
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -336,6 +339,35 @@ def test_confirmation_invokes_canonical_service_and_attaches():
     print("9. confirm → canonical service attaches by reference (no re-upload) + audit OK")
 
 
+def test_execution_disabled_blocks_confirm_attach_and_calls_nothing():
+    old = os.environ.get("SA_EXECUTION_ENABLED")
+    try:
+        os.environ["SA_EXECUTION_ENABLED"] = "false"
+        db = base_db()
+        install(db)
+        r = run(cmd("Attach Ahana's intro to Google AI"))  # preview still works
+        assert r["state"] == "preview"
+
+        e = run(confirm(r["context"]))
+        assert e["state"] == "blocked", e
+        assert "disabled" in e["message"].lower()
+        media = db.submissions.docs[0]["media"]
+        assert not any(m.get("source_talent_media_id") == "lib_intro" for m in media)
+        assert db.whatsapp_agent_audit_log.docs == []
+
+        # the plan is not consumed — re-enabling lets it attach
+        os.environ["SA_EXECUTION_ENABLED"] = "true"
+        e2 = run(confirm(r["context"]))
+        assert e2["state"] == "attached", e2
+    finally:
+        if old is None:
+            os.environ.pop("SA_EXECUTION_ENABLED", None)
+        else:
+            os.environ["SA_EXECUTION_ENABLED"] = old
+    print("22. execution disabled -> confirm_submission blocked, nothing attached, plan not consumed; "
+          "re-enabling lets the SAME plan attach OK")
+
+
 def test_already_attached_skipped_no_duplicate():
     db = base_db()
     # intro already on the submission, sourced from lib_intro
@@ -502,6 +534,7 @@ if __name__ == "__main__":
         test_tampered_project_and_submission_rejected,
         test_arbitrary_media_and_submission_cannot_be_injected,
         test_no_whatsapp_no_cloudinary_no_link_no_pipeline,
+        test_execution_disabled_blocks_confirm_attach_and_calls_nothing,
     ]:
         fn()
     print("\nALL SIMPLE ASSISTANT SUBMISSION TESTS PASSED")

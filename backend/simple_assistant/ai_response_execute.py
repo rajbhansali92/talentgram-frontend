@@ -21,7 +21,14 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from simple_assistant import ai_response, audit, comm, whatsapp_send
+from simple_assistant import (
+    EXECUTION_DISABLED_MESSAGE,
+    ai_response,
+    audit,
+    comm,
+    is_execution_enabled,
+    whatsapp_send,
+)
 from simple_assistant.comm_plan import DEST_GROUP
 from simple_assistant.commands import _envelope, _verified_pending, build_overview
 from simple_assistant.readonly_db import RDB
@@ -50,6 +57,17 @@ async def confirm_and_send_ai(*, conversation_id, context, user, final_text: Opt
         return _blocked(cid, "I couldn't verify that response. Please ask me to draft a fresh one.", need_refresh=True)
     if pending.get("kind") != "confirm_ai_response":
         return _blocked(cid, "There's no pending AI response to approve.")
+
+    # ---- SA-execution-gate: independent kill-switch, checked before ANY
+    # further processing — expiry/idempotency checks, the live re-fetch, and
+    # the eventual whatsapp_send.queue_send() call are all below this and
+    # never reached while execution is disabled. Independent of, and
+    # unaffected by, SA_AI_RESPONSE_ENABLED (which only gates whether a
+    # draft was generated in the first place — this gate is purely about
+    # the separate "approve & send" step). Not recorded to the audit log,
+    # so a still-valid draft can be approved again once enabled. ----
+    if not is_execution_enabled():
+        return _blocked(cid, EXECUTION_DISABLED_MESSAGE)
 
     plan_id = pending.get("plan_id")
     inbound_id = pending.get("inbound_id")

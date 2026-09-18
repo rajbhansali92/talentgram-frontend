@@ -30,7 +30,7 @@ from routers.casting_pipeline import (
     bulk_delete_pipeline,
     bulk_move_by_talent_ids,
 )
-from simple_assistant import audit
+from simple_assistant import EXECUTION_DISABLED_MESSAGE, audit, is_execution_enabled
 from simple_assistant.commands import (
     EXECUTABLE_INTENTS,
     STAGE_LABELS,
@@ -68,6 +68,16 @@ async def confirm_and_execute(
         )
     if pending.get("kind") != "confirm_plan":
         return _blocked(cid, "There's no pending action to confirm.")
+
+    # ---- SA-execution-gate: independent kill-switch, checked before ANY
+    # further processing — structural validation, idempotency, live
+    # re-resolution, and the mutating calls themselves all sit below this
+    # and are never reached while execution is disabled. Not recorded to
+    # the audit log (nothing was attempted), so a still-valid plan can be
+    # confirmed again once execution is enabled. ----
+    if not is_execution_enabled():
+        return _blocked(cid, EXECUTION_DISABLED_MESSAGE)
+
     plan = pending.get("plan") or {}
     plan_id = pending.get("plan_id")
     intent = plan.get("intent")

@@ -106,6 +106,38 @@ def test_feature_flag():
     print("1. feature flag OFF by default OK")
 
 
+def test_execution_flag():
+    """SA-execution-gate: independent of SIMPLE_ASSISTANT_ENABLED, OFF by
+    default, and unaffected by the master flag's own state (master OFF
+    still 404s everything at the router regardless of this flag)."""
+    old_exec = os.environ.get("SA_EXECUTION_ENABLED")
+    old_master = os.environ.get("SIMPLE_ASSISTANT_ENABLED")
+    try:
+        os.environ.pop("SA_EXECUTION_ENABLED", None)
+        assert simple_assistant.is_execution_enabled() is False  # OFF by default
+        os.environ["SA_EXECUTION_ENABLED"] = "true"
+        assert simple_assistant.is_execution_enabled() is True
+        os.environ["SA_EXECUTION_ENABLED"] = "1"
+        assert simple_assistant.is_execution_enabled() is True
+        for v in ("false", "0", "", "no", "off"):
+            os.environ["SA_EXECUTION_ENABLED"] = v
+            assert simple_assistant.is_execution_enabled() is False, v
+
+        # master OFF: is_enabled() is False regardless of SA_EXECUTION_ENABLED
+        # — the router 404s every route before this flag is ever consulted.
+        os.environ["SIMPLE_ASSISTANT_ENABLED"] = "false"
+        os.environ["SA_EXECUTION_ENABLED"] = "true"
+        assert simple_assistant.is_enabled() is False
+        assert simple_assistant.is_execution_enabled() is True  # unaffected either way
+    finally:
+        for var, old in (("SA_EXECUTION_ENABLED", old_exec), ("SIMPLE_ASSISTANT_ENABLED", old_master)):
+            if old is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = old
+    print("1b. execution flag OFF by default, independent of the master flag OK")
+
+
 def test_router_surface():
     paths = sorted(r.path for r in sa_router.routes)
     assert paths == [
@@ -232,6 +264,7 @@ def test_no_extra_agent_registered():
 
 if __name__ == "__main__":
     test_feature_flag()
+    test_execution_flag()
     test_router_surface()
     test_stage_labels_are_canonical()
     test_build_overview_shape()

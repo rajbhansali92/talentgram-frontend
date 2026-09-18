@@ -22,6 +22,9 @@ os.environ.setdefault("ADMIN_PASSWORD", "x")
 for _k in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
     os.environ.setdefault(_k, "x")
 os.environ["SIMPLE_ASSISTANT_ENABLED"] = "true"
+# This file exercises the real confirm/execute path (Phase 3), so the new
+# independent execution kill-switch must be explicitly on here.
+os.environ["SA_EXECUTION_ENABLED"] = "true"
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -410,6 +413,40 @@ def test_confirm_submission_and_ai_response_kinds_unaffected_by_confirm_plan_ttl
     print("15. confirm_submission gets no expires_at from this change (out of scope) OK")
 
 
+# ---- execution kill-switch (independent of SIMPLE_ASSISTANT_ENABLED) -----
+def test_execution_disabled_blocks_confirm_plan_and_calls_nothing():
+    db = fresh_db()
+    install(db)
+    # master flag stays ON for this whole file; toggle ONLY the execution gate
+    old = os.environ.get("SA_EXECUTION_ENABLED")
+    try:
+        os.environ["SA_EXECUTION_ENABLED"] = "false"
+        # read-only preview still works with execution off
+        r = run(preview("Mark Ahana unavailable for Google AI"))
+        assert r["state"] == "preview" and r["plan"]["executable"] is True
+
+        e = run(confirm(r["context"]))
+        assert e["state"] == "blocked", e
+        assert "disabled" in e["message"].lower()
+        # nothing mutated
+        assert db.casting_pipeline.docs[0]["stage"] == "shortlisted"
+        # not falsely recorded as executed, and the plan is not consumed —
+        # confirming the SAME context again once execution is re-enabled
+        # must still work (proves the block didn't invalidate the plan)
+        assert not any(x.get("agent_id") == "simple-assistant" for x in db.whatsapp_agent_audit_log.docs)
+        os.environ["SA_EXECUTION_ENABLED"] = "true"
+        e2 = run(confirm(r["context"]))
+        assert e2["state"] == "executed", e2
+        assert db.casting_pipeline.docs[0]["stage"] == "not_available"
+    finally:
+        if old is None:
+            os.environ.pop("SA_EXECUTION_ENABLED", None)
+        else:
+            os.environ["SA_EXECUTION_ENABLED"] = old
+    print("16. execution disabled -> confirm_plan blocked, nothing mutated, plan not consumed; "
+          "re-enabling lets the SAME plan execute OK")
+
+
 if __name__ == "__main__":
     for fn in [
         test_single_mark_executes_via_canonical_fn,
@@ -427,6 +464,7 @@ if __name__ == "__main__":
         test_fresh_plan_carries_a_30min_expiry_and_still_executes,
         test_expired_plan_refuses_even_with_a_valid_signature,
         test_confirm_submission_and_ai_response_kinds_unaffected_by_confirm_plan_ttl,
+        test_execution_disabled_blocks_confirm_plan_and_calls_nothing,
     ]:
         fn()
     print("\nALL SIMPLE ASSISTANT EXECUTION TESTS PASSED")

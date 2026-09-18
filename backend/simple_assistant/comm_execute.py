@@ -17,7 +17,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from simple_assistant import audit, comm, links_adapter, whatsapp_send
+from simple_assistant import (
+    EXECUTION_DISABLED_MESSAGE,
+    audit,
+    comm,
+    is_execution_enabled,
+    links_adapter,
+    whatsapp_send,
+)
 from simple_assistant.commands import _envelope, _is_expired, _verified_pending, build_overview
 from simple_assistant.comm_plan import (
     DEST_GROUP,
@@ -54,6 +61,15 @@ async def confirm_and_send(*, conversation_id, context, user) -> dict:
         return _blocked(cid, "I couldn't verify that communication. Please ask me again so I can prepare a fresh plan.", need_refresh=True)
     if pending.get("kind") != "confirm_comm":
         return _blocked(cid, "There's no pending communication to confirm.")
+
+    # ---- SA-execution-gate: independent kill-switch, checked before ANY
+    # further processing — nothing below this (idempotency, live
+    # re-resolution, the actual whatsapp_send.queue_send() calls) is
+    # reached while execution is disabled. Not recorded to the audit log,
+    # so a still-valid plan can be confirmed again once enabled. ----
+    if not is_execution_enabled():
+        return _blocked(cid, EXECUTION_DISABLED_MESSAGE)
+
     plan = pending.get("comm_plan") or {}
     plan_id = pending.get("plan_id")
     action_type = plan.get("action_type")

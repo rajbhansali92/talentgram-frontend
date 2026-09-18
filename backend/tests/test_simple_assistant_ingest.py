@@ -23,6 +23,9 @@ os.environ.setdefault("ADMIN_PASSWORD", "x")
 for _k in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
     os.environ.setdefault(_k, "x")
 os.environ["SIMPLE_ASSISTANT_ENABLED"] = "true"
+# This file exercises the real confirm_and_ingest path (Phase 4C), so the
+# new independent execution kill-switch must be explicitly on here.
+os.environ["SA_EXECUTION_ENABLED"] = "true"
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -594,6 +597,50 @@ def test_no_whatsapp_no_link_no_pipeline():
     print("27. no WhatsApp job / batch, no link, no pipeline mutation OK")
 
 
+# ---- execution kill-switch (independent of SIMPLE_ASSISTANT_ENABLED) -----
+class _TrackedUpload(FakeUpload):
+    """Same as FakeUpload, but records whether .read() was ever called —
+    proves the block happens before the file bytes are even read into
+    memory, let alone reaching Cloudinary or MongoDB."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.read_called = False
+
+    async def read(self):
+        self.read_called = True
+        return await super().read()
+
+
+def test_execution_disabled_blocks_confirm_upload_before_reading_the_file():
+    old = os.environ.get("SA_EXECUTION_ENABLED")
+    try:
+        os.environ["SA_EXECUTION_ENABLED"] = "false"
+        r = preview()  # preview still works with execution off
+        upload = _TrackedUpload()
+
+        e = run(confirm(r["context"], file=upload))
+        assert e["state"] == "blocked", e
+        assert "disabled" in e["message"].lower()
+        assert upload.read_called is False, "the file must not be read while execution is disabled"
+        assert _UPLOAD_CALLS == []  # Cloudinary boundary never reached
+        media = subs_router.db.submissions.docs[0]["media"]
+        assert not any(m.get("source") == "simple_assistant_ingest" for m in media)
+
+        # the plan is not consumed — re-enabling lets it upload
+        os.environ["SA_EXECUTION_ENABLED"] = "true"
+        e2 = run(confirm(r["context"]))
+        assert e2["state"] == "attached", e2
+        assert len(_UPLOAD_CALLS) == 1
+    finally:
+        if old is None:
+            os.environ.pop("SA_EXECUTION_ENABLED", None)
+        else:
+            os.environ["SA_EXECUTION_ENABLED"] = old
+    print("26. execution disabled -> confirm_upload blocked BEFORE the file is read, "
+          "zero Cloudinary/MongoDB write, plan not consumed; re-enabling lets it upload OK")
+
+
 if __name__ == "__main__":
     for fn in [
         test_talent_project_submission_resolution, test_authoritative_duplicate_resolution,
@@ -609,6 +656,7 @@ if __name__ == "__main__":
         test_tampered_submission_rejected, test_tampered_category_rejected,
         test_file_bytes_must_match_pinned_hash, test_replay_no_duplicate_one_audit_row,
         test_no_whatsapp_no_link_no_pipeline,
+        test_execution_disabled_blocks_confirm_upload_before_reading_the_file,
     ]:
         fn()
     print("\nALL SIMPLE ASSISTANT INGEST TESTS PASSED")

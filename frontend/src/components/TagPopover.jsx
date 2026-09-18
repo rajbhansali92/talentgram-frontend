@@ -10,7 +10,12 @@ export default function TagPopover({ talent, onSave, onClose }) {
     const [tagSearch, setTagSearch] = useState("");
     const [saving, setSaving] = useState(false);
     const [localTags, setLocalTags] = useState(talent.tags || []);
-    
+    // Multi-select: clicking an existing tag only stages it here — nothing
+    // is persisted until "Save & Close", so the user can pick several tags
+    // in one sitting without a round-trip (and the modal staying open)
+    // between every single click.
+    const [pendingTags, setPendingTags] = useState([]);
+
     useEffect(() => {
         let isMounted = true;
         (async () => {
@@ -26,21 +31,44 @@ export default function TagPopover({ talent, onSave, onClose }) {
         return () => { isMounted = false; };
     }, []);
 
-    const assignTag = async (tag) => {
-        const already = localTags.some(t => t.id === tag.id);
-        if (already) return;
+    const togglePendingTag = (tag) => {
+        setPendingTags(prev =>
+            prev.some(t => t.id === tag.id)
+                ? prev.filter(t => t.id !== tag.id)
+                : [...prev, { id: tag.id, name: tag.name }]
+        );
+    };
+
+    const saveAndClose = async () => {
+        if (pendingTags.length === 0) {
+            onClose();
+            return;
+        }
         setSaving(true);
-        try {
-            await adminApi.post(`/talents/${talent.id}/tag/${tag.id}`);
-            const updated = [...localTags, { id: tag.id, name: tag.name }];
+        const succeeded = [];
+        const failed = [];
+        for (const tag of pendingTags) {
+            try {
+                await adminApi.post(`/talents/${talent.id}/tag/${tag.id}`);
+                succeeded.push(tag);
+            } catch (e) {
+                failed.push(tag);
+                toast.error(formatErrorDetail(e, `Failed to assign tag "${tag.name}"`));
+            }
+        }
+        setSaving(false);
+        if (succeeded.length > 0) {
+            const updated = [...localTags, ...succeeded];
             setLocalTags(updated);
             onSave(talent.id, updated);
             talentPreviewCache.invalidateTalent(talent.id);
-            toast.success(`Assigned tag "${tag.name}"`);
-        } catch (e) {
-            toast.error(formatErrorDetail(e, "Failed to assign tag"));
-        } finally {
-            setSaving(false);
+            toast.success(succeeded.length === 1 ? `Assigned tag "${succeeded[0].name}"` : `Assigned ${succeeded.length} tags`);
+        }
+        // Only the tags that failed stay pending, so the user can retry
+        // just those via Save & Close again without losing the selection.
+        setPendingTags(failed);
+        if (failed.length === 0) {
+            onClose();
         }
     };
 
@@ -89,6 +117,7 @@ export default function TagPopover({ talent, onSave, onClose }) {
 
     const filtered = allTags
         .filter(t => !localTags.some(lt => lt.id === t.id))
+        .filter(t => !pendingTags.some(pt => pt.id === t.id))
         .filter(t => t.name.toLowerCase().includes(tagSearch.toLowerCase()));
 
     return (
@@ -120,6 +149,26 @@ export default function TagPopover({ talent, onSave, onClose }) {
                     {localTags.length === 0 && <span className="text-xs text-black/30 italic">No tags assigned</span>}
                 </div>
 
+                {/* Pending tags — selected but not yet saved; clearly
+                    distinguishable from the already-assigned chips above
+                    via a dashed border, and toggle off with the same X. */}
+                {pendingTags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-3 shrink-0" data-testid="pending-tags">
+                        {pendingTags.map(tag => (
+                            <span
+                                key={tag.id}
+                                data-testid={`pending-tag-${tag.id}`}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-50 border border-dashed border-amber-300 text-amber-700 text-[11px] rounded-full"
+                            >
+                                {tag.name}
+                                <button onClick={() => togglePendingTag(tag)} className="text-amber-500 hover:text-red-500 transition-colors ml-0.5">
+                                    <X className="w-3 h-3" />
+                                </button>
+                            </span>
+                        ))}
+                    </div>
+                )}
+
                 {/* Tag Search/Add input */}
                 <div className="relative mb-3 shrink-0">
                     <input
@@ -138,7 +187,8 @@ export default function TagPopover({ talent, onSave, onClose }) {
                         <button
                             key={tag.id}
                             type="button"
-                            onClick={() => assignTag(tag)}
+                            onClick={() => togglePendingTag(tag)}
+                            data-testid={`tag-option-${tag.id}`}
                             className="w-full text-left px-3.5 py-2.5 text-xs hover:bg-black/[0.02] flex items-center justify-between text-black/75 hover:text-black"
                         >
                             <span>{tag.name}</span>
@@ -162,8 +212,9 @@ export default function TagPopover({ talent, onSave, onClose }) {
 
                 {/* Footer Save / Done */}
                 <button
-                    onClick={onClose}
-                    className="w-full py-2.5 bg-black text-white hover:bg-black/90 font-medium rounded-lg text-xs transition-colors shrink-0 flex items-center justify-center gap-1.5"
+                    onClick={saveAndClose}
+                    disabled={saving}
+                    className="w-full py-2.5 bg-black text-white hover:bg-black/90 disabled:opacity-60 font-medium rounded-lg text-xs transition-colors shrink-0 flex items-center justify-center gap-1.5"
                 >
                     {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                     Save & Close

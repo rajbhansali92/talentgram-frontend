@@ -1254,10 +1254,15 @@ export default function TalentEdit() {
                                                             <button
                                                                 key={tag.id}
                                                                 type="button"
+                                                                data-testid={`profile-tag-option-${tag.id}`}
                                                                 onClick={() => {
+                                                                    // Multi-select (2026-09-18): keep the dropdown OPEN
+                                                                    // and only clear the search text, so the user can
+                                                                    // immediately add another existing tag without
+                                                                    // reopening it. Persistence stays immediate per
+                                                                    // tag (assignTag already saves), unchanged.
                                                                     assignTag(tag);
                                                                     setTagSearch("");
-                                                                    setIsTagDropdownOpen(false);
                                                                 }}
                                                                 className="w-full text-left px-4 py-2.5 text-xs text-black/70 hover:bg-black/[0.03] hover:text-black transition-colors flex items-center justify-between"
                                                             >

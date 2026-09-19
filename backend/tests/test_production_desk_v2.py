@@ -612,8 +612,68 @@ async def test_talent_invoice_message_calculation_matches_spec_example(client, h
         assert breakdown["commission_amount"] == 22000
         assert breakdown["reimbursements"] == 2500
         assert breakdown["invoice_amount"] == 90500
-        assert "90,500" in r.json()["message"]
-        assert "Reimbursements are not subject to commission" in r.json()["message"]
+        assert breakdown["extra_hours_count"] == 1
+        message = r.json()["message"]
+        assert "90,500" in message
+        assert "Extra Hours: 1 hour — ₹10,000" in message
+        assert "Commissionable Amount: ₹1,10,000" in message
+        assert "Commission @ 20%: ₹22,000" in message
+        assert "Reimbursements: ₹2,500" in message
+        assert "Billing Details:" in message
+        assert "Talentgram Agency LLP" in message
+        assert "GSTIN No: 27AAVFT3898G1Z8" in message
+        # V2 polish (spec section 19) — the user explicitly does not want
+        # this sentence in the outgoing message anymore.
+        assert "not subject to commission" not in message
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_talent_invoice_message_no_overtime_no_reimbursement_omits_lines(client, headers):
+    """Spec sections 17/20: flat fee, no extra hours, no reimbursement ->
+    message must NOT mention Extra Hours, Commissionable Amount, or
+    Reimbursements at all, and the math is the simple base case."""
+    pid = await _make_project(commission_percent="15%")
+    tid = await _make_talent("ZZZ_TEST_PDV2_Flat_Talent", "+911112223335")
+    await _add_to_pipeline(pid, tid)
+    try:
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"budget_total": 50000}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["breakdown"]["invoice_amount"] == 42500
+        message = body["message"]
+        assert "Extra Hours" not in message
+        assert "Commissionable Amount" not in message
+        assert "Reimbursements" not in message
+        assert "Commission @ 15%: ₹7,500" in message
+        assert "Invoice Amount to Talentgram: ₹42,500" in message
+        assert "Billing Details:" in message
+        assert body["destination_type"] == "phone"
+        assert body["whatsapp_group_name"] is None
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_talent_invoice_message_prefers_whatsapp_group_when_set(client, headers):
+    """Spec sections 22-24: whatsapp_group_name (the SAME field the
+    existing campaign engine already reads) is reported as the preferred
+    destination, but the phone number is still returned as the actual
+    wa.me target — a group can't be opened via a plain link."""
+    pid = await _make_project(commission_percent="15%")
+    tid = await _make_talent("ZZZ_TEST_PDV2_Group_Talent", "+911112223336")
+    await db.talents.update_one({"id": tid}, {"$set": {"whatsapp_group_name": "ZZZ_TEST_Group_Chat"}})
+    await _add_to_pipeline(pid, tid)
+    try:
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"budget_total": 50000}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["destination_type"] == "group"
+        assert body["whatsapp_group_name"] == "ZZZ_TEST_Group_Chat"
+        assert body["phone"] == "+911112223336"
     finally:
         await _cleanup(pid, [tid])
 
@@ -651,3 +711,89 @@ async def test_existing_production_desk_shape_unaffected_by_v2(client, headers):
         assert card["reimbursement_total"] == 0
     finally:
         await _cleanup(pid, [tid])
+
+
+# ---------------------------------------------------------------------------
+# V2 final polish — costume_trial_time, Overview (today/upcoming/completed)
+# ---------------------------------------------------------------------------
+@_aio
+async def test_costume_trial_time_round_trips(client, headers):
+    pid = await _make_project()
+    tid = await _make_talent()
+    await _add_to_pipeline(pid, tid)
+    try:
+        r = await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"costume_trial_time": "4:00 PM"}, headers=headers)
+        card = _find_talent(r.json(), tid)
+        assert card["costume_trial_time"] == "4:00 PM"
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_today_and_upcoming_surface_structured_shoot_days_and_prep_events(client, headers):
+    from datetime import date, timedelta
+
+    pid = await _make_project()
+    tid = await _make_talent("ZZZ_TEST_PDV2_Today_Talent")
+    await _add_to_pipeline(pid, tid)
+    today_str = date.today().isoformat()
+    tomorrow_str = (date.today() + timedelta(days=1)).isoformat()
+    try:
+        await client.post(f"/api/projects/{pid}/production-desk/talents/{tid}/shoot-days", json={"date": today_str, "location": "Mumbai"}, headers=headers)
+        await client.post(
+            f"/api/projects/{pid}/production-desk/talents/{tid}/readings-rehearsals",
+            json={"type": "reading", "date": tomorrow_str},
+            headers=headers,
+        )
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        body = r.json()
+        assert any(d["talent_id"] == tid and d["date"] == today_str for d in body["today"]["shoot_days"])
+        assert any(e["talent_id"] == tid and e["date"] == tomorrow_str for e in body["upcoming"]["prep_events"])
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_completed_bucket_shows_paid_reimbursement_and_received_tranche(client, headers):
+    pid = await _make_project()
+    tid = await _make_talent("ZZZ_TEST_PDV2_Completed_Talent")
+    await _add_to_pipeline(pid, tid)
+    try:
+        reimb_resp = await client.post(
+            f"/api/projects/{pid}/production-desk/reimbursements",
+            data={"talent_id": tid, "expense_type": "Travel", "amount": "1000"},
+            headers=headers,
+        )
+        reimb_id = reimb_resp.json()["reimbursements"][0]["id"]
+        await client.patch(f"/api/projects/{pid}/production-desk/reimbursements/{reimb_id}", json={"status": "paid"}, headers=headers)
+
+        tranche_resp = await client.post(f"/api/projects/{pid}/production-desk/tranches", json={"name": "Advance", "amount": 5000}, headers=headers)
+        tranche_id = tranche_resp.json()["tranches"][0]["id"]
+        r = await client.patch(f"/api/projects/{pid}/production-desk/tranches/{tranche_id}", json={"payment_status": "received"}, headers=headers)
+
+        body = r.json()
+        assert any(x["id"] == reimb_id for x in body["completed"]["reimbursements"])
+        assert any(x["id"] == tranche_id for x in body["completed"]["tranches"])
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_crew_client_ref_includes_crm_peek_fields(client, headers):
+    pid = await _make_project()
+    client_resp = await client.post(
+        "/api/marketing/clients",
+        json={"name": "ZZZ_TEST_PDV2_Crew_Contact", "phone_number": "+911234567890", "company_name": "ZZZ_TEST Co", "email": "crew@example.com", "contact_type": "production"},
+        headers=headers,
+    )
+    cid = client_resp.json()["id"]
+    try:
+        await client.post(f"/api/projects/{pid}/production-desk/crew", json={"client_id": cid, "role": "Producer"}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk", headers=headers)
+        crew_contact = r.json()["crew"][0]["contact"]
+        assert crew_contact["company_name"] == "ZZZ_TEST Co"
+        assert crew_contact["email"] == "crew@example.com"
+        assert crew_contact["contact_type"] == "production"
+    finally:
+        await db.project_crew.delete_many({"project_id": pid})
+        await _cleanup(pid, client_ids=[cid])

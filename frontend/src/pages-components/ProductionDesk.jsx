@@ -50,7 +50,8 @@ import {
     Plus, Trash2, Upload, ChevronsUpDown, ExternalLink, Receipt,
     ClipboardList, Wallet, UserPlus, Sun, CalendarClock, ListChecks,
     CheckCircle2, Circle, PhoneCall, MessageCircle, MapPin,
-    Layers, X,
+    Layers, X, Pencil, ChevronDown, ChevronUp, Phone, Mail,
+    Building2, History,
 } from "lucide-react";
 
 // Same INR formatter MarketingHub already uses — no second money formatter.
@@ -247,6 +248,36 @@ function LocationPicker({ value, onCommit, knownLocations, placeholder, classNam
     );
 }
 
+// V2 polish (spec section 7-11) — the consistent Edit/Save/Cancel/Delete
+// control cluster used by every editable record (costume trial, shoot day,
+// reading/rehearsal, tranche) and editable section (Payment Follow-up).
+// Normal browsing stays fully read-only; only this button ever flips a
+// record into a mutable state. The Management Agent is unaffected — it
+// still PATCHes the same endpoints directly, never through this UI state.
+function EditControls({ editing, onEdit, onSave, onCancel, onDelete, saveDisabled, size = "sm" }) {
+    const h = size === "sm" ? "h-6 text-[10px] px-2" : "h-7 text-xs";
+    if (!editing) {
+        return (
+            <div className="flex items-center gap-1.5 shrink-0">
+                <Button size="sm" variant="ghost" className={h} onClick={onEdit}>
+                    <Pencil className="h-3 w-3 mr-1" /> Edit
+                </Button>
+                {onDelete && (
+                    <button onClick={onDelete} className="text-black/30 hover:text-red-500" title="Delete">
+                        <Trash2 className="h-3 w-3" />
+                    </button>
+                )}
+            </div>
+        );
+    }
+    return (
+        <div className="flex items-center gap-1.5 shrink-0">
+            <Button size="sm" variant="ghost" className={h} onClick={onCancel}>Cancel</Button>
+            <Button size="sm" className={h} onClick={onSave} disabled={saveDisabled}>Save</Button>
+        </div>
+    );
+}
+
 function SectionCard({ title, icon: Icon, right, children, testId }) {
     return (
         <Card className="border-black/[0.08] shadow-none" data-testid={testId}>
@@ -273,6 +304,125 @@ function StatPill({ label, value, tone }) {
             <span className="text-[11px] uppercase tracking-wide text-black/40">{label}</span>
             <span className={`text-[15px] font-semibold ${toneClass}`}>{value}</span>
         </div>
+    );
+}
+
+// V2 polish (spec sections 26-35) — Production Overview as a collapsible
+// smart dashboard. Everything here is DERIVED from data the backend already
+// computes and returns from GET .../production-desk (summary,
+// needs_attention, today, upcoming, completed) — no second data source, no
+// second reminder engine. Collapse state is a per-viewer convenience
+// (localStorage), never sent to the server.
+function OverviewDashboard({ project: p, summary, needsAttention, today, upcoming, completed }) {
+    const [collapsed, setCollapsed] = useState(() => {
+        try { return localStorage.getItem("pd_overview_collapsed") === "1"; } catch { return false; }
+    });
+    const toggle = () => {
+        setCollapsed((v) => {
+            const next = !v;
+            try { localStorage.setItem("pd_overview_collapsed", next ? "1" : "0"); } catch { /* per-viewer convenience only */ }
+            return next;
+        });
+    };
+
+    const todayItems = [];
+    if (today.project_shoot_today) todayItems.push({ key: "proj-shoot", icon: "🎬", label: "Shoot is today" });
+    today.shoot_days?.forEach((d) => todayItems.push({ key: `sd-${d.talent_id}-${d.date}`, icon: "🎬", label: `Shoot — ${d.talent_name}${d.location ? ` (${d.location})` : ""}` }));
+    today.prep_events?.forEach((e) => todayItems.push({ key: `pe-${e.talent_id}-${e.date}`, icon: e.type === "rehearsal" ? "🎭" : "📖", label: `${e.type === "rehearsal" ? "Rehearsal" : "Reading"} — ${e.talent_name}` }));
+    today.trials.forEach((c) => todayItems.push({ key: `trial-${c.talent_id}`, icon: "👗", label: `Costume trial — ${c.name}${c.costume_trial_location ? ` (${c.costume_trial_location})` : ""}` }));
+    today.tasks.forEach((t) => todayItems.push({ key: `task-${t.id}`, icon: "✓", label: `${t.title}${t.talent_name ? ` (${t.talent_name})` : ""}` }));
+    if (today.payment_followup_due) todayItems.push({ key: "pf", icon: "💰", label: "Payment follow-up due today", warn: true });
+
+    const upcomingItems = [];
+    upcoming.shoot_days?.forEach((d) => upcomingItems.push({ key: `sd-${d.talent_id}-${d.date}`, label: `${formatDate(d.date)} — ${d.talent_name} — Shoot${d.location ? ` — ${d.location}` : ""}` }));
+    upcoming.prep_events?.forEach((e) => upcomingItems.push({ key: `pe-${e.talent_id}-${e.date}`, label: `${formatDate(e.date)} — ${e.talent_name} — ${e.type === "rehearsal" ? "Rehearsal" : "Reading"}${e.location ? ` — ${e.location}` : ""}` }));
+    upcoming.trials.forEach((c) => upcomingItems.push({ key: `trial-${c.talent_id}`, label: `${formatDate(c.costume_trial_at)} — ${c.name} — Costume Trial` }));
+    upcoming.tasks.forEach((t) => upcomingItems.push({ key: `task-${t.id}`, label: `${formatDate(t.due_at)} — ${t.title}${t.talent_name ? ` (${t.talent_name})` : ""}` }));
+    if (upcoming.payment_followup) upcomingItems.push({ key: "pf", label: `${formatDate(p.pd_next_follow_up_at)} — Payment Follow-up` });
+
+    const completedItems = [];
+    completed?.reimbursements?.forEach((r) => completedItems.push({ key: `r-${r.id}`, label: `Reimbursement cleared — ${r.talent_name} — ${formatCurrency(r.amount)}` }));
+    completed?.tranches?.forEach((t) => completedItems.push({ key: `t-${t.id}`, label: `Tranche received — ${t.name} — ${formatCurrency(t.amount)}` }));
+    completed?.tasks?.forEach((t) => completedItems.push({ key: `task-${t.id}`, label: `Task completed — ${t.title}` }));
+
+    return (
+        <Card className="border-black/[0.08] shadow-none" data-testid="pd-overview">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 py-3.5 px-4 border-b border-black/[0.06]">
+                <div>
+                    <CardTitle className="text-[13px] font-semibold text-black/80 flex items-center gap-2">
+                        <ClipboardList className="h-3.5 w-3.5 text-black/40" /> Production Overview
+                    </CardTitle>
+                    <div className="text-[11px] text-black/40 mt-0.5 flex flex-wrap items-center gap-x-2">
+                        <span className="font-medium text-black/60">{p.brand_name}</span>
+                        {p.status && <Badge variant="outline" className="text-[10px] capitalize">{p.status}</Badge>}
+                        {p.production_house && <span>· Client: {p.production_house}</span>}
+                        <Badge variant="outline" className="text-[10px] capitalize">{(p.pd_production_status || "not_started").replace("_", " ")}</Badge>
+                    </div>
+                </div>
+                <button onClick={toggle} className="text-black/40 hover:text-black/70 p-1" data-testid="pd-overview-toggle">
+                    {collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                </button>
+            </CardHeader>
+            {!collapsed && (
+                <CardContent className="p-4" data-testid="pd-overview-content">
+                    <div className="flex flex-wrap gap-x-8 gap-y-4">
+                        <StatPill label="Locked Talents" value={summary.locked_count} />
+                        <StatPill label="Shoot Days" value={summary.shoot_days ?? "—"} />
+                        <StatPill label="Talent Budget" value={formatCurrency(summary.talent_budget_total)} />
+                        <StatPill label="Extra Hours" value={formatCurrency(summary.extra_hours_total)} tone={summary.extra_hours_total > 0 ? "warn" : "neutral"} />
+                        <StatPill label="Reimbursements" value={formatCurrency(summary.reimbursements_total)} />
+                        <StatPill label="Talent Cost" value={formatCurrency(summary.total_talent_and_overtime_and_reimbursements)} />
+                        <StatPill label="TG Commission (Net)" value={formatCurrency(summary.commission_net)} />
+                        <StatPill
+                            label="Client Payment"
+                            value={p.pd_payment_in_received ? "Received" : "Pending"}
+                            tone={p.pd_payment_in_received ? "good" : "warn"}
+                        />
+                        <StatPill
+                            label="Talent Payment Out"
+                            value={`${summary.payments_cleared}/${summary.payments_total} Cleared`}
+                            tone={summary.payments_cleared === summary.payments_total && summary.payments_total > 0 ? "good" : "warn"}
+                        />
+                        {summary.payments_pending_amount > 0 && (
+                            <StatPill label="Pending Amount" value={formatCurrency(summary.payments_pending_amount)} tone="warn" />
+                        )}
+                    </div>
+
+                    {needsAttention.length > 0 && (
+                        <div className="mt-4 flex items-start gap-2 rounded-md bg-amber-50 border border-amber-200 px-3 py-2.5" data-testid="pd-needs-attention">
+                            <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-amber-800">
+                                {needsAttention.map((item, i) => <span key={i}>{item}</span>)}
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+                        <div className="rounded-md border border-black/[0.06] p-3" data-testid="pd-today">
+                            <div className="text-[11px] font-medium text-black/50 uppercase tracking-wide mb-2 flex items-center gap-1"><Sun className="h-3 w-3" /> Today</div>
+                            <div className="space-y-1 text-xs">
+                                {todayItems.map((it) => <div key={it.key} className={it.warn ? "text-amber-700" : "text-black/80"}>{it.icon} {it.label}</div>)}
+                                {todayItems.length === 0 && <div className="text-black/40 py-2 text-center">Nothing scheduled today.</div>}
+                            </div>
+                        </div>
+                        <div className="rounded-md border border-black/[0.06] p-3" data-testid="pd-upcoming">
+                            <div className="text-[11px] font-medium text-black/50 uppercase tracking-wide mb-2 flex items-center gap-1"><CalendarClock className="h-3 w-3" /> Upcoming</div>
+                            <div className="space-y-1 text-xs">
+                                {upcomingItems.map((it) => <div key={it.key} className="text-black/70">{it.label}</div>)}
+                                {upcomingItems.length === 0 && <div className="text-black/40 py-2 text-center">Nothing upcoming.</div>}
+                            </div>
+                        </div>
+                        <div className="rounded-md border border-black/[0.06] p-3" data-testid="pd-completed">
+                            <div className="text-[11px] font-medium text-black/50 uppercase tracking-wide mb-2 flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> Completed</div>
+                            <div className="space-y-1 text-xs">
+                                {completedItems.map((it) => <div key={it.key} className="text-black/60">{it.label}</div>)}
+                                {completedItems.length === 0 && <div className="text-black/40 py-2 text-center">Nothing completed yet.</div>}
+                            </div>
+                        </div>
+                    </div>
+                </CardContent>
+            )}
+        </Card>
     );
 }
 
@@ -556,6 +706,15 @@ export default function ProductionDesk({ projectId, project }) {
         }
     }, [projectId]);
 
+    const updateReadingRehearsal = useCallback(async (talentId, entryId, payload) => {
+        try {
+            const { data } = await adminApi.patch(`/projects/${projectId}/production-desk/talents/${talentId}/readings-rehearsals/${entryId}`, payload);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Update failed");
+        }
+    }, [projectId]);
+
     const deleteReadingRehearsal = useCallback(async (talentId, entryId) => {
         try {
             const { data } = await adminApi.delete(`/projects/${projectId}/production-desk/talents/${talentId}/readings-rehearsals/${entryId}`);
@@ -608,9 +767,18 @@ export default function ProductionDesk({ projectId, project }) {
         }
     }, [projectId]);
 
+    // V2 polish (spec sections 22-25) — destination_type is "group" when
+    // this talent has a whatsapp_group_name on file (the SAME field the
+    // existing campaign engine already reads), but a wa.me link can only
+    // open an individual chat, never a WhatsApp group — so the phone
+    // number is still what actually opens, and the admin is told so
+    // rather than silently sending to the wrong place.
     const askTalentToRaiseInvoice = useCallback(async (talentId) => {
         try {
             const { data } = await adminApi.get(`/projects/${projectId}/production-desk/talents/${talentId}/invoice-message`);
+            if (data.destination_type === "group") {
+                toast.info(`This talent also has a WhatsApp group ("${data.whatsapp_group_name}") on file — opening their personal number instead, since a group can't be opened via a link.`);
+            }
             openWhatsApp(data.phone, data.message);
         } catch (err) {
             toast.error(formatErrorDetail(err) || "Could not build invoice request");
@@ -653,73 +821,7 @@ export default function ProductionDesk({ projectId, project }) {
 
     return (
         <div className="space-y-4 pb-16" data-testid="production-desk-root">
-            {/* Overview */}
-            <SectionCard title="Overview" icon={ClipboardList} testId="pd-overview">
-                <div className="flex flex-wrap gap-x-8 gap-y-4">
-                    <StatPill label="Locked Talents" value={summary.locked_count} />
-                    <StatPill label="Shoot Days" value={summary.shoot_days ?? "—"} />
-                    <StatPill label="Talent Budget" value={formatCurrency(summary.talent_budget_total)} />
-                    <StatPill label="Production Budget" value={formatCurrency(summary.production_budget_total)} />
-                    <StatPill label="TG Commission (Net)" value={formatCurrency(summary.commission_net)} />
-                    <StatPill
-                        label="Payments"
-                        value={`${summary.payments_cleared}/${summary.payments_total} Cleared`}
-                        tone={summary.payments_cleared === summary.payments_total && summary.payments_total > 0 ? "good" : "warn"}
-                    />
-                    {summary.payments_pending_amount > 0 && (
-                        <StatPill label="Pending Amount" value={formatCurrency(summary.payments_pending_amount)} tone="warn" />
-                    )}
-                </div>
-
-                {needs_attention.length > 0 && (
-                    <div className="mt-4 flex items-start gap-2 rounded-md bg-amber-50 border border-amber-200 px-3 py-2.5" data-testid="pd-needs-attention">
-                        <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
-                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-amber-800">
-                            {needs_attention.map((item, i) => <span key={i}>{item}</span>)}
-                        </div>
-                    </div>
-                )}
-            </SectionCard>
-
-            {/* Today / Upcoming — derived from Locked Talents' Talent
-                Preparation fields, workflow_tasks, and the payment
-                follow-up fields below; not a second data source. */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <SectionCard title="Today" icon={Sun} testId="pd-today">
-                    <div className="space-y-1.5 text-xs">
-                        {today.project_shoot_today && <div className="text-black/80">🎬 Shoot is today</div>}
-                        {today.shoots.map((c) => <div key={`shoot-${c.talent_id}`} className="text-black/80">🎬 Shoot today — {c.name}</div>)}
-                        {today.trials.map((c) => (
-                            <div key={`trial-${c.talent_id}`} className="text-black/80">
-                                👗 Costume trial — {c.name}{c.costume_trial_location ? ` (${c.costume_trial_location})` : ""}
-                            </div>
-                        ))}
-                        {today.tasks.map((t) => (
-                            <div key={t.id} className="text-black/80">✓ {t.title}{t.talent_name ? ` (${t.talent_name})` : ""}</div>
-                        ))}
-                        {today.payment_followup_due && <div className="text-amber-700">💰 Payment follow-up due today</div>}
-                        {!today.project_shoot_today && today.shoots.length === 0 && today.trials.length === 0 && today.tasks.length === 0 && !today.payment_followup_due && (
-                            <div className="text-black/40 py-2 text-center">Nothing scheduled today.</div>
-                        )}
-                    </div>
-                </SectionCard>
-
-                <SectionCard title="Upcoming" icon={CalendarClock} testId="pd-upcoming">
-                    <div className="space-y-1.5 text-xs">
-                        {upcoming.shoots.map((c) => <div key={`up-shoot-${c.talent_id}`} className="text-black/70">🎬 Shoot scheduled — {c.name}</div>)}
-                        {upcoming.trials.map((c) => (
-                            <div key={`up-trial-${c.talent_id}`} className="text-black/70">👗 Costume trial — {c.name} ({formatDate(c.costume_trial_at)})</div>
-                        ))}
-                        {upcoming.tasks.map((t) => (
-                            <div key={t.id} className="text-black/70">✓ {t.title}{t.talent_name ? ` (${t.talent_name})` : ""} — due {formatDate(t.due_at)}</div>
-                        ))}
-                        {upcoming.payment_followup && <div className="text-black/70">💰 Payment follow-up — {formatDate(p.pd_next_follow_up_at)}</div>}
-                        {upcoming.shoots.length === 0 && upcoming.trials.length === 0 && upcoming.tasks.length === 0 && !upcoming.payment_followup && (
-                            <div className="text-black/40 py-2 text-center">Nothing upcoming.</div>
-                        )}
-                    </div>
-                </SectionCard>
-            </div>
+            <OverviewDashboard project={p} summary={summary} needsAttention={needs_attention} today={today} upcoming={upcoming} completed={data.completed} />
 
             {/* Locked Talents */}
             <SectionCard title={`Locked Talents (${talents.length})`} icon={Users} testId="pd-locked-talents">
@@ -791,115 +893,33 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
-            {/* Talent Preparation — additive fields on the SAME locked
-                casting_pipeline row Locked Talents above reads; no second
-                talent/project relationship. V2: Fitting/Look Test/Shoot
-                Status were REMOVED from this UI (spec section 6) — Fitting/
-                Look Test stay fully alive server-side (Management Agent has
-                real, working NLU commands and readiness checks against
-                them — see production_desk.py's _talent_card docstring),
-                simply not shown here; Shoot Status moved into the new
-                Shooting Schedule section below, where it belongs with the
-                actual per-day schedule. */}
+            {/* V2 polish (spec section 2) — Talent Preparation now holds
+                BOTH Costume Trial and Readings & Rehearsals for each talent
+                in one place, instead of two separate cards. Additive
+                fields on the SAME locked casting_pipeline row Locked
+                Talents above reads; no second talent/project relationship.
+                Fitting/Look Test/Shoot Status stay fully alive server-side
+                (Management Agent has real NLU commands against them — see
+                production_desk.py's _talent_card docstring), simply not
+                shown here (spec section 6); Shoot Status lives in Shoot
+                Details below, next to the actual per-day schedule. */}
             {talents.length > 0 && (
                 <SectionCard title="Talent Preparation" icon={ListChecks} testId="pd-talent-prep">
-                    <div className="overflow-x-auto">
-                        <Table>
-                            <TableHeader>
-                                <TableRow>
-                                    <TableHead className="text-xs">Talent</TableHead>
-                                    <TableHead className="text-xs">Costume Trial</TableHead>
-                                    <TableHead className="text-xs">Trial Location</TableHead>
-                                </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                                {talents.map((t) => (
-                                    <TableRow key={t.talent_id} data-testid={`pd-prep-row-${t.talent_id}`}>
-                                        <TableCell className="text-xs font-medium text-black/80">{t.name}</TableCell>
-                                        <TableCell>
-                                            <Input
-                                                type="date"
-                                                defaultValue={toDateInputValue(t.costume_trial_at)}
-                                                className="h-7 text-xs w-[130px]"
-                                                onBlur={(e) => {
-                                                    const iso = fromDateInputValue(e.target.value);
-                                                    if (iso !== t.costume_trial_at) patchTalent(t.talent_id, { costume_trial_at: iso });
-                                                }}
-                                            />
-                                        </TableCell>
-                                        <TableCell>
-                                            <div className="flex items-center gap-1.5">
-                                                <LocationPicker
-                                                    value={t.costume_trial_location || ""}
-                                                    knownLocations={knownLocations}
-                                                    placeholder="Location"
-                                                    className="h-7 text-xs w-[130px]"
-                                                    onCommit={(name, mapUrl) => {
-                                                        const updates = {};
-                                                        if (name !== (t.costume_trial_location || "")) updates.costume_trial_location = name;
-                                                        if (mapUrl && !t.costume_trial_map_url) updates.costume_trial_map_url = mapUrl;
-                                                        if (Object.keys(updates).length) patchTalent(t.talent_id, updates);
-                                                    }}
-                                                />
-                                                <Input
-                                                    defaultValue={t.costume_trial_map_url || ""}
-                                                    placeholder="Map URL (optional)"
-                                                    className="h-7 text-xs w-[150px]"
-                                                    onBlur={(e) => { if (e.target.value !== (t.costume_trial_map_url || "")) patchTalent(t.talent_id, { costume_trial_map_url: e.target.value }); }}
-                                                />
-                                                {t.costume_trial_map_url && (
-                                                    <a href={t.costume_trial_map_url} target="_blank" rel="noreferrer" className="text-black/30 hover:text-[#0c2340] shrink-0">
-                                                        <MapPin className="h-3.5 w-3.5" />
-                                                    </a>
-                                                )}
-                                            </div>
-                                        </TableCell>
-                                    </TableRow>
-                                ))}
-                            </TableBody>
-                        </Table>
-                    </div>
-                </SectionCard>
-            )}
-
-            {/* V2 — Shooting Schedule (spec sections 1-4): per-talent,
-                independently-manageable shoot-day records. Cards, not a
-                giant table, so this stays usable on mobile (spec section
-                31). "Use Project Dates" is the explicit, admin-tapped
-                one-tap seed from Shoot Details' own structured dates below
-                — never automatic, never overwrites the project's dates. */}
-            {talents.length > 0 && (
-                <SectionCard title="Shooting Schedule" icon={CalendarClock} testId="pd-shoot-schedule">
                     <div className="space-y-4">
                         {talents.map((t) => (
-                            <TalentShootSchedule
-                                key={t.talent_id}
-                                talent={t}
-                                projectShootDates={p.pd_shoot_dates_list || []}
-                                knownLocations={knownLocations}
-                                onAdd={(payload) => addShootDay(t.talent_id, payload)}
-                                onUpdate={(dayId, payload) => updateShootDay(t.talent_id, dayId, payload)}
-                                onDelete={(dayId) => deleteShootDay(t.talent_id, dayId)}
-                                onUseProjectDates={() => useProjectDatesForTalent(t.talent_id)}
-                            />
-                        ))}
-                    </div>
-                </SectionCard>
-            )}
-
-            {/* V2 — Readings & Rehearsals (spec section 8), under Talent
-                Preparation conceptually but its own card for scannability. */}
-            {talents.length > 0 && (
-                <SectionCard title="Readings & Rehearsals" icon={Users} testId="pd-readings-rehearsals">
-                    <div className="space-y-4">
-                        {talents.map((t) => (
-                            <TalentReadingsRehearsals
-                                key={t.talent_id}
-                                talent={t}
-                                knownLocations={knownLocations}
-                                onAdd={(payload) => addReadingRehearsal(t.talent_id, payload)}
-                                onDelete={(entryId) => deleteReadingRehearsal(t.talent_id, entryId)}
-                            />
+                            <div key={t.talent_id} className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-prep-${t.talent_id}`}>
+                                <div className="text-xs font-semibold text-black/80 mb-2">{t.name}</div>
+                                <CostumeTrialBlock talent={t} knownLocations={knownLocations} onSave={(payload) => patchTalent(t.talent_id, payload)} />
+                                <div className="mt-3 pt-3 border-t border-black/[0.06]">
+                                    <TalentReadingsRehearsals
+                                        talent={t}
+                                        knownLocations={knownLocations}
+                                        onAdd={(payload) => addReadingRehearsal(t.talent_id, payload)}
+                                        onUpdate={(entryId, payload) => updateReadingRehearsal(t.talent_id, entryId, payload)}
+                                        onDelete={(entryId) => deleteReadingRehearsal(t.talent_id, entryId)}
+                                    />
+                                </div>
+                            </div>
                         ))}
                     </div>
                 </SectionCard>
@@ -953,9 +973,7 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
-            {/* Production Budget & Shoot Details */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <SectionCard title="Production Budget" icon={Wallet} testId="pd-production-budget">
+            <SectionCard title="Production Budget" icon={Wallet} testId="pd-production-budget">
                     <div className="space-y-3">
                         <div>
                             <Label className="text-[11px] text-black/40">Budget / Day</Label>
@@ -999,68 +1017,39 @@ export default function ProductionDesk({ projectId, project }) {
                     </div>
                 </SectionCard>
 
-                <SectionCard title="Shoot Details" icon={CalendarDays} testId="pd-shoot-details">
-                    <div className="space-y-2.5 text-xs">
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="text-black/40 shrink-0">Shooting Dates</span>
-                            <Input defaultValue={p.shoot_dates || ""} placeholder="e.g. 26th - 27th August" className="h-7 text-xs max-w-[220px]" onBlur={(e) => { if (e.target.value !== (p.shoot_dates || "")) patchProject({ shoot_dates: e.target.value }); }} />
-                        </div>
-                        {/* V2 (spec section 4) — the proper structured multi-date
-                            picker: add/remove ISO dates, stored structurally.
-                            This is what a locked talent's own schedule can be
-                            seeded from ("Use Project Dates" in Shooting
-                            Schedule above) — independent of the free-text
-                            field above and the single reminder-only date
-                            below. */}
-                        <div>
-                            <span className="text-black/40 block mb-1">Shoot Dates (structured)</span>
-                            <ShootDatesList dates={p.pd_shoot_dates_list || []} onChange={(dates) => patchProject({ shoot_dates_list: dates })} />
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="text-black/40 shrink-0" title="A single date used only to schedule shoot reminders — independent of the free-text Shooting Dates above.">Shoot Date (reminders)</span>
-                            <Input type="date" defaultValue={p.pd_shoot_date || ""} className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_shoot_date || "")) patchProject({ shoot_date: e.target.value || null }); }} />
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="text-black/40 shrink-0">Call Time</span>
-                            <Input defaultValue={p.pd_call_time || ""} placeholder="e.g. 8:00 AM" className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_call_time || "")) patchProject({ call_time: e.target.value }); }} />
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="text-black/40 shrink-0">Reporting Time</span>
-                            <Input defaultValue={p.pd_reporting_time || ""} placeholder="e.g. 7:00 AM" className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_reporting_time || "")) patchProject({ reporting_time: e.target.value }); }} />
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="text-black/40 shrink-0">Location</span>
-                            <LocationPicker
-                                value={p.pd_shoot_location || ""}
-                                knownLocations={knownLocations}
-                                placeholder="Shoot location"
-                                className="h-7 text-xs max-w-[220px]"
-                                onCommit={(name) => { if (name !== (p.pd_shoot_location || "")) patchProject({ shoot_location: name }); }}
-                            />
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="text-black/40 shrink-0">Shoot Status</span>
-                            <Select value={p.pd_shoot_status} onValueChange={(v) => patchProject({ shoot_status: v })}>
-                                <SelectTrigger className="h-7 text-xs w-[130px]"><SelectValue /></SelectTrigger>
-                                <SelectContent>
-                                    {SHOOT_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
-                                </SelectContent>
-                            </Select>
-                        </div>
-                        {/* Production Contact moved to Payment Follow-up as
-                            "Concerned Person" (spec section 16) — same
-                            underlying pd_production_contact_client_id field,
-                            just homed where it's actually used. Multiple
-                            production contacts (spec section 28) already
-                            exist as the Crew section further down — reused,
-                            not duplicated here. */}
-                        <div>
-                            <span className="text-black/40 block mb-1">Notes</span>
-                            <Textarea defaultValue={p.pd_shoot_notes || ""} rows={2} className="text-xs" onBlur={(e) => { if (e.target.value !== (p.pd_shoot_notes || "")) patchProject({ shoot_notes: e.target.value }); }} />
+            {/* V2 polish (spec section 3/4/6) — Shoot Details now holds
+                BOTH the project-level shoot info AND every locked talent's
+                own independent shooting schedule, instead of two separate
+                cards. One primary structured date list (spec section 4);
+                the free-text legacy `shoot_dates` and the reminder-only
+                `pd_shoot_date` are kept (never deleted — the reminder
+                worker genuinely reads pd_shoot_date/pd_call_time/
+                pd_reporting_time/pd_shoot_location, see
+                services/production_reminder_worker.py) but folded into one
+                small labeled "Legacy / Reminder" sub-area instead of
+                looking like a third separate shoot-date UI. */}
+            <SectionCard title="Shoot Details" icon={CalendarDays} testId="pd-shoot-details">
+                <ShootDetailsProjectBlock project={p} knownLocations={knownLocations} onSave={patchProject} />
+                {talents.length > 0 && (
+                    <div className="mt-4 pt-4 border-t border-black/[0.06]">
+                        <div className="text-[11px] font-medium text-black/50 uppercase tracking-wide mb-2">Talent Shooting Schedule</div>
+                        <div className="space-y-4">
+                            {talents.map((t) => (
+                                <TalentShootSchedule
+                                    key={t.talent_id}
+                                    talent={t}
+                                    projectShootDates={p.pd_shoot_dates_list || []}
+                                    knownLocations={knownLocations}
+                                    onAdd={(payload) => addShootDay(t.talent_id, payload)}
+                                    onUpdate={(dayId, payload) => updateShootDay(t.talent_id, dayId, payload)}
+                                    onDelete={(dayId) => deleteShootDay(t.talent_id, dayId)}
+                                    onUseProjectDates={() => useProjectDatesForTalent(t.talent_id)}
+                                />
+                            ))}
                         </div>
                     </div>
-                </SectionCard>
-            </div>
+                )}
+            </SectionCard>
 
             {/* Payment Follow-up — operational tracking ONLY, not a
                 Finance/accounting record. pd_payment_in_received (in
@@ -1080,49 +1069,7 @@ export default function ProductionDesk({ projectId, project }) {
                 <p className="text-[11px] text-black/35 mb-3 -mt-1">
                     Opens WhatsApp with the message pre-filled. Nothing is sent automatically — you review and tap Send yourself.
                 </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="sm:col-span-2">
-                        <Label className="text-[11px] text-black/40">Concerned Person (CRM contact)</Label>
-                        <div className="mt-1">
-                            <ClientPicker
-                                clients={clients}
-                                placeholder={p.pd_production_contact?.name || "Search CRM contacts…"}
-                                onContactCreated={(c) => setClients((prev) => [c, ...prev])}
-                                onPicked={(c) => patchProject({ production_contact_client_id: c.id || c._id })}
-                            />
-                        </div>
-                    </div>
-                    <div>
-                        <Label className="text-[11px] text-black/40">Payment Terms</Label>
-                        <Input defaultValue={p.pd_payment_terms || ""} placeholder="e.g. 50% advance, 50% on delivery" className="h-8 text-xs mt-1" onBlur={(e) => { if (e.target.value !== (p.pd_payment_terms || "")) patchProject({ payment_terms: e.target.value }); }} />
-                    </div>
-                    <div>
-                        <Label className="text-[11px] text-black/40">Status</Label>
-                        <Select value={p.pd_payment_followup_status} onValueChange={(v) => patchProject({ payment_followup_status: v })}>
-                            <SelectTrigger className="h-8 text-xs mt-1"><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                                {PAYMENT_FOLLOWUP_STATUSES.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
-                            </SelectContent>
-                        </Select>
-                    </div>
-                    <div>
-                        <Label className="text-[11px] text-black/40">Expected Date</Label>
-                        <Input type="date" defaultValue={toDateInputValue(p.pd_expected_payment_date)} className="h-8 text-xs mt-1"
-                            onBlur={(e) => { const iso = fromDateInputValue(e.target.value); if (iso !== p.pd_expected_payment_date) patchProject({ expected_payment_date: iso }); }} />
-                    </div>
-                    <div>
-                        <Label className="text-[11px] text-black/40">Next Follow-up</Label>
-                        <Input type="date" defaultValue={toDateInputValue(p.pd_next_follow_up_at)} className="h-8 text-xs mt-1"
-                            onBlur={(e) => { const iso = fromDateInputValue(e.target.value); if (iso !== p.pd_next_follow_up_at) patchProject({ next_follow_up_at: iso, last_follow_up_at: new Date().toISOString() }); }} />
-                    </div>
-                    <div className="sm:col-span-2">
-                        <Label className="text-[11px] text-black/40">Notes</Label>
-                        <Textarea defaultValue={p.pd_payment_followup_notes || ""} rows={2} className="text-xs mt-1" onBlur={(e) => { if (e.target.value !== (p.pd_payment_followup_notes || "")) patchProject({ payment_followup_notes: e.target.value }); }} />
-                    </div>
-                </div>
-                {p.pd_last_follow_up_at && (
-                    <div className="mt-3 text-[11px] text-black/40">Last followed up: {formatDate(p.pd_last_follow_up_at)}</div>
-                )}
+                <PaymentFollowUpBlock project={p} clients={clients} onContactCreated={(c) => setClients((prev) => [c, ...prev])} onSave={patchProject} />
             </SectionCard>
 
             {/* V2 — Payment Tranches / Billing Milestones (spec sections
@@ -1305,7 +1252,12 @@ export default function ProductionDesk({ projectId, project }) {
                 </div>
             </SectionCard>
 
-            {/* Crew */}
+            {/* V2 polish (spec sections 12-14) — Crew, redesigned as
+                compact CRM-linked contact cards with a peek popover
+                (Name/Role/Company/Phone/Email) and Call/WhatsApp/Email
+                actions shown only where the data actually exists. Never
+                duplicates the CRM record — every field comes from the
+                SAME client-ref lookup this endpoint already returns. */}
             <SectionCard
                 title={`Crew (${crew.length})`}
                 icon={UserPlus}
@@ -1316,17 +1268,7 @@ export default function ProductionDesk({ projectId, project }) {
                     <div className="text-xs text-black/40 py-4 text-center">No crew added yet.</div>
                 ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {crew.map((c) => (
-                            <div key={c.id} className="flex items-center justify-between text-xs rounded-md border border-black/[0.06] px-3 py-2" data-testid={`pd-crew-${c.id}`}>
-                                <div>
-                                    <div className="font-medium text-black/75">{c.contact?.name || "Unnamed"}</div>
-                                    <div className="text-black/40">{c.role}</div>
-                                </div>
-                                <button onClick={() => deleteCrew(c.id)} className="text-black/30 hover:text-red-500">
-                                    <Trash2 className="h-3 w-3" />
-                                </button>
-                            </div>
-                        ))}
+                        {crew.map((c) => <CrewCard key={c.id} crew={c} onDelete={() => deleteCrew(c.id)} />)}
                     </div>
                 )}
             </SectionCard>
@@ -1527,6 +1469,262 @@ function ShootDatesList({ dates, onChange }) {
 }
 
 // ============================================================================
+// V2 polish (spec section 3/6/7) — the project-level half of the merged
+// Shoot Details card. The structured Shoot Dates list stays a standalone,
+// always-available add/remove control (adding/removing a chip is already
+// a deliberate action, not an accidental edit); everything else
+// (call/reporting time, location, status, notes, and the legacy/reminder
+// fields) is section-level Edit/Save/Cancel so normal browsing can't
+// accidentally change them.
+// ============================================================================
+// V2 polish (spec sections 12-14) — one crew member, as a compact
+// CRM-linked card. Clicking the name opens a "peek" popover with the
+// contact's own CRM fields (no second contact record — everything comes
+// from the crew.contact object the backend already resolves). Action
+// buttons only render when the underlying data actually exists.
+function CrewCard({ crew: c, onDelete }) {
+    const contact = c.contact || {};
+    const phone = contact.phone_number;
+    const digits = (phone || "").replace(/[^0-9]/g, "");
+
+    return (
+        <div className="rounded-md border border-black/[0.06] px-3 py-2" data-testid={`pd-crew-${c.id}`}>
+            <div className="flex items-start justify-between gap-2">
+                <Popover>
+                    <PopoverTrigger asChild>
+                        <button className="text-left min-w-0" data-testid={`pd-crew-peek-trigger-${c.id}`}>
+                            <div className="text-xs font-medium text-black/75 hover:underline truncate">{contact.name || "Unnamed"}</div>
+                            <div className="text-[11px] text-black/40">{c.role}</div>
+                        </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-64 text-xs" align="start" data-testid={`pd-crew-peek-${c.id}`}>
+                        <div className="font-semibold text-black/80 text-sm mb-1">{contact.name || "Unnamed"}</div>
+                        <div className="space-y-1 text-black/60">
+                            <div>Role: {c.role}</div>
+                            {contact.company_name && <div className="flex items-center gap-1"><Building2 className="h-3 w-3" /> {contact.company_name}</div>}
+                            {phone && <div className="flex items-center gap-1"><Phone className="h-3 w-3" /> {phone}</div>}
+                            {contact.email && <div className="flex items-center gap-1"><Mail className="h-3 w-3" /> {contact.email}</div>}
+                            {contact.contact_type && <div>Type: {contact.contact_type}</div>}
+                        </div>
+                        <a href="/admin/marketing" className="mt-2 inline-flex items-center gap-1 text-[#0c2340] hover:underline text-[11px]">
+                            <ExternalLink className="h-3 w-3" /> Open CRM
+                        </a>
+                    </PopoverContent>
+                </Popover>
+                <button onClick={onDelete} className="text-black/30 hover:text-red-500 shrink-0"><Trash2 className="h-3 w-3" /></button>
+            </div>
+            {(phone || contact.email) && (
+                <div className="flex items-center gap-2 mt-2">
+                    {phone && (
+                        <a href={`tel:${digits}`} className="inline-flex items-center gap-1 text-[11px] text-black/60 hover:text-[#0c2340] border border-black/[0.08] rounded px-2 py-1" data-testid={`pd-crew-call-${c.id}`}>
+                            <Phone className="h-3 w-3" /> Call
+                        </a>
+                    )}
+                    {phone && (
+                        <button
+                            onClick={() => window.open(`https://wa.me/${digits}`, "_blank")}
+                            className="inline-flex items-center gap-1 text-[11px] text-black/60 hover:text-[#0c2340] border border-black/[0.08] rounded px-2 py-1"
+                            data-testid={`pd-crew-whatsapp-${c.id}`}
+                        >
+                            <MessageCircle className="h-3 w-3" /> WhatsApp
+                        </button>
+                    )}
+                    {contact.email && (
+                        <a href={`mailto:${contact.email}`} className="inline-flex items-center gap-1 text-[11px] text-black/60 hover:text-[#0c2340] border border-black/[0.08] rounded px-2 py-1" data-testid={`pd-crew-email-${c.id}`}>
+                            <Mail className="h-3 w-3" /> Email
+                        </a>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// V2 polish (spec section 9) — Payment Follow-up, section-level
+// Edit/Save/Cancel exactly as illustrated: Payment Terms / Expected Date /
+// Concerned Person / Status shown read-only, Edit flips the whole block to
+// inputs, Cancel restores exactly what the server last returned.
+function PaymentFollowUpBlock({ project: p, clients, onContactCreated, onSave }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState(null);
+    const [pickedContact, setPickedContact] = useState(null);
+
+    const startEdit = () => {
+        setDraft({
+            payment_terms: p.pd_payment_terms || "", status: p.pd_payment_followup_status || "not_due",
+            expected_date: toDateInputValue(p.pd_expected_payment_date), next_follow_up: toDateInputValue(p.pd_next_follow_up_at),
+            notes: p.pd_payment_followup_notes || "",
+        });
+        setPickedContact(null);
+        setEditing(true);
+    };
+    const save = () => {
+        const payload = {
+            payment_terms: draft.payment_terms, payment_followup_status: draft.status,
+            expected_payment_date: fromDateInputValue(draft.expected_date),
+            payment_followup_notes: draft.notes,
+        };
+        const newNextFollowUp = fromDateInputValue(draft.next_follow_up);
+        if (newNextFollowUp !== p.pd_next_follow_up_at) {
+            payload.next_follow_up_at = newNextFollowUp;
+            payload.last_follow_up_at = new Date().toISOString();
+        }
+        if (pickedContact) payload.production_contact_client_id = pickedContact.id || pickedContact._id;
+        onSave(payload);
+        setEditing(false);
+        setDraft(null);
+    };
+
+    return (
+        <div data-testid="pd-payment-followup-block">
+            {!editing ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div><span className="text-black/40 block">Payment Terms</span><span className="text-black/70">{p.pd_payment_terms || "—"}</span></div>
+                    <div><span className="text-black/40 block">Expected Date</span><span className="text-black/70">{formatDate(p.pd_expected_payment_date)}</span></div>
+                    <div><span className="text-black/40 block">Concerned Person</span><span className="text-black/70">{p.pd_production_contact?.name || "—"}</span></div>
+                    <div><span className="text-black/40 block">Status</span><Badge variant="outline" className="text-[10px] capitalize">{(p.pd_payment_followup_status || "not_due").replace("_", " ")}</Badge></div>
+                    <div><span className="text-black/40 block">Next Follow-up</span><span className="text-black/70">{formatDate(p.pd_next_follow_up_at)}</span></div>
+                    {p.pd_payment_followup_notes && <div className="sm:col-span-2"><span className="text-black/40 block">Notes</span><span className="text-black/70 whitespace-pre-wrap">{p.pd_payment_followup_notes}</span></div>}
+                    {p.pd_last_follow_up_at && <div className="sm:col-span-2 text-black/40">Last followed up: {formatDate(p.pd_last_follow_up_at)}</div>}
+                    <div className="sm:col-span-2"><EditControls editing={false} onEdit={startEdit} /></div>
+                </div>
+            ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="sm:col-span-2">
+                        <Label className="text-[11px] text-black/40">Concerned Person (CRM contact)</Label>
+                        <div className="mt-1">
+                            <ClientPicker
+                                clients={clients}
+                                placeholder={pickedContact?.name || p.pd_production_contact?.name || "Search CRM contacts…"}
+                                onContactCreated={onContactCreated}
+                                onPicked={setPickedContact}
+                            />
+                        </div>
+                    </div>
+                    <div>
+                        <Label className="text-[11px] text-black/40">Payment Terms</Label>
+                        <Input value={draft.payment_terms} onChange={(e) => setDraft((d) => ({ ...d, payment_terms: e.target.value }))} placeholder="e.g. 50% advance, 50% on delivery" className="h-8 text-xs mt-1" />
+                    </div>
+                    <div>
+                        <Label className="text-[11px] text-black/40">Status</Label>
+                        <Select value={draft.status} onValueChange={(v) => setDraft((d) => ({ ...d, status: v }))}>
+                            <SelectTrigger className="h-8 text-xs mt-1"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                                {PAYMENT_FOLLOWUP_STATUSES.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
+                            </SelectContent>
+                        </Select>
+                    </div>
+                    <div>
+                        <Label className="text-[11px] text-black/40">Expected Date</Label>
+                        <Input type="date" value={draft.expected_date} onChange={(e) => setDraft((d) => ({ ...d, expected_date: e.target.value }))} className="h-8 text-xs mt-1" />
+                    </div>
+                    <div>
+                        <Label className="text-[11px] text-black/40">Next Follow-up</Label>
+                        <Input type="date" value={draft.next_follow_up} onChange={(e) => setDraft((d) => ({ ...d, next_follow_up: e.target.value }))} className="h-8 text-xs mt-1" />
+                    </div>
+                    <div className="sm:col-span-2">
+                        <Label className="text-[11px] text-black/40">Notes</Label>
+                        <Textarea value={draft.notes} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} rows={2} className="text-xs mt-1" />
+                    </div>
+                    <div className="sm:col-span-2 flex justify-end">
+                        <EditControls editing onSave={save} onCancel={() => { setEditing(false); setDraft(null); }} />
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function ShootDetailsProjectBlock({ project: p, knownLocations, onSave }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState(null);
+    const [showLegacy, setShowLegacy] = useState(false);
+
+    const startEdit = () => {
+        setDraft({
+            call_time: p.pd_call_time || "", reporting_time: p.pd_reporting_time || "",
+            location: p.pd_shoot_location || "", status: p.pd_shoot_status || "not_scheduled",
+            notes: p.pd_shoot_notes || "", shoot_dates: p.shoot_dates || "",
+            shoot_date: p.pd_shoot_date || "",
+        });
+        setEditing(true);
+    };
+    const save = () => {
+        onSave({
+            call_time: draft.call_time, reporting_time: draft.reporting_time,
+            shoot_location: draft.location, shoot_status: draft.status, shoot_notes: draft.notes,
+            shoot_dates: draft.shoot_dates, shoot_date: draft.shoot_date || null,
+        });
+        setEditing(false);
+        setDraft(null);
+    };
+
+    return (
+        <div>
+            <div>
+                <span className="text-black/40 block mb-1 text-xs">Shoot Dates</span>
+                <ShootDatesList dates={p.pd_shoot_dates_list || []} onChange={(dates) => onSave({ shoot_dates_list: dates })} />
+            </div>
+
+            <div className="flex items-center justify-between gap-2 mt-4 mb-2">
+                <span className="text-[11px] font-medium text-black/50 uppercase tracking-wide">Shoot Info</span>
+                <EditControls editing={editing} onEdit={startEdit} onSave={save} onCancel={() => { setEditing(false); setDraft(null); }} />
+            </div>
+            {!editing ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 text-xs">
+                    <div><span className="text-black/40 block">Call Time</span><span className="text-black/70">{p.pd_call_time || "—"}</span></div>
+                    <div><span className="text-black/40 block">Reporting Time</span><span className="text-black/70">{p.pd_reporting_time || "—"}</span></div>
+                    <div><span className="text-black/40 block">Location</span><LocationLink name={p.pd_shoot_location} mapUrl={null} /></div>
+                    <div><span className="text-black/40 block">Status</span><Badge variant="outline" className="text-[10px] capitalize">{(p.pd_shoot_status || "not_scheduled").replace("_", " ")}</Badge></div>
+                    {p.pd_shoot_notes && <div className="col-span-2 sm:col-span-4"><span className="text-black/40 block">Notes</span><span className="text-black/70 whitespace-pre-wrap">{p.pd_shoot_notes}</span></div>}
+                </div>
+            ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div><Label className="text-[10px]">Call Time</Label><Input value={draft.call_time} onChange={(e) => setDraft((d) => ({ ...d, call_time: e.target.value }))} placeholder="e.g. 8:00 AM" className="h-7 text-xs" /></div>
+                    <div><Label className="text-[10px]">Reporting Time</Label><Input value={draft.reporting_time} onChange={(e) => setDraft((d) => ({ ...d, reporting_time: e.target.value }))} placeholder="e.g. 7:00 AM" className="h-7 text-xs" /></div>
+                    <div>
+                        <Label className="text-[10px]">Location</Label>
+                        <LocationPicker value={draft.location} knownLocations={knownLocations} className="h-7 text-xs" immediate onCommit={(name) => setDraft((d) => ({ ...d, location: name }))} />
+                    </div>
+                    <div>
+                        <Label className="text-[10px]">Status</Label>
+                        <Select value={draft.status} onValueChange={(v) => setDraft((d) => ({ ...d, status: v }))}>
+                            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>{SHOOT_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}</SelectContent>
+                        </Select>
+                    </div>
+                    <div className="col-span-2 sm:col-span-4"><Label className="text-[10px]">Notes</Label><Textarea value={draft.notes} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} rows={2} className="text-xs" /></div>
+                    <div className="col-span-2 sm:col-span-4 pt-2 border-t border-black/[0.06]">
+                        <Label className="text-[10px] text-black/40">Legacy / Reminder fields</Label>
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                            <div>
+                                <Label className="text-[10px]" title="Free-text shooting-date summary from before the structured list above existed.">Shooting Dates (free text)</Label>
+                                <Input value={draft.shoot_dates} onChange={(e) => setDraft((d) => ({ ...d, shoot_dates: e.target.value }))} placeholder="e.g. 26th - 27th August" className="h-7 text-xs" />
+                            </div>
+                            <div>
+                                <Label className="text-[10px]" title="Used only by the automated shoot-reminder worker — independent of the dates above.">Reminder Date</Label>
+                                <Input type="date" value={draft.shoot_date} onChange={(e) => setDraft((d) => ({ ...d, shoot_date: e.target.value }))} className="h-7 text-xs" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {!editing && (p.shoot_dates || p.pd_shoot_date) && (
+                <button className="mt-2 text-[11px] text-black/35 hover:text-black/60 inline-flex items-center gap-1" onClick={() => setShowLegacy((v) => !v)}>
+                    <History className="h-3 w-3" /> {showLegacy ? "Hide" : "Show"} legacy/reminder fields
+                </button>
+            )}
+            {!editing && showLegacy && (
+                <div className="mt-1.5 text-[11px] text-black/50 space-y-0.5">
+                    {p.shoot_dates && <div>Shooting Dates (free text): {p.shoot_dates}</div>}
+                    {p.pd_shoot_date && <div>Reminder Date: {p.pd_shoot_date}</div>}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ============================================================================
 // V2 — Per-talent Shooting Schedule (spec sections 1-4). Cards, not a
 // table, so this stays usable on mobile. Each row's own extra-hours
 // figure here is a DISPLAY-only recomputation using the exact same
@@ -1539,6 +1737,103 @@ function _dayExtraHours(perDay, agreed, actual) {
     if (!perDay || !a || a <= 0 || actual === null || actual === undefined || actual === "" || Number.isNaN(act)) return { hours: 0, amount: 0 };
     const extra = Math.max(0, act - a);
     return { hours: extra, amount: (perDay / a) * extra };
+}
+
+const SHOOT_SCHEDULE_COLUMNS = ["Date", "Call Time", "Reporting Time", "Location", "Agreed Basis", "Actual Hours", "Extra Hours", "Extra Amount", "Status", "Actions"];
+
+// V2 polish (spec section 4/7) — one shoot day, explicit Edit/Save/Cancel.
+// Renders BOTH a desktop grid-row (proper labeled columns, not
+// placeholder-only cells) and a mobile stacked card from the SAME local
+// state, so editing never desyncs between breakpoints.
+function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState(null);
+    const extra = _dayExtraHours(perDay, day.agreed_hours, day.actual_hours);
+
+    const startEdit = () => {
+        setDraft({
+            date: day.date || "", call_time: day.call_time || "", reporting_time: day.reporting_time || "",
+            location: day.location || "", location_map_url: day.location_map_url || "",
+            agreed_hours: day.agreed_hours ?? "", actual_hours: day.actual_hours ?? "",
+        });
+        setEditing(true);
+    };
+    const save = () => {
+        onUpdate({
+            date: draft.date, call_time: draft.call_time || null, reporting_time: draft.reporting_time || null,
+            location: draft.location || null, location_map_url: draft.location_map_url || null,
+            agreed_hours: draft.agreed_hours === "" ? null : Number(draft.agreed_hours),
+            actual_hours: draft.actual_hours === "" ? null : Number(draft.actual_hours),
+        });
+        setEditing(false);
+        setDraft(null);
+    };
+    const cancel = () => { setEditing(false); setDraft(null); };
+
+    if (editing) {
+        return (
+            <div className="grid grid-cols-2 sm:grid-cols-9 gap-1.5 items-end bg-white border border-[#0c2340]/20 rounded-md p-2" data-testid={`pd-shoot-day-${day.id}`}>
+                <div><Label className="text-[10px] sm:hidden">Date</Label><Input type="date" value={draft.date} onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))} className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px] sm:hidden">Call Time</Label><Input value={draft.call_time} onChange={(e) => setDraft((d) => ({ ...d, call_time: e.target.value }))} placeholder="e.g. 8:00 AM" className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px] sm:hidden">Reporting Time</Label><Input value={draft.reporting_time} onChange={(e) => setDraft((d) => ({ ...d, reporting_time: e.target.value }))} placeholder="e.g. 7:00 AM" className="h-7 text-[11px]" /></div>
+                <div>
+                    <Label className="text-[10px] sm:hidden">Location</Label>
+                    <LocationPicker
+                        value={draft.location}
+                        knownLocations={knownLocations}
+                        className="h-7 text-[11px]"
+                        immediate
+                        onCommit={(name, mapUrl) => setDraft((d) => ({ ...d, location: name, location_map_url: mapUrl && !d.location_map_url ? mapUrl : d.location_map_url }))}
+                    />
+                </div>
+                <div><Label className="text-[10px] sm:hidden">Agreed Basis (hrs)</Label><Input type="number" value={draft.agreed_hours} onChange={(e) => setDraft((d) => ({ ...d, agreed_hours: e.target.value }))} placeholder="e.g. 12" className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px] sm:hidden">Actual Hours</Label><Input type="number" value={draft.actual_hours} onChange={(e) => setDraft((d) => ({ ...d, actual_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
+                <div className="text-[11px] text-black/40">Extra: {extra.hours > 0 ? `${extra.hours}h` : "—"}</div>
+                <div className="text-[11px] text-black/40">{extra.hours > 0 ? formatCurrency(extra.amount) : "—"}</div>
+                <div className="col-span-2 sm:col-span-1 flex sm:block items-center gap-1.5">
+                    <EditControls editing onSave={save} onCancel={cancel} />
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <>
+            {/* Desktop — labeled grid row, matches the header below */}
+            <div className="hidden sm:grid sm:grid-cols-9 gap-1.5 items-center text-[11px] bg-slate-50/60 rounded-md p-2" data-testid={`pd-shoot-day-${day.id}`}>
+                <div className="font-medium text-black/70">{day.date}</div>
+                <div className="text-black/60">{day.call_time || "—"}</div>
+                <div className="text-black/60">{day.reporting_time || "—"}</div>
+                <div className="text-black/60"><LocationLink name={day.location} mapUrl={day.location_map_url} /></div>
+                <div className="text-black/60">{day.agreed_hours ?? "—"}</div>
+                <div className="text-black/60">{day.actual_hours ?? "—"}</div>
+                <div className={extra.hours > 0 ? "text-amber-700 font-medium" : "text-black/30"}>{extra.hours > 0 ? `${extra.hours}h` : "—"}</div>
+                <div className={extra.hours > 0 ? "text-amber-700 font-medium" : "text-black/30"}>{extra.hours > 0 ? formatCurrency(extra.amount) : "—"}</div>
+                <div className="flex items-center justify-between gap-1">
+                    <Badge variant="outline" className="text-[10px] capitalize">{(day.shoot_status || "scheduled").replace("_", " ")}</Badge>
+                    <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} />
+                </div>
+            </div>
+            {/* Mobile — stacked card, same data, same state */}
+            <div className="sm:hidden rounded-md border border-black/[0.08] p-2.5 text-[11px] space-y-1.5" data-testid={`pd-shoot-day-mobile-${day.id}`}>
+                <div className="flex items-center justify-between">
+                    <span className="font-semibold text-black/80">{day.date}</span>
+                    <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} />
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-black/60">
+                    <div><span className="text-black/40">Call:</span> {day.call_time || "—"}</div>
+                    <div><span className="text-black/40">Reporting:</span> {day.reporting_time || "—"}</div>
+                    <div className="col-span-2"><span className="text-black/40">Location:</span> <LocationLink name={day.location} mapUrl={day.location_map_url} /></div>
+                    <div><span className="text-black/40">Agreed:</span> {day.agreed_hours ?? "—"}h</div>
+                    <div><span className="text-black/40">Actual:</span> {day.actual_hours ?? "—"}h</div>
+                    {extra.hours > 0 && (
+                        <div className="col-span-2 text-amber-700 font-medium">Extra: {extra.hours}h · {formatCurrency(extra.amount)}</div>
+                    )}
+                </div>
+                <Badge variant="outline" className="text-[10px] capitalize">{(day.shoot_status || "scheduled").replace("_", " ")}</Badge>
+            </div>
+        </>
+    );
 }
 
 function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd, onUpdate, onDelete, onUseProjectDates }) {
@@ -1580,54 +1875,22 @@ function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd,
                 <div className="text-[11px] text-black/30 italic py-2">No shoot days scheduled.</div>
             )}
 
+            {talent.shoot_days.length > 0 && (
+                <div className="hidden sm:grid sm:grid-cols-9 gap-1.5 px-2 pb-1 text-[10px] uppercase tracking-wide text-black/35">
+                    {SHOOT_SCHEDULE_COLUMNS.map((c) => <div key={c}>{c}</div>)}
+                </div>
+            )}
             <div className="space-y-1.5">
-                {talent.shoot_days.map((d) => {
-                    const extra = _dayExtraHours(talent.budget_per_day, d.agreed_hours, d.actual_hours);
-                    return (
-                        <div key={d.id} className="grid grid-cols-2 sm:grid-cols-6 gap-1.5 items-center text-[11px] bg-slate-50/60 rounded-md p-2" data-testid={`pd-shoot-day-${d.id}`}>
-                            <div className="font-medium text-black/70">{d.date}</div>
-                            <Input defaultValue={d.call_time || ""} placeholder="Call" className="h-6 text-[11px]" onBlur={(e) => { if (e.target.value !== (d.call_time || "")) onUpdate(d.id, { call_time: e.target.value }); }} />
-                            <Input defaultValue={d.reporting_time || ""} placeholder="Reporting" className="h-6 text-[11px]" onBlur={(e) => { if (e.target.value !== (d.reporting_time || "")) onUpdate(d.id, { reporting_time: e.target.value }); }} />
-                            <div className="flex items-center gap-1">
-                                <LocationPicker
-                                    value={d.location || ""}
-                                    knownLocations={knownLocations}
-                                    placeholder="Location"
-                                    className="h-6 text-[11px]"
-                                    onCommit={(name, mapUrl) => {
-                                        const updates = {};
-                                        if (name !== (d.location || "")) updates.location = name;
-                                        if (mapUrl && !d.location_map_url) updates.location_map_url = mapUrl;
-                                        if (Object.keys(updates).length) onUpdate(d.id, updates);
-                                    }}
-                                />
-                                {d.location_map_url && (
-                                    <a href={d.location_map_url} target="_blank" rel="noreferrer" className="text-black/30 hover:text-[#0c2340] shrink-0">
-                                        <MapPin className="h-3 w-3" />
-                                    </a>
-                                )}
-                            </div>
-                            <div className="flex items-center gap-1">
-                                <Input type="number" defaultValue={d.agreed_hours ?? ""} placeholder="Basis h" className="h-6 text-[11px] w-14" onBlur={(e) => { const v = e.target.value === "" ? null : Number(e.target.value); if (v !== d.agreed_hours) onUpdate(d.id, { agreed_hours: v }); }} />
-                                <Input type="number" defaultValue={d.actual_hours ?? ""} placeholder="Actual h" className="h-6 text-[11px] w-14" onBlur={(e) => { const v = e.target.value === "" ? null : Number(e.target.value); if (v !== d.actual_hours) onUpdate(d.id, { actual_hours: v }); }} />
-                            </div>
-                            <div className="flex items-center justify-between gap-1">
-                                <div className="flex flex-col">
-                                    <Select value={d.shoot_status || "scheduled"} onValueChange={(v) => onUpdate(d.id, { shoot_status: v })}>
-                                        <SelectTrigger className="h-6 text-[10px] w-[92px]"><SelectValue /></SelectTrigger>
-                                        <SelectContent>
-                                            {SHOOT_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
-                                        </SelectContent>
-                                    </Select>
-                                    {extra.hours > 0 && (
-                                        <span className="text-amber-700 mt-0.5">+{extra.hours}h · {formatCurrency(extra.amount)}</span>
-                                    )}
-                                </div>
-                                <button onClick={() => onDelete(d.id)} className="text-black/30 hover:text-red-500 shrink-0"><Trash2 className="h-3 w-3" /></button>
-                            </div>
-                        </div>
-                    );
-                })}
+                {talent.shoot_days.map((d) => (
+                    <ShootDayRow
+                        key={d.id}
+                        day={d}
+                        perDay={talent.budget_per_day}
+                        knownLocations={knownLocations}
+                        onUpdate={(payload) => onUpdate(d.id, payload)}
+                        onDelete={() => onDelete(d.id)}
+                    />
+                ))}
             </div>
 
             {adding && (
@@ -1658,9 +1921,151 @@ function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd,
 }
 
 // ============================================================================
-// V2 — Readings & Rehearsals (spec section 8).
+// V2 polish (spec section 2) — Costume Trial, now Date + Time + Location,
+// explicit Edit/Save/Cancel (spec section 7). Normal browsing is
+// read-only; only "Edit" makes the fields mutable, and Cancel discards
+// any unsaved change and restores exactly what the server last returned.
 // ============================================================================
-function TalentReadingsRehearsals({ talent, knownLocations, onAdd, onDelete }) {
+function CostumeTrialBlock({ talent, knownLocations, onSave }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState(null);
+
+    const startEdit = () => {
+        setDraft({
+            date: toDateInputValue(talent.costume_trial_at),
+            time: talent.costume_trial_time || "",
+            location: talent.costume_trial_location || "",
+            location_map_url: talent.costume_trial_map_url || "",
+        });
+        setEditing(true);
+    };
+
+    const save = () => {
+        onSave({
+            costume_trial_at: fromDateInputValue(draft.date),
+            costume_trial_time: draft.time || null,
+            costume_trial_location: draft.location || null,
+            costume_trial_map_url: draft.location_map_url || null,
+        });
+        setEditing(false);
+        setDraft(null);
+    };
+
+    const hasAny = talent.costume_trial_at || talent.costume_trial_time || talent.costume_trial_location;
+
+    return (
+        <div data-testid={`pd-costume-trial-${talent.talent_id}`}>
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="text-[11px] font-medium text-black/50 uppercase tracking-wide">Costume Trial</span>
+                <EditControls editing={editing} onEdit={startEdit} onSave={save} onCancel={() => { setEditing(false); setDraft(null); }} />
+            </div>
+            {!editing ? (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-black/70">
+                    <span>{formatDate(talent.costume_trial_at)}</span>
+                    {talent.costume_trial_time && <span>{talent.costume_trial_time}</span>}
+                    <LocationLink name={talent.costume_trial_location} mapUrl={talent.costume_trial_map_url} />
+                    {!hasAny && <span className="text-black/30 italic">Not scheduled</span>}
+                </div>
+            ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                    <div><Label className="text-[10px]">Date</Label><Input type="date" value={draft.date} onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Time</Label><Input value={draft.time} onChange={(e) => setDraft((d) => ({ ...d, time: e.target.value }))} placeholder="e.g. 4:00 PM" className="h-7 text-[11px]" /></div>
+                    <div>
+                        <Label className="text-[10px]">Location</Label>
+                        <LocationPicker
+                            value={draft.location}
+                            knownLocations={knownLocations}
+                            className="h-7 text-[11px]"
+                            immediate
+                            onCommit={(name, mapUrl) => setDraft((d) => ({ ...d, location: name, location_map_url: mapUrl && !d.location_map_url ? mapUrl : d.location_map_url }))}
+                        />
+                    </div>
+                    <div><Label className="text-[10px]">Map URL</Label><Input value={draft.location_map_url} onChange={(e) => setDraft((d) => ({ ...d, location_map_url: e.target.value }))} placeholder="Optional" className="h-7 text-[11px]" /></div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ============================================================================
+// V2 — Readings & Rehearsals (spec section 8/38). Explicit per-row
+// Edit/Save/Cancel/Delete, reusing the same PATCH endpoint the Management
+// Agent could also call directly.
+// ============================================================================
+function ReadingRehearsalRow({ entry, knownLocations, onUpdate, onDelete }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState(null);
+
+    const startEdit = () => {
+        setDraft({
+            type: entry.type, date: entry.date || "", time: entry.time || "",
+            location: entry.location || "", location_map_url: entry.location_map_url || "", notes: entry.notes || "",
+        });
+        setEditing(true);
+    };
+    const save = () => {
+        onUpdate({
+            type: draft.type, date: draft.date || null, time: draft.time || null,
+            location: draft.location || null, location_map_url: draft.location_map_url || null, notes: draft.notes || null,
+        });
+        setEditing(false);
+        setDraft(null);
+    };
+
+    if (editing) {
+        return (
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 items-end bg-white border border-black/[0.08] rounded-md p-2" data-testid={`pd-reading-${entry.id}`}>
+                <div>
+                    <Label className="text-[10px]">Type</Label>
+                    <Select value={draft.type} onValueChange={(v) => setDraft((d) => ({ ...d, type: v }))}>
+                        <SelectTrigger className="h-7 text-[11px]"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="reading">Reading</SelectItem>
+                            <SelectItem value="rehearsal">Rehearsal</SelectItem>
+                        </SelectContent>
+                    </Select>
+                </div>
+                <div><Label className="text-[10px]">Date</Label><Input type="date" value={draft.date} onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))} className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px]">Time</Label><Input value={draft.time} onChange={(e) => setDraft((d) => ({ ...d, time: e.target.value }))} placeholder="e.g. 4 PM" className="h-7 text-[11px]" /></div>
+                <div>
+                    <Label className="text-[10px]">Location</Label>
+                    <LocationPicker
+                        value={draft.location}
+                        knownLocations={knownLocations}
+                        className="h-7 text-[11px]"
+                        immediate
+                        onCommit={(name, mapUrl) => setDraft((d) => ({ ...d, location: name, location_map_url: mapUrl && !d.location_map_url ? mapUrl : d.location_map_url }))}
+                    />
+                </div>
+                <div><Label className="text-[10px]">Notes</Label><Input value={draft.notes} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} className="h-7 text-[11px]" /></div>
+                <div className="col-span-2 sm:col-span-5 flex justify-end gap-1.5">
+                    <EditControls editing onSave={save} onCancel={() => { setEditing(false); setDraft(null); }} />
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex items-center justify-between text-[11px] bg-slate-50/60 rounded-md px-2 py-1.5" data-testid={`pd-reading-${entry.id}`}>
+            <div className="flex items-center gap-2 flex-wrap">
+                <Badge variant="outline" className="text-[10px] capitalize">{entry.type}</Badge>
+                {entry.date && <span className="text-black/60">{entry.date}</span>}
+                {entry.time && <span className="text-black/50">{entry.time}</span>}
+                {entry.location && (
+                    entry.location_map_url ? (
+                        <a href={entry.location_map_url} target="_blank" rel="noreferrer" className="text-black/50 hover:text-[#0c2340] hover:underline inline-flex items-center gap-0.5">
+                            · <MapPin className="h-2.5 w-2.5" />{entry.location}
+                        </a>
+                    ) : <span className="text-black/50">· {entry.location}</span>
+                )}
+                {entry.notes && <span className="text-black/40">({entry.notes})</span>}
+            </div>
+            <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} />
+        </div>
+    );
+}
+
+function TalentReadingsRehearsals({ talent, knownLocations, onAdd, onUpdate, onDelete }) {
     const [adding, setAdding] = useState(false);
     const [form, setForm] = useState({ type: "reading", date: "", time: "", location: "", location_map_url: "", notes: "" });
 
@@ -1674,9 +2079,9 @@ function TalentReadingsRehearsals({ talent, knownLocations, onAdd, onDelete }) {
     };
 
     return (
-        <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-readings-${talent.talent_id}`}>
+        <div data-testid={`pd-readings-${talent.talent_id}`}>
             <div className="flex items-center justify-between gap-2 mb-2">
-                <span className="text-xs font-semibold text-black/80">{talent.name}</span>
+                <span className="text-[11px] font-medium text-black/50 uppercase tracking-wide">Readings &amp; Rehearsals</span>
                 <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => setAdding((v) => !v)}>
                     <Plus className="h-3 w-3 mr-1" /> Add
                 </Button>
@@ -1686,22 +2091,13 @@ function TalentReadingsRehearsals({ talent, knownLocations, onAdd, onDelete }) {
             )}
             <div className="space-y-1">
                 {talent.readings_rehearsals.map((e) => (
-                    <div key={e.id} className="flex items-center justify-between text-[11px] bg-slate-50/60 rounded-md px-2 py-1.5" data-testid={`pd-reading-${e.id}`}>
-                        <div className="flex items-center gap-2 flex-wrap">
-                            <Badge variant="outline" className="text-[10px] capitalize">{e.type}</Badge>
-                            {e.date && <span className="text-black/60">{e.date}</span>}
-                            {e.time && <span className="text-black/50">{e.time}</span>}
-                            {e.location && (
-                                e.location_map_url ? (
-                                    <a href={e.location_map_url} target="_blank" rel="noreferrer" className="text-black/50 hover:text-[#0c2340] hover:underline inline-flex items-center gap-0.5">
-                                        · <MapPin className="h-2.5 w-2.5" />{e.location}
-                                    </a>
-                                ) : <span className="text-black/50">· {e.location}</span>
-                            )}
-                            {e.notes && <span className="text-black/40">({e.notes})</span>}
-                        </div>
-                        <button onClick={() => onDelete(e.id)} className="text-black/30 hover:text-red-500 shrink-0"><Trash2 className="h-3 w-3" /></button>
-                    </div>
+                    <ReadingRehearsalRow
+                        key={e.id}
+                        entry={e}
+                        knownLocations={knownLocations}
+                        onUpdate={(payload) => onUpdate(e.id, payload)}
+                        onDelete={() => onDelete(e.id)}
+                    />
                 ))}
             </div>
             {adding && (
@@ -1748,8 +2144,15 @@ function TalentFinancialCard({ talent, onAskInvoice }) {
     return (
         <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-financial-${talent.talent_id}`}>
             <div className="flex items-center justify-between gap-2 mb-2">
-                <span className="text-xs font-semibold text-black/80">{talent.name}</span>
-                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={onAskInvoice} data-testid={`pd-ask-invoice-${talent.talent_id}`} title="Opens WhatsApp with the message pre-filled — you review and send it yourself">
+                <div className="min-w-0">
+                    <span className="text-xs font-semibold text-black/80">{talent.name}</span>
+                    {talent.whatsapp_group_name && (
+                        <div className="text-[10px] text-black/35" data-testid={`pd-whatsapp-group-${talent.talent_id}`}>
+                            WhatsApp group on file: {talent.whatsapp_group_name} (message opens to phone — a group can't be opened via a link)
+                        </div>
+                    )}
+                </div>
+                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2 shrink-0" onClick={onAskInvoice} data-testid={`pd-ask-invoice-${talent.talent_id}`} title="Opens WhatsApp with the message pre-filled — you review and send it yourself">
                     <MessageCircle className="h-3 w-3 mr-1" /> Open WhatsApp: Ask to Raise Invoice
                 </Button>
             </div>
@@ -1769,6 +2172,92 @@ function TalentFinancialCard({ talent, onAskInvoice }) {
 // V2 — Payment Tranches / Billing Milestones (spec sections 19-20). An
 // operational billing tracker, deliberately not an accounting system.
 // ============================================================================
+// V2 polish (spec section 7/9) — one payment tranche, explicit
+// Edit/Save/Cancel/Delete (previously every field committed on blur —
+// risky for a financial record someone could accidentally edit while
+// scrolling/clicking).
+function TrancheRow({ tranche: t, index, onUpdate, onDelete }) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState(null);
+
+    const startEdit = () => {
+        setDraft({
+            name: t.name, amount: String(t.amount ?? ""), trigger: t.trigger || "",
+            invoice_status: t.invoice_status, invoice_date: t.invoice_date || "", invoice_number: t.invoice_number || "",
+            payment_status: t.payment_status, payment_date: t.payment_date || "", notes: t.notes || "",
+        });
+        setEditing(true);
+    };
+    const save = () => {
+        onUpdate({
+            name: draft.name.trim() || t.name, amount: draft.amount === "" ? t.amount : Number(draft.amount),
+            trigger: draft.trigger || null, invoice_status: draft.invoice_status, invoice_date: draft.invoice_date || null,
+            invoice_number: draft.invoice_number || null, payment_status: draft.payment_status,
+            payment_date: draft.payment_date || null, notes: draft.notes || null,
+        });
+        setEditing(false);
+        setDraft(null);
+    };
+
+    if (editing) {
+        return (
+            <div className="rounded-md border border-[#0c2340]/20 bg-white p-2.5" data-testid={`pd-tranche-${t.id}`}>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div><Label className="text-[10px]">Name / Milestone</Label><Input value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} className="h-7 text-xs" /></div>
+                    <div><Label className="text-[10px]">Amount</Label><Input type="number" value={draft.amount} onChange={(e) => setDraft((d) => ({ ...d, amount: e.target.value }))} className="h-7 text-xs" /></div>
+                    <div><Label className="text-[10px]">Trigger</Label><Input value={draft.trigger} onChange={(e) => setDraft((d) => ({ ...d, trigger: e.target.value }))} className="h-7 text-xs" /></div>
+                    <div>
+                        <Label className="text-[10px]">Invoice Status</Label>
+                        <Select value={draft.invoice_status} onValueChange={(v) => setDraft((d) => ({ ...d, invoice_status: v }))}>
+                            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>{TRANCHE_INVOICE_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
+                        </Select>
+                    </div>
+                    <div><Label className="text-[10px]">Invoice Date</Label><Input type="date" value={draft.invoice_date} onChange={(e) => setDraft((d) => ({ ...d, invoice_date: e.target.value }))} className="h-7 text-xs" /></div>
+                    <div><Label className="text-[10px]">Invoice #</Label><Input value={draft.invoice_number} onChange={(e) => setDraft((d) => ({ ...d, invoice_number: e.target.value }))} className="h-7 text-xs" /></div>
+                    <div>
+                        <Label className="text-[10px]">Payment Status</Label>
+                        <Select value={draft.payment_status} onValueChange={(v) => setDraft((d) => ({ ...d, payment_status: v }))}>
+                            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>{TRANCHE_PAYMENT_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
+                        </Select>
+                    </div>
+                    <div><Label className="text-[10px]">Payment Date</Label><Input type="date" value={draft.payment_date} onChange={(e) => setDraft((d) => ({ ...d, payment_date: e.target.value }))} className="h-7 text-xs" /></div>
+                    <div><Label className="text-[10px]">Notes</Label><Input value={draft.notes} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} className="h-7 text-xs" /></div>
+                </div>
+                <div className="flex justify-end mt-2">
+                    <EditControls editing onSave={save} onCancel={() => { setEditing(false); setDraft(null); }} />
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="rounded-md border border-black/[0.06] p-2.5" data-testid={`pd-tranche-${t.id}`}>
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+                <span className="text-xs font-semibold text-black/80">{index + 1}. {t.name}</span>
+                <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-black/70">{formatCurrency(t.amount)}</span>
+                    <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} />
+                </div>
+            </div>
+            {t.trigger && <div className="text-[11px] text-black/40 mb-1">Trigger: {t.trigger}</div>}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+                <span className={t.invoice_status === "raised_and_sent" ? "text-emerald-700" : "text-amber-700"}>
+                    Invoice: {TRANCHE_INVOICE_STATUSES.find((o) => o.value === t.invoice_status)?.label || t.invoice_status}
+                    {t.invoice_date && ` (${formatDate(t.invoice_date)})`}
+                </span>
+                {t.invoice_number && <span className="text-black/50">Inv# {t.invoice_number}</span>}
+                <span className={t.payment_status === "received" ? "text-emerald-700" : "text-amber-700"}>
+                    Payment: {TRANCHE_PAYMENT_STATUSES.find((o) => o.value === t.payment_status)?.label || t.payment_status}
+                    {t.payment_date && ` (${formatDate(t.payment_date)})`}
+                </span>
+            </div>
+            {t.notes && <div className="text-[11px] text-black/40 mt-1">Notes: {t.notes}</div>}
+        </div>
+    );
+}
+
 function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals }) {
     const [adding, setAdding] = useState(false);
     const [form, setForm] = useState({ name: "", amount: "", trigger: "", invoice_number: "", invoice_date: "", payment_date: "", notes: "" });
@@ -1807,58 +2296,7 @@ function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals })
             ) : (
                 <div className="space-y-2">
                     {tranches.map((t, i) => (
-                        <div key={t.id} className="rounded-md border border-black/[0.06] p-2.5" data-testid={`pd-tranche-${t.id}`}>
-                            <div className="flex items-center justify-between gap-2 mb-1.5">
-                                <span className="text-xs font-semibold text-black/80">{i + 1}. {t.name}</span>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-xs font-semibold text-black/70">{formatCurrency(t.amount)}</span>
-                                    <button onClick={() => onDelete(t.id)} className="text-black/30 hover:text-red-500"><Trash2 className="h-3 w-3" /></button>
-                                </div>
-                            </div>
-                            {t.trigger && <div className="text-[11px] text-black/40 mb-1.5">Trigger: {t.trigger}</div>}
-                            <div className="flex flex-wrap items-center gap-2 mb-1.5">
-                                <Select value={t.invoice_status} onValueChange={(v) => onUpdate(t.id, { invoice_status: v })}>
-                                    <SelectTrigger className={`h-6 text-[10px] w-[110px] ${t.invoice_status === "raised_and_sent" ? "text-emerald-700" : "text-amber-700"}`}><SelectValue /></SelectTrigger>
-                                    <SelectContent>
-                                        {TRANCHE_INVOICE_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>Invoice: {o.label}</SelectItem>)}
-                                    </SelectContent>
-                                </Select>
-                                <Input
-                                    defaultValue={t.invoice_date || ""}
-                                    type="date"
-                                    className="h-6 text-[10px] w-[120px]"
-                                    data-testid={`pd-tranche-invoice-date-${t.id}`}
-                                    onBlur={(e) => { if (e.target.value !== (t.invoice_date || "")) onUpdate(t.id, { invoice_date: e.target.value || null }); }}
-                                />
-                                <Select value={t.payment_status} onValueChange={(v) => onUpdate(t.id, { payment_status: v })}>
-                                    <SelectTrigger className={`h-6 text-[10px] w-[110px] ${t.payment_status === "received" ? "text-emerald-700" : "text-amber-700"}`}><SelectValue /></SelectTrigger>
-                                    <SelectContent>
-                                        {TRANCHE_PAYMENT_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>Payment: {o.label}</SelectItem>)}
-                                    </SelectContent>
-                                </Select>
-                                <Input
-                                    defaultValue={t.payment_date || ""}
-                                    type="date"
-                                    className="h-6 text-[10px] w-[120px]"
-                                    data-testid={`pd-tranche-payment-date-${t.id}`}
-                                    onBlur={(e) => { if (e.target.value !== (t.payment_date || "")) onUpdate(t.id, { payment_date: e.target.value || null }); }}
-                                />
-                            </div>
-                            <div className="flex flex-wrap items-center gap-2">
-                                <Input
-                                    defaultValue={t.invoice_number || ""}
-                                    placeholder="Invoice # (optional)"
-                                    className="h-6 text-[10px] w-[130px]"
-                                    onBlur={(e) => { if (e.target.value !== (t.invoice_number || "")) onUpdate(t.id, { invoice_number: e.target.value || null }); }}
-                                />
-                                <Input
-                                    defaultValue={t.notes || ""}
-                                    placeholder="Notes (optional)"
-                                    className="h-6 text-[10px] flex-1 min-w-[140px]"
-                                    onBlur={(e) => { if (e.target.value !== (t.notes || "")) onUpdate(t.id, { notes: e.target.value || null }); }}
-                                />
-                            </div>
-                        </div>
+                        <TrancheRow key={t.id} tranche={t} index={i} onUpdate={(payload) => onUpdate(t.id, payload)} onDelete={() => onDelete(t.id)} />
                     ))}
                 </div>
             )}

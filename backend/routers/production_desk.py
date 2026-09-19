@@ -127,6 +127,21 @@ router = APIRouter(prefix="/api/projects", tags=["Production Desk"])
 # mutated by any code path — NOT a placeholder for a real sync.
 ZOHO_STATUS = "not_connected"
 
+# V2 polish (spec section 21) — the agency's own fixed billing details,
+# appended verbatim to every talent invoice-request WhatsApp message.
+# Static by design; not a per-project/per-client field anywhere in this
+# schema, so it lives here rather than as new DB state.
+BILLING_DETAILS_BLOCK = (
+    "Billing Details:\n\n"
+    "Company Name: Talentgram Agency LLP\n\n"
+    "Address: 12, Ground Floor office no.8, Anand Bhuvan Building, "
+    "Jagannath Sankarseth Marg, Mangalwadi, Girgaon, India, Maharashtra, "
+    "Mumbai-400004\n\n"
+    "Email ID: team@talentgramagency.com\n\n"
+    "GSTIN No: 27AAVFT3898G1Z8\n\n"
+    "PAN No: AAVFT3898G"
+)
+
 # Categories Production Desk can attach through the EXISTING project
 # material pipeline (widens routers.projects.MATERIAL_CATEGORIES — see
 # server.py startup, which merges this set in once, not a parallel list
@@ -238,6 +253,20 @@ def _shoot_day_extra_hours_amount(per_day_rate: Optional[float], record: dict) -
 
 def _talent_extra_hours_total(per_day_rate: Optional[float], shoot_days: List[dict]) -> float:
     return round(sum(_shoot_day_extra_hours_amount(per_day_rate, d) for d in (shoot_days or [])), 2)
+
+
+def _talent_extra_hours_count(shoot_days: List[dict]) -> float:
+    """Raw overtime HOURS (not money) across every shoot day — used only for
+    the WhatsApp invoice message's "Extra Hours: N hours" line (spec section
+    18). Independent of _talent_extra_hours_total, which is the money value
+    already used everywhere else; never stored, computed fresh each time."""
+    total = 0.0
+    for d in shoot_days or []:
+        agreed = _num(d.get("agreed_hours"))
+        actual = _num(d.get("actual_hours"))
+        if agreed and actual is not None and actual > agreed:
+            total += actual - agreed
+    return round(total, 2)
 
 
 async def _get_project_or_404(pid: str) -> dict:
@@ -354,6 +383,7 @@ def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float =
         # spec section 6 only asks to remove them from the Production Desk
         # UI, not to break that — see V2 frontend changes, not here.
         "costume_trial_at": row.get("pd_costume_trial_at"),
+        "costume_trial_time": row.get("pd_costume_trial_time"),
         "costume_trial_location": row.get("pd_costume_trial_location"),
         "costume_trial_map_url": row.get("pd_costume_trial_map_url"),
         "fitting_status": row.get("pd_fitting_status") or "not_scheduled",
@@ -361,6 +391,13 @@ def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float =
         "grooming_requirements": row.get("pd_grooming_requirements"),
         "special_instructions": row.get("pd_special_instructions"),
         "shoot_status": row.get("pd_shoot_status") or "not_scheduled",
+        # V2 polish — WhatsApp destination preference (spec section 22-25).
+        # `whatsapp_group_name` is the SAME field the existing campaign
+        # engine's own _resolve_destination() already uses as its source of
+        # truth for "does this talent have a group" (routers/whatsapp.py) —
+        # not a new mapping. See build_talent_invoice_message's docstring
+        # for why the actual wa.me link still targets the phone number.
+        "whatsapp_group_name": (t.get("whatsapp_group_name") or "").strip() or None,
     }
 
 
@@ -372,7 +409,7 @@ async def _locked_talent_cards(pid: str, project: dict, reimb_totals: Optional[D
     talent_ids = [r["talent_id"] for r in rows if r.get("talent_id")]
     talents = await db.talents.find(
         {"id": {"$in": talent_ids}},
-        {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "cover_media_id": 1, "media": 1},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "cover_media_id": 1, "media": 1, "whatsapp_group_name": 1},
     ).to_list(len(talent_ids))
     by_id = {t["id"]: t for t in talents}
     cards = []
@@ -388,7 +425,19 @@ def _serialise_client_ref(client_id: Optional[str], name_cache: Dict[str, dict])
     if not client_id:
         return None
     info = name_cache.get(client_id) or {}
-    return {"client_id": client_id, "name": info.get("name", ""), "phone_number": info.get("phone_number")}
+    return {
+        "client_id": client_id,
+        "name": info.get("name", ""),
+        "phone_number": info.get("phone_number"),
+        # V2 polish (spec section 12) — the CRM "peek" needs a bit more than
+        # name+phone; these ride along on the exact same lookup every
+        # existing client-ref caller (kickback recipient, crew, payment
+        # follow-up contact) already uses, so nothing fetches twice.
+        "company_name": info.get("company_name"),
+        "email": info.get("email"),
+        "contact_type": info.get("contact_type"),
+        "designation": info.get("designation"),
+    }
 
 
 async def _client_name_map(client_ids: List[str]) -> Dict[str, dict]:
@@ -410,8 +459,18 @@ async def _client_name_map(client_ids: List[str]) -> Dict[str, dict]:
             continue
     if not oids:
         return {}
-    docs = await db.clients.find({"_id": {"$in": oids}}, {"name": 1, "phone_number": 1}).to_list(len(oids))
-    return {str(d["_id"]): {"name": d.get("name", ""), "phone_number": d.get("phone_number")} for d in docs}
+    docs = await db.clients.find(
+        {"_id": {"$in": oids}},
+        {"name": 1, "phone_number": 1, "company_name": 1, "email": 1, "contact_type": 1, "designation": 1},
+    ).to_list(len(oids))
+    return {
+        str(d["_id"]): {
+            "name": d.get("name", ""), "phone_number": d.get("phone_number"),
+            "company_name": d.get("company_name"), "email": d.get("email"),
+            "contact_type": d.get("contact_type"), "designation": d.get("designation"),
+        }
+        for d in docs
+    }
 
 
 _ACTIVE_TASK_STATUSES = ["pending", "in_progress"]
@@ -549,6 +608,45 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     shoots_upcoming = [c for c in locked if c["shoot_status"] == "scheduled"]
     project_shoot_today = project.get("pd_shoot_status") == "today"
 
+    # V2 polish (spec sections 26-34) — Overview dashboard. Every item below
+    # is DERIVED from data already computed above (locked talents' own
+    # pd_shoot_days / pd_readings_rehearsals, reimbursements, tranches,
+    # tasks) — no new collection, no second reminder engine, purely a
+    # presentation-layer read of what already exists.
+    today_date_str = date.today().isoformat()
+    shoot_days_today: List[dict] = []
+    shoot_days_upcoming: List[dict] = []
+    prep_events_today: List[dict] = []
+    prep_events_upcoming: List[dict] = []
+    for c in locked:
+        for d in c.get("shoot_days") or []:
+            ds = d.get("date")
+            if not ds:
+                continue
+            entry = {
+                "talent_id": c["talent_id"], "talent_name": c["name"], "date": ds,
+                "call_time": d.get("call_time"), "location": d.get("location"),
+                "status": d.get("shoot_status"),
+            }
+            if ds == today_date_str:
+                shoot_days_today.append(entry)
+            elif ds > today_date_str:
+                shoot_days_upcoming.append(entry)
+        for rr in c.get("readings_rehearsals") or []:
+            ds = rr.get("date")
+            if not ds:
+                continue
+            entry = {
+                "talent_id": c["talent_id"], "talent_name": c["name"], "type": rr.get("type"),
+                "date": ds, "time": rr.get("time"), "location": rr.get("location"),
+            }
+            if ds == today_date_str:
+                prep_events_today.append(entry)
+            elif ds > today_date_str:
+                prep_events_upcoming.append(entry)
+    shoot_days_upcoming.sort(key=lambda x: x["date"])
+    prep_events_upcoming.sort(key=lambda x: x["date"])
+
     next_follow_up = project.get("pd_next_follow_up_at")
     followup_status = project.get("pd_payment_followup_status") or "not_due"
     payment_followup_due_today = bool(
@@ -600,6 +698,23 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     # never touched this new field aren't retroactively flagged.
     if project.get("pd_agreement_status") == "pending":
         needs_attention.append("Agreement not signed")
+
+    # V2 polish (spec section 32) — "recently completed", using each
+    # record's own updated_at (already set by every status-changing PATCH
+    # in this file / routers/workflow.py) as the recency signal. Capped and
+    # sorted newest-first; nothing here is a new timestamp field.
+    completed_reimbursements = sorted(
+        (r for r in reimbursements if r.get("status") == "paid" and r.get("updated_at")),
+        key=lambda r: r["updated_at"], reverse=True,
+    )[:5]
+    completed_tranches = sorted(
+        (t for t in tranches if t.get("payment_status") == "received" and t.get("updated_at")),
+        key=lambda t: t["updated_at"], reverse=True,
+    )[:5]
+    completed_tasks = sorted(
+        (t for t in tasks if t.get("status") == "completed" and t.get("updated_at")),
+        key=lambda t: t["updated_at"], reverse=True,
+    )[:5]
 
     return {
         "project": {
@@ -717,6 +832,8 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             "tasks": task_buckets["due_today"],
             "trials": trials_today,
             "shoots": shoots_today,
+            "shoot_days": shoot_days_today,
+            "prep_events": prep_events_today,
             "project_shoot_today": project_shoot_today,
             "payment_followup_due": payment_followup_due_today,
         },
@@ -724,7 +841,14 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             "tasks": task_buckets["upcoming"],
             "trials": trials_upcoming,
             "shoots": shoots_upcoming,
+            "shoot_days": shoot_days_upcoming,
+            "prep_events": prep_events_upcoming,
             "payment_followup": payment_followup_upcoming,
+        },
+        "completed": {
+            "reimbursements": completed_reimbursements,
+            "tranches": completed_tranches,
+            "tasks": completed_tasks,
         },
     }
 
@@ -897,6 +1021,10 @@ class TalentProductionPatch(BaseModel):
     payment_status: Optional[str] = None
     # Talent Preparation (Phase 2)
     costume_trial_at: Optional[str] = None
+    # V2 polish (spec section 2) — free-text time, matching the exact
+    # pattern pd_call_time/pd_reporting_time already use (never real time
+    # parsing anywhere in this schema).
+    costume_trial_time: Optional[str] = None
     costume_trial_location: Optional[str] = None
     # V2 — lightest-possible "clickable location" (spec section 7): an
     # optional Google Maps URL alongside the existing plain-text location,
@@ -929,6 +1057,7 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
         "commission_percent": "pd_commission_percent",
         "payment_status": "pd_payment_status",
         "costume_trial_at": "pd_costume_trial_at",
+        "costume_trial_time": "pd_costume_trial_time",
         "costume_trial_location": "pd_costume_trial_location",
         "costume_trial_map_url": "pd_costume_trial_map_url",
         "fitting_status": "pd_fitting_status",
@@ -1559,7 +1688,7 @@ async def build_payment_followup_message(pid: str, admin: dict = Depends(current
 async def build_talent_invoice_message(pid: str, talent_id: str, admin: dict = Depends(current_team_or_admin)):
     project = await _get_project_or_404(pid)
     row = await _get_locked_pipeline_row(pid, talent_id)
-    talent = await db.talents.find_one({"id": talent_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "cover_media_id": 1, "media": 1})
+    talent = await db.talents.find_one({"id": talent_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "cover_media_id": 1, "media": 1, "whatsapp_group_name": 1})
     if not talent:
         raise HTTPException(404, "Talent not found")
 
@@ -1573,6 +1702,10 @@ async def build_talent_invoice_message(pid: str, talent_id: str, admin: dict = D
 
     brand = project.get("brand_name") or "the project"
     first_name = (card["name"] or "").split(" ")[0] or "there"
+    has_extra_hours = bool(card["extra_hours_total"])
+    has_reimbursement = bool(card["reimbursement_total"])
+    extra_hours_count = _talent_extra_hours_count(card["shoot_days"]) if has_extra_hours else 0
+
     lines = [
         f"Hi {first_name},",
         "",
@@ -1580,27 +1713,56 @@ async def build_talent_invoice_message(pid: str, talent_id: str, admin: dict = D
         "",
         f"Talent Fee: ₹{_fmt_inr(card['budget_total'])}",
     ]
-    if card["extra_hours_total"]:
-        lines.append(f"Extra Hours: ₹{_fmt_inr(card['extra_hours_total'])}")
     commission_pct = card["commission_percent"]
     commission_pct_label = f"{commission_pct:g}%" if commission_pct is not None else ""
-    lines.append(f"Commission @ {commission_pct_label} on Talent Fee + Extra Hours: ₹{_fmt_inr(card['commission_amount'])}")
-    if card["reimbursement_total"]:
+    if has_extra_hours:
+        # V2 polish (spec section 18) — only mention overtime/commissionable
+        # breakdown when overtime actually happened; a flat fee with no
+        # extra hours never mentions "Commissionable Amount" at all (spec
+        # section 17), since it would just equal the Talent Fee.
+        hours_label = f"{extra_hours_count:g} hour{'s' if extra_hours_count != 1 else ''}"
+        lines.append(f"Extra Hours: {hours_label} — ₹{_fmt_inr(card['extra_hours_total'])}")
+        lines.append(f"Commissionable Amount: ₹{_fmt_inr(card['commissionable_amount'])}")
+        lines.append(f"Commission @ {commission_pct_label}: ₹{_fmt_inr(card['commission_amount'])}")
+    else:
+        lines.append(f"Commission @ {commission_pct_label}: ₹{_fmt_inr(card['commission_amount'])}")
+    if has_reimbursement:
         lines.append(f"Reimbursements: ₹{_fmt_inr(card['reimbursement_total'])}")
     lines += [
         "",
-        f"Invoice amount to Talentgram: ₹{_fmt_inr(card['invoice_amount'])}",
-        "",
-        "Reimbursements are not subject to commission.",
+        f"Invoice Amount to Talentgram: ₹{_fmt_inr(card['invoice_amount'])}",
         "",
         "Please raise the invoice accordingly and share it with us.",
+        "",
+        BILLING_DETAILS_BLOCK,
+        "",
+        "Thanks,",
+        "Talentgram Agency",
     ]
     message = "\n".join(lines)
+
+    # V2 polish (spec sections 22-25) — WhatsApp destination preference.
+    # whatsapp_group_name is reported so the UI can show which destination
+    # is preferred, but the actual wa.me link always targets the phone:
+    # wa.me only opens an individual chat by phone number — it cannot open
+    # a WhatsApp GROUP by name or ID, and the only existing mechanism that
+    # CAN reach a group (the campaign worker's template/batch pipeline) is
+    # a headless, sending_enabled-gated system with no "admin reviews and
+    # taps Send themselves" step, which is exactly the safety property this
+    # one-tap action must keep. Reusing it here would either bypass that
+    # gate or silently send — neither is acceptable, so the phone number
+    # remains the one mechanism that is both safe and guaranteed to work.
+    group_name = card.get("whatsapp_group_name")
+    destination_type = "group" if group_name else "phone"
+
     return {
         "phone": card["phone"], "talent_name": card["name"], "message": message,
+        "whatsapp_group_name": group_name,
+        "destination_type": destination_type,
         "breakdown": {
             "talent_fee": card["budget_total"],
             "extra_hours": card["extra_hours_total"],
+            "extra_hours_count": extra_hours_count,
             "commissionable": card["commissionable_amount"],
             "commission_percent": commission_pct,
             "commission_amount": card["commission_amount"],

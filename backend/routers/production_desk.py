@@ -1362,6 +1362,51 @@ async def delete_crew(pid: str, crew_id: str, admin: dict = Depends(current_admi
 
 
 # ---------------------------------------------------------------------------
+# V2 — Known Locations (spec section 2: lightweight location search/select).
+#
+# No Google Places / Maps API integration exists anywhere in this codebase
+# and none is added here — that would require new external credentials and
+# billing this task cannot introduce. Instead: a cheap, read-only, capped
+# aggregation of location names + map URLs the studio has ALREADY typed
+# in, across every project's shoot location, every locked talent's costume
+# trial location, and every shoot-day / reading-rehearsal location. This
+# turns the plain-text location fields into a genuine search/select-from-
+# real-places-we've-used combobox (see ProductionDesk.jsx's LocationPicker)
+# without inventing geocoding or a maps platform.
+# ---------------------------------------------------------------------------
+@router.get("/{pid}/production-desk/known-locations")
+async def get_known_locations(pid: str, admin: dict = Depends(current_team_or_admin)):
+    await _get_project_or_404(pid)
+    locations: Dict[str, Optional[str]] = {}
+
+    def _note(name, map_url=None):
+        name = (name or "").strip()
+        if not name:
+            return
+        if name not in locations or (map_url and not locations.get(name)):
+            locations[name] = map_url or locations.get(name)
+
+    async for proj in db.projects.find({}, {"pd_shoot_location": 1}).limit(1000):
+        _note(proj.get("pd_shoot_location"))
+
+    async for row in db.casting_pipeline.find(
+        {"stage": "locked"},
+        {"pd_costume_trial_location": 1, "pd_costume_trial_map_url": 1, "pd_shoot_days": 1, "pd_readings_rehearsals": 1},
+    ).limit(1000):
+        _note(row.get("pd_costume_trial_location"), row.get("pd_costume_trial_map_url"))
+        for d in (row.get("pd_shoot_days") or []):
+            _note(d.get("location"), d.get("location_map_url"))
+        for r in (row.get("pd_readings_rehearsals") or []):
+            _note(r.get("location"), r.get("location_map_url"))
+
+    result = sorted(
+        [{"name": k, "map_url": v} for k, v in locations.items()],
+        key=lambda x: x["name"].lower(),
+    )[:100]
+    return {"locations": result}
+
+
+# ---------------------------------------------------------------------------
 # V2 — Payment Tranches / Billing Milestones (spec sections 19-20)
 #
 # A genuinely new, small collection — nothing existing models "a project
@@ -1376,6 +1421,7 @@ class TrancheIn(BaseModel):
     trigger: Optional[str] = None
     invoice_status: Optional[str] = "pending"
     invoice_date: Optional[str] = None
+    invoice_number: Optional[str] = None
     payment_status: Optional[str] = "pending"
     payment_date: Optional[str] = None
     notes: Optional[str] = None
@@ -1387,6 +1433,7 @@ class TrancheUpdateIn(BaseModel):
     trigger: Optional[str] = None
     invoice_status: Optional[str] = None
     invoice_date: Optional[str] = None
+    invoice_number: Optional[str] = None
     payment_status: Optional[str] = None
     payment_date: Optional[str] = None
     notes: Optional[str] = None
@@ -1411,6 +1458,7 @@ async def add_tranche(pid: str, payload: TrancheIn, admin: dict = Depends(curren
         "trigger": payload.trigger,
         "invoice_status": payload.invoice_status or "pending",
         "invoice_date": payload.invoice_date,
+        "invoice_number": payload.invoice_number,
         "payment_status": payload.payment_status or "pending",
         "payment_date": payload.payment_date,
         "notes": payload.notes,

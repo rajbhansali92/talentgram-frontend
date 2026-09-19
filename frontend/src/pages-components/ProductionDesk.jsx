@@ -169,6 +169,84 @@ function LocationLink({ name, mapUrl }) {
     return <span className="text-black/70">{name}</span>;
 }
 
+// V2 — lightweight location search/select (spec section 2). No Google
+// Places/Maps integration exists in this codebase (and none is added
+// here — that needs new external credentials/billing this task cannot
+// introduce). Instead: search/select from real locations the studio has
+// already used (fetched via known-locations, see production_desk.py),
+// with free text still allowed for a genuinely new location. Picking a
+// suggestion also carries over its saved map URL when one exists.
+function LocationPicker({ value, onCommit, knownLocations, placeholder, className, immediate }) {
+    const [open, setOpen] = useState(false);
+    const [query, setQuery] = useState(value || "");
+
+    useEffect(() => { setQuery(value || ""); }, [value]);
+
+    const filtered = useMemo(() => {
+        const q = query.trim().toLowerCase();
+        const list = knownLocations || [];
+        if (!q) return list.slice(0, 15);
+        return list.filter((l) => l.name.toLowerCase().includes(q)).slice(0, 15);
+    }, [knownLocations, query]);
+
+    const commit = (name, mapUrl) => {
+        setQuery(name);
+        setOpen(false);
+        onCommit(name, mapUrl);
+    };
+
+    return (
+        <Popover open={open} onOpenChange={setOpen}>
+            <PopoverTrigger asChild>
+                <Input
+                    type="text"
+                    value={query}
+                    placeholder={placeholder || "Search or type a location"}
+                    className={className || "h-7 text-xs"}
+                    onChange={(e) => {
+                        setQuery(e.target.value);
+                        setOpen(true);
+                        // Add-form usage (no blur before "Save" is clicked) needs
+                        // every keystroke synced to the parent's form state —
+                        // detail-row usage stays blur/select-only to avoid a
+                        // network PATCH per keystroke (matches every other text
+                        // field in this file).
+                        if (immediate) onCommit(e.target.value);
+                    }}
+                    onFocus={() => setOpen(true)}
+                    onBlur={() => {
+                        setTimeout(() => {
+                            setOpen(false);
+                            if (!immediate && query !== (value || "")) onCommit(query);
+                        }, 150);
+                    }}
+                />
+            </PopoverTrigger>
+            {filtered.length > 0 && (
+                <PopoverContent className="w-64 p-0" align="start" onOpenAutoFocus={(e) => e.preventDefault()}>
+                    <Command shouldFilter={false}>
+                        <CommandList>
+                            <CommandGroup heading="Previously used">
+                                {filtered.map((l) => (
+                                    <CommandItem
+                                        key={l.name}
+                                        value={l.name}
+                                        onSelect={() => commit(l.name, l.map_url || undefined)}
+                                        className="text-xs cursor-pointer"
+                                    >
+                                        <MapPin className="h-3 w-3 mr-1.5 text-black/30 shrink-0" />
+                                        <span className="truncate">{l.name}</span>
+                                    </CommandItem>
+                                ))}
+                            </CommandGroup>
+                        </CommandList>
+                    </Command>
+                </PopoverContent>
+            )}
+        </Popover>
+    );
+}
+
 function SectionCard({ title, icon: Icon, right, children, testId }) {
     return (
         <Card className="border-black/[0.08] shadow-none" data-testid={testId}>
@@ -316,6 +394,7 @@ export default function ProductionDesk({ projectId, project }) {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [clients, setClients] = useState([]);
+    const [knownLocations, setKnownLocations] = useState([]);
     const isMobile = useMediaQuery("(max-width: 767px)");
     const [quickViewTalent, setQuickViewTalent] = useState(null);
     const [kickbackDialog, setKickbackDialog] = useState(false);
@@ -345,6 +424,16 @@ export default function ProductionDesk({ projectId, project }) {
             setClients(Array.isArray(data) ? data : (data.items || []));
         }).catch(() => {});
     }, []);
+
+    // V2 — Known Locations (spec section 2): real, previously-used location
+    // names + map URLs the studio has already typed in, across every
+    // project/talent — see production_desk.py's known-locations endpoint
+    // docstring for why this replaces a Maps/Places integration.
+    useEffect(() => {
+        adminApi.get(`/projects/${projectId}/production-desk/known-locations`).then(({ data }) => {
+            setKnownLocations(Array.isArray(data.locations) ? data.locations : []);
+        }).catch(() => {});
+    }, [projectId]);
 
     const openQuickView = useCallback((card) => {
         const cached = talentPreviewCache.getTalent(card.talent_id);
@@ -740,11 +829,17 @@ export default function ProductionDesk({ projectId, project }) {
                                         </TableCell>
                                         <TableCell>
                                             <div className="flex items-center gap-1.5">
-                                                <Input
-                                                    defaultValue={t.costume_trial_location || ""}
+                                                <LocationPicker
+                                                    value={t.costume_trial_location || ""}
+                                                    knownLocations={knownLocations}
                                                     placeholder="Location"
                                                     className="h-7 text-xs w-[130px]"
-                                                    onBlur={(e) => { if (e.target.value !== (t.costume_trial_location || "")) patchTalent(t.talent_id, { costume_trial_location: e.target.value }); }}
+                                                    onCommit={(name, mapUrl) => {
+                                                        const updates = {};
+                                                        if (name !== (t.costume_trial_location || "")) updates.costume_trial_location = name;
+                                                        if (mapUrl && !t.costume_trial_map_url) updates.costume_trial_map_url = mapUrl;
+                                                        if (Object.keys(updates).length) patchTalent(t.talent_id, updates);
+                                                    }}
                                                 />
                                                 <Input
                                                     defaultValue={t.costume_trial_map_url || ""}
@@ -781,6 +876,7 @@ export default function ProductionDesk({ projectId, project }) {
                                 key={t.talent_id}
                                 talent={t}
                                 projectShootDates={p.pd_shoot_dates_list || []}
+                                knownLocations={knownLocations}
                                 onAdd={(payload) => addShootDay(t.talent_id, payload)}
                                 onUpdate={(dayId, payload) => updateShootDay(t.talent_id, dayId, payload)}
                                 onDelete={(dayId) => deleteShootDay(t.talent_id, dayId)}
@@ -800,6 +896,7 @@ export default function ProductionDesk({ projectId, project }) {
                             <TalentReadingsRehearsals
                                 key={t.talent_id}
                                 talent={t}
+                                knownLocations={knownLocations}
                                 onAdd={(payload) => addReadingRehearsal(t.talent_id, payload)}
                                 onDelete={(entryId) => deleteReadingRehearsal(t.talent_id, entryId)}
                             />
@@ -933,7 +1030,13 @@ export default function ProductionDesk({ projectId, project }) {
                         </div>
                         <div className="flex items-center justify-between gap-2">
                             <span className="text-black/40 shrink-0">Location</span>
-                            <Input defaultValue={p.pd_shoot_location || ""} placeholder="Shoot location" className="h-7 text-xs max-w-[220px]" onBlur={(e) => { if (e.target.value !== (p.pd_shoot_location || "")) patchProject({ shoot_location: e.target.value }); }} />
+                            <LocationPicker
+                                value={p.pd_shoot_location || ""}
+                                knownLocations={knownLocations}
+                                placeholder="Shoot location"
+                                className="h-7 text-xs max-w-[220px]"
+                                onCommit={(name) => { if (name !== (p.pd_shoot_location || "")) patchProject({ shoot_location: name }); }}
+                            />
                         </div>
                         <div className="flex items-center justify-between gap-2">
                             <span className="text-black/40 shrink-0">Shoot Status</span>
@@ -969,11 +1072,14 @@ export default function ProductionDesk({ projectId, project }) {
                 icon={PhoneCall}
                 testId="pd-payment-followup"
                 right={
-                    <Button size="sm" variant="outline" className="h-7 text-xs" onClick={sendPaymentFollowUp} data-testid="pd-whatsapp-followup-btn">
-                        <MessageCircle className="h-3 w-3 mr-1" /> WhatsApp Follow-up
+                    <Button size="sm" variant="outline" className="h-7 text-xs" onClick={sendPaymentFollowUp} data-testid="pd-whatsapp-followup-btn" title="Opens WhatsApp with the message pre-filled — you review and send it yourself">
+                        <MessageCircle className="h-3 w-3 mr-1" /> Open WhatsApp Follow-up
                     </Button>
                 }
             >
+                <p className="text-[11px] text-black/35 mb-3 -mt-1">
+                    Opens WhatsApp with the message pre-filled. Nothing is sent automatically — you review and tap Send yourself.
+                </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="sm:col-span-2">
                         <Label className="text-[11px] text-black/40">Concerned Person (CRM contact)</Label>
@@ -1435,7 +1541,7 @@ function _dayExtraHours(perDay, agreed, actual) {
     return { hours: extra, amount: (perDay / a) * extra };
 }
 
-function TalentShootSchedule({ talent, projectShootDates, onAdd, onUpdate, onDelete, onUseProjectDates }) {
+function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd, onUpdate, onDelete, onUseProjectDates }) {
     const [adding, setAdding] = useState(false);
     const [form, setForm] = useState({ date: "", call_time: "", reporting_time: "", location: "", location_map_url: "", agreed_hours: "", actual_hours: "" });
 
@@ -1482,7 +1588,25 @@ function TalentShootSchedule({ talent, projectShootDates, onAdd, onUpdate, onDel
                             <div className="font-medium text-black/70">{d.date}</div>
                             <Input defaultValue={d.call_time || ""} placeholder="Call" className="h-6 text-[11px]" onBlur={(e) => { if (e.target.value !== (d.call_time || "")) onUpdate(d.id, { call_time: e.target.value }); }} />
                             <Input defaultValue={d.reporting_time || ""} placeholder="Reporting" className="h-6 text-[11px]" onBlur={(e) => { if (e.target.value !== (d.reporting_time || "")) onUpdate(d.id, { reporting_time: e.target.value }); }} />
-                            <Input defaultValue={d.location || ""} placeholder="Location" className="h-6 text-[11px]" onBlur={(e) => { if (e.target.value !== (d.location || "")) onUpdate(d.id, { location: e.target.value }); }} />
+                            <div className="flex items-center gap-1">
+                                <LocationPicker
+                                    value={d.location || ""}
+                                    knownLocations={knownLocations}
+                                    placeholder="Location"
+                                    className="h-6 text-[11px]"
+                                    onCommit={(name, mapUrl) => {
+                                        const updates = {};
+                                        if (name !== (d.location || "")) updates.location = name;
+                                        if (mapUrl && !d.location_map_url) updates.location_map_url = mapUrl;
+                                        if (Object.keys(updates).length) onUpdate(d.id, updates);
+                                    }}
+                                />
+                                {d.location_map_url && (
+                                    <a href={d.location_map_url} target="_blank" rel="noreferrer" className="text-black/30 hover:text-[#0c2340] shrink-0">
+                                        <MapPin className="h-3 w-3" />
+                                    </a>
+                                )}
+                            </div>
                             <div className="flex items-center gap-1">
                                 <Input type="number" defaultValue={d.agreed_hours ?? ""} placeholder="Basis h" className="h-6 text-[11px] w-14" onBlur={(e) => { const v = e.target.value === "" ? null : Number(e.target.value); if (v !== d.agreed_hours) onUpdate(d.id, { agreed_hours: v }); }} />
                                 <Input type="number" defaultValue={d.actual_hours ?? ""} placeholder="Actual h" className="h-6 text-[11px] w-14" onBlur={(e) => { const v = e.target.value === "" ? null : Number(e.target.value); if (v !== d.actual_hours) onUpdate(d.id, { actual_hours: v }); }} />
@@ -1511,7 +1635,16 @@ function TalentShootSchedule({ talent, projectShootDates, onAdd, onUpdate, onDel
                     <div><Label className="text-[10px]">Date</Label><Input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} className="h-7 text-[11px]" autoFocus /></div>
                     <div><Label className="text-[10px]">Call Time</Label><Input value={form.call_time} onChange={(e) => setForm((f) => ({ ...f, call_time: e.target.value }))} className="h-7 text-[11px]" /></div>
                     <div><Label className="text-[10px]">Reporting</Label><Input value={form.reporting_time} onChange={(e) => setForm((f) => ({ ...f, reporting_time: e.target.value }))} className="h-7 text-[11px]" /></div>
-                    <div><Label className="text-[10px]">Location</Label><Input value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div>
+                        <Label className="text-[10px]">Location</Label>
+                        <LocationPicker
+                            value={form.location}
+                            knownLocations={knownLocations}
+                            className="h-7 text-[11px]"
+                            immediate
+                            onCommit={(name, mapUrl) => setForm((f) => ({ ...f, location: name, location_map_url: mapUrl && !f.location_map_url ? mapUrl : f.location_map_url }))}
+                        />
+                    </div>
                     <div><Label className="text-[10px]">Agreed Hours (basis)</Label><Input type="number" value={form.agreed_hours} onChange={(e) => setForm((f) => ({ ...f, agreed_hours: e.target.value }))} placeholder="e.g. 12" className="h-7 text-[11px]" /></div>
                     <div><Label className="text-[10px]">Actual Hours</Label><Input type="number" value={form.actual_hours} onChange={(e) => setForm((f) => ({ ...f, actual_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
                     <div className="col-span-2 flex justify-end gap-1.5">
@@ -1527,16 +1660,16 @@ function TalentShootSchedule({ talent, projectShootDates, onAdd, onUpdate, onDel
 // ============================================================================
 // V2 — Readings & Rehearsals (spec section 8).
 // ============================================================================
-function TalentReadingsRehearsals({ talent, onAdd, onDelete }) {
+function TalentReadingsRehearsals({ talent, knownLocations, onAdd, onDelete }) {
     const [adding, setAdding] = useState(false);
-    const [form, setForm] = useState({ type: "reading", date: "", time: "", location: "", notes: "" });
+    const [form, setForm] = useState({ type: "reading", date: "", time: "", location: "", location_map_url: "", notes: "" });
 
     const submit = () => {
         onAdd({
             type: form.type, date: form.date || null, time: form.time || null,
-            location: form.location || null, notes: form.notes || null,
+            location: form.location || null, location_map_url: form.location_map_url || null, notes: form.notes || null,
         });
-        setForm({ type: "reading", date: "", time: "", location: "", notes: "" });
+        setForm({ type: "reading", date: "", time: "", location: "", location_map_url: "", notes: "" });
         setAdding(false);
     };
 
@@ -1558,7 +1691,13 @@ function TalentReadingsRehearsals({ talent, onAdd, onDelete }) {
                             <Badge variant="outline" className="text-[10px] capitalize">{e.type}</Badge>
                             {e.date && <span className="text-black/60">{e.date}</span>}
                             {e.time && <span className="text-black/50">{e.time}</span>}
-                            {e.location && <span className="text-black/50">· {e.location}</span>}
+                            {e.location && (
+                                e.location_map_url ? (
+                                    <a href={e.location_map_url} target="_blank" rel="noreferrer" className="text-black/50 hover:text-[#0c2340] hover:underline inline-flex items-center gap-0.5">
+                                        · <MapPin className="h-2.5 w-2.5" />{e.location}
+                                    </a>
+                                ) : <span className="text-black/50">· {e.location}</span>
+                            )}
                             {e.notes && <span className="text-black/40">({e.notes})</span>}
                         </div>
                         <button onClick={() => onDelete(e.id)} className="text-black/30 hover:text-red-500 shrink-0"><Trash2 className="h-3 w-3" /></button>
@@ -1579,7 +1718,16 @@ function TalentReadingsRehearsals({ talent, onAdd, onDelete }) {
                     </div>
                     <div><Label className="text-[10px]">Date</Label><Input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} className="h-7 text-[11px]" /></div>
                     <div><Label className="text-[10px]">Time</Label><Input value={form.time} onChange={(e) => setForm((f) => ({ ...f, time: e.target.value }))} placeholder="e.g. 4 PM" className="h-7 text-[11px]" /></div>
-                    <div><Label className="text-[10px]">Location</Label><Input value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div>
+                        <Label className="text-[10px]">Location</Label>
+                        <LocationPicker
+                            value={form.location}
+                            knownLocations={knownLocations}
+                            className="h-7 text-[11px]"
+                            immediate
+                            onCommit={(name, mapUrl) => setForm((f) => ({ ...f, location: name, location_map_url: mapUrl && !f.location_map_url ? mapUrl : f.location_map_url }))}
+                        />
+                    </div>
                     <div><Label className="text-[10px]">Notes</Label><Input value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} className="h-7 text-[11px]" /></div>
                     <div className="col-span-2 sm:col-span-5 flex justify-end gap-1.5">
                         <Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={() => setAdding(false)}>Cancel</Button>
@@ -1601,8 +1749,8 @@ function TalentFinancialCard({ talent, onAskInvoice }) {
         <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-financial-${talent.talent_id}`}>
             <div className="flex items-center justify-between gap-2 mb-2">
                 <span className="text-xs font-semibold text-black/80">{talent.name}</span>
-                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={onAskInvoice} data-testid={`pd-ask-invoice-${talent.talent_id}`}>
-                    <MessageCircle className="h-3 w-3 mr-1" /> Ask Talent to Raise Invoice
+                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={onAskInvoice} data-testid={`pd-ask-invoice-${talent.talent_id}`} title="Opens WhatsApp with the message pre-filled — you review and send it yourself">
+                    <MessageCircle className="h-3 w-3 mr-1" /> Open WhatsApp: Ask to Raise Invoice
                 </Button>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-[11px]">
@@ -1623,12 +1771,20 @@ function TalentFinancialCard({ talent, onAskInvoice }) {
 // ============================================================================
 function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals }) {
     const [adding, setAdding] = useState(false);
-    const [form, setForm] = useState({ name: "", amount: "", trigger: "" });
+    const [form, setForm] = useState({ name: "", amount: "", trigger: "", invoice_number: "", invoice_date: "", payment_date: "", notes: "" });
 
     const submit = () => {
         if (!form.name.trim() || !form.amount) return;
-        onAdd({ name: form.name.trim(), amount: Number(form.amount), trigger: form.trigger || null });
-        setForm({ name: "", amount: "", trigger: "" });
+        onAdd({
+            name: form.name.trim(),
+            amount: Number(form.amount),
+            trigger: form.trigger || null,
+            invoice_number: form.invoice_number || null,
+            invoice_date: form.invoice_date || null,
+            payment_date: form.payment_date || null,
+            notes: form.notes || null,
+        });
+        setForm({ name: "", amount: "", trigger: "", invoice_number: "", invoice_date: "", payment_date: "", notes: "" });
         setAdding(false);
     };
 
@@ -1659,20 +1815,48 @@ function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals })
                                     <button onClick={() => onDelete(t.id)} className="text-black/30 hover:text-red-500"><Trash2 className="h-3 w-3" /></button>
                                 </div>
                             </div>
-                            {t.trigger && <div className="text-[11px] text-black/40 mb-1.5">{t.trigger}</div>}
-                            <div className="flex flex-wrap items-center gap-2">
+                            {t.trigger && <div className="text-[11px] text-black/40 mb-1.5">Trigger: {t.trigger}</div>}
+                            <div className="flex flex-wrap items-center gap-2 mb-1.5">
                                 <Select value={t.invoice_status} onValueChange={(v) => onUpdate(t.id, { invoice_status: v })}>
                                     <SelectTrigger className={`h-6 text-[10px] w-[110px] ${t.invoice_status === "raised_and_sent" ? "text-emerald-700" : "text-amber-700"}`}><SelectValue /></SelectTrigger>
                                     <SelectContent>
                                         {TRANCHE_INVOICE_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>Invoice: {o.label}</SelectItem>)}
                                     </SelectContent>
                                 </Select>
+                                <Input
+                                    defaultValue={t.invoice_date || ""}
+                                    type="date"
+                                    className="h-6 text-[10px] w-[120px]"
+                                    data-testid={`pd-tranche-invoice-date-${t.id}`}
+                                    onBlur={(e) => { if (e.target.value !== (t.invoice_date || "")) onUpdate(t.id, { invoice_date: e.target.value || null }); }}
+                                />
                                 <Select value={t.payment_status} onValueChange={(v) => onUpdate(t.id, { payment_status: v })}>
                                     <SelectTrigger className={`h-6 text-[10px] w-[110px] ${t.payment_status === "received" ? "text-emerald-700" : "text-amber-700"}`}><SelectValue /></SelectTrigger>
                                     <SelectContent>
                                         {TRANCHE_PAYMENT_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>Payment: {o.label}</SelectItem>)}
                                     </SelectContent>
                                 </Select>
+                                <Input
+                                    defaultValue={t.payment_date || ""}
+                                    type="date"
+                                    className="h-6 text-[10px] w-[120px]"
+                                    data-testid={`pd-tranche-payment-date-${t.id}`}
+                                    onBlur={(e) => { if (e.target.value !== (t.payment_date || "")) onUpdate(t.id, { payment_date: e.target.value || null }); }}
+                                />
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <Input
+                                    defaultValue={t.invoice_number || ""}
+                                    placeholder="Invoice # (optional)"
+                                    className="h-6 text-[10px] w-[130px]"
+                                    onBlur={(e) => { if (e.target.value !== (t.invoice_number || "")) onUpdate(t.id, { invoice_number: e.target.value || null }); }}
+                                />
+                                <Input
+                                    defaultValue={t.notes || ""}
+                                    placeholder="Notes (optional)"
+                                    className="h-6 text-[10px] flex-1 min-w-[140px]"
+                                    onBlur={(e) => { if (e.target.value !== (t.notes || "")) onUpdate(t.id, { notes: e.target.value || null }); }}
+                                />
                             </div>
                         </div>
                     ))}
@@ -1683,6 +1867,10 @@ function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals })
                     <div><Label className="text-[10px]">Name / Milestone</Label><Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Signing" className="h-8 text-xs" autoFocus /></div>
                     <div><Label className="text-[10px]">Amount</Label><Input type="number" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} className="h-8 text-xs" /></div>
                     <div><Label className="text-[10px]">Trigger (optional)</Label><Input value={form.trigger} onChange={(e) => setForm((f) => ({ ...f, trigger: e.target.value }))} placeholder="e.g. On shoot commencement" className="h-8 text-xs" /></div>
+                    <div><Label className="text-[10px]">Invoice Date (optional)</Label><Input type="date" value={form.invoice_date} onChange={(e) => setForm((f) => ({ ...f, invoice_date: e.target.value }))} className="h-8 text-xs" /></div>
+                    <div><Label className="text-[10px]">Invoice # (optional)</Label><Input value={form.invoice_number} onChange={(e) => setForm((f) => ({ ...f, invoice_number: e.target.value }))} className="h-8 text-xs" /></div>
+                    <div><Label className="text-[10px]">Payment Date (optional)</Label><Input type="date" value={form.payment_date} onChange={(e) => setForm((f) => ({ ...f, payment_date: e.target.value }))} className="h-8 text-xs" /></div>
+                    <div className="sm:col-span-3"><Label className="text-[10px]">Notes (optional)</Label><Input value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} className="h-8 text-xs" /></div>
                     <div className="sm:col-span-3 flex justify-end gap-1.5">
                         <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setAdding(false)}>Cancel</Button>
                         <Button size="sm" className="h-7 text-xs" disabled={!form.name.trim() || !form.amount} onClick={submit}>Add Tranche</Button>

@@ -134,6 +134,13 @@ vi.mock("@/lib/api", () => ({ get adminApi() { return globalThis.__mockAdminApi;
 beforeEach(() => {
     globalThis.__mockAdminApi = mockAdminApi();
     try { window.localStorage.clear(); } catch { /* noop */ }
+    // Delete actions and the WhatsApp-group send now confirm via
+    // window.confirm — default to "yes" so existing flows keep working;
+    // tests that specifically need "cancel" override this per-test. Reset
+    // call history every test so accumulated calls from a prior test never
+    // leak into an assertion on "the first/last confirm call".
+    if (window.confirm && window.confirm.mockRestore) window.confirm.mockRestore();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 afterEach(cleanup);
 
@@ -268,6 +275,37 @@ describe("ProductionDesk V2 final polish", () => {
             expect(scheduleCard.textContent).toMatch(/Extra Amount/);
             const row = screen.getByTestId("pd-shoot-day-d1");
             expect(row.textContent).toMatch(/2h/); // 14 - 12 = 2h overtime, shown read-only
+        });
+
+        it("Actions column stays aligned with the header — same grid template, Actions never a separate cell than Status (regression for the wrapping defect)", async () => {
+            const dataWithDay = {
+                ...BASE_DATA,
+                locked_talents: [{ ...TALENT, shoot_days: [{ id: "d1", date: "2026-09-20", agreed_hours: 12, actual_hours: 12, shoot_status: "scheduled" }] }],
+            };
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: dataWithDay });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-shoot-day-d1")).toBeTruthy());
+            const scheduleCard = screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`);
+            const headerRow = scheduleCard.querySelector(".hidden.lg\\:grid");
+            const dataRow = screen.getByTestId("pd-shoot-day-d1");
+            // Header and data row must share the identical column template —
+            // this is exactly what the original defect violated (10 header
+            // labels over a 9-column row).
+            expect(headerRow.className).toContain("lg:grid-cols-[");
+            expect(dataRow.className).toContain("lg:grid-cols-[");
+            expect(headerRow.className.match(/lg:grid-cols-\[[^\]]+\]/)[0]).toBe(dataRow.className.match(/lg:grid-cols-\[[^\]]+\]/)[0]);
+            // Edit and Delete controls are both inside the SAME trailing
+            // Actions cell as siblings, never split across rows.
+            const editBtn = within(dataRow).getByTitle("Edit");
+            const deleteBtn = within(dataRow).getByTitle("Delete");
+            expect(editBtn.parentElement).toBe(deleteBtn.parentElement);
         });
 
         it("a shoot day is read-only until Edit, and Save persists all fields together", async () => {
@@ -624,9 +662,10 @@ describe("ProductionDesk V2 final polish", () => {
             openSpy.mockRestore();
         });
 
-        it("prefers the WhatsApp group when set, but still opens the phone wa.me link (a group can't be opened via a link) and shows a note", async () => {
+        it("prefers the WhatsApp group when set: after admin confirmation, sends via the existing WhatsApp Engine (not a wa.me link)", async () => {
             const talentWithGroup = { ...TALENT, whatsapp_group_name: "Harshita Casting Group" };
             const dataWithGroup = { ...BASE_DATA, locked_talents: [talentWithGroup] };
+            const sendToGroup = vi.fn(() => Promise.resolve({ data: { ok: true, batch_id: "b1", job_ids: ["j1"], whatsapp_group_name: "Harshita Casting Group", talent_name: "Harshita" } }));
             globalThis.__mockAdminApi = mockAdminApi({
                 get: vi.fn((url) => {
                     if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: dataWithGroup });
@@ -643,15 +682,43 @@ describe("ProductionDesk V2 final polish", () => {
                     }
                     return Promise.resolve({ data: {} });
                 }),
+                post: (url, ...rest) => (url === "/projects/proj-1/production-desk/talents/t1/invoice-message/send-to-group" ? sendToGroup(url, ...rest) : Promise.resolve({ data: BASE_DATA })),
             });
             const openSpy = vi.spyOn(window, "open").mockImplementation(() => {});
+            const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
             render(<ProductionDesk projectId="proj-1" project={{}} />);
-            await waitFor(() => expect(screen.getByTestId(`pd-whatsapp-group-${TALENT.talent_id}`)).toBeTruthy());
-            expect(screen.getByTestId(`pd-whatsapp-group-${TALENT.talent_id}`).textContent).toMatch(/Harshita Casting Group/);
+            await waitFor(() => expect(screen.getByTestId(`pd-whatsapp-destination-${TALENT.talent_id}`)).toBeTruthy());
+            expect(screen.getByTestId(`pd-whatsapp-destination-${TALENT.talent_id}`).textContent).toMatch(/WhatsApp Group/);
             fireEvent.click(screen.getByTestId(`pd-ask-invoice-${TALENT.talent_id}`));
-            await waitFor(() => expect(openSpy).toHaveBeenCalled());
-            expect(openSpy.mock.calls[0][0]).toContain("https://wa.me/919999900000"); // fallback always works
+            await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+            expect(confirmSpy.mock.calls[0][0]).toContain("Harshita Casting Group"); // admin reviews the exact destination + message before it sends
+            await waitFor(() => expect(sendToGroup).toHaveBeenCalled());
+            expect(openSpy).not.toHaveBeenCalled(); // the group is the REAL destination now, not a wa.me phone link
             openSpy.mockRestore();
+        });
+
+        it("declining the confirmation does not send anything", async () => {
+            const talentWithGroup = { ...TALENT, whatsapp_group_name: "Harshita Casting Group" };
+            const dataWithGroup = { ...BASE_DATA, locked_talents: [talentWithGroup] };
+            const sendToGroup = vi.fn(() => Promise.resolve({ data: { ok: true } }));
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: dataWithGroup });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    if (url === "/projects/proj-1/production-desk/talents/t1/invoice-message") {
+                        return Promise.resolve({ data: { phone: "+919999900000", talent_name: "Harshita", destination_type: "group", whatsapp_group_name: "Harshita Casting Group", message: "msg", breakdown: {} } });
+                    }
+                    return Promise.resolve({ data: {} });
+                }),
+                post: (url, ...rest) => (url.endsWith("/send-to-group") ? sendToGroup(url, ...rest) : Promise.resolve({ data: BASE_DATA })),
+            });
+            vi.spyOn(window, "confirm").mockReturnValue(false);
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId(`pd-ask-invoice-${TALENT.talent_id}`)).toBeTruthy());
+            fireEvent.click(screen.getByTestId(`pd-ask-invoice-${TALENT.talent_id}`));
+            await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+            expect(sendToGroup).not.toHaveBeenCalled();
         });
 
         it("falls back to the phone number when no WhatsApp group is set", async () => {
@@ -668,7 +735,48 @@ describe("ProductionDesk V2 final polish", () => {
             });
             render(<ProductionDesk projectId="proj-1" project={{}} />);
             await waitFor(() => expect(screen.getByTestId(`pd-ask-invoice-${TALENT.talent_id}`)).toBeTruthy());
-            expect(screen.queryByTestId(`pd-whatsapp-group-${TALENT.talent_id}`)).toBeNull();
+            expect(screen.getByTestId(`pd-whatsapp-destination-${TALENT.talent_id}`).textContent).not.toMatch(/Group/);
+        });
+    });
+
+    // ---- Responsive layout (structural, not pixel-perfect) ----
+    describe("Responsive layout", () => {
+        it("Locked Talents renders both a desktop table and a mobile card list for the same data (CSS picks one per breakpoint)", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-locked-talents")).toBeTruthy());
+            // Desktop table row
+            expect(screen.getByTestId(`pd-talent-row-${TALENT.talent_id}`)).toBeTruthy();
+            // Mobile card — distinct element/testid, not a duplicate of the table row
+            const mobileCard = screen.getByTestId(`pd-talent-row-mobile-${TALENT.talent_id}`);
+            expect(mobileCard).toBeTruthy();
+            expect(mobileCard.parentElement.className).toContain("lg:hidden");
+        });
+
+        it("Talent Financials name and the invoice button are separate flex items, not competing for one truncated row", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId(`pd-financial-${TALENT.talent_id}`)).toBeTruthy());
+            const card = screen.getByTestId(`pd-financial-${TALENT.talent_id}`);
+            const nameEl = within(card).getByText(TALENT.name);
+            expect(nameEl.className).not.toContain("truncate"); // full name always visible now
+            const header = card.querySelector(".flex.flex-col.lg\\:flex-row");
+            expect(header).toBeTruthy();
+        });
+
+        it("SectionCard headers stack title above right-content through tablet width (Commission & Kickbacks, Payment Follow-up) — only true desktop goes row-mode", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-commission")).toBeTruthy());
+            const commissionHeader = screen.getByTestId("pd-commission").querySelector(":scope > div");
+            expect(commissionHeader.className).toContain("flex-col");
+            expect(commissionHeader.className).toContain("lg:flex-row");
+            const followupHeader = screen.getByTestId("pd-payment-followup").querySelector(":scope > div");
+            expect(followupHeader.className).toContain("flex-col");
+        });
+
+        it("Shooting Schedule uses lg: (not sm:) for the desktop/mobile switch, so tablet width gets the readable stacked cards, not a cramped table", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`)).toBeTruthy());
+            const card = screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`);
+            expect(card.querySelector(".hidden.sm\\:grid")).toBeNull(); // no leftover sm: switch
         });
     });
 

@@ -1684,19 +1684,23 @@ async def build_payment_followup_message(pid: str, admin: dict = Depends(current
     return {"phone": contact["phone_number"], "contact_name": contact.get("name"), "message": message}
 
 
-@router.get("/{pid}/production-desk/talents/{talent_id}/invoice-message")
-async def build_talent_invoice_message(pid: str, talent_id: str, admin: dict = Depends(current_team_or_admin)):
+async def _load_talent_invoice_card(pid: str, talent_id: str) -> tuple[dict, dict, dict]:
+    """Shared by the GET preview and the POST group-send endpoint below —
+    one place that resolves project/talent/card, never two."""
     project = await _get_project_or_404(pid)
     row = await _get_locked_pipeline_row(pid, talent_id)
     talent = await db.talents.find_one({"id": talent_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "cover_media_id": 1, "media": 1, "whatsapp_group_name": 1})
     if not talent:
         raise HTTPException(404, "Talent not found")
-
     reimbursements = await db.project_reimbursements.find({"project_id": pid, "talent_id": talent_id}, {"_id": 0}).to_list(200)
     reimbursement_total = sum(_num(r.get("amount")) or 0.0 for r in reimbursements)
     card = _talent_card(talent, row, project, reimbursement_total)
-    if card["phone"] is None:
-        raise HTTPException(400, "This talent has no phone number on file")
+    return project, talent, card
+
+
+def _build_invoice_message(project: dict, card: dict) -> Dict[str, Any]:
+    """Pure message/breakdown construction — no I/O, no HTTP concerns, so
+    the GET preview and the POST group-send action can never drift apart."""
     if card["commissionable_amount"] is None or card["commission_amount"] is None:
         raise HTTPException(400, "Set this talent's budget/day (or total) and commission first")
 
@@ -1742,17 +1746,12 @@ async def build_talent_invoice_message(pid: str, talent_id: str, admin: dict = D
     message = "\n".join(lines)
 
     # V2 polish (spec sections 22-25) — WhatsApp destination preference.
-    # whatsapp_group_name is reported so the UI can show which destination
-    # is preferred, but the actual wa.me link always targets the phone:
-    # wa.me only opens an individual chat by phone number — it cannot open
-    # a WhatsApp GROUP by name or ID, and the only existing mechanism that
-    # CAN reach a group (the campaign worker's template/batch pipeline) is
-    # a headless, sending_enabled-gated system with no "admin reviews and
-    # taps Send themselves" step, which is exactly the safety property this
-    # one-tap action must keep. Reusing it here would either bypass that
-    # gate or silently send — neither is acceptable, so the phone number
-    # remains the one mechanism that is both safe and guaranteed to work.
-    group_name = card.get("whatsapp_group_name")
+    # whatsapp_group_name (the SAME field the existing campaign engine's own
+    # _resolve_destination() already treats as authoritative) wins when
+    # non-empty after stripping — exactly _resolve_destination's own rule,
+    # so "missing/null/empty/whitespace-only" group all correctly fall back
+    # to phone here too, with no separate validity notion invented.
+    group_name = (card.get("whatsapp_group_name") or "").strip() or None
     destination_type = "group" if group_name else "phone"
 
     return {
@@ -1769,4 +1768,77 @@ async def build_talent_invoice_message(pid: str, talent_id: str, admin: dict = D
             "reimbursements": card["reimbursement_total"],
             "invoice_amount": card["invoice_amount"],
         },
+    }
+
+
+@router.get("/{pid}/production-desk/talents/{talent_id}/invoice-message")
+async def build_talent_invoice_message(pid: str, talent_id: str, admin: dict = Depends(current_team_or_admin)):
+    project, talent, card = await _load_talent_invoice_card(pid, talent_id)
+    result = _build_invoice_message(project, card)
+    # Phone is only REQUIRED when it's actually the destination that will be
+    # used — a talent with a WhatsApp group but no phone on file must still
+    # be able to send to that group (spec: "no phone + valid group -> group
+    # is used").
+    if result["destination_type"] == "phone" and card["phone"] is None:
+        raise HTTPException(400, "This talent has no phone number on file")
+    return result
+
+
+@router.post("/{pid}/production-desk/talents/{talent_id}/invoice-message/send-to-group")
+async def send_talent_invoice_to_group(pid: str, talent_id: str, admin: dict = Depends(current_team_or_admin)):
+    """Queues the exact same invoice message to the talent's WhatsApp GROUP
+    through the EXISTING WhatsApp Engine (the same _create_batch_internal /
+    whatsapp_jobs / worker pipeline POST /api/whatsapp/batches, "Send
+    Casting Call", and the Simple Assistant WhatsApp adapter all already
+    use — see simple_assistant/whatsapp_send.py's own docstring for the
+    identical pattern reused here, no new template/queue/worker/number).
+
+    A phone number can NEVER open a WhatsApp group via a link — wa.me only
+    opens an individual chat — so this is the only way the destination can
+    actually BE the group, not just display its name. Only reachable when a
+    group is genuinely on file; the phone case stays on the existing
+    wa.me-with-manual-review flow, untouched. The frontend requires an
+    explicit admin confirmation click (showing this exact message and
+    destination) before calling this endpoint — see ProductionDesk.jsx's
+    askTalentToRaiseInvoice — so a financial message is never queued
+    without the admin having reviewed it first. The worker's own
+    sending_enabled gate (added after a prior misuse incident) still
+    applies unchanged; this endpoint cannot bypass it.
+    """
+    from routers.whatsapp import BatchIn, ManualContact, SourceParams, _create_batch_internal
+
+    project, talent, card = await _load_talent_invoice_card(pid, talent_id)
+    result = _build_invoice_message(project, card)
+    group_name = result["whatsapp_group_name"]
+    if not group_name:
+        raise HTTPException(400, "This talent has no WhatsApp group on file — use the phone number instead")
+
+    template_doc = await db.whatsapp_templates.find_one({"slug": "custom"}, {"_id": 0, "id": 1})
+    if not template_doc:
+        raise HTTPException(503, "WhatsApp 'Custom Message' template is not configured")
+
+    try:
+        res = await _create_batch_internal(
+            BatchIn(
+                source_type="MANUAL",
+                source_params=SourceParams(contacts=[
+                    ManualContact(name=card["name"] or "", phone="", whatsapp_group_name=group_name),
+                ]),
+                template_id=template_doc["id"],
+                variable_data={"message": result["message"]},
+                is_dry_run=False,
+            ),
+            admin,
+        )
+    except HTTPException:
+        raise
+    jobs = res.get("jobs") or []
+    if not jobs:
+        raise HTTPException(400, "The WhatsApp group did not resolve to a sendable destination")
+    return {
+        "ok": True,
+        "batch_id": res["batch"]["id"],
+        "job_ids": [j["id"] for j in jobs],
+        "whatsapp_group_name": group_name,
+        "talent_name": card["name"],
     }

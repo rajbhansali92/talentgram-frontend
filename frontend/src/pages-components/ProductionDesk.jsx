@@ -254,16 +254,36 @@ function LocationPicker({ value, onCommit, knownLocations, placeholder, classNam
 // Normal browsing stays fully read-only; only this button ever flips a
 // record into a mutable state. The Management Agent is unaffected — it
 // still PATCHes the same endpoints directly, never through this UI state.
-function EditControls({ editing, onEdit, onSave, onCancel, onDelete, saveDisabled, size = "sm" }) {
+function EditControls({ editing, onEdit, onSave, onCancel, onDelete, saveDisabled, size = "sm", compact = false }) {
     const h = size === "sm" ? "h-6 text-[10px] px-2" : "h-7 text-xs";
+    // Deleting a record needs a confirmation step (a stray tap must never
+    // silently remove a shoot day / reading / tranche / crew member).
+    const confirmDelete = () => { if (window.confirm("Delete this? This can't be undone.")) onDelete(); };
     if (!editing) {
+        if (compact) {
+            // Dense table rows (e.g. Shooting Schedule) — icon-only with a
+            // tooltip/aria-label instead of the text button, so Actions
+            // never needs more width than Date/Location/etc. and can't wrap.
+            return (
+                <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={onEdit} className="text-black/40 hover:text-[#0c2340]" title="Edit" aria-label="Edit">
+                        <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                    {onDelete && (
+                        <button onClick={confirmDelete} className="text-black/40 hover:text-red-500" title="Delete" aria-label="Delete">
+                            <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                    )}
+                </div>
+            );
+        }
         return (
             <div className="flex items-center gap-1.5 shrink-0">
                 <Button size="sm" variant="ghost" className={h} onClick={onEdit}>
                     <Pencil className="h-3 w-3 mr-1" /> Edit
                 </Button>
                 {onDelete && (
-                    <button onClick={onDelete} className="text-black/30 hover:text-red-500" title="Delete">
+                    <button onClick={confirmDelete} className="text-black/30 hover:text-red-500" title="Delete" aria-label="Delete">
                         <Trash2 className="h-3 w-3" />
                     </button>
                 )}
@@ -281,9 +301,16 @@ function EditControls({ editing, onEdit, onSave, onCancel, onDelete, saveDisable
 function SectionCard({ title, icon: Icon, right, children, testId }) {
     return (
         <Card className="border-black/[0.08] shadow-none" data-testid={testId}>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 py-3.5 px-4 border-b border-black/[0.06]">
+            {/* UI audit fix — a title + a multi-part `right` (e.g. a status
+                label next to a button) used to compete for one row's width
+                and wrap/crowd on mobile ("Commission & Kickbacks" title
+                wrapping into 2 lines with "Zoho — Not Connected" and "Add
+                Kickback" squeezed into what was left). Stacking below sm:
+                gives each its own full-width line; sm:+ keeps the original
+                single-row layout unchanged. */}
+            <CardHeader className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 space-y-0 py-3.5 px-4 border-b border-black/[0.06]">
                 <CardTitle className="text-[13px] font-semibold text-black/80 flex items-center gap-2">
-                    {Icon && <Icon className="h-3.5 w-3.5 text-black/40" />}
+                    {Icon && <Icon className="h-3.5 w-3.5 text-black/40 shrink-0" />}
                     {title}
                 </CardTitle>
                 {right}
@@ -773,11 +800,32 @@ export default function ProductionDesk({ projectId, project }) {
     // open an individual chat, never a WhatsApp group — so the phone
     // number is still what actually opens, and the admin is told so
     // rather than silently sending to the wrong place.
+    // destination_type === "group": the talent's WhatsApp GROUP is the real
+    // destination now (spec: "the destination must actually be the talent's
+    // associated WhatsApp group, not merely display the group name"). A
+    // link can't open a WhatsApp group, so this sends through the existing
+    // WhatsApp Engine (same batch/job/worker pipeline every other real send
+    // in this app uses — see production_desk.py's send_talent_invoice_to_group)
+    // — never silently: the admin must explicitly confirm the exact message
+    // first, matching the same confirm-before-send pattern the WhatsApp
+    // Engine's own broadcast page already uses.
+    // destination_type === "phone": unchanged — opens wa.me with the
+    // message pre-filled, admin reviews and sends manually inside WhatsApp.
     const askTalentToRaiseInvoice = useCallback(async (talentId) => {
         try {
             const { data } = await adminApi.get(`/projects/${projectId}/production-desk/talents/${talentId}/invoice-message`);
             if (data.destination_type === "group") {
-                toast.info(`This talent also has a WhatsApp group ("${data.whatsapp_group_name}") on file — opening their personal number instead, since a group can't be opened via a link.`);
+                const confirmed = window.confirm(
+                    `Send this invoice request to ${data.talent_name}'s WhatsApp group "${data.whatsapp_group_name}"?\n\n${data.message}`,
+                );
+                if (!confirmed) return;
+                try {
+                    await adminApi.post(`/projects/${projectId}/production-desk/talents/${talentId}/invoice-message/send-to-group`);
+                    toast.success(`Sent to ${data.whatsapp_group_name}`);
+                } catch (sendErr) {
+                    toast.error(formatErrorDetail(sendErr) || "Could not send to the WhatsApp group");
+                }
+                return;
             }
             openWhatsApp(data.phone, data.message);
         } catch (err) {
@@ -830,53 +878,94 @@ export default function ProductionDesk({ projectId, project }) {
                         No talents are locked on this project yet. Move a talent to <strong>Locked</strong> in Casting Pipeline for it to appear here.
                     </div>
                 ) : (
-                    <div className="overflow-x-auto">
-                        <Table>
-                            <TableHeader>
-                                <TableRow>
-                                    <TableHead className="text-xs">Talent</TableHead>
-                                    <TableHead className="text-xs">Budget / Day</TableHead>
-                                    <TableHead className="text-xs">Shoot Days</TableHead>
-                                    <TableHead className="text-xs">Total Budget</TableHead>
-                                    <TableHead className="text-xs">Commission %</TableHead>
-                                    <TableHead className="text-xs">Commission ₹</TableHead>
-                                    <TableHead className="text-xs">Payment</TableHead>
-                                </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                                {talents.map((t) => (
-                                    <TableRow key={t.talent_id} data-testid={`pd-talent-row-${t.talent_id}`}>
-                                        <TableCell>
-                                            <button
-                                                className="flex items-center gap-2 text-left hover:underline"
-                                                onClick={() => openQuickView(t)}
-                                            >
-                                                {t.image_url ? (
-                                                    <img src={t.image_url} alt="" className="h-7 w-7 rounded-full object-cover" />
-                                                ) : (
-                                                    <div className="h-7 w-7 rounded-full bg-black/[0.06] flex items-center justify-center text-[10px] text-black/40">
-                                                        {(t.name || "?")[0]}
-                                                    </div>
-                                                )}
-                                                <span className="text-xs font-medium text-black/80">{t.name || "Untitled"}</span>
-                                            </button>
-                                        </TableCell>
-                                        <TableCell>
-                                            <InlineNumber value={t.budget_per_day} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_per_day: v })} />
-                                        </TableCell>
-                                        <TableCell>
-                                            <InlineNumber value={t.shooting_days} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { shooting_days: v })} />
-                                        </TableCell>
-                                        <TableCell>
-                                            <InlineNumber value={t.budget_total} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_total: v })} />
-                                        </TableCell>
-                                        <TableCell>
-                                            <InlineNumber value={t.commission_percent} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { commission_percent: v })} />
-                                        </TableCell>
-                                        <TableCell className="text-xs text-black/60">{formatCurrency(t.commission_amount)}</TableCell>
-                                        <TableCell>
+                    <>
+                        {/* Desktop/tablet — the full table. UI audit fix: this
+                            used to be the ONLY layout at every width, forcing
+                            a horizontal scroll-within-a-card on mobile
+                            (Part 12: "if a table cannot reasonably fit, use
+                            the mobile card representation"). */}
+                        <div className="hidden lg:block overflow-x-auto">
+                            <Table>
+                                <TableHeader>
+                                    <TableRow>
+                                        <TableHead className="text-xs">Talent</TableHead>
+                                        <TableHead className="text-xs">Budget / Day</TableHead>
+                                        <TableHead className="text-xs">Shoot Days</TableHead>
+                                        <TableHead className="text-xs">Total Budget</TableHead>
+                                        <TableHead className="text-xs">Commission %</TableHead>
+                                        <TableHead className="text-xs">Commission ₹</TableHead>
+                                        <TableHead className="text-xs">Payment</TableHead>
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    {talents.map((t) => (
+                                        <TableRow key={t.talent_id} data-testid={`pd-talent-row-${t.talent_id}`}>
+                                            <TableCell>
+                                                <button
+                                                    className="flex items-center gap-2 text-left hover:underline"
+                                                    onClick={() => openQuickView(t)}
+                                                >
+                                                    {t.image_url ? (
+                                                        <img src={t.image_url} alt="" className="h-7 w-7 rounded-full object-cover" />
+                                                    ) : (
+                                                        <div className="h-7 w-7 rounded-full bg-black/[0.06] flex items-center justify-center text-[10px] text-black/40">
+                                                            {(t.name || "?")[0]}
+                                                        </div>
+                                                    )}
+                                                    <span className="text-xs font-medium text-black/80">{t.name || "Untitled"}</span>
+                                                </button>
+                                            </TableCell>
+                                            <TableCell>
+                                                <InlineNumber value={t.budget_per_day} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_per_day: v })} />
+                                            </TableCell>
+                                            <TableCell>
+                                                <InlineNumber value={t.shooting_days} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { shooting_days: v })} />
+                                            </TableCell>
+                                            <TableCell>
+                                                <InlineNumber value={t.budget_total} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_total: v })} />
+                                            </TableCell>
+                                            <TableCell>
+                                                <InlineNumber value={t.commission_percent} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { commission_percent: v })} />
+                                            </TableCell>
+                                            <TableCell className="text-xs text-black/60">{formatCurrency(t.commission_amount)}</TableCell>
+                                            <TableCell>
+                                                <Select value={t.payment_status} onValueChange={(v) => patchTalent(t.talent_id, { payment_status: v })}>
+                                                    <SelectTrigger className={`h-7 text-xs w-[110px] ${t.payment_status === "cleared" ? "text-emerald-700" : "text-amber-700"}`}>
+                                                        <SelectValue />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        <SelectItem value="pending">Pending</SelectItem>
+                                                        <SelectItem value="cleared">Cleared</SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                            </TableCell>
+                                        </TableRow>
+                                    ))}
+                                </TableBody>
+                            </Table>
+                        </div>
+                        {/* Mobile/tablet — stacked cards, same editable fields. */}
+                        <div className="lg:hidden space-y-2">
+                            {talents.map((t) => (
+                                <div key={t.talent_id} className="rounded-md border border-black/[0.06] p-3" data-testid={`pd-talent-row-mobile-${t.talent_id}`}>
+                                    <button className="flex items-center gap-2 text-left hover:underline mb-2" onClick={() => openQuickView(t)}>
+                                        {t.image_url ? (
+                                            <img src={t.image_url} alt="" className="h-7 w-7 rounded-full object-cover" />
+                                        ) : (
+                                            <div className="h-7 w-7 rounded-full bg-black/[0.06] flex items-center justify-center text-[10px] text-black/40">{(t.name || "?")[0]}</div>
+                                        )}
+                                        <span className="text-xs font-medium text-black/80">{t.name || "Untitled"}</span>
+                                    </button>
+                                    <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-[11px]">
+                                        <div><span className="text-black/40 block mb-0.5">Budget / Day</span><InlineNumber value={t.budget_per_day} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_per_day: v })} /></div>
+                                        <div><span className="text-black/40 block mb-0.5">Shoot Days</span><InlineNumber value={t.shooting_days} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { shooting_days: v })} /></div>
+                                        <div><span className="text-black/40 block mb-0.5">Total Budget</span><InlineNumber value={t.budget_total} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_total: v })} /></div>
+                                        <div><span className="text-black/40 block mb-0.5">Commission %</span><InlineNumber value={t.commission_percent} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { commission_percent: v })} /></div>
+                                        <div><span className="text-black/40 block mb-0.5">Commission ₹</span><span className="text-black/60">{formatCurrency(t.commission_amount)}</span></div>
+                                        <div>
+                                            <span className="text-black/40 block mb-0.5">Payment</span>
                                             <Select value={t.payment_status} onValueChange={(v) => patchTalent(t.talent_id, { payment_status: v })}>
-                                                <SelectTrigger className={`h-7 text-xs w-[110px] ${t.payment_status === "cleared" ? "text-emerald-700" : "text-amber-700"}`}>
+                                                <SelectTrigger className={`h-7 text-xs w-full ${t.payment_status === "cleared" ? "text-emerald-700" : "text-amber-700"}`}>
                                                     <SelectValue />
                                                 </SelectTrigger>
                                                 <SelectContent>
@@ -884,12 +973,12 @@ export default function ProductionDesk({ projectId, project }) {
                                                     <SelectItem value="cleared">Cleared</SelectItem>
                                                 </SelectContent>
                                             </Select>
-                                        </TableCell>
-                                    </TableRow>
-                                ))}
-                            </TableBody>
-                        </Table>
-                    </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </>
                 )}
             </SectionCard>
 
@@ -1740,6 +1829,13 @@ function _dayExtraHours(perDay, agreed, actual) {
 }
 
 const SHOOT_SCHEDULE_COLUMNS = ["Date", "Call Time", "Reporting Time", "Location", "Agreed Basis", "Actual Hours", "Extra Hours", "Extra Amount", "Status", "Actions"];
+// Explicit per-column widths (not equal grid-cols-N) — Actions and Location
+// need real room; a short numeric column doesn't. This exact template is
+// shared by the header AND every row (view + edit) so nothing can drift out
+// of alignment, and Actions gets enough width to never wrap (the original
+// UI defect: a 10-label header over a 9-cell row, with Actions crammed into
+// the same cell as the Status badge).
+const SHOOT_SCHEDULE_GRID = "lg:grid-cols-[1fr_0.85fr_0.95fr_1.15fr_0.8fr_0.8fr_0.75fr_0.85fr_0.9fr_0.95fr]";
 
 // V2 polish (spec section 4/7) — one shoot day, explicit Edit/Save/Cancel.
 // Renders BOTH a desktop grid-row (proper labeled columns, not
@@ -1755,6 +1851,7 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
             date: day.date || "", call_time: day.call_time || "", reporting_time: day.reporting_time || "",
             location: day.location || "", location_map_url: day.location_map_url || "",
             agreed_hours: day.agreed_hours ?? "", actual_hours: day.actual_hours ?? "",
+            shoot_status: day.shoot_status || "scheduled",
         });
         setEditing(true);
     };
@@ -1764,6 +1861,7 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
             location: draft.location || null, location_map_url: draft.location_map_url || null,
             agreed_hours: draft.agreed_hours === "" ? null : Number(draft.agreed_hours),
             actual_hours: draft.actual_hours === "" ? null : Number(draft.actual_hours),
+            shoot_status: draft.shoot_status,
         });
         setEditing(false);
         setDraft(null);
@@ -1772,12 +1870,12 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
 
     if (editing) {
         return (
-            <div className="grid grid-cols-2 sm:grid-cols-9 gap-1.5 items-end bg-white border border-[#0c2340]/20 rounded-md p-2" data-testid={`pd-shoot-day-${day.id}`}>
-                <div><Label className="text-[10px] sm:hidden">Date</Label><Input type="date" value={draft.date} onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))} className="h-7 text-[11px]" /></div>
-                <div><Label className="text-[10px] sm:hidden">Call Time</Label><Input value={draft.call_time} onChange={(e) => setDraft((d) => ({ ...d, call_time: e.target.value }))} placeholder="e.g. 8:00 AM" className="h-7 text-[11px]" /></div>
-                <div><Label className="text-[10px] sm:hidden">Reporting Time</Label><Input value={draft.reporting_time} onChange={(e) => setDraft((d) => ({ ...d, reporting_time: e.target.value }))} placeholder="e.g. 7:00 AM" className="h-7 text-[11px]" /></div>
+            <div className={`grid grid-cols-2 ${SHOOT_SCHEDULE_GRID} gap-x-2 gap-y-2 lg:items-end bg-white border border-[#0c2340]/20 rounded-md p-2.5`} data-testid={`pd-shoot-day-${day.id}`}>
+                <div><Label className="text-[10px] lg:hidden">Date</Label><Input type="date" value={draft.date} onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))} className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px] lg:hidden">Call Time</Label><Input value={draft.call_time} onChange={(e) => setDraft((d) => ({ ...d, call_time: e.target.value }))} placeholder="e.g. 8:00 AM" className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px] lg:hidden">Reporting Time</Label><Input value={draft.reporting_time} onChange={(e) => setDraft((d) => ({ ...d, reporting_time: e.target.value }))} placeholder="e.g. 7:00 AM" className="h-7 text-[11px]" /></div>
                 <div>
-                    <Label className="text-[10px] sm:hidden">Location</Label>
+                    <Label className="text-[10px] lg:hidden">Location</Label>
                     <LocationPicker
                         value={draft.location}
                         knownLocations={knownLocations}
@@ -1786,11 +1884,18 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
                         onCommit={(name, mapUrl) => setDraft((d) => ({ ...d, location: name, location_map_url: mapUrl && !d.location_map_url ? mapUrl : d.location_map_url }))}
                     />
                 </div>
-                <div><Label className="text-[10px] sm:hidden">Agreed Basis (hrs)</Label><Input type="number" value={draft.agreed_hours} onChange={(e) => setDraft((d) => ({ ...d, agreed_hours: e.target.value }))} placeholder="e.g. 12" className="h-7 text-[11px]" /></div>
-                <div><Label className="text-[10px] sm:hidden">Actual Hours</Label><Input type="number" value={draft.actual_hours} onChange={(e) => setDraft((d) => ({ ...d, actual_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
-                <div className="text-[11px] text-black/40">Extra: {extra.hours > 0 ? `${extra.hours}h` : "—"}</div>
-                <div className="text-[11px] text-black/40">{extra.hours > 0 ? formatCurrency(extra.amount) : "—"}</div>
-                <div className="col-span-2 sm:col-span-1 flex sm:block items-center gap-1.5">
+                <div><Label className="text-[10px] lg:hidden">Agreed Basis (hrs)</Label><Input type="number" value={draft.agreed_hours} onChange={(e) => setDraft((d) => ({ ...d, agreed_hours: e.target.value }))} placeholder="e.g. 12" className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px] lg:hidden">Actual Hours</Label><Input type="number" value={draft.actual_hours} onChange={(e) => setDraft((d) => ({ ...d, actual_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
+                <div className="text-[11px] text-black/40"><span className="lg:hidden text-black/40 mr-1">Extra:</span>{extra.hours > 0 ? `${extra.hours}h` : "—"}</div>
+                <div className="text-[11px] text-black/40"><span className="lg:hidden text-black/40 mr-1">Extra Amt:</span>{extra.hours > 0 ? formatCurrency(extra.amount) : "—"}</div>
+                <div>
+                    <Label className="text-[10px] lg:hidden">Status</Label>
+                    <Select value={draft.shoot_status} onValueChange={(v) => setDraft((d) => ({ ...d, shoot_status: v }))}>
+                        <SelectTrigger className="h-7 text-[11px]"><SelectValue /></SelectTrigger>
+                        <SelectContent>{SHOOT_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}</SelectContent>
+                    </Select>
+                </div>
+                <div className="col-span-2 lg:col-span-1 flex lg:justify-end items-center gap-1.5">
                     <EditControls editing onSave={save} onCancel={cancel} />
                 </div>
             </div>
@@ -1800,22 +1905,22 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
     return (
         <>
             {/* Desktop — labeled grid row, matches the header below */}
-            <div className="hidden sm:grid sm:grid-cols-9 gap-1.5 items-center text-[11px] bg-slate-50/60 rounded-md p-2" data-testid={`pd-shoot-day-${day.id}`}>
-                <div className="font-medium text-black/70">{day.date}</div>
-                <div className="text-black/60">{day.call_time || "—"}</div>
-                <div className="text-black/60">{day.reporting_time || "—"}</div>
-                <div className="text-black/60"><LocationLink name={day.location} mapUrl={day.location_map_url} /></div>
+            <div className={`hidden lg:grid ${SHOOT_SCHEDULE_GRID} gap-x-2 items-center text-[11px] bg-slate-50/60 rounded-md px-2 py-2.5`} data-testid={`pd-shoot-day-${day.id}`}>
+                <div className="font-medium text-black/70 truncate">{day.date}</div>
+                <div className="text-black/60 truncate">{day.call_time || "—"}</div>
+                <div className="text-black/60 truncate">{day.reporting_time || "—"}</div>
+                <div className="text-black/60 truncate min-w-0"><LocationLink name={day.location} mapUrl={day.location_map_url} /></div>
                 <div className="text-black/60">{day.agreed_hours ?? "—"}</div>
                 <div className="text-black/60">{day.actual_hours ?? "—"}</div>
                 <div className={extra.hours > 0 ? "text-amber-700 font-medium" : "text-black/30"}>{extra.hours > 0 ? `${extra.hours}h` : "—"}</div>
-                <div className={extra.hours > 0 ? "text-amber-700 font-medium" : "text-black/30"}>{extra.hours > 0 ? formatCurrency(extra.amount) : "—"}</div>
-                <div className="flex items-center justify-between gap-1">
-                    <Badge variant="outline" className="text-[10px] capitalize">{(day.shoot_status || "scheduled").replace("_", " ")}</Badge>
-                    <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} />
+                <div className={extra.hours > 0 ? "text-amber-700 font-medium truncate" : "text-black/30"}>{extra.hours > 0 ? formatCurrency(extra.amount) : "—"}</div>
+                <div><Badge variant="outline" className="text-[10px] capitalize">{(day.shoot_status || "scheduled").replace("_", " ")}</Badge></div>
+                <div className="flex items-center justify-end">
+                    <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} compact />
                 </div>
             </div>
             {/* Mobile — stacked card, same data, same state */}
-            <div className="sm:hidden rounded-md border border-black/[0.08] p-2.5 text-[11px] space-y-1.5" data-testid={`pd-shoot-day-mobile-${day.id}`}>
+            <div className="lg:hidden rounded-md border border-black/[0.08] p-2.5 text-[11px] space-y-1.5" data-testid={`pd-shoot-day-mobile-${day.id}`}>
                 <div className="flex items-center justify-between">
                     <span className="font-semibold text-black/80">{day.date}</span>
                     <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} />
@@ -1876,8 +1981,10 @@ function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd,
             )}
 
             {talent.shoot_days.length > 0 && (
-                <div className="hidden sm:grid sm:grid-cols-9 gap-1.5 px-2 pb-1 text-[10px] uppercase tracking-wide text-black/35">
-                    {SHOOT_SCHEDULE_COLUMNS.map((c) => <div key={c}>{c}</div>)}
+                <div className={`hidden lg:grid ${SHOOT_SCHEDULE_GRID} gap-x-2 px-2 pb-1 text-[10px] uppercase tracking-wide text-black/35`}>
+                    {SHOOT_SCHEDULE_COLUMNS.map((c, i) => (
+                        <div key={c} className={i === SHOOT_SCHEDULE_COLUMNS.length - 1 ? "text-right" : ""}>{c}</div>
+                    ))}
                 </div>
             )}
             <div className="space-y-1.5">
@@ -1894,7 +2001,7 @@ function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd,
             </div>
 
             {adding && (
-                <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-1.5 items-end bg-white border border-black/[0.06] rounded-md p-2">
+                <div className="mt-2 grid grid-cols-2 lg:grid-cols-4 gap-1.5 items-end bg-white border border-black/[0.06] rounded-md p-2">
                     <div><Label className="text-[10px]">Date</Label><Input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} className="h-7 text-[11px]" autoFocus /></div>
                     <div><Label className="text-[10px]">Call Time</Label><Input value={form.call_time} onChange={(e) => setForm((f) => ({ ...f, call_time: e.target.value }))} className="h-7 text-[11px]" /></div>
                     <div><Label className="text-[10px]">Reporting</Label><Input value={form.reporting_time} onChange={(e) => setForm((f) => ({ ...f, reporting_time: e.target.value }))} className="h-7 text-[11px]" /></div>
@@ -2143,17 +2250,24 @@ function TalentReadingsRehearsals({ talent, knownLocations, onAdd, onUpdate, onD
 function TalentFinancialCard({ talent, onAskInvoice }) {
     return (
         <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-financial-${talent.talent_id}`}>
-            <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="min-w-0">
-                    <span className="text-xs font-semibold text-black/80">{talent.name}</span>
-                    {talent.whatsapp_group_name && (
-                        <div className="text-[10px] text-black/35" data-testid={`pd-whatsapp-group-${talent.talent_id}`}>
-                            WhatsApp group on file: {talent.whatsapp_group_name} (message opens to phone — a group can't be opened via a link)
-                        </div>
-                    )}
-                </div>
-                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2 shrink-0" onClick={onAskInvoice} data-testid={`pd-ask-invoice-${talent.talent_id}`} title="Opens WhatsApp with the message pre-filled — you review and send it yourself">
-                    <MessageCircle className="h-3 w-3 mr-1" /> Open WhatsApp: Ask to Raise Invoice
+            {/* UI audit fix — the talent name used to truncate to "ZZ…" on
+                mobile/tablet because it shared one row with the (long)
+                invoice button; stacking below lg: gives the name its own
+                line at every width narrower than genuine desktop. */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 mb-2">
+                <span className="text-xs font-semibold text-black/80">{talent.name}</span>
+                <Button
+                    size="sm" variant="outline" className="h-6 text-[10px] px-2 self-start lg:self-auto shrink-0"
+                    onClick={onAskInvoice}
+                    data-testid={`pd-ask-invoice-${talent.talent_id}`}
+                    title={talent.whatsapp_group_name
+                        ? `Sends to the "${talent.whatsapp_group_name}" WhatsApp group — you'll be asked to confirm the message first`
+                        : "Opens WhatsApp with the message pre-filled — you review and send it yourself"}
+                >
+                    <MessageCircle className="h-3 w-3 mr-1" /> Ask to Raise Invoice
+                    <span className="text-black/40 ml-1" data-testid={`pd-whatsapp-destination-${talent.talent_id}`}>
+                        · WhatsApp{talent.whatsapp_group_name ? " Group" : ""}
+                    </span>
                 </Button>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-[11px]">

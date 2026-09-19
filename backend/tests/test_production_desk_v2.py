@@ -797,3 +797,106 @@ async def test_crew_client_ref_includes_crm_peek_fields(client, headers):
     finally:
         await db.project_crew.delete_many({"project_id": pid})
         await _cleanup(pid, client_ids=[cid])
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp group destination — the group must actually be USED, not just
+# displayed. Reuses the exact same _create_batch_internal engine every other
+# real send in this app goes through (see production_desk.py's
+# send_talent_invoice_to_group docstring) — no new worker/queue/template.
+# ---------------------------------------------------------------------------
+@_aio
+async def test_A_group_destination_actually_sends_to_the_group(client, headers):
+    pid = await _make_project(commission_percent="15%")
+    tid = await _make_talent("ZZZ_TEST_PDV2_GroupSend_Talent", "+911112229001")
+    await db.talents.update_one({"id": tid}, {"$set": {"whatsapp_group_name": "ZZZ_TEST_Real_Group"}})
+    await _add_to_pipeline(pid, tid)
+    # Temporarily enable sending on the shared "default" worker to prove the
+    # real send path end-to-end, then restore its prior state exactly —
+    # this is a shared dev DB and the fail-closed default is deliberate.
+    prior = await db.whatsapp_workers.find_one({"id": "default"}, {"_id": 0, "sending_enabled": 1})
+    await db.whatsapp_workers.update_one({"id": "default"}, {"$set": {"sending_enabled": True}})
+    try:
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"budget_total": 50000}, headers=headers)
+        preview = await client.get(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message", headers=headers)
+        assert preview.json()["destination_type"] == "group"
+
+        r = await client.post(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message/send-to-group", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["whatsapp_group_name"] == "ZZZ_TEST_Real_Group"
+        job = await db.whatsapp_jobs.find_one({"batch_id": body["batch_id"]}, {"_id": 0})
+        assert job["destination_type"] == "group"
+        assert job["destination"] == "ZZZ_TEST_Real_Group"
+        assert "Invoice Amount to Talentgram" in job["message_body"]
+        await db.whatsapp_batches.delete_many({"id": body["batch_id"]})
+        await db.whatsapp_jobs.delete_many({"batch_id": body["batch_id"]})
+    finally:
+        if prior and "sending_enabled" in prior:
+            await db.whatsapp_workers.update_one({"id": "default"}, {"$set": {"sending_enabled": prior["sending_enabled"]}})
+        else:
+            await db.whatsapp_workers.update_one({"id": "default"}, {"$unset": {"sending_enabled": ""}})
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_B_no_group_falls_back_to_phone_destination(client, headers):
+    pid = await _make_project(commission_percent="15%")
+    tid = await _make_talent("ZZZ_TEST_PDV2_NoGroup_Talent", "+911112229002")
+    await _add_to_pipeline(pid, tid)
+    try:
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"budget_total": 50000}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message", headers=headers)
+        assert r.json()["destination_type"] == "phone"
+        assert r.json()["phone"] == "+911112229002"
+
+        send = await client.post(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message/send-to-group", headers=headers)
+        assert send.status_code == 400  # no group to send to — frontend must use the phone/wa.me path instead
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_C_whitespace_only_group_is_treated_as_no_group_safe_phone_fallback(client, headers):
+    pid = await _make_project(commission_percent="15%")
+    tid = await _make_talent("ZZZ_TEST_PDV2_StaleGroup_Talent", "+911112229003")
+    await db.talents.update_one({"id": tid}, {"$set": {"whatsapp_group_name": "   "}})
+    await _add_to_pipeline(pid, tid)
+    try:
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"budget_total": 50000}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message", headers=headers)
+        assert r.json()["destination_type"] == "phone"
+        assert r.json()["whatsapp_group_name"] is None
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_D_no_phone_but_valid_group_uses_the_group(client, headers):
+    pid = await _make_project(commission_percent="15%")
+    tid = await _make_talent("ZZZ_TEST_PDV2_NoPhoneGroup_Talent", phone=None)
+    await db.talents.update_one({"id": tid}, {"$set": {"whatsapp_group_name": "ZZZ_TEST_NoPhone_Group"}})
+    await _add_to_pipeline(pid, tid)
+    try:
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"budget_total": 50000}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message", headers=headers)
+        assert r.status_code == 200  # no 400 despite missing phone — the group is what's used
+        assert r.json()["destination_type"] == "group"
+        assert r.json()["whatsapp_group_name"] == "ZZZ_TEST_NoPhone_Group"
+    finally:
+        await _cleanup(pid, [tid])
+
+
+@_aio
+async def test_E_no_group_no_phone_gives_a_clear_error(client, headers):
+    pid = await _make_project(commission_percent="15%")
+    tid = await _make_talent("ZZZ_TEST_PDV2_NoDestination_Talent", phone=None)
+    await _add_to_pipeline(pid, tid)
+    try:
+        await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"budget_total": 50000}, headers=headers)
+        r = await client.get(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message", headers=headers)
+        assert r.status_code == 400
+        assert "phone" in r.json()["detail"].lower()
+    finally:
+        await _cleanup(pid, [tid])

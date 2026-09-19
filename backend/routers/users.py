@@ -113,7 +113,9 @@ async def update_role(
     target = await db.users.find_one({"id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "User not found")
-    # Guard: prevent the last admin from demoting themselves into team.
+    if target.get("id") == admin.get("id") and payload.role != target.get("role"):
+        raise HTTPException(400, "Cannot change your own role")
+    # Guard: prevent the last admin from being demoted into team.
     if target.get("role") == "admin" and payload.role != "admin":
         admin_count = await db.users.count_documents({"role": "admin", "status": "active"})
         if admin_count <= 1:

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { adminApi, getAdmin, isAdmin } from "@/lib/api";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import {
     Select,
     SelectContent,
@@ -121,7 +122,7 @@ function InviteModal({ open, onClose, onInvited }) {
             onInvited();
             toast.success("Invite created");
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to invite");
+            toast.error(formatErrorDetail(e, "Failed to invite"));
         } finally {
             setBusy(false);
         }
@@ -329,7 +330,7 @@ export default function UserManagement() {
             setItems(data.items || []);
             setStats(data.stats || {});
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to load users");
+            toast.error(formatErrorDetail(e, "Failed to load users"));
         } finally {
             setLoading(false);
         }
@@ -346,7 +347,7 @@ export default function UserManagement() {
             toast.success("Role updated");
             load();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to update role");
+            toast.error(formatErrorDetail(e, "Failed to update role"));
         } finally {
             setBusyId(null);
         }
@@ -360,7 +361,7 @@ export default function UserManagement() {
             toast.success(action === "enable" ? "User enabled" : "User disabled");
             load();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed");
+            toast.error(formatErrorDetail(e, "Failed"));
         } finally {
             setBusyId(null);
         }
@@ -376,7 +377,7 @@ export default function UserManagement() {
                 expires_at: data.expires_at,
             });
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed");
+            toast.error(formatErrorDetail(e, "Failed"));
         } finally {
             setBusyId(null);
         }
@@ -395,7 +396,7 @@ export default function UserManagement() {
             toast.success("User deleted");
             load();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed");
+            toast.error(formatErrorDetail(e, "Failed"));
         } finally {
             setBusyId(null);
         }

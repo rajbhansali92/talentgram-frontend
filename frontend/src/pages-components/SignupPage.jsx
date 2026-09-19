@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useRouter, useSearchParams } from "next/navigation";
 import { api as axios, saveAdminSession } from "@/lib/api";
 import { toast } from "sonner";
 import Logo from "@/components/Logo";
@@ -8,8 +8,8 @@ import { Loader2, Check, Sparkles, Eye, EyeOff, RefreshCw } from "lucide-react";
 
 
 export default function SignupPage() {
-    const [params] = useSearchParams();
-    const nav = useNavigate();
+    const params = useSearchParams();
+    const router = useRouter();
     const token = params.get("token") || "";
 
     const [state, setState] = useState("loading");
@@ -80,7 +80,7 @@ export default function SignupPage() {
             });
             saveAdminSession(data.token, data.admin);
             toast.success(`Welcome, ${invite.name.split(" ")[0]}`);
-            nav("/admin");
+            router.push("/admin");
         } catch (err) {
             toast.error(err?.response?.data?.detail || "Failed to complete signup");
         } finally {

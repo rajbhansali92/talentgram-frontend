@@ -330,6 +330,20 @@ class TestAdminUserActions:
         r = requests.post(f"{API}/users/{my_id}/disable", headers=hdr(admin_token))
         assert r.status_code == 400
 
+    def test_cannot_change_own_role(self, admin_token):
+        """update_role previously had no self-check (unlike disable/delete), so
+        an admin could demote themselves whenever 2+ admins existed — the
+        last-admin-count guard only fires at exactly 1 active admin."""
+        r = requests.get(f"{API}/users", headers=hdr(admin_token))
+        admins = [u for u in r.json()["items"] if u.get("role") == "admin" and u.get("email") == ADMIN_EMAIL]
+        assert admins, "primary admin not found"
+        my_id = admins[0]["id"]
+        r = requests.post(f"{API}/users/{my_id}/role", headers=hdr(admin_token), json={"role": "team"})
+        assert r.status_code == 400
+        r = requests.get(f"{API}/users", headers=hdr(admin_token))
+        me = next(u for u in r.json()["items"] if u["id"] == my_id)
+        assert me["role"] == "admin"
+
     def test_cannot_delete_last_admin(self, admin_token):
         r = requests.get(f"{API}/users", headers=hdr(admin_token))
         admins = [u for u in r.json()["items"] if u.get("role") == "admin" and u.get("status") == "active"]

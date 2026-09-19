@@ -3209,6 +3209,27 @@ function SubmissionPage() {
                                         </p>
                                     </div>
                                 )}
+                                {/* Was missing entirely on this screen — a returning,
+                                    already-submitted talent had no way to reopen the
+                                    brief they were cast against (2026-09-19). Same
+                                    button/state the pre-submission form already uses. */}
+                                {hasAuditionMaterial && (
+                                    <div className="mt-4 pt-4 border-t border-slate-200">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowMaterial(true)}
+                                            data-testid="view-audition-material-btn"
+                                            className="inline-flex items-center gap-2 px-5 py-2.5 border border-[#0c2340] hover:border-[#0c2340] hover:bg-[#0c2340]/[0.08] active:scale-[0.98] rounded-full text-[13px] text-[#0c2340] font-semibold transition-all hover:shadow-md hover:-translate-y-[1px] bg-[#0c2340]/[0.04]"
+                                        >
+                                            <FolderOpen className="w-4 h-4 text-[#0c2340]" /> View Audition Material
+                                        </button>
+                                        {auditionMaterialSummary && (
+                                            <p className="mt-2 ml-1 text-[11px] text-[#666666] tracking-wide">
+                                                {auditionMaterialSummary}
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         )}
 
@@ -3231,6 +3252,22 @@ function SubmissionPage() {
                         </div>
                     </div>
                 </div>
+                {/* Root cause of the "?material=1 opens then jumps back to
+                    Upload Complete" bug: this Thank You / Submission Hub
+                    screen is a separate early `return` that never rendered
+                    MaterialModal at all, regardless of `showMaterial`. The
+                    materialDeepLink effect (above) already flips
+                    `showMaterial` true independent of submission state — it
+                    just had nowhere to render once a submitted talent
+                    reopened the link. Reusing the exact same modal/state the
+                    pre-submission form uses, so the explicit ?material=1 URL
+                    intent is honoured regardless of which screen is showing. */}
+                {showMaterial && (
+                    <MaterialModal
+                        project={project}
+                        onClose={() => setShowMaterial(false)}
+                    />
+                )}
             </main>
         );
     }

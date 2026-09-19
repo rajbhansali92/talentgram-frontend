@@ -165,6 +165,29 @@ SHOOT_STATUS_OPTIONS = ["not_scheduled", "scheduled", "today", "completed", "can
 TRIAL_STATUS_OPTIONS = ["not_scheduled", "scheduled", "completed"]
 PAYMENT_FOLLOWUP_STATUSES = ["not_due", "due", "in_progress", "done"]
 
+# ── Production Desk V2 (talent-level shooting/overtime/reimbursements) ─────
+# Per-talent shoot-day records, readings/rehearsals, and payment tranches
+# are all small, additive structures on the SAME existing rows/collections
+# this module already owns — no new "talent scheduling" or "finance"
+# system. See module docstring for the overall reuse principle.
+
+# Reuses SHOOT_STATUS_OPTIONS for each individual day record's own status
+# (a talent can be "today" on one date and "scheduled" on another).
+
+# Agreement Signed — some projects genuinely have no agreement step, hence
+# a real N/A rather than forcing every project into a false "Pending".
+AGREEMENT_STATUS_OPTIONS = ["done", "pending", "n_a"]
+
+# Payment Tranches — an operational billing-milestone tracker, deliberately
+# NOT an accounting/invoicing engine (see module docstring's Zoho section
+# for the same "honest, not-built" boundary). invoice_status mirrors the
+# same raised/raised_and_sent vocabulary the project-level checklist uses,
+# so one convention is used everywhere rather than two.
+TRANCHE_INVOICE_STATUSES = ["pending", "raised", "raised_and_sent"]
+TRANCHE_PAYMENT_STATUSES = ["pending", "received"]
+
+READING_REHEARSAL_TYPES = {"reading", "rehearsal"}
+
 
 def _num(v) -> Optional[float]:
     """Best-effort float coercion — treats "", None, and non-numeric input
@@ -190,6 +213,33 @@ def _commission_fraction(raw: Optional[str]) -> Optional[float]:
         return None
 
 
+def _shoot_day_extra_hours_amount(per_day_rate: Optional[float], record: dict) -> float:
+    """The core overtime formula (spec section 1):
+
+        hourly_rate = per_day_rate / agreed_hours
+        extra_hours = max(0, actual_hours - agreed_hours)
+        extra_amount = hourly_rate * extra_hours
+
+    `agreed_hours` is read PER RECORD (never a hardcoded 12), so a project
+    on a 12-hour basis and one on a 14-hour basis compute correctly from
+    the exact same function — the "basis" is just whatever the admin typed
+    into that specific shoot day. Missing per_day_rate, agreed_hours, or
+    actual_hours all mean "not computable yet" (0), not an error — a
+    manager may add the date before the rate/hours are finalised."""
+    agreed = _num(record.get("agreed_hours"))
+    actual = _num(record.get("actual_hours"))
+    if not per_day_rate or not agreed or agreed <= 0 or actual is None:
+        return 0.0
+    extra = actual - agreed
+    if extra <= 0:
+        return 0.0
+    return round((per_day_rate / agreed) * extra, 2)
+
+
+def _talent_extra_hours_total(per_day_rate: Optional[float], shoot_days: List[dict]) -> float:
+    return round(sum(_shoot_day_extra_hours_amount(per_day_rate, d) for d in (shoot_days or [])), 2)
+
+
 async def _get_project_or_404(pid: str) -> dict:
     project = await db.projects.find_one({"id": pid}, {"_id": 0})
     if not project:
@@ -212,19 +262,37 @@ async def _get_locked_pipeline_row(pid: str, talent_id: str) -> dict:
     return row
 
 
-def _talent_card(t: dict, row: dict, project: dict) -> dict:
+def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float = 0.0) -> dict:
     """One locked talent's Production Desk view — budget, commission,
-    payment. Effective shooting days/commission fall back to the
-    project-level value when the talent has no override, and an
-    explicitly-set budget_total is NEVER recomputed from per-day × days
-    (only used when total itself is absent)."""
+    overtime, reimbursements, payment. Effective shooting days/commission
+    fall back to the project-level value when the talent has no override,
+    and an explicitly-set budget_total is NEVER recomputed from
+    per-day × days (only used when total itself is absent).
+
+    V2 (talent-level shooting/overtime): when `pd_shoot_days` (the
+    structured per-day schedule) has any records, its length becomes the
+    authoritative `shooting_days` — the old manual `pd_shooting_days`
+    integer is only a fallback for talents that never adopted the new
+    per-day schedule, preserving old records unchanged (spec section 33).
+
+    Commission formula (spec section 22): commission applies to
+    Base Fee + Extra Hours — reimbursements are a separate, non-
+    commissionable pass-through, exactly as before (reimbursement_total is
+    reported alongside but never folded into commissionable_amount)."""
     from routers.casting_pipeline import _talent_merge_fields
 
     merged = _talent_merge_fields(t)
     per_day = _num(row.get("pd_budget_per_day"))
     explicit_total = _num(row.get("pd_budget_total"))
-    shooting_days = row.get("pd_shooting_days")
-    shooting_days = int(shooting_days) if shooting_days not in (None, "") else project.get("pd_shooting_days")
+    shoot_days = row.get("pd_shoot_days") or []
+    readings_rehearsals = row.get("pd_readings_rehearsals") or []
+    manual_shooting_days = row.get("pd_shooting_days")
+    if shoot_days:
+        shooting_days = len(shoot_days)
+    elif manual_shooting_days not in (None, ""):
+        shooting_days = int(manual_shooting_days)
+    else:
+        shooting_days = project.get("pd_shooting_days")
     commission_pct_raw = row.get("pd_commission_percent")
     commission_fraction = (
         _num(commission_pct_raw) / 100.0 if commission_pct_raw not in (None, "")
@@ -238,9 +306,22 @@ def _talent_card(t: dict, row: dict, project: dict) -> dict:
     else:
         budget_total = None
 
+    extra_hours_total = _talent_extra_hours_total(per_day, shoot_days)
+    commissionable_amount = (
+        round((budget_total or 0) + extra_hours_total, 2)
+        if (budget_total is not None or extra_hours_total)
+        else None
+    )
     commission_amount = (
-        round(budget_total * commission_fraction, 2)
-        if budget_total is not None and commission_fraction is not None
+        round(commissionable_amount * commission_fraction, 2)
+        if commissionable_amount is not None and commission_fraction is not None
+        else None
+    )
+    # Talent invoice amount (spec section 24): commissionable minus
+    # commission, PLUS reimbursements added back uncommissioned.
+    invoice_amount = (
+        round((commissionable_amount - commission_amount) + reimbursement_total, 2)
+        if commissionable_amount is not None and commission_amount is not None
         else None
     )
 
@@ -257,10 +338,24 @@ def _talent_card(t: dict, row: dict, project: dict) -> dict:
         "commission_percent": (commission_fraction * 100.0) if commission_fraction is not None else None,
         "commission_amount": commission_amount,
         "payment_status": row.get("pd_payment_status") or "pending",
+        # V2 — per-day shooting schedule + overtime (spec sections 1-4).
+        "shoot_days": shoot_days,
+        "extra_hours_total": extra_hours_total,
+        "commissionable_amount": commissionable_amount,
+        "reimbursement_total": round(reimbursement_total, 2),
+        "invoice_amount": invoice_amount,
+        # V2 — Readings & Rehearsals (spec section 8).
+        "readings_rehearsals": readings_rehearsals,
         # Talent Preparation (Phase 2) — additive fields on the SAME
         # locked casting_pipeline row, no second talent/project record.
+        # fitting_status/look_test_status stay fully alive here — the
+        # Management Agent already has real, working NLU commands and
+        # readiness checks against them (agents/modules/management_agent.py);
+        # spec section 6 only asks to remove them from the Production Desk
+        # UI, not to break that — see V2 frontend changes, not here.
         "costume_trial_at": row.get("pd_costume_trial_at"),
         "costume_trial_location": row.get("pd_costume_trial_location"),
+        "costume_trial_map_url": row.get("pd_costume_trial_map_url"),
         "fitting_status": row.get("pd_fitting_status") or "not_scheduled",
         "look_test_status": row.get("pd_look_test_status") or "not_scheduled",
         "grooming_requirements": row.get("pd_grooming_requirements"),
@@ -269,10 +364,11 @@ def _talent_card(t: dict, row: dict, project: dict) -> dict:
     }
 
 
-async def _locked_talent_cards(pid: str, project: dict) -> List[dict]:
+async def _locked_talent_cards(pid: str, project: dict, reimb_totals: Optional[Dict[str, float]] = None) -> List[dict]:
     rows = await db.casting_pipeline.find({"project_id": pid, "stage": "locked"}, {"_id": 0}).to_list(2000)
     if not rows:
         return []
+    reimb_totals = reimb_totals or {}
     talent_ids = [r["talent_id"] for r in rows if r.get("talent_id")]
     talents = await db.talents.find(
         {"id": {"$in": talent_ids}},
@@ -284,19 +380,23 @@ async def _locked_talent_cards(pid: str, project: dict) -> List[dict]:
         t = by_id.get(row.get("talent_id"))
         if not t:
             continue
-        cards.append(_talent_card(t, row, project))
+        cards.append(_talent_card(t, row, project, reimb_totals.get(row.get("talent_id"), 0.0)))
     return cards
 
 
-def _serialise_client_ref(client_id: Optional[str], name_cache: Dict[str, str]) -> Optional[dict]:
+def _serialise_client_ref(client_id: Optional[str], name_cache: Dict[str, dict]) -> Optional[dict]:
     if not client_id:
         return None
-    return {"client_id": client_id, "name": name_cache.get(client_id, "")}
+    info = name_cache.get(client_id) or {}
+    return {"client_id": client_id, "name": info.get("name", ""), "phone_number": info.get("phone_number")}
 
 
-async def _client_name_map(client_ids: List[str]) -> Dict[str, str]:
-    """Batch-resolve CRM client display names — one query regardless of how
-    many kickbacks/crew rows reference clients."""
+async def _client_name_map(client_ids: List[str]) -> Dict[str, dict]:
+    """Batch-resolve CRM client display name + phone — one query regardless
+    of how many kickbacks/crew/payment-followup rows reference clients.
+    Phone is needed by the WhatsApp one-tap actions (spec sections 17/23);
+    exposed via the same map every existing client-ref caller already
+    uses, not a second lookup."""
     from bson import ObjectId
     from bson.errors import InvalidId
 
@@ -310,8 +410,8 @@ async def _client_name_map(client_ids: List[str]) -> Dict[str, str]:
             continue
     if not oids:
         return {}
-    docs = await db.clients.find({"_id": {"$in": oids}}, {"name": 1}).to_list(len(oids))
-    return {str(d["_id"]): d.get("name", "") for d in docs}
+    docs = await db.clients.find({"_id": {"$in": oids}}, {"name": 1, "phone_number": 1}).to_list(len(oids))
+    return {str(d["_id"]): {"name": d.get("name", ""), "phone_number": d.get("phone_number")} for d in docs}
 
 
 _ACTIVE_TASK_STATUSES = ["pending", "in_progress"]
@@ -358,9 +458,21 @@ def _bucket_tasks(tasks: List[dict], today_start: str, today_end: str) -> Dict[s
 async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_admin)):
     project = await _get_project_or_404(pid)
 
-    locked = await _locked_talent_cards(pid, project)
+    # Reimbursements are fetched BEFORE the locked-talent cards (rather than
+    # after, as before V2) so each talent's card can carry its own
+    # reimbursement_total — same underlying db.project_reimbursements
+    # collection/query, just reordered.
+    reimbursements = await db.project_reimbursements.find({"project_id": pid}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    reimb_totals: Dict[str, float] = {}
+    for r in reimbursements:
+        tid = r.get("talent_id")
+        if tid:
+            reimb_totals[tid] = reimb_totals.get(tid, 0.0) + (_num(r.get("amount")) or 0.0)
+
+    locked = await _locked_talent_cards(pid, project, reimb_totals)
 
     talent_budget_total = sum(c["budget_total"] for c in locked if c["budget_total"] is not None)
+    extra_hours_total_all = sum(c["extra_hours_total"] for c in locked)
     commission_gross = sum(c["commission_amount"] for c in locked if c["commission_amount"] is not None)
     cleared = sum(1 for c in locked if c["payment_status"] == "cleared")
     pending_amount = sum(
@@ -372,7 +484,22 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     kickbacks_total = sum(_num(k.get("amount")) or 0 for k in kickbacks)
     commission_net = commission_gross - kickbacks_total
 
-    reimbursements = await db.project_reimbursements.find({"project_id": pid}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    reimbursements_total_all = round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2)
+    # Checklist reimbursement status (spec section 11) — computed, never
+    # stored: N/A when the project genuinely has none, complete only once
+    # every one of them is "paid", otherwise pending. Never a false
+    # "Pending" when there's nothing to reimburse.
+    if not reimbursements:
+        reimbursement_checklist_status = "n_a"
+    elif all(r.get("status") == "paid" for r in reimbursements):
+        reimbursement_checklist_status = "complete"
+    else:
+        reimbursement_checklist_status = "pending"
+
+    tranches = await db.project_payment_tranches.find({"project_id": pid}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    tranches_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches), 2)
+    tranches_received_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches if t.get("payment_status") == "received"), 2)
+
     crew = await db.project_crew.find({"project_id": pid}, {"_id": 0}).sort("created_at", 1).to_list(200)
 
     name_map = await _client_name_map(
@@ -468,6 +595,11 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
         needs_attention.append("Payment follow-up due today")
     if locked and not project.get("pd_shoot_location") and not project.get("pd_call_time"):
         needs_attention.append("Shoot details incomplete")
+    # Only nags when the admin has explicitly marked it pending — an unset
+    # (None) agreement_status never surfaces here, so old projects that
+    # never touched this new field aren't retroactively flagged.
+    if project.get("pd_agreement_status") == "pending":
+        needs_attention.append("Agreement not signed")
 
     return {
         "project": {
@@ -522,6 +654,22 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             "pd_next_follow_up_at": next_follow_up,
             "pd_payment_followup_status": followup_status,
             "pd_payment_followup_notes": project.get("pd_payment_followup_notes"),
+            # V2 — Agreement Signed (spec section 14). None (unset) is
+            # rendered by the frontend the same as "pending" for display,
+            # but never auto-flagged in needs_attention (see above) so an
+            # old project isn't retroactively nagged.
+            "pd_agreement_status": project.get("pd_agreement_status"),
+            # V2 — structured multi-date shoot schedule (spec section 4).
+            # Independent of the free-text `shoot_dates` above and the
+            # single reminder-only `pd_shoot_date` — this is the new
+            # proper date-picker's backing store, and the source a locked
+            # talent's own per-day schedule can be seeded from (spec
+            # section 3's "Use Project Dates" one-tap, never auto-synced).
+            "pd_shoot_dates_list": project.get("pd_shoot_dates_list") or [],
+            # V2 — combined checklist convenience: true only when BOTH
+            # underlying fields (kept alive for Management Agent's existing
+            # invoice-status NLU/digest commands) are true.
+            "pd_invoice_raised_and_sent": bool(project.get("pd_invoice_raised")) and bool(project.get("pd_invoice_sent")),
         },
         "finance": {
             # Honest, static Case-B state — see module docstring. Never
@@ -533,17 +681,29 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             "locked_count": len(locked),
             "shoot_days": project.get("pd_shooting_days"),
             "talent_budget_total": talent_budget_total,
+            "extra_hours_total": round(extra_hours_total_all, 2),
+            "reimbursements_total": reimbursements_total_all,
             "production_budget_total": _num(project.get("pd_production_budget_total")),
+            # V2 (spec section 21) — auto-aggregated, never manually typed.
+            # The pre-existing pd_production_budget_total (manual line
+            # above) is left untouched/still editable; this is a SEPARATE,
+            # additive, fully-derived total so nothing prior silently
+            # changes meaning.
+            "total_talent_and_overtime_and_reimbursements": round(talent_budget_total + extra_hours_total_all + reimbursements_total_all, 2),
             "commission_gross": round(commission_gross, 2),
             "kickbacks_total": round(kickbacks_total, 2),
             "commission_net": round(commission_net, 2),
             "payments_cleared": cleared,
             "payments_total": len(locked),
             "payments_pending_amount": round(pending_amount, 2),
+            "tranches_total": tranches_total,
+            "tranches_received_total": tranches_received_total,
         },
         "needs_attention": needs_attention,
         "kickbacks": kickbacks,
         "reimbursements": reimbursements,
+        "reimbursement_checklist_status": reimbursement_checklist_status,
+        "tranches": tranches,
         "crew": crew,
         "documents": documents,
         "tasks": {
@@ -617,6 +777,18 @@ class ProductionDeskProjectPatch(BaseModel):
     next_follow_up_at: Optional[str] = None
     payment_followup_status: Optional[str] = None
     payment_followup_notes: Optional[str] = None
+    # V2 — Agreement Signed (spec section 14). Explicit three-way so a
+    # project genuinely without an agreement step can say so honestly.
+    agreement_status: Optional[str] = None
+    # V2 — structured multi-date shoot schedule (spec section 4). A plain
+    # list of ISO dates; the frontend renders add/remove date pickers over
+    # it rather than a free-text field.
+    shoot_dates_list: Optional[List[str]] = None
+    # V2 — convenience alias so the frontend's single "Invoice Raised &
+    # Sent" checklist toggle can write both underlying fields (still kept
+    # alive for Management Agent — see module docstring) in one call
+    # instead of two separate ones that could race/partially apply.
+    invoice_raised_and_sent: Optional[bool] = None
 
 
 @router.patch("/{pid}/production-desk")
@@ -628,11 +800,19 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
     if payload.payment_followup_status is not None and payload.payment_followup_status not in PAYMENT_FOLLOWUP_STATUSES:
         raise HTTPException(400, f"payment_followup_status must be one of {PAYMENT_FOLLOWUP_STATUSES}")
+    if payload.agreement_status is not None and payload.agreement_status not in AGREEMENT_STATUS_OPTIONS:
+        raise HTTPException(400, f"agreement_status must be one of {AGREEMENT_STATUS_OPTIONS}")
     if payload.shoot_date is not None and payload.shoot_date != "":
         try:
             date.fromisoformat(payload.shoot_date)
         except ValueError:
             raise HTTPException(400, "shoot_date must be an ISO date (YYYY-MM-DD)")
+    if payload.shoot_dates_list is not None:
+        for d in payload.shoot_dates_list:
+            try:
+                date.fromisoformat(d)
+            except ValueError:
+                raise HTTPException(400, f"shoot_dates_list entries must be ISO dates (YYYY-MM-DD): {d!r}")
     field_map = {
         "production_budget_per_day": "pd_production_budget_per_day",
         "production_budget_total": "pd_production_budget_total",
@@ -659,8 +839,19 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         # new pd_* field. See ProductionDeskProjectPatch.shoot_dates above.
         "shoot_dates": "shoot_dates",
         "shoot_date": "pd_shoot_date",
+        "agreement_status": "pd_agreement_status",
+        "shoot_dates_list": "pd_shoot_dates_list",
     }
-    updates = {field_map[k]: v for k, v in payload.model_dump(exclude_unset=True).items()}
+    payload_dict = payload.model_dump(exclude_unset=True)
+    # invoice_raised_and_sent is a write-only alias — it maps to BOTH
+    # existing fields at once, never stored under its own key (the
+    # computed pd_invoice_raised_and_sent read in get_production_desk
+    # derives from them fresh every time, so there's nothing to desync).
+    invoice_alias = payload_dict.pop("invoice_raised_and_sent", None)
+    updates = {field_map[k]: v for k, v in payload_dict.items()}
+    if invoice_alias is not None:
+        updates["pd_invoice_raised"] = invoice_alias
+        updates["pd_invoice_sent"] = invoice_alias
     # A shoot_date CHANGE invalidates any previously-sent shoot reminders —
     # see services/production_reminder_worker.py's idempotency design
     # (each reminder kind is only "sent for" a specific date value; clearing
@@ -707,6 +898,11 @@ class TalentProductionPatch(BaseModel):
     # Talent Preparation (Phase 2)
     costume_trial_at: Optional[str] = None
     costume_trial_location: Optional[str] = None
+    # V2 — lightest-possible "clickable location" (spec section 7): an
+    # optional Google Maps URL alongside the existing plain-text location,
+    # not a new maps integration. costume_trial_location's existing type
+    # (a plain string) is untouched, so every old reader keeps working.
+    costume_trial_map_url: Optional[str] = None
     fitting_status: Optional[str] = None
     look_test_status: Optional[str] = None
     grooming_requirements: Optional[str] = None
@@ -734,6 +930,7 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
         "payment_status": "pd_payment_status",
         "costume_trial_at": "pd_costume_trial_at",
         "costume_trial_location": "pd_costume_trial_location",
+        "costume_trial_map_url": "pd_costume_trial_map_url",
         "fitting_status": "pd_fitting_status",
         "look_test_status": "pd_look_test_status",
         "grooming_requirements": "pd_grooming_requirements",
@@ -759,6 +956,223 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
                 payload={"project_id": pid, "talent_id": talent_id},
                 actor_id=admin.get("id"),
             )
+    return await get_production_desk(pid, admin)
+
+
+# ---------------------------------------------------------------------------
+# V2 — Per-talent shoot-day schedule (spec sections 1-4)
+#
+# Stored as a small array (`pd_shoot_days`) on the SAME locked
+# casting_pipeline row every other pd_* talent field already lives on —
+# not a new collection. Whole-array read/modify/write (fetch the row,
+# mutate the list in Python, $set the array back) rather than positional
+# Mongo array operators: a talent has at most a handful of shoot days, so
+# this stays simple and easy to reason about, matching this module's own
+# "don't over-engineer" convention elsewhere (e.g. kickbacks/reimbursements
+# already use plain collections rather than aggregation pipelines).
+# ---------------------------------------------------------------------------
+class ShootDayIn(BaseModel):
+    date: str = Field(..., description="ISO date YYYY-MM-DD")
+    call_time: Optional[str] = None
+    reporting_time: Optional[str] = None
+    location: Optional[str] = None
+    location_map_url: Optional[str] = None
+    agreed_hours: Optional[float] = None
+    actual_hours: Optional[float] = None
+    shoot_status: Optional[str] = None
+
+
+class ShootDayUpdateIn(BaseModel):
+    date: Optional[str] = None
+    call_time: Optional[str] = None
+    reporting_time: Optional[str] = None
+    location: Optional[str] = None
+    location_map_url: Optional[str] = None
+    agreed_hours: Optional[float] = None
+    actual_hours: Optional[float] = None
+    shoot_status: Optional[str] = None
+
+
+def _validate_shoot_day_date(raw: str):
+    try:
+        date.fromisoformat(raw)
+    except ValueError:
+        raise HTTPException(400, "date must be an ISO date (YYYY-MM-DD)")
+
+
+async def _resync_talent_shooting_days(pid: str, talent_id: str, shoot_days: List[dict]):
+    """Keeps pd_shooting_days (the plain count, used by the base-fee
+    per-day × days calc) equal to len(pd_shoot_days) whenever the
+    structured schedule is in use — see _talent_card's docstring."""
+    await db.casting_pipeline.update_one(
+        {"project_id": pid, "talent_id": talent_id},
+        {"$set": {"pd_shoot_days": shoot_days, "pd_shooting_days": len(shoot_days), "updated_at": _now()}},
+    )
+
+
+@router.post("/{pid}/production-desk/talents/{talent_id}/shoot-days")
+async def add_talent_shoot_day(pid: str, talent_id: str, payload: ShootDayIn, admin: dict = Depends(current_team_or_admin)):
+    row = await _get_locked_pipeline_row(pid, talent_id)
+    _validate_shoot_day_date(payload.date)
+    if payload.shoot_status is not None and payload.shoot_status not in SHOOT_STATUS_OPTIONS:
+        raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
+    shoot_days = list(row.get("pd_shoot_days") or [])
+    shoot_days.append({
+        "id": str(uuid.uuid4()),
+        "date": payload.date,
+        "call_time": payload.call_time,
+        "reporting_time": payload.reporting_time,
+        "location": payload.location,
+        "location_map_url": payload.location_map_url,
+        "agreed_hours": payload.agreed_hours,
+        "actual_hours": payload.actual_hours,
+        "shoot_status": payload.shoot_status or "scheduled",
+    })
+    shoot_days.sort(key=lambda d: d.get("date") or "")
+    await _resync_talent_shooting_days(pid, talent_id, shoot_days)
+    return await get_production_desk(pid, admin)
+
+
+@router.post("/{pid}/production-desk/talents/{talent_id}/shoot-days/use-project-dates")
+async def seed_talent_shoot_days_from_project(pid: str, talent_id: str, admin: dict = Depends(current_team_or_admin)):
+    """Spec section 3's explicit, admin-triggered one-tap: copies the
+    project's own structured pd_shoot_dates_list into this talent's
+    schedule as a starting point. Never automatic, never overwrites the
+    project's own dates, and skips any date the talent already has a
+    record for (so re-clicking is safe/idempotent)."""
+    row = await _get_locked_pipeline_row(pid, talent_id)
+    project = await _get_project_or_404(pid)
+    project_dates = project.get("pd_shoot_dates_list") or []
+    if not project_dates:
+        raise HTTPException(400, "This project has no structured shoot dates set yet (Shoot Details → Shooting Dates)")
+    shoot_days = list(row.get("pd_shoot_days") or [])
+    existing_dates = {d.get("date") for d in shoot_days}
+    for d in project_dates:
+        if d in existing_dates:
+            continue
+        shoot_days.append({
+            "id": str(uuid.uuid4()), "date": d, "call_time": None, "reporting_time": None,
+            "location": None, "location_map_url": None, "agreed_hours": None, "actual_hours": None,
+            "shoot_status": "scheduled",
+        })
+    shoot_days.sort(key=lambda d: d.get("date") or "")
+    await _resync_talent_shooting_days(pid, talent_id, shoot_days)
+    return await get_production_desk(pid, admin)
+
+
+@router.patch("/{pid}/production-desk/talents/{talent_id}/shoot-days/{day_id}")
+async def update_talent_shoot_day(pid: str, talent_id: str, day_id: str, payload: ShootDayUpdateIn, admin: dict = Depends(current_team_or_admin)):
+    row = await _get_locked_pipeline_row(pid, talent_id)
+    if payload.date is not None:
+        _validate_shoot_day_date(payload.date)
+    if payload.shoot_status is not None and payload.shoot_status not in SHOOT_STATUS_OPTIONS:
+        raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
+    shoot_days = list(row.get("pd_shoot_days") or [])
+    changes = payload.model_dump(exclude_unset=True)
+    found = False
+    for d in shoot_days:
+        if d.get("id") == day_id:
+            d.update(changes)
+            found = True
+            break
+    if not found:
+        raise HTTPException(404, "Shoot day not found")
+    shoot_days.sort(key=lambda d: d.get("date") or "")
+    await _resync_talent_shooting_days(pid, talent_id, shoot_days)
+    return await get_production_desk(pid, admin)
+
+
+@router.delete("/{pid}/production-desk/talents/{talent_id}/shoot-days/{day_id}")
+async def delete_talent_shoot_day(pid: str, talent_id: str, day_id: str, admin: dict = Depends(current_team_or_admin)):
+    row = await _get_locked_pipeline_row(pid, talent_id)
+    shoot_days = [d for d in (row.get("pd_shoot_days") or []) if d.get("id") != day_id]
+    if len(shoot_days) == len(row.get("pd_shoot_days") or []):
+        raise HTTPException(404, "Shoot day not found")
+    # Deliberately NOT resynced via _resync_talent_shooting_days when the
+    # list becomes empty — that would silently blank out pd_shooting_days
+    # for a talent falling back to the old manual count. Only keep the
+    # count in sync while the structured schedule is still in use.
+    if shoot_days:
+        await _resync_talent_shooting_days(pid, talent_id, shoot_days)
+    else:
+        await db.casting_pipeline.update_one(
+            {"project_id": pid, "talent_id": talent_id},
+            {"$set": {"pd_shoot_days": [], "updated_at": _now()}},
+        )
+    return await get_production_desk(pid, admin)
+
+
+# ---------------------------------------------------------------------------
+# V2 — Readings & Rehearsals (spec section 8)
+# Same whole-array-on-the-locked-row pattern as shoot-days above.
+# ---------------------------------------------------------------------------
+class ReadingRehearsalIn(BaseModel):
+    type: str
+    date: Optional[str] = None
+    time: Optional[str] = None
+    location: Optional[str] = None
+    location_map_url: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ReadingRehearsalUpdateIn(BaseModel):
+    type: Optional[str] = None
+    date: Optional[str] = None
+    time: Optional[str] = None
+    location: Optional[str] = None
+    location_map_url: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.post("/{pid}/production-desk/talents/{talent_id}/readings-rehearsals")
+async def add_reading_rehearsal(pid: str, talent_id: str, payload: ReadingRehearsalIn, admin: dict = Depends(current_team_or_admin)):
+    if payload.type not in READING_REHEARSAL_TYPES:
+        raise HTTPException(400, f"type must be one of {sorted(READING_REHEARSAL_TYPES)}")
+    row = await _get_locked_pipeline_row(pid, talent_id)
+    entries = list(row.get("pd_readings_rehearsals") or [])
+    entries.append({
+        "id": str(uuid.uuid4()), "type": payload.type, "date": payload.date, "time": payload.time,
+        "location": payload.location, "location_map_url": payload.location_map_url, "notes": payload.notes,
+    })
+    await db.casting_pipeline.update_one(
+        {"project_id": pid, "talent_id": talent_id},
+        {"$set": {"pd_readings_rehearsals": entries, "updated_at": _now()}},
+    )
+    return await get_production_desk(pid, admin)
+
+
+@router.patch("/{pid}/production-desk/talents/{talent_id}/readings-rehearsals/{entry_id}")
+async def update_reading_rehearsal(pid: str, talent_id: str, entry_id: str, payload: ReadingRehearsalUpdateIn, admin: dict = Depends(current_team_or_admin)):
+    if payload.type is not None and payload.type not in READING_REHEARSAL_TYPES:
+        raise HTTPException(400, f"type must be one of {sorted(READING_REHEARSAL_TYPES)}")
+    row = await _get_locked_pipeline_row(pid, talent_id)
+    entries = list(row.get("pd_readings_rehearsals") or [])
+    changes = payload.model_dump(exclude_unset=True)
+    found = False
+    for e in entries:
+        if e.get("id") == entry_id:
+            e.update(changes)
+            found = True
+            break
+    if not found:
+        raise HTTPException(404, "Entry not found")
+    await db.casting_pipeline.update_one(
+        {"project_id": pid, "talent_id": talent_id},
+        {"$set": {"pd_readings_rehearsals": entries, "updated_at": _now()}},
+    )
+    return await get_production_desk(pid, admin)
+
+
+@router.delete("/{pid}/production-desk/talents/{talent_id}/readings-rehearsals/{entry_id}")
+async def delete_reading_rehearsal(pid: str, talent_id: str, entry_id: str, admin: dict = Depends(current_team_or_admin)):
+    row = await _get_locked_pipeline_row(pid, talent_id)
+    entries = [e for e in (row.get("pd_readings_rehearsals") or []) if e.get("id") != entry_id]
+    if len(entries) == len(row.get("pd_readings_rehearsals") or []):
+        raise HTTPException(404, "Entry not found")
+    await db.casting_pipeline.update_one(
+        {"project_id": pid, "talent_id": talent_id},
+        {"$set": {"pd_readings_rehearsals": entries, "updated_at": _now()}},
+    )
     return await get_production_desk(pid, admin)
 
 
@@ -945,3 +1359,204 @@ async def delete_crew(pid: str, crew_id: str, admin: dict = Depends(current_admi
     if not res.deleted_count:
         raise HTTPException(404, "Crew member not found")
     return await get_production_desk(pid, admin)
+
+
+# ---------------------------------------------------------------------------
+# V2 — Payment Tranches / Billing Milestones (spec sections 19-20)
+#
+# A genuinely new, small collection — nothing existing models "a project
+# gets paid in stages". Deliberately an operational billing TRACKER, not
+# an accounting/invoicing engine: no ledger, no journal entries, no GST
+# reconciliation (see module docstring's Zoho section for the same
+# "honest, not-built" boundary this follows).
+# ---------------------------------------------------------------------------
+class TrancheIn(BaseModel):
+    name: str = Field(..., min_length=1)
+    amount: float = Field(..., gt=0)
+    trigger: Optional[str] = None
+    invoice_status: Optional[str] = "pending"
+    invoice_date: Optional[str] = None
+    payment_status: Optional[str] = "pending"
+    payment_date: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class TrancheUpdateIn(BaseModel):
+    name: Optional[str] = None
+    amount: Optional[float] = Field(None, gt=0)
+    trigger: Optional[str] = None
+    invoice_status: Optional[str] = None
+    invoice_date: Optional[str] = None
+    payment_status: Optional[str] = None
+    payment_date: Optional[str] = None
+    notes: Optional[str] = None
+
+
+def _validate_tranche_statuses(invoice_status, payment_status):
+    if invoice_status is not None and invoice_status not in TRANCHE_INVOICE_STATUSES:
+        raise HTTPException(400, f"invoice_status must be one of {TRANCHE_INVOICE_STATUSES}")
+    if payment_status is not None and payment_status not in TRANCHE_PAYMENT_STATUSES:
+        raise HTTPException(400, f"payment_status must be one of {TRANCHE_PAYMENT_STATUSES}")
+
+
+@router.post("/{pid}/production-desk/tranches")
+async def add_tranche(pid: str, payload: TrancheIn, admin: dict = Depends(current_team_or_admin)):
+    await _get_project_or_404(pid)
+    _validate_tranche_statuses(payload.invoice_status, payload.payment_status)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "project_id": pid,
+        "name": payload.name,
+        "amount": payload.amount,
+        "trigger": payload.trigger,
+        "invoice_status": payload.invoice_status or "pending",
+        "invoice_date": payload.invoice_date,
+        "payment_status": payload.payment_status or "pending",
+        "payment_date": payload.payment_date,
+        "notes": payload.notes,
+        "created_at": _now(),
+        "created_by": admin.get("email"),
+    }
+    await db.project_payment_tranches.insert_one(doc)
+    return await get_production_desk(pid, admin)
+
+
+@router.patch("/{pid}/production-desk/tranches/{tranche_id}")
+async def update_tranche(pid: str, tranche_id: str, payload: TrancheUpdateIn, admin: dict = Depends(current_team_or_admin)):
+    _validate_tranche_statuses(payload.invoice_status, payload.payment_status)
+    updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if updates:
+        updates["updated_at"] = _now()
+        res = await db.project_payment_tranches.update_one({"id": tranche_id, "project_id": pid}, {"$set": updates})
+        if not res.matched_count:
+            raise HTTPException(404, "Tranche not found")
+    return await get_production_desk(pid, admin)
+
+
+@router.delete("/{pid}/production-desk/tranches/{tranche_id}")
+async def delete_tranche(pid: str, tranche_id: str, admin: dict = Depends(current_admin)):
+    res = await db.project_payment_tranches.delete_one({"id": tranche_id, "project_id": pid})
+    if not res.deleted_count:
+        raise HTTPException(404, "Tranche not found")
+    return await get_production_desk(pid, admin)
+
+
+# ---------------------------------------------------------------------------
+# V2 — WhatsApp one-tap message builders (spec sections 17/18/23/24/25/26)
+#
+# These do NOT send anything — see module docstring's WhatsApp-agent-wiring
+# note and the spec's own "do not create a new WhatsApp sender/worker".
+# Both return {phone, message}; the frontend opens the EXACT SAME
+# wa.me/<phone>?text=<message> deep link MarketingHub.jsx's own
+# handleShare() already uses for one-off admin-triggered messages — a
+# manual, admin-reviewed send (the admin still taps Send inside WhatsApp
+# themselves), not an automated one. The financial arithmetic lives here
+# (Python), once, reusing _talent_card's own already-computed numbers —
+# the frontend never re-derives an amount, only renders what this returns.
+# ---------------------------------------------------------------------------
+def _fmt_inr(amount: Optional[float]) -> str:
+    if amount is None:
+        return "0"
+    n = int(round(amount))
+    s = str(abs(n))
+    if len(s) > 3:
+        last3 = s[-3:]
+        rest = s[:-3]
+        groups = []
+        while len(rest) > 2:
+            groups.insert(0, rest[-2:])
+            rest = rest[:-2]
+        if rest:
+            groups.insert(0, rest)
+        s = ",".join(groups) + "," + last3
+    return ("-" if n < 0 else "") + s
+
+
+@router.get("/{pid}/production-desk/payment-followup-message")
+async def build_payment_followup_message(pid: str, admin: dict = Depends(current_team_or_admin)):
+    project = await _get_project_or_404(pid)
+    contact_id = project.get("pd_production_contact_client_id")
+    if not contact_id:
+        raise HTTPException(400, "Set a Payment Follow-up concerned person first")
+    name_map = await _client_name_map([contact_id])
+    contact = name_map.get(contact_id)
+    if not contact or not contact.get("phone_number"):
+        raise HTTPException(400, "This CRM contact has no phone number on file")
+
+    locked = await _locked_talent_cards(pid, project)
+    talent_names = ", ".join(c["name"] for c in locked if c.get("name")) or "the locked talent(s)"
+    brand = project.get("brand_name") or "the project"
+    terms = project.get("pd_payment_terms")
+    expected = project.get("pd_expected_payment_date")
+
+    lines = [
+        f"Hi {contact.get('name') or ''},".strip(),
+        "",
+        f"Just a gentle reminder regarding the payment for the {brand} project.",
+        "",
+        f"Project: {brand}",
+        f"Talent(s): {talent_names}",
+    ]
+    if terms:
+        lines.append(f"Payment terms: {terms}")
+    if expected:
+        expected_display = expected[:10] if isinstance(expected, str) else expected
+        lines.append(f"Expected payment date: {expected_display}")
+    lines += ["", "Kindly arrange the payment at your earliest convenience.", "", "Thank you."]
+    message = "\n".join(lines)
+    return {"phone": contact["phone_number"], "contact_name": contact.get("name"), "message": message}
+
+
+@router.get("/{pid}/production-desk/talents/{talent_id}/invoice-message")
+async def build_talent_invoice_message(pid: str, talent_id: str, admin: dict = Depends(current_team_or_admin)):
+    project = await _get_project_or_404(pid)
+    row = await _get_locked_pipeline_row(pid, talent_id)
+    talent = await db.talents.find_one({"id": talent_id}, {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "cover_media_id": 1, "media": 1})
+    if not talent:
+        raise HTTPException(404, "Talent not found")
+
+    reimbursements = await db.project_reimbursements.find({"project_id": pid, "talent_id": talent_id}, {"_id": 0}).to_list(200)
+    reimbursement_total = sum(_num(r.get("amount")) or 0.0 for r in reimbursements)
+    card = _talent_card(talent, row, project, reimbursement_total)
+    if card["phone"] is None:
+        raise HTTPException(400, "This talent has no phone number on file")
+    if card["commissionable_amount"] is None or card["commission_amount"] is None:
+        raise HTTPException(400, "Set this talent's budget/day (or total) and commission first")
+
+    brand = project.get("brand_name") or "the project"
+    first_name = (card["name"] or "").split(" ")[0] or "there"
+    lines = [
+        f"Hi {first_name},",
+        "",
+        f"Please raise and send your invoice for the {brand} project.",
+        "",
+        f"Talent Fee: ₹{_fmt_inr(card['budget_total'])}",
+    ]
+    if card["extra_hours_total"]:
+        lines.append(f"Extra Hours: ₹{_fmt_inr(card['extra_hours_total'])}")
+    commission_pct = card["commission_percent"]
+    commission_pct_label = f"{commission_pct:g}%" if commission_pct is not None else ""
+    lines.append(f"Commission @ {commission_pct_label} on Talent Fee + Extra Hours: ₹{_fmt_inr(card['commission_amount'])}")
+    if card["reimbursement_total"]:
+        lines.append(f"Reimbursements: ₹{_fmt_inr(card['reimbursement_total'])}")
+    lines += [
+        "",
+        f"Invoice amount to Talentgram: ₹{_fmt_inr(card['invoice_amount'])}",
+        "",
+        "Reimbursements are not subject to commission.",
+        "",
+        "Please raise the invoice accordingly and share it with us.",
+    ]
+    message = "\n".join(lines)
+    return {
+        "phone": card["phone"], "talent_name": card["name"], "message": message,
+        "breakdown": {
+            "talent_fee": card["budget_total"],
+            "extra_hours": card["extra_hours_total"],
+            "commissionable": card["commissionable_amount"],
+            "commission_percent": commission_pct,
+            "commission_amount": card["commission_amount"],
+            "reimbursements": card["reimbursement_total"],
+            "invoice_amount": card["invoice_amount"],
+        },
+    }

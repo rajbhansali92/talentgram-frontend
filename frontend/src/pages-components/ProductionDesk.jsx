@@ -49,7 +49,8 @@ import {
     Loader2, AlertTriangle, Users, IndianRupee, CalendarDays, FileText,
     Plus, Trash2, Upload, ChevronsUpDown, ExternalLink, Receipt,
     ClipboardList, Wallet, UserPlus, Sun, CalendarClock, ListChecks,
-    CheckCircle2, Circle, PhoneCall,
+    CheckCircle2, Circle, PhoneCall, MessageCircle, MapPin,
+    Layers, X,
 } from "lucide-react";
 
 // Same INR formatter MarketingHub already uses — no second money formatter.
@@ -120,6 +121,53 @@ const PRODUCTION_STATUS_OPTIONS = [
 const TRIAL_STATUS_OPTIONS = ["not_scheduled", "scheduled", "completed"];
 const SHOOT_STATUS_OPTIONS = ["not_scheduled", "scheduled", "today", "completed", "cancelled"];
 const PAYMENT_FOLLOWUP_STATUSES = ["not_due", "due", "in_progress", "done"];
+
+// V2 — Production Desk talent-level shooting/overtime/reimbursements.
+// Matches backend production_desk.py's AGREEMENT_STATUS_OPTIONS /
+// TRANCHE_INVOICE_STATUSES / TRANCHE_PAYMENT_STATUSES exactly.
+const AGREEMENT_STATUS_OPTIONS = [
+    { value: "done", label: "Done" },
+    { value: "pending", label: "Pending" },
+    { value: "n_a", label: "N/A" },
+];
+const TRANCHE_INVOICE_STATUSES = [
+    { value: "pending", label: "Pending" },
+    { value: "raised", label: "Raised" },
+    { value: "raised_and_sent", label: "Raised & Sent" },
+];
+const TRANCHE_PAYMENT_STATUSES = [
+    { value: "pending", label: "Pending" },
+    { value: "received", label: "Received" },
+];
+
+// Opens the SAME wa.me deep-link pattern MarketingHub.jsx's own
+// handleShare() already uses for one-off admin-triggered WhatsApp
+// messages — the admin still taps Send inside WhatsApp themselves, so
+// this never auto-sends anything (spec: "do not create a new WhatsApp
+// sender/worker").
+function openWhatsApp(phone, message) {
+    const digits = (phone || "").replace(/[^0-9]/g, "");
+    if (!digits) {
+        toast.error("No phone number on file");
+        return;
+    }
+    window.open(`https://wa.me/${digits}?text=${encodeURIComponent(message)}`, "_blank");
+}
+
+// Lightest-possible "clickable location" (spec section 7/29) — a name plus
+// an optional Google Maps URL, never a maps-search integration.
+function LocationLink({ name, mapUrl }) {
+    if (!name && !mapUrl) return <span className="text-black/30">—</span>;
+    if (mapUrl) {
+        return (
+            <a href={mapUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[#0c2340] hover:underline">
+                <MapPin className="h-3 w-3 shrink-0" />
+                <span className="truncate">{name || "View on map"}</span>
+            </a>
+        );
+    }
+    return <span className="text-black/70">{name}</span>;
+}
 
 function SectionCard({ title, icon: Icon, right, children, testId }) {
     return (
@@ -372,6 +420,114 @@ export default function ProductionDesk({ projectId, project }) {
         }
     }, [projectId]);
 
+    // V2 — per-talent shoot-day schedule (spec sections 1-4).
+    const addShootDay = useCallback(async (talentId, payload) => {
+        try {
+            const { data } = await adminApi.post(`/projects/${projectId}/production-desk/talents/${talentId}/shoot-days`, payload);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not add shoot day");
+        }
+    }, [projectId]);
+
+    const updateShootDay = useCallback(async (talentId, dayId, payload) => {
+        try {
+            const { data } = await adminApi.patch(`/projects/${projectId}/production-desk/talents/${talentId}/shoot-days/${dayId}`, payload);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Update failed");
+        }
+    }, [projectId]);
+
+    const deleteShootDay = useCallback(async (talentId, dayId) => {
+        try {
+            const { data } = await adminApi.delete(`/projects/${projectId}/production-desk/talents/${talentId}/shoot-days/${dayId}`);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not remove shoot day");
+        }
+    }, [projectId]);
+
+    const useProjectDatesForTalent = useCallback(async (talentId) => {
+        try {
+            const { data } = await adminApi.post(`/projects/${projectId}/production-desk/talents/${talentId}/shoot-days/use-project-dates`);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not use project dates");
+        }
+    }, [projectId]);
+
+    // V2 — Readings & Rehearsals (spec section 8).
+    const addReadingRehearsal = useCallback(async (talentId, payload) => {
+        try {
+            const { data } = await adminApi.post(`/projects/${projectId}/production-desk/talents/${talentId}/readings-rehearsals`, payload);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not add entry");
+        }
+    }, [projectId]);
+
+    const deleteReadingRehearsal = useCallback(async (talentId, entryId) => {
+        try {
+            const { data } = await adminApi.delete(`/projects/${projectId}/production-desk/talents/${talentId}/readings-rehearsals/${entryId}`);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not remove entry");
+        }
+    }, [projectId]);
+
+    // V2 — Payment Tranches (spec sections 19-20).
+    const addTranche = useCallback(async (payload) => {
+        try {
+            const { data } = await adminApi.post(`/projects/${projectId}/production-desk/tranches`, payload);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not add tranche");
+        }
+    }, [projectId]);
+
+    const updateTranche = useCallback(async (id, payload) => {
+        try {
+            const { data } = await adminApi.patch(`/projects/${projectId}/production-desk/tranches/${id}`, payload);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Update failed");
+        }
+    }, [projectId]);
+
+    const deleteTranche = useCallback(async (id) => {
+        try {
+            const { data } = await adminApi.delete(`/projects/${projectId}/production-desk/tranches/${id}`);
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not remove tranche");
+        }
+    }, [projectId]);
+
+    // V2 — WhatsApp one-tap actions (spec sections 17/18/23-26). The
+    // backend computes the exact message/amount server-side (single
+    // source of truth for the financial formula); this just opens the
+    // SAME wa.me deep link every other one-off admin WhatsApp send in
+    // this codebase already uses — see openWhatsApp() above.
+    const sendPaymentFollowUp = useCallback(async () => {
+        try {
+            const { data } = await adminApi.get(`/projects/${projectId}/production-desk/payment-followup-message`);
+            openWhatsApp(data.phone, data.message);
+            await patchProject({ last_follow_up_at: new Date().toISOString() });
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not build follow-up message");
+        }
+    }, [projectId]);
+
+    const askTalentToRaiseInvoice = useCallback(async (talentId) => {
+        try {
+            const { data } = await adminApi.get(`/projects/${projectId}/production-desk/talents/${talentId}/invoice-message`);
+            openWhatsApp(data.phone, data.message);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Could not build invoice request");
+        }
+    }, [projectId]);
+
     // Tasks — the SAME db.workflow_tasks the admin Workflow page and the
     // Management Agent read/write (routers/workflow.py). Not a
     // Production-Desk-only task store.
@@ -404,7 +560,7 @@ export default function ProductionDesk({ projectId, project }) {
         return <div className="py-24 text-center text-black/40 text-sm">Could not load Production Desk.</div>;
     }
 
-    const { project: p, locked_talents: talents, summary, needs_attention, kickbacks, reimbursements, crew, documents, finance, today, upcoming, tasks } = data;
+    const { project: p, locked_talents: talents, summary, needs_attention, kickbacks, reimbursements, reimbursement_checklist_status, tranches, crew, documents, finance, today, upcoming, tasks } = data;
 
     return (
         <div className="space-y-4 pb-16" data-testid="production-desk-root">
@@ -548,7 +704,14 @@ export default function ProductionDesk({ projectId, project }) {
 
             {/* Talent Preparation — additive fields on the SAME locked
                 casting_pipeline row Locked Talents above reads; no second
-                talent/project relationship. */}
+                talent/project relationship. V2: Fitting/Look Test/Shoot
+                Status were REMOVED from this UI (spec section 6) — Fitting/
+                Look Test stay fully alive server-side (Management Agent has
+                real, working NLU commands and readiness checks against
+                them — see production_desk.py's _talent_card docstring),
+                simply not shown here; Shoot Status moved into the new
+                Shooting Schedule section below, where it belongs with the
+                actual per-day schedule. */}
             {talents.length > 0 && (
                 <SectionCard title="Talent Preparation" icon={ListChecks} testId="pd-talent-prep">
                     <div className="overflow-x-auto">
@@ -558,9 +721,6 @@ export default function ProductionDesk({ projectId, project }) {
                                     <TableHead className="text-xs">Talent</TableHead>
                                     <TableHead className="text-xs">Costume Trial</TableHead>
                                     <TableHead className="text-xs">Trial Location</TableHead>
-                                    <TableHead className="text-xs">Fitting</TableHead>
-                                    <TableHead className="text-xs">Look Test</TableHead>
-                                    <TableHead className="text-xs">Shoot Status</TableHead>
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
@@ -579,41 +739,85 @@ export default function ProductionDesk({ projectId, project }) {
                                             />
                                         </TableCell>
                                         <TableCell>
-                                            <Input
-                                                defaultValue={t.costume_trial_location || ""}
-                                                placeholder="Location"
-                                                className="h-7 text-xs w-[130px]"
-                                                onBlur={(e) => { if (e.target.value !== (t.costume_trial_location || "")) patchTalent(t.talent_id, { costume_trial_location: e.target.value }); }}
-                                            />
-                                        </TableCell>
-                                        <TableCell>
-                                            <Select value={t.fitting_status} onValueChange={(v) => patchTalent(t.talent_id, { fitting_status: v })}>
-                                                <SelectTrigger className="h-7 text-xs w-[120px]"><SelectValue /></SelectTrigger>
-                                                <SelectContent>
-                                                    {TRIAL_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
-                                                </SelectContent>
-                                            </Select>
-                                        </TableCell>
-                                        <TableCell>
-                                            <Select value={t.look_test_status} onValueChange={(v) => patchTalent(t.talent_id, { look_test_status: v })}>
-                                                <SelectTrigger className="h-7 text-xs w-[120px]"><SelectValue /></SelectTrigger>
-                                                <SelectContent>
-                                                    {TRIAL_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
-                                                </SelectContent>
-                                            </Select>
-                                        </TableCell>
-                                        <TableCell>
-                                            <Select value={t.shoot_status} onValueChange={(v) => patchTalent(t.talent_id, { shoot_status: v })}>
-                                                <SelectTrigger className="h-7 text-xs w-[120px]"><SelectValue /></SelectTrigger>
-                                                <SelectContent>
-                                                    {SHOOT_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
-                                                </SelectContent>
-                                            </Select>
+                                            <div className="flex items-center gap-1.5">
+                                                <Input
+                                                    defaultValue={t.costume_trial_location || ""}
+                                                    placeholder="Location"
+                                                    className="h-7 text-xs w-[130px]"
+                                                    onBlur={(e) => { if (e.target.value !== (t.costume_trial_location || "")) patchTalent(t.talent_id, { costume_trial_location: e.target.value }); }}
+                                                />
+                                                <Input
+                                                    defaultValue={t.costume_trial_map_url || ""}
+                                                    placeholder="Map URL (optional)"
+                                                    className="h-7 text-xs w-[150px]"
+                                                    onBlur={(e) => { if (e.target.value !== (t.costume_trial_map_url || "")) patchTalent(t.talent_id, { costume_trial_map_url: e.target.value }); }}
+                                                />
+                                                {t.costume_trial_map_url && (
+                                                    <a href={t.costume_trial_map_url} target="_blank" rel="noreferrer" className="text-black/30 hover:text-[#0c2340] shrink-0">
+                                                        <MapPin className="h-3.5 w-3.5" />
+                                                    </a>
+                                                )}
+                                            </div>
                                         </TableCell>
                                     </TableRow>
                                 ))}
                             </TableBody>
                         </Table>
+                    </div>
+                </SectionCard>
+            )}
+
+            {/* V2 — Shooting Schedule (spec sections 1-4): per-talent,
+                independently-manageable shoot-day records. Cards, not a
+                giant table, so this stays usable on mobile (spec section
+                31). "Use Project Dates" is the explicit, admin-tapped
+                one-tap seed from Shoot Details' own structured dates below
+                — never automatic, never overwrites the project's dates. */}
+            {talents.length > 0 && (
+                <SectionCard title="Shooting Schedule" icon={CalendarClock} testId="pd-shoot-schedule">
+                    <div className="space-y-4">
+                        {talents.map((t) => (
+                            <TalentShootSchedule
+                                key={t.talent_id}
+                                talent={t}
+                                projectShootDates={p.pd_shoot_dates_list || []}
+                                onAdd={(payload) => addShootDay(t.talent_id, payload)}
+                                onUpdate={(dayId, payload) => updateShootDay(t.talent_id, dayId, payload)}
+                                onDelete={(dayId) => deleteShootDay(t.talent_id, dayId)}
+                                onUseProjectDates={() => useProjectDatesForTalent(t.talent_id)}
+                            />
+                        ))}
+                    </div>
+                </SectionCard>
+            )}
+
+            {/* V2 — Readings & Rehearsals (spec section 8), under Talent
+                Preparation conceptually but its own card for scannability. */}
+            {talents.length > 0 && (
+                <SectionCard title="Readings & Rehearsals" icon={Users} testId="pd-readings-rehearsals">
+                    <div className="space-y-4">
+                        {talents.map((t) => (
+                            <TalentReadingsRehearsals
+                                key={t.talent_id}
+                                talent={t}
+                                onAdd={(payload) => addReadingRehearsal(t.talent_id, payload)}
+                                onDelete={(entryId) => deleteReadingRehearsal(t.talent_id, entryId)}
+                            />
+                        ))}
+                    </div>
+                </SectionCard>
+            )}
+
+            {/* V2 — Talent Financials (spec sections 21-25): the exact
+                Fee / Extra Hours / Commissionable / Commission /
+                Reimbursements / Invoice Amount breakdown, all computed
+                server-side in _talent_card — never re-derived here. */}
+            {talents.length > 0 && (
+                <SectionCard title="Talent Financials" icon={IndianRupee} testId="pd-talent-financials">
+                    <div className="space-y-2">
+                        {talents.map((t) => (
+                            <TalentFinancialCard key={t.talent_id} talent={t} onAskInvoice={() => askTalentToRaiseInvoice(t.talent_id)} />
+                        ))}
                     </div>
                 </SectionCard>
             )}
@@ -668,6 +872,16 @@ export default function ProductionDesk({ projectId, project }) {
                             <Label className="text-[11px] text-black/40">Number of Shooting Days</Label>
                             <InlineNumber value={p.pd_shooting_days} className="mt-1" onSave={(v) => patchProject({ shooting_days: v })} />
                         </div>
+                        {/* V2 (spec section 21) — auto-aggregated, never manually
+                            typed. A SEPARATE total from the manual line above,
+                            which stays exactly as it was. */}
+                        <div className="pt-3 border-t border-black/[0.06] space-y-1.5" data-testid="pd-budget-auto-breakdown">
+                            <Label className="text-[11px] text-black/40">Auto-Calculated (Talent + Overtime + Reimbursements)</Label>
+                            <div className="flex justify-between text-xs text-black/60"><span>Talent Fees</span><span>{formatCurrency(summary.talent_budget_total)}</span></div>
+                            <div className="flex justify-between text-xs text-black/60"><span>Extra Hours (Overtime)</span><span>{formatCurrency(summary.extra_hours_total)}</span></div>
+                            <div className="flex justify-between text-xs text-black/60"><span>Reimbursements</span><span>{formatCurrency(summary.reimbursements_total)}</span></div>
+                            <div className="flex justify-between text-xs font-semibold text-black/80 pt-1 border-t border-black/[0.05]"><span>Total</span><span>{formatCurrency(summary.total_talent_and_overtime_and_reimbursements)}</span></div>
+                        </div>
                         {(p.client_budget_lines?.length > 0 || p.talent_budget_lines?.length > 0) && (
                             <div className="pt-2 border-t border-black/[0.06]" data-testid="pd-budget-reference">
                                 <Label className="text-[11px] text-black/40">Budget Reference (from Project Details)</Label>
@@ -694,6 +908,17 @@ export default function ProductionDesk({ projectId, project }) {
                             <span className="text-black/40 shrink-0">Shooting Dates</span>
                             <Input defaultValue={p.shoot_dates || ""} placeholder="e.g. 26th - 27th August" className="h-7 text-xs max-w-[220px]" onBlur={(e) => { if (e.target.value !== (p.shoot_dates || "")) patchProject({ shoot_dates: e.target.value }); }} />
                         </div>
+                        {/* V2 (spec section 4) — the proper structured multi-date
+                            picker: add/remove ISO dates, stored structurally.
+                            This is what a locked talent's own schedule can be
+                            seeded from ("Use Project Dates" in Shooting
+                            Schedule above) — independent of the free-text
+                            field above and the single reminder-only date
+                            below. */}
+                        <div>
+                            <span className="text-black/40 block mb-1">Shoot Dates (structured)</span>
+                            <ShootDatesList dates={p.pd_shoot_dates_list || []} onChange={(dates) => patchProject({ shoot_dates_list: dates })} />
+                        </div>
                         <div className="flex items-center justify-between gap-2">
                             <span className="text-black/40 shrink-0" title="A single date used only to schedule shoot reminders — independent of the free-text Shooting Dates above.">Shoot Date (reminders)</span>
                             <Input type="date" defaultValue={p.pd_shoot_date || ""} className="h-7 text-xs max-w-[160px]" onBlur={(e) => { if (e.target.value !== (p.pd_shoot_date || "")) patchProject({ shoot_date: e.target.value || null }); }} />
@@ -719,15 +944,13 @@ export default function ProductionDesk({ projectId, project }) {
                                 </SelectContent>
                             </Select>
                         </div>
-                        <div>
-                            <span className="text-black/40 block mb-1">Production Contact</span>
-                            <ClientPicker
-                                clients={clients}
-                                placeholder={p.pd_production_contact?.name || "Search CRM contacts…"}
-                                onContactCreated={(c) => setClients((prev) => [c, ...prev])}
-                                onPicked={(c) => patchProject({ production_contact_client_id: c.id || c._id })}
-                            />
-                        </div>
+                        {/* Production Contact moved to Payment Follow-up as
+                            "Concerned Person" (spec section 16) — same
+                            underlying pd_production_contact_client_id field,
+                            just homed where it's actually used. Multiple
+                            production contacts (spec section 28) already
+                            exist as the Crew section further down — reused,
+                            not duplicated here. */}
                         <div>
                             <span className="text-black/40 block mb-1">Notes</span>
                             <Textarea defaultValue={p.pd_shoot_notes || ""} rows={2} className="text-xs" onBlur={(e) => { if (e.target.value !== (p.pd_shoot_notes || "")) patchProject({ shoot_notes: e.target.value }); }} />
@@ -741,8 +964,28 @@ export default function ProductionDesk({ projectId, project }) {
                 Project Checklist below) stays the one "has it actually
                 arrived" boolean; this is the working notes a manager
                 keeps while chasing it. */}
-            <SectionCard title="Payment Follow-up" icon={PhoneCall} testId="pd-payment-followup">
+            <SectionCard
+                title="Payment Follow-up"
+                icon={PhoneCall}
+                testId="pd-payment-followup"
+                right={
+                    <Button size="sm" variant="outline" className="h-7 text-xs" onClick={sendPaymentFollowUp} data-testid="pd-whatsapp-followup-btn">
+                        <MessageCircle className="h-3 w-3 mr-1" /> WhatsApp Follow-up
+                    </Button>
+                }
+            >
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="sm:col-span-2">
+                        <Label className="text-[11px] text-black/40">Concerned Person (CRM contact)</Label>
+                        <div className="mt-1">
+                            <ClientPicker
+                                clients={clients}
+                                placeholder={p.pd_production_contact?.name || "Search CRM contacts…"}
+                                onContactCreated={(c) => setClients((prev) => [c, ...prev])}
+                                onPicked={(c) => patchProject({ production_contact_client_id: c.id || c._id })}
+                            />
+                        </div>
+                    </div>
                     <div>
                         <Label className="text-[11px] text-black/40">Payment Terms</Label>
                         <Input defaultValue={p.pd_payment_terms || ""} placeholder="e.g. 50% advance, 50% on delivery" className="h-8 text-xs mt-1" onBlur={(e) => { if (e.target.value !== (p.pd_payment_terms || "")) patchProject({ payment_terms: e.target.value }); }} />
@@ -775,6 +1018,17 @@ export default function ProductionDesk({ projectId, project }) {
                     <div className="mt-3 text-[11px] text-black/40">Last followed up: {formatDate(p.pd_last_follow_up_at)}</div>
                 )}
             </SectionCard>
+
+            {/* V2 — Payment Tranches / Billing Milestones (spec sections
+                19-20): an operational billing tracker for long-format
+                projects, not accounting. */}
+            <PaymentTranchesSection
+                tranches={tranches}
+                onAdd={addTranche}
+                onUpdate={updateTranche}
+                onDelete={deleteTranche}
+                totals={{ total: summary.tranches_total, received: summary.tranches_received_total }}
+            />
 
             {/* Commission & Kickbacks */}
             <SectionCard
@@ -857,10 +1111,17 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
-            {/* Project Checklist — lifecycle order: Confirmation -> Invoice
-                Raised -> Invoice Sent -> Client Payment -> GST -> Talent
-                Payments (the last row is derived from Locked Talents /
-                Overview, never a second payment record). */}
+            {/* Project Checklist — lifecycle order: Agreement -> Confirmation
+                -> Invoice Raised & Sent -> Client Payment -> GST -> Talent
+                Reimbursement Out -> Talent Payment Out. The last two rows
+                are derived, read-only (same project_reimbursements/Locked
+                Talents data already computed elsewhere), never a second
+                record. V2 (spec sections 12-14): Invoice Raised + Invoice
+                Sent are now ONE toggle (still writes both underlying
+                fields — kept alive for Management Agent's existing
+                invoice-status commands, see production_desk.py); Agreement
+                Signed added as its own three-way status; "Talent Payments"
+                renamed "Talent Payment Out" (terminology only). */}
             <SectionCard
                 title="Project Checklist"
                 icon={ClipboardList}
@@ -877,10 +1138,36 @@ export default function ProductionDesk({ projectId, project }) {
                 }
             >
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="flex items-center justify-between gap-2 rounded-md border border-black/[0.06] px-3 py-2.5" data-testid="pd-checklist-agreement">
+                        <span className="text-xs text-black/70">Agreement Signed</span>
+                        <Select value={p.pd_agreement_status || "pending"} onValueChange={(v) => patchProject({ agreement_status: v })}>
+                            <SelectTrigger className={`h-7 text-[11px] w-[90px] ${p.pd_agreement_status === "done" ? "text-emerald-700" : p.pd_agreement_status === "n_a" ? "text-black/40" : "text-amber-700"}`}>
+                                <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {AGREEMENT_STATUS_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                            </SelectContent>
+                        </Select>
+                    </div>
                     {[
                         { key: "confirmation_mail_received", label: "Confirmation Mail Received", val: p.pd_confirmation_mail_received },
-                        { key: "invoice_raised", label: "Invoice Raised", val: p.pd_invoice_raised },
-                        { key: "invoice_sent", label: "Invoice Sent", val: p.pd_invoice_sent },
+                    ].map((item) => (
+                        <div key={item.key} className="flex items-center justify-between gap-2 rounded-md border border-black/[0.06] px-3 py-2.5">
+                            <span className="text-xs text-black/70">{item.label}</span>
+                            <div className="flex items-center gap-1.5">
+                                <span className={`text-[11px] font-medium ${item.val ? "text-emerald-700" : "text-amber-700"}`}>{item.val ? "Complete" : "Pending"}</span>
+                                <Switch checked={!!item.val} onCheckedChange={(v) => patchProject({ [item.key]: v })} />
+                            </div>
+                        </div>
+                    ))}
+                    <div className="flex items-center justify-between gap-2 rounded-md border border-black/[0.06] px-3 py-2.5" data-testid="pd-checklist-invoice">
+                        <span className="text-xs text-black/70">Invoice Raised &amp; Sent</span>
+                        <div className="flex items-center gap-1.5">
+                            <span className={`text-[11px] font-medium ${p.pd_invoice_raised_and_sent ? "text-emerald-700" : "text-amber-700"}`}>{p.pd_invoice_raised_and_sent ? "Complete" : "Pending"}</span>
+                            <Switch checked={!!p.pd_invoice_raised_and_sent} onCheckedChange={(v) => patchProject({ invoice_raised_and_sent: v })} />
+                        </div>
+                    </div>
+                    {[
                         { key: "payment_in_received", label: "Client Payment In", val: p.pd_payment_in_received },
                         { key: "gst_component_received", label: "GST Component In", val: p.pd_gst_component_received },
                     ].map((item) => (
@@ -892,10 +1179,19 @@ export default function ProductionDesk({ projectId, project }) {
                             </div>
                         </div>
                     ))}
+                    {/* Derived, read-only (spec section 11) — never a false
+                        "Pending" when the project genuinely has no
+                        reimbursements. */}
+                    <div className="flex items-center justify-between gap-2 rounded-md border border-black/[0.06] px-3 py-2.5" data-testid="pd-checklist-reimbursement-out">
+                        <span className="text-xs text-black/70">Talent Reimbursement Out</span>
+                        <span className={`text-[11px] font-medium ${reimbursement_checklist_status === "complete" ? "text-emerald-700" : reimbursement_checklist_status === "n_a" ? "text-black/40" : "text-amber-700"}`}>
+                            {reimbursement_checklist_status === "complete" ? "Complete" : reimbursement_checklist_status === "n_a" ? "N/A" : "Pending"}
+                        </span>
+                    </div>
                     {/* Derived, read-only — same summary.payments_* Locked
                         Talents already computes; not a second toggle/record. */}
                     <div className="flex items-center justify-between gap-2 rounded-md border border-black/[0.06] px-3 py-2.5" data-testid="pd-checklist-talent-payments">
-                        <span className="text-xs text-black/70">Talent Payments</span>
+                        <span className="text-xs text-black/70">Talent Payment Out</span>
                         <span className={`text-[11px] font-medium ${summary.payments_cleared === summary.payments_total && summary.payments_total > 0 ? "text-emerald-700" : "text-amber-700"}`}>
                             {summary.payments_cleared} / {summary.payments_total} Cleared
                         </span>
@@ -929,18 +1225,13 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
-            {/* Project Requirements / Usage — display only, reuses existing Project Details fields */}
-            <SectionCard title="Project Requirements & Usage" icon={FileText} testId="pd-requirements">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                    <div><span className="text-black/40 block">Medium / Usage</span><span className="text-black/70">{p.medium_usage || "—"}</span></div>
-                    <div><span className="text-black/40 block">Director</span><span className="text-black/70">{p.director || "—"}</span></div>
-                    <div><span className="text-black/40 block">Production House</span><span className="text-black/70">{p.production_house || "—"}</span></div>
-                    <div><span className="text-black/40 block">Competitive Brand Restriction</span><span className="text-black/70">{p.competitive_brand_enabled ? "Yes" : "No"}</span></div>
-                    {p.additional_details && (
-                        <div className="sm:col-span-2"><span className="text-black/40 block">Additional Details</span><span className="text-black/70 whitespace-pre-wrap">{p.additional_details}</span></div>
-                    )}
-                </div>
-            </SectionCard>
+            {/* "Project Requirements & Usage" removed from this workspace
+                (spec section 27) — not useful for day-to-day production
+                ops. The underlying fields (medium_usage, director,
+                production_house, competitive_brand_enabled,
+                additional_details) are untouched and still fully visible
+                on the Project Details tab; nothing was deleted, only this
+                read-only Production Desk display of them. */}
 
             {/* Documents */}
             <SectionCard
@@ -1090,6 +1381,315 @@ export default function ProductionDesk({ projectId, project }) {
                 <TalentPreviewDrawer talent={quickViewTalent} onClose={() => setQuickViewTalent(null)} isMobile={isMobile} />
             )}
         </div>
+    );
+}
+
+// ============================================================================
+// V2 — Structured multi-date shoot picker (spec section 4). Add/remove
+// ISO dates, stored structurally — no free text, no calendar-grid widget
+// (deliberately the lightest implementation that satisfies "select one,
+// select multiple, add/remove, see selected clearly").
+// ============================================================================
+function ShootDatesList({ dates, onChange }) {
+    const [newDate, setNewDate] = useState("");
+    const sorted = [...dates].sort();
+    const addDate = () => {
+        if (!newDate || dates.includes(newDate)) return;
+        onChange([...dates, newDate].sort());
+        setNewDate("");
+    };
+    const removeDate = (d) => onChange(dates.filter((x) => x !== d));
+    return (
+        <div data-testid="pd-shoot-dates-list">
+            <div className="flex flex-wrap gap-1.5 mb-2">
+                {sorted.length === 0 && <span className="text-black/30 italic">No dates set</span>}
+                {sorted.map((d) => (
+                    <span key={d} className="inline-flex items-center gap-1 px-2 py-1 bg-slate-50 border border-black/[0.08] rounded-full text-[11px] text-black/70" data-testid={`pd-shoot-date-chip-${d}`}>
+                        {d}
+                        <button type="button" onClick={() => removeDate(d)} className="text-black/30 hover:text-red-500"><X className="h-3 w-3" /></button>
+                    </span>
+                ))}
+            </div>
+            <div className="flex items-center gap-1.5">
+                <Input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className="h-7 text-xs w-[150px]" />
+                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={addDate} disabled={!newDate}>
+                    <Plus className="h-3 w-3 mr-1" /> Add Date
+                </Button>
+            </div>
+        </div>
+    );
+}
+
+// ============================================================================
+// V2 — Per-talent Shooting Schedule (spec sections 1-4). Cards, not a
+// table, so this stays usable on mobile. Each row's own extra-hours
+// figure here is a DISPLAY-only recomputation using the exact same
+// formula the backend already applied to compute extra_hours_total — the
+// authoritative number always comes from the server on save.
+// ============================================================================
+function _dayExtraHours(perDay, agreed, actual) {
+    const a = Number(agreed);
+    const act = Number(actual);
+    if (!perDay || !a || a <= 0 || actual === null || actual === undefined || actual === "" || Number.isNaN(act)) return { hours: 0, amount: 0 };
+    const extra = Math.max(0, act - a);
+    return { hours: extra, amount: (perDay / a) * extra };
+}
+
+function TalentShootSchedule({ talent, projectShootDates, onAdd, onUpdate, onDelete, onUseProjectDates }) {
+    const [adding, setAdding] = useState(false);
+    const [form, setForm] = useState({ date: "", call_time: "", reporting_time: "", location: "", location_map_url: "", agreed_hours: "", actual_hours: "" });
+
+    const submit = () => {
+        if (!form.date) return;
+        onAdd({
+            date: form.date,
+            call_time: form.call_time || null,
+            reporting_time: form.reporting_time || null,
+            location: form.location || null,
+            location_map_url: form.location_map_url || null,
+            agreed_hours: form.agreed_hours === "" ? null : Number(form.agreed_hours),
+            actual_hours: form.actual_hours === "" ? null : Number(form.actual_hours),
+        });
+        setForm({ date: "", call_time: "", reporting_time: "", location: "", location_map_url: "", agreed_hours: "", actual_hours: "" });
+        setAdding(false);
+    };
+
+    return (
+        <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-shoot-schedule-${talent.talent_id}`}>
+            <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-xs font-semibold text-black/80">{talent.name}</span>
+                <div className="flex items-center gap-1.5">
+                    {projectShootDates.length > 0 && (
+                        <Button size="sm" variant="ghost" className="h-6 text-[10px] px-2" onClick={onUseProjectDates} data-testid={`pd-use-project-dates-${talent.talent_id}`}>
+                            Use Project Dates
+                        </Button>
+                    )}
+                    <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => setAdding((v) => !v)}>
+                        <Plus className="h-3 w-3 mr-1" /> Add Date
+                    </Button>
+                </div>
+            </div>
+
+            {talent.shoot_days.length === 0 && !adding && (
+                <div className="text-[11px] text-black/30 italic py-2">No shoot days scheduled.</div>
+            )}
+
+            <div className="space-y-1.5">
+                {talent.shoot_days.map((d) => {
+                    const extra = _dayExtraHours(talent.budget_per_day, d.agreed_hours, d.actual_hours);
+                    return (
+                        <div key={d.id} className="grid grid-cols-2 sm:grid-cols-6 gap-1.5 items-center text-[11px] bg-slate-50/60 rounded-md p-2" data-testid={`pd-shoot-day-${d.id}`}>
+                            <div className="font-medium text-black/70">{d.date}</div>
+                            <Input defaultValue={d.call_time || ""} placeholder="Call" className="h-6 text-[11px]" onBlur={(e) => { if (e.target.value !== (d.call_time || "")) onUpdate(d.id, { call_time: e.target.value }); }} />
+                            <Input defaultValue={d.reporting_time || ""} placeholder="Reporting" className="h-6 text-[11px]" onBlur={(e) => { if (e.target.value !== (d.reporting_time || "")) onUpdate(d.id, { reporting_time: e.target.value }); }} />
+                            <Input defaultValue={d.location || ""} placeholder="Location" className="h-6 text-[11px]" onBlur={(e) => { if (e.target.value !== (d.location || "")) onUpdate(d.id, { location: e.target.value }); }} />
+                            <div className="flex items-center gap-1">
+                                <Input type="number" defaultValue={d.agreed_hours ?? ""} placeholder="Basis h" className="h-6 text-[11px] w-14" onBlur={(e) => { const v = e.target.value === "" ? null : Number(e.target.value); if (v !== d.agreed_hours) onUpdate(d.id, { agreed_hours: v }); }} />
+                                <Input type="number" defaultValue={d.actual_hours ?? ""} placeholder="Actual h" className="h-6 text-[11px] w-14" onBlur={(e) => { const v = e.target.value === "" ? null : Number(e.target.value); if (v !== d.actual_hours) onUpdate(d.id, { actual_hours: v }); }} />
+                            </div>
+                            <div className="flex items-center justify-between gap-1">
+                                <div className="flex flex-col">
+                                    <Select value={d.shoot_status || "scheduled"} onValueChange={(v) => onUpdate(d.id, { shoot_status: v })}>
+                                        <SelectTrigger className="h-6 text-[10px] w-[92px]"><SelectValue /></SelectTrigger>
+                                        <SelectContent>
+                                            {SHOOT_STATUS_OPTIONS.map((o) => <SelectItem key={o} value={o}>{o.replace("_", " ")}</SelectItem>)}
+                                        </SelectContent>
+                                    </Select>
+                                    {extra.hours > 0 && (
+                                        <span className="text-amber-700 mt-0.5">+{extra.hours}h · {formatCurrency(extra.amount)}</span>
+                                    )}
+                                </div>
+                                <button onClick={() => onDelete(d.id)} className="text-black/30 hover:text-red-500 shrink-0"><Trash2 className="h-3 w-3" /></button>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+
+            {adding && (
+                <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-1.5 items-end bg-white border border-black/[0.06] rounded-md p-2">
+                    <div><Label className="text-[10px]">Date</Label><Input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} className="h-7 text-[11px]" autoFocus /></div>
+                    <div><Label className="text-[10px]">Call Time</Label><Input value={form.call_time} onChange={(e) => setForm((f) => ({ ...f, call_time: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Reporting</Label><Input value={form.reporting_time} onChange={(e) => setForm((f) => ({ ...f, reporting_time: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Location</Label><Input value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Agreed Hours (basis)</Label><Input type="number" value={form.agreed_hours} onChange={(e) => setForm((f) => ({ ...f, agreed_hours: e.target.value }))} placeholder="e.g. 12" className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Actual Hours</Label><Input type="number" value={form.actual_hours} onChange={(e) => setForm((f) => ({ ...f, actual_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div className="col-span-2 flex justify-end gap-1.5">
+                        <Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={() => setAdding(false)}>Cancel</Button>
+                        <Button size="sm" className="h-7 text-[11px]" disabled={!form.date} onClick={submit}>Save</Button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ============================================================================
+// V2 — Readings & Rehearsals (spec section 8).
+// ============================================================================
+function TalentReadingsRehearsals({ talent, onAdd, onDelete }) {
+    const [adding, setAdding] = useState(false);
+    const [form, setForm] = useState({ type: "reading", date: "", time: "", location: "", notes: "" });
+
+    const submit = () => {
+        onAdd({
+            type: form.type, date: form.date || null, time: form.time || null,
+            location: form.location || null, notes: form.notes || null,
+        });
+        setForm({ type: "reading", date: "", time: "", location: "", notes: "" });
+        setAdding(false);
+    };
+
+    return (
+        <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-readings-${talent.talent_id}`}>
+            <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-xs font-semibold text-black/80">{talent.name}</span>
+                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => setAdding((v) => !v)}>
+                    <Plus className="h-3 w-3 mr-1" /> Add
+                </Button>
+            </div>
+            {talent.readings_rehearsals.length === 0 && !adding && (
+                <div className="text-[11px] text-black/30 italic py-1">No readings or rehearsals scheduled.</div>
+            )}
+            <div className="space-y-1">
+                {talent.readings_rehearsals.map((e) => (
+                    <div key={e.id} className="flex items-center justify-between text-[11px] bg-slate-50/60 rounded-md px-2 py-1.5" data-testid={`pd-reading-${e.id}`}>
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <Badge variant="outline" className="text-[10px] capitalize">{e.type}</Badge>
+                            {e.date && <span className="text-black/60">{e.date}</span>}
+                            {e.time && <span className="text-black/50">{e.time}</span>}
+                            {e.location && <span className="text-black/50">· {e.location}</span>}
+                            {e.notes && <span className="text-black/40">({e.notes})</span>}
+                        </div>
+                        <button onClick={() => onDelete(e.id)} className="text-black/30 hover:text-red-500 shrink-0"><Trash2 className="h-3 w-3" /></button>
+                    </div>
+                ))}
+            </div>
+            {adding && (
+                <div className="mt-2 grid grid-cols-2 sm:grid-cols-5 gap-1.5 items-end bg-white border border-black/[0.06] rounded-md p-2">
+                    <div>
+                        <Label className="text-[10px]">Type</Label>
+                        <Select value={form.type} onValueChange={(v) => setForm((f) => ({ ...f, type: v }))}>
+                            <SelectTrigger className="h-7 text-[11px]"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="reading">Reading</SelectItem>
+                                <SelectItem value="rehearsal">Rehearsal</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </div>
+                    <div><Label className="text-[10px]">Date</Label><Input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Time</Label><Input value={form.time} onChange={(e) => setForm((f) => ({ ...f, time: e.target.value }))} placeholder="e.g. 4 PM" className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Location</Label><Input value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Notes</Label><Input value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div className="col-span-2 sm:col-span-5 flex justify-end gap-1.5">
+                        <Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={() => setAdding(false)}>Cancel</Button>
+                        <Button size="sm" className="h-7 text-[11px]" onClick={submit}>Save</Button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ============================================================================
+// V2 — Talent Financials (spec sections 21-25). Every number here comes
+// straight from the server's already-computed _talent_card fields — no
+// arithmetic happens in this component.
+// ============================================================================
+function TalentFinancialCard({ talent, onAskInvoice }) {
+    return (
+        <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-financial-${talent.talent_id}`}>
+            <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-xs font-semibold text-black/80">{talent.name}</span>
+                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={onAskInvoice} data-testid={`pd-ask-invoice-${talent.talent_id}`}>
+                    <MessageCircle className="h-3 w-3 mr-1" /> Ask Talent to Raise Invoice
+                </Button>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-[11px]">
+                <div className="flex justify-between sm:block"><span className="text-black/40">Talent Fee</span><span className="text-black/70 font-medium">{formatCurrency(talent.budget_total)}</span></div>
+                <div className="flex justify-between sm:block"><span className="text-black/40">Extra Hours</span><span className="text-black/70 font-medium">{formatCurrency(talent.extra_hours_total)}</span></div>
+                <div className="flex justify-between sm:block"><span className="text-black/40">Commissionable</span><span className="text-black/70 font-medium">{formatCurrency(talent.commissionable_amount)}</span></div>
+                <div className="flex justify-between sm:block"><span className="text-black/40">Commission ({talent.commission_percent ?? "—"}%)</span><span className="text-black/70 font-medium">{formatCurrency(talent.commission_amount)}</span></div>
+                <div className="flex justify-between sm:block"><span className="text-black/40">Reimbursements</span><span className="text-black/70 font-medium">{formatCurrency(talent.reimbursement_total)}</span></div>
+                <div className="flex justify-between sm:block"><span className="text-[#0c2340] font-semibold">Invoice Amount</span><span className="text-[#0c2340] font-bold">{formatCurrency(talent.invoice_amount)}</span></div>
+            </div>
+        </div>
+    );
+}
+
+// ============================================================================
+// V2 — Payment Tranches / Billing Milestones (spec sections 19-20). An
+// operational billing tracker, deliberately not an accounting system.
+// ============================================================================
+function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals }) {
+    const [adding, setAdding] = useState(false);
+    const [form, setForm] = useState({ name: "", amount: "", trigger: "" });
+
+    const submit = () => {
+        if (!form.name.trim() || !form.amount) return;
+        onAdd({ name: form.name.trim(), amount: Number(form.amount), trigger: form.trigger || null });
+        setForm({ name: "", amount: "", trigger: "" });
+        setAdding(false);
+    };
+
+    return (
+        <SectionCard
+            title="Payment Tranches"
+            icon={Layers}
+            right={<Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setAdding((v) => !v)}><Plus className="h-3 w-3 mr-1" /> Add Tranche</Button>}
+            testId="pd-tranches"
+        >
+            {tranches.length > 0 && (
+                <div className="flex flex-wrap gap-x-8 gap-y-2 mb-3 text-xs">
+                    <span className="text-black/40">Total: <span className="text-black/80 font-semibold">{formatCurrency(totals.total)}</span></span>
+                    <span className="text-black/40">Received: <span className="text-emerald-700 font-semibold">{formatCurrency(totals.received)}</span></span>
+                    <span className="text-black/40">Outstanding: <span className="text-amber-700 font-semibold">{formatCurrency((totals.total || 0) - (totals.received || 0))}</span></span>
+                </div>
+            )}
+            {tranches.length === 0 && !adding ? (
+                <div className="text-xs text-black/40 py-4 text-center">No payment tranches yet.</div>
+            ) : (
+                <div className="space-y-2">
+                    {tranches.map((t, i) => (
+                        <div key={t.id} className="rounded-md border border-black/[0.06] p-2.5" data-testid={`pd-tranche-${t.id}`}>
+                            <div className="flex items-center justify-between gap-2 mb-1.5">
+                                <span className="text-xs font-semibold text-black/80">{i + 1}. {t.name}</span>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xs font-semibold text-black/70">{formatCurrency(t.amount)}</span>
+                                    <button onClick={() => onDelete(t.id)} className="text-black/30 hover:text-red-500"><Trash2 className="h-3 w-3" /></button>
+                                </div>
+                            </div>
+                            {t.trigger && <div className="text-[11px] text-black/40 mb-1.5">{t.trigger}</div>}
+                            <div className="flex flex-wrap items-center gap-2">
+                                <Select value={t.invoice_status} onValueChange={(v) => onUpdate(t.id, { invoice_status: v })}>
+                                    <SelectTrigger className={`h-6 text-[10px] w-[110px] ${t.invoice_status === "raised_and_sent" ? "text-emerald-700" : "text-amber-700"}`}><SelectValue /></SelectTrigger>
+                                    <SelectContent>
+                                        {TRANCHE_INVOICE_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>Invoice: {o.label}</SelectItem>)}
+                                    </SelectContent>
+                                </Select>
+                                <Select value={t.payment_status} onValueChange={(v) => onUpdate(t.id, { payment_status: v })}>
+                                    <SelectTrigger className={`h-6 text-[10px] w-[110px] ${t.payment_status === "received" ? "text-emerald-700" : "text-amber-700"}`}><SelectValue /></SelectTrigger>
+                                    <SelectContent>
+                                        {TRANCHE_PAYMENT_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>Payment: {o.label}</SelectItem>)}
+                                    </SelectContent>
+                                </Select>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+            {adding && (
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 items-end bg-slate-50/60 border border-black/[0.06] rounded-md p-3">
+                    <div><Label className="text-[10px]">Name / Milestone</Label><Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Signing" className="h-8 text-xs" autoFocus /></div>
+                    <div><Label className="text-[10px]">Amount</Label><Input type="number" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} className="h-8 text-xs" /></div>
+                    <div><Label className="text-[10px]">Trigger (optional)</Label><Input value={form.trigger} onChange={(e) => setForm((f) => ({ ...f, trigger: e.target.value }))} placeholder="e.g. On shoot commencement" className="h-8 text-xs" /></div>
+                    <div className="sm:col-span-3 flex justify-end gap-1.5">
+                        <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setAdding(false)}>Cancel</Button>
+                        <Button size="sm" className="h-7 text-xs" disabled={!form.name.trim() || !form.amount} onClick={submit}>Add Tranche</Button>
+                    </div>
+                </div>
+            )}
+        </SectionCard>
     );
 }
 

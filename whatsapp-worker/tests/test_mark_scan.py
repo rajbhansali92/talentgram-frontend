@@ -2096,8 +2096,8 @@ def main():
     # form_insert_index (between Intro and Pictures), Pictures last, then
     # the ☑️ marker — never scan/discovery order.
     calls_73, open_73, forward_73, text_73 = _install_send_fakes()
-    orig_open_73, orig_forward_73, orig_text_73 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_73, forward_73, text_73
+    orig_open_73, orig_forward_73, orig_text_73 = sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = open_73, forward_73, text_73
     try:
         req_73 = {
             "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Vaseline",
@@ -2108,7 +2108,7 @@ def main():
         }
         result_73 = asyncio.run(mark_scan._run_send(_FakePage73(), req_73))
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_73, orig_forward_73, orig_text_73
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = orig_open_73, orig_forward_73, orig_text_73
 
     assert all(r["ok"] for r in result_73["results"]), result_73
     assert result_73["form_send_result"]["ok"] is True, result_73
@@ -2131,8 +2131,8 @@ def main():
     # even though send_targets is completely empty. The source group is
     # never opened when there is nothing to forward.
     calls_74, open_74, forward_74, text_74 = _install_send_fakes()
-    orig_open_74, orig_forward_74, orig_text_74 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_74, forward_74, text_74
+    orig_open_74, orig_forward_74, orig_text_74 = sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = open_74, forward_74, text_74
     try:
         req_74 = {
             "group_name": "Source Group", "destination_group": "Dest Group",
@@ -2140,7 +2140,7 @@ def main():
         }
         result_74 = asyncio.run(mark_scan._run_send(_FakePage73(), req_74))
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_74, orig_forward_74, orig_text_74
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = orig_open_74, orig_forward_74, orig_text_74
 
     assert result_74["results"] == [], result_74
     assert result_74["form_send_result"]["ok"] is True, result_74
@@ -2153,8 +2153,8 @@ def main():
     # send_marker_on_success=True and the form succeeded — a single
     # failure anywhere in the run means the marker is never sent early.
     calls_75, open_75, forward_75, text_75 = _install_send_fakes(forward_results={"take1": {"ok": False, "error": "boom"}})
-    orig_open_75, orig_forward_75, orig_text_75 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_75, forward_75, text_75
+    orig_open_75, orig_forward_75, orig_text_75 = sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = open_75, forward_75, text_75
     try:
         req_75 = {
             "group_name": "Source Group", "destination_group": "Dest Group",
@@ -2163,7 +2163,7 @@ def main():
         }
         result_75 = asyncio.run(mark_scan._run_send(_FakePage73(), req_75))
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_75, orig_forward_75, orig_text_75
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = orig_open_75, orig_forward_75, orig_text_75
 
     assert result_75["results"][0]["ok"] is False, result_75
     assert result_75["form_send_result"]["ok"] is True, result_75
@@ -2175,8 +2175,8 @@ def main():
     # marker as sent in an earlier attempt) -> never sent again even
     # though everything else succeeds this run.
     calls_76, open_76, forward_76, text_76 = _install_send_fakes()
-    orig_open_76, orig_forward_76, orig_text_76 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_76, forward_76, text_76
+    orig_open_76, orig_forward_76, orig_text_76 = sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = open_76, forward_76, text_76
     try:
         req_76 = {
             "group_name": "Source Group", "destination_group": "Dest Group",
@@ -2185,7 +2185,7 @@ def main():
         }
         result_76 = asyncio.run(mark_scan._run_send(_FakePage73(), req_76))
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_76, orig_forward_76, orig_text_76
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = orig_open_76, orig_forward_76, orig_text_76
 
     assert result_76["marker_result"] is None, result_76
     assert not any(c == ("text", mark_scan.SEND_MARKER_TEXT) for c in calls_76), calls_76
@@ -2198,8 +2198,8 @@ def main():
     # marker-only resume.
     # ------------------------------------------------------------------
     calls_76b, open_76b, forward_76b, text_76b = _install_send_fakes()
-    orig_o76b, orig_f76b, orig_t76b = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_76b, forward_76b, text_76b
+    orig_o76b, orig_f76b, orig_t76b = sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = open_76b, forward_76b, text_76b
     try:
         req_76b = {
             "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Airtel Kick Boxing",
@@ -2208,7 +2208,7 @@ def main():
         }
         result_76b = asyncio.run(mark_scan._run_send(_FakePage73(), req_76b))
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_o76b, orig_f76b, orig_t76b
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = orig_o76b, orig_f76b, orig_t76b
     assert result_76b["ack_result"]["ok"] is True, result_76b
     assert ("text", "Thanks, shared for Airtel Kick Boxing.") in calls_76b, calls_76b
     # Sent before the marker, into the SOURCE group (not Dest Group).
@@ -2221,8 +2221,8 @@ def main():
     # NEVER sent, even though the form succeeded — never falsely tell the
     # talent everything was shared.
     calls_76c, open_76c, forward_76c, text_76c = _install_send_fakes(forward_results={"take1": {"ok": False, "error": "boom"}})
-    orig_o76c, orig_f76c, orig_t76c = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_76c, forward_76c, text_76c
+    orig_o76c, orig_f76c, orig_t76c = sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = open_76c, forward_76c, text_76c
     try:
         req_76c = {
             "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Airtel Kick Boxing",
@@ -2231,7 +2231,7 @@ def main():
         }
         result_76c = asyncio.run(mark_scan._run_send(_FakePage73(), req_76c))
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_o76c, orig_f76c, orig_t76c
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = orig_o76c, orig_f76c, orig_t76c
     assert result_76c["ack_result"] is None, result_76c
     assert not any(c[0] == "text" and c[1].startswith("Thanks, shared") for c in calls_76c), calls_76c
     print("76c. Ack withheld on partial failure -> talent is never told 'shared' when a media item actually failed")
@@ -2241,8 +2241,8 @@ def main():
     # acknowledgement is NEVER re-sent — it already went out on the
     # earlier run that actually did the forwarding.
     calls_76d, open_76d, forward_76d, text_76d = _install_send_fakes()
-    orig_o76d, orig_f76d, orig_t76d = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_76d, forward_76d, text_76d
+    orig_o76d, orig_f76d, orig_t76d = sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = open_76d, forward_76d, text_76d
     try:
         req_76d = {
             "group_name": "Source Group", "destination_group": "Dest Group", "project_label": "Airtel Kick Boxing",
@@ -2250,7 +2250,7 @@ def main():
         }
         result_76d = asyncio.run(mark_scan._run_send(_FakePage73(), req_76d))
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_o76d, orig_f76d, orig_t76d
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = orig_o76d, orig_f76d, orig_t76d
     assert result_76d["ack_result"] is None, result_76d
     assert not any(c[0] == "text" and c[1].startswith("Thanks, shared") for c in calls_76d), calls_76d
     print("76d. Ack not re-sent on marker-only resume -> zero new media/form this run means the earlier run's ack already covered it")
@@ -2270,10 +2270,10 @@ def main():
 
     _, _, forward_76e_fake, _ = _install_send_fakes()
     orig_open_source_76e = mark_scan._open_source_chat
-    orig_forward_76e = mark_scan._send_one_target_native_forward
+    orig_forward_76e = mark_scan._send_one_target_via_download
     orig_text_76e = mark_scan._send_text_message
     mark_scan._open_source_chat = _fake_open_source_phone
-    mark_scan._send_one_target_native_forward = forward_76e_fake
+    mark_scan._send_one_target_via_download = forward_76e_fake
     mark_scan._send_text_message = _fake_text_capture_dtype
     try:
         req_76e = {
@@ -2284,7 +2284,7 @@ def main():
         result_76e = asyncio.run(mark_scan._run_send(_FakePage73(), req_76e))
     finally:
         mark_scan._open_source_chat = orig_open_source_76e
-        mark_scan._send_one_target_native_forward = orig_forward_76e
+        mark_scan._send_one_target_via_download = orig_forward_76e
         mark_scan._send_text_message = orig_text_76e
     assert result_76e["ack_result"]["ok"] is True, result_76e
     assert captured_dtype.get("value") == "number", captured_dtype
@@ -2489,7 +2489,7 @@ def main():
 
     # 80: the dialog genuinely never closes (stuck through every bounded
     # round) -> reports False rather than pretending success; the caller
-    # (_send_one_target_native_forward) folds this into its own error
+    # (_send_one_target_via_download) folds this into its own error
     # message rather than silently proceeding into a guaranteed failure.
     stuck_dump = {"dialogFound": True, "buttons": []}
     page_80 = _make_page_78([stuck_dump])
@@ -2513,8 +2513,8 @@ def main():
     # away isolates exactly what _run_send itself adds).
     import time as _time_mod
     calls_81, open_81, forward_81, text_81 = _install_send_fakes()
-    orig_open_81, orig_forward_81, orig_text_81 = sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = open_81, forward_81, text_81
+    orig_open_81, orig_forward_81, orig_text_81 = sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = open_81, forward_81, text_81
     try:
         req_81 = {
             "group_name": "Source Group", "destination_group": "Dest Group",
@@ -2528,7 +2528,7 @@ def main():
         result_81 = asyncio.run(mark_scan._run_send(_FakePage73(), req_81))
         elapsed_81 = _time_mod.monotonic() - t_start_81
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = orig_open_81, orig_forward_81, orig_text_81
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = orig_open_81, orig_forward_81, orig_text_81
 
     assert all(r["ok"] for r in result_81["results"]), result_81
     assert result_81["marker_result"]["ok"] is True, result_81
@@ -2679,7 +2679,7 @@ def main():
     # send -- the very next operation (_send_text_message opening the
     # destination group for the marker) then failed with CHAT_NOT_OPENED
     # because an unknown blocking dialog was still covering the view.
-    # _send_one_target_native_forward's SUCCESS path never verified the
+    # _send_one_target_via_download's SUCCESS path never verified the
     # dialog had actually closed (only the two FAILURE paths did) -- this
     # test proves the fix: success now also calls _ensure_forward_dialog_closed
     # before returning, without turning the already-real success into a
@@ -2733,7 +2733,7 @@ def main():
     sender._find_outgoing_with_text = _fake_find_text_84
     try:
         target_84 = _send_target("photo1", "photos")
-        result_84 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage84(), "Source Group", target_84))
+        result_84 = asyncio.run(mark_scan._send_one_target_via_download(_FakePage84(), "Source Group", target_84))
     finally:
         sender._open_group_chat = orig_open_84
         mark_scan._open_media_and_get_forward_button = orig_ready_84
@@ -3661,11 +3661,11 @@ def main():
 
     orig_open_group_108 = sender._open_group_chat
     orig_open_phone_108 = sender._open_chat_by_phone
-    orig_forward_108 = mark_scan._send_one_target_native_forward
+    orig_forward_108 = mark_scan._send_one_target_via_download
     orig_text_108 = mark_scan._send_text_message
     sender._open_group_chat = _fake_open_group_108
     sender._open_chat_by_phone = _fake_open_phone_108
-    mark_scan._send_one_target_native_forward = _fake_forward_108
+    mark_scan._send_one_target_via_download = _fake_forward_108
     mark_scan._send_text_message = _fake_text_108
     try:
         req_108 = {
@@ -3689,7 +3689,7 @@ def main():
     finally:
         sender._open_group_chat = orig_open_group_108
         sender._open_chat_by_phone = orig_open_phone_108
-        mark_scan._send_one_target_native_forward = orig_forward_108
+        mark_scan._send_one_target_via_download = orig_forward_108
         mark_scan._send_text_message = orig_text_108
 
     assert all(r["ok"] for r in result_108["results"]), result_108
@@ -3712,13 +3712,13 @@ def main():
     # 2 succeeded moments apart in the SAME send. Root cause: nothing
     # above _open_media_and_get_forward_button's own internal
     # MAX_FORWARD_READINESS_ROUNDS ever retried the WHOLE item once that
-    # exhausted. _send_one_target_native_forward is now a bounded
+    # exhausted. _send_one_target_via_download is now a bounded
     # (MAX_SEND_ITEM_ATTEMPTS) retry wrapper around
-    # _send_one_target_native_forward_attempt (the exact original
+    # _send_local_file (the exact original
     # per-item logic, now with delivery verification appended) — these
     # tests exercise the wrapper's own orchestration directly (mocking
     # the attempt function, mirroring test 73's own style of mocking
-    # _send_one_target_native_forward to test _run_send's orchestration
+    # _send_one_target_via_download to test _run_send's orchestration
     # in isolation), plus one deeper integration test using REAL attempt
     # internals (mirroring test 84's mocking style) for the closest
     # available proxy to a live reproduction in this environment.
@@ -3745,13 +3745,13 @@ def main():
             return {"ok": False, "source_message_id": target["source_message_id"], "error": "forward not ready: tile click failed after 3 attempts"}
         return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT"}
 
-    orig_attempt_109 = mark_scan._send_one_target_native_forward_attempt
-    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_109
+    orig_attempt_109 = mark_scan._send_local_file
+    mark_scan._send_local_file = _fake_attempt_109
     try:
         target_109 = _send_target("intro1", "intro")
-        result_109 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage73(), "Source Group", target_109))
+        result_109 = asyncio.run(mark_scan._send_one_target_via_download(_FakePage73(), "Source Group", target_109))
     finally:
-        mark_scan._send_one_target_native_forward_attempt = orig_attempt_109
+        mark_scan._send_local_file = orig_attempt_109
 
     assert result_109["ok"] is True, result_109
     assert len(calls_109) == 2, calls_109
@@ -3767,13 +3767,13 @@ def main():
             return {"ok": False, "source_message_id": target["source_message_id"], "error": "forward not ready: no <video> mounted within 15s of click"}
         return {"ok": True, "source_message_id": target["source_message_id"], "send_state": "MESSAGE_SENT"}
 
-    orig_attempt_110 = mark_scan._send_one_target_native_forward_attempt
-    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_110
+    orig_attempt_110 = mark_scan._send_local_file
+    mark_scan._send_local_file = _fake_attempt_110
     try:
         target_110 = _send_target("intro1", "intro")
-        result_110 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePageWithWait(), "Source Group", target_110))
+        result_110 = asyncio.run(mark_scan._send_one_target_via_download(_FakePageWithWait(), "Source Group", target_110))
     finally:
-        mark_scan._send_one_target_native_forward_attempt = orig_attempt_110
+        mark_scan._send_local_file = orig_attempt_110
 
     assert result_110["ok"] is True, result_110
     assert len(calls_110) == mark_scan.MAX_SEND_ITEM_ATTEMPTS == 3, calls_110
@@ -3788,13 +3788,13 @@ def main():
         calls_111.append(target["source_message_id"])
         return {"ok": False, "source_message_id": target["source_message_id"], "error": "forward not ready: source message no longer found in window"}
 
-    orig_attempt_111 = mark_scan._send_one_target_native_forward_attempt
-    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_111
+    orig_attempt_111 = mark_scan._send_local_file
+    mark_scan._send_local_file = _fake_attempt_111
     try:
         target_111 = _send_target("intro1", "intro")
-        result_111 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePageWithWait(), "Source Group", target_111))
+        result_111 = asyncio.run(mark_scan._send_one_target_via_download(_FakePageWithWait(), "Source Group", target_111))
     finally:
-        mark_scan._send_one_target_native_forward_attempt = orig_attempt_111
+        mark_scan._send_local_file = orig_attempt_111
 
     assert result_111["ok"] is False, result_111
     assert len(calls_111) == mark_scan.MAX_SEND_ITEM_ATTEMPTS == 3, calls_111
@@ -3811,13 +3811,13 @@ def main():
         calls_112.append((target["source_message_id"], target["media_role"], target["take_number"]))
         return {"ok": False, "source_message_id": target["source_message_id"], "error": "forward not ready: tile click failed"} if len(calls_112) < 3 else {"ok": True, "source_message_id": target["source_message_id"]}
 
-    orig_attempt_112 = mark_scan._send_one_target_native_forward_attempt
-    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_112
+    orig_attempt_112 = mark_scan._send_local_file
+    mark_scan._send_local_file = _fake_attempt_112
     try:
         target_112 = _send_target("take2-msgid", "take", 2)
-        result_112 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePageWithWait(), "Source Group", target_112))
+        result_112 = asyncio.run(mark_scan._send_one_target_via_download(_FakePageWithWait(), "Source Group", target_112))
     finally:
-        mark_scan._send_one_target_native_forward_attempt = orig_attempt_112
+        mark_scan._send_local_file = orig_attempt_112
 
     assert result_112["ok"] is True, result_112
     assert calls_112 == [("take2-msgid", "take", 2)] * 3, calls_112
@@ -3832,14 +3832,14 @@ def main():
         calls_113.append(1)
         return {"ok": False, "source_message_id": target["source_message_id"], "error": "x"} if len(calls_113) < 3 else {"ok": True, "source_message_id": target["source_message_id"]}
 
-    orig_attempt_113 = mark_scan._send_one_target_native_forward_attempt
-    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_113
+    orig_attempt_113 = mark_scan._send_local_file
+    mark_scan._send_local_file = _fake_attempt_113
     try:
         page_113 = _FakePageWithWait()
         target_113 = _send_target("intro1", "intro")
-        result_113 = asyncio.run(mark_scan._send_one_target_native_forward(page_113, "Source Group", target_113))
+        result_113 = asyncio.run(mark_scan._send_one_target_via_download(page_113, "Source Group", target_113))
     finally:
-        mark_scan._send_one_target_native_forward_attempt = orig_attempt_113
+        mark_scan._send_local_file = orig_attempt_113
 
     assert result_113["ok"] is True, result_113
     assert page_113.waits == [mark_scan.SEND_ITEM_RECOVERY_BACKOFF_MS], page_113.waits
@@ -3851,14 +3851,14 @@ def main():
     async def _fake_attempt_114(page, group_name, target, item_label="", source_type="group"):
         return {"ok": True, "source_message_id": target["source_message_id"]}
 
-    orig_attempt_114 = mark_scan._send_one_target_native_forward_attempt
-    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_114
+    orig_attempt_114 = mark_scan._send_local_file
+    mark_scan._send_local_file = _fake_attempt_114
     try:
         page_114 = _FakePageWithWait()
         target_114 = _send_target("intro1", "intro")
-        result_114 = asyncio.run(mark_scan._send_one_target_native_forward(page_114, "Source Group", target_114))
+        result_114 = asyncio.run(mark_scan._send_one_target_via_download(page_114, "Source Group", target_114))
     finally:
-        mark_scan._send_one_target_native_forward_attempt = orig_attempt_114
+        mark_scan._send_local_file = orig_attempt_114
 
     assert result_114["ok"] is True, result_114
     assert page_114.waits == [], page_114.waits
@@ -3866,7 +3866,7 @@ def main():
 
     # 115-117: source-type-agnostic recovery (Requirements E/F/G) — the
     # wrapper itself never inspects source_type at all; it just retries
-    # whatever _send_one_target_native_forward_attempt is given, so group,
+    # whatever _send_local_file is given, so group,
     # phone, and mixed-source items all recover identically. Proven here
     # by driving the SAME fails-once-then-succeeds sequence through each
     # source_type value.
@@ -3877,15 +3877,15 @@ def main():
             calls_11x.append(source_type)
             return {"ok": False, "source_message_id": target["source_message_id"], "error": "x"} if len(calls_11x) == 1 else {"ok": True, "source_message_id": target["source_message_id"]}
 
-        orig_attempt_11x = mark_scan._send_one_target_native_forward_attempt
-        mark_scan._send_one_target_native_forward_attempt = _fake_attempt_11x
+        orig_attempt_11x = mark_scan._send_local_file
+        mark_scan._send_local_file = _fake_attempt_11x
         try:
             target_11x = _send_target("intro1", "intro")
-            result_11x = asyncio.run(mark_scan._send_one_target_native_forward(
+            result_11x = asyncio.run(mark_scan._send_one_target_via_download(
                 _FakePage73(), group_name_11x, target_11x, source_type=source_type_11x,
             ))
         finally:
-            mark_scan._send_one_target_native_forward_attempt = orig_attempt_11x
+            mark_scan._send_local_file = orig_attempt_11x
         assert result_11x["ok"] is True, result_11x
         assert calls_11x == [source_type_11x, source_type_11x], calls_11x
         label = "group source" if source_type_11x == "group" else "individual phone source"
@@ -3896,7 +3896,7 @@ def main():
     # needs recovery must reopen the PHONE source, never the group, and
     # vice versa for an Introduction marked in the group. Exercised via
     # _run_send's own real per-target source_type threading (unchanged),
-    # with _send_one_target_native_forward itself mocked at the OUTER
+    # with _send_one_target_via_download itself mocked at the OUTER
     # level (as test 108 already does) plus a nested real-wrapper check:
     # this test instead drives the wrapper directly per item, mirroring
     # _run_send's own call shape for each of the two source types.
@@ -3911,19 +3911,19 @@ def main():
             return {"ok": False, "source_message_id": target["source_message_id"], "error": "x"}
         return {"ok": True, "source_message_id": target["source_message_id"]}
 
-    orig_attempt_117 = mark_scan._send_one_target_native_forward_attempt
-    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_117
+    orig_attempt_117 = mark_scan._send_local_file
+    mark_scan._send_local_file = _fake_attempt_117
     try:
         phone_target_117 = _send_target("phone-take1", "take", 1)
         group_target_117 = _send_target("group-intro1", "intro")
-        result_phone_117 = asyncio.run(mark_scan._send_one_target_native_forward(
+        result_phone_117 = asyncio.run(mark_scan._send_one_target_via_download(
             _FakePage73(), "919990000111", phone_target_117, source_type="phone",
         ))
-        result_group_117 = asyncio.run(mark_scan._send_one_target_native_forward(
+        result_group_117 = asyncio.run(mark_scan._send_one_target_via_download(
             _FakePage73(), "Shivi Rajput x Talentgram", group_target_117, source_type="group",
         ))
     finally:
-        mark_scan._send_one_target_native_forward_attempt = orig_attempt_117
+        mark_scan._send_local_file = orig_attempt_117
 
     assert result_phone_117["ok"] is True, result_phone_117
     assert result_group_117["ok"] is True, result_group_117
@@ -3981,7 +3981,7 @@ def main():
     # than the pure-wrapper tests above): _open_media_and_get_forward_button
     # fails ONCE (reproducing "could not reopen the marked media" exactly
     # as reported for Padm Rautela's Introduction) then succeeds, proving
-    # the REAL _send_one_target_native_forward (source reopen + reacquire
+    # the REAL _send_one_target_via_download (source reopen + reacquire
     # + forward + destination-select + caption/send + delivery
     # verification) recovers end-to-end, not just the mocked-attempt
     # orchestration tested above.
@@ -4031,7 +4031,7 @@ def main():
     sender._find_outgoing_with_text = _fake_find_text_119
     try:
         target_119 = _send_target("intro-padm-rautela", "intro")
-        result_119 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage119(), "Padm Rautela x Talentgram", target_119))
+        result_119 = asyncio.run(mark_scan._send_one_target_via_download(_FakePage119(), "Padm Rautela x Talentgram", target_119))
     finally:
         sender._open_group_chat = orig_open_119
         mark_scan._open_media_and_get_forward_button = orig_ready_119
@@ -4061,7 +4061,7 @@ def main():
     mark_scan._open_media_and_get_forward_button = _fake_ready_120
     try:
         target_120 = _send_target("intro-gone", "intro")
-        result_120 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePage119(), "Some Group", target_120))
+        result_120 = asyncio.run(mark_scan._send_one_target_via_download(_FakePage119(), "Some Group", target_120))
     finally:
         sender._open_group_chat = orig_open_120
         mark_scan._open_media_and_get_forward_button = orig_ready_120
@@ -4094,9 +4094,9 @@ def main():
         return "OPENED"
 
     orig_open_121 = sender._open_group_chat
-    orig_forward_121 = mark_scan._send_one_target_native_forward
+    orig_forward_121 = mark_scan._send_one_target_via_download
     orig_text_121 = mark_scan._send_text_message
-    sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = (
+    sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = (
         _fake_open_group_121, _fake_forward_121, _fake_text_121,
     )
     try:
@@ -4113,7 +4113,7 @@ def main():
         }
         result_121 = asyncio.run(mark_scan._run_send(_FakePage73(), req_121))
     finally:
-        sender._open_group_chat, mark_scan._send_one_target_native_forward, mark_scan._send_text_message = (
+        sender._open_group_chat, mark_scan._send_one_target_via_download, mark_scan._send_text_message = (
             orig_open_121, orig_forward_121, orig_text_121,
         )
     assert all(r["ok"] for r in result_121["results"]), result_121
@@ -4294,7 +4294,7 @@ def main():
     try:
         target_124 = _send_target("intro-padm-124", "intro")
         target_124["destination_group"] = "Padm Group"
-        result_124 = asyncio.run(mark_scan._send_one_target_native_forward(_FakePageWithWait(), "Padm Rautela x Talentgram", target_124))
+        result_124 = asyncio.run(mark_scan._send_one_target_via_download(_FakePageWithWait(), "Padm Rautela x Talentgram", target_124))
     finally:
         sender._open_group_chat = orig_open_group_124
         mark_scan._open_media_and_get_forward_button = orig_ready_124
@@ -4324,9 +4324,9 @@ def main():
     async def _fake_open_group_125(page, group):
         return "OPENED"
 
-    orig_attempt_125 = mark_scan._send_one_target_native_forward_attempt
+    orig_attempt_125 = mark_scan._send_local_file
     orig_open_125 = sender._open_group_chat
-    mark_scan._send_one_target_native_forward_attempt = _fake_attempt_125
+    mark_scan._send_local_file = _fake_attempt_125
     sender._open_group_chat = _fake_open_group_125
     try:
         req_125 = {
@@ -4336,7 +4336,7 @@ def main():
         }
         result_125 = asyncio.run(mark_scan._run_send(_FakePageWithWait(), req_125))
     finally:
-        mark_scan._send_one_target_native_forward_attempt = orig_attempt_125
+        mark_scan._send_local_file = orig_attempt_125
         sender._open_group_chat = orig_open_125
 
     assert all(r["ok"] for r in result_125["results"]), result_125
@@ -4414,7 +4414,7 @@ def main():
             target_12x = _send_target("take2-msgid", "take", 2)
             target_12x["destination_group"] = "Dest Group"
             target_12x["caption"] = "Audition Take 2"  # the real role caption, not the test helper's default (msg id)
-            result_12x = asyncio.run(mark_scan._send_one_target_native_forward(
+            result_12x = asyncio.run(mark_scan._send_one_target_via_download(
                 _FakePageWithWait(), source_name_12x, target_12x, source_type=source_type_12x,
             ))
         finally:
@@ -4492,10 +4492,10 @@ def main():
         group_target_129 = _send_target("group-intro1-129", "intro")
         group_target_129["destination_group"] = "Dest Group"
         group_target_129["caption"] = "Introduction Take"
-        result_phone_129 = asyncio.run(mark_scan._send_one_target_native_forward(
+        result_phone_129 = asyncio.run(mark_scan._send_one_target_via_download(
             _FakePageWithWait(), "919990000111", phone_target_129, source_type="phone",
         ))
-        result_group_129 = asyncio.run(mark_scan._send_one_target_native_forward(
+        result_group_129 = asyncio.run(mark_scan._send_one_target_via_download(
             _FakePageWithWait(), "Shivi Rajput x Talentgram", group_target_129, source_type="group",
         ))
     finally:
@@ -4566,7 +4566,7 @@ def main():
         talent_b_target_130 = _send_target("intro-talentB-130", "intro")
         talent_b_target_130["destination_group"] = "Shared Casting Group"
         talent_b_target_130["caption"] = "Introduction Take"
-        result_130 = asyncio.run(mark_scan._send_one_target_native_forward(
+        result_130 = asyncio.run(mark_scan._send_one_target_via_download(
             _FakePageWithWait(), "Talent B x Talentgram", talent_b_target_130,
         ))
     finally:
@@ -4642,7 +4642,7 @@ def main():
                         if outer.on_send is not None:
                             outer.on_send(outer.typed_caption)
                     # any other coordinate (e.g. the Forward-button click
-                    # in _send_one_target_native_forward_attempt, or the
+                    # in _send_local_file, or the
                     # compose-box focus click) is an unrelated no-op here
 
             self.mouse = _Mouse()
@@ -4796,7 +4796,7 @@ def main():
         # own bounded rounds -> the REAL _enter_forward_caption_and_send
         # logic runs (not mocked here — this fake stands in for the
         # WHOLE caption+send step per outer attempt, mirroring how
-        # _send_one_target_native_forward_attempt's OTHER steps are
+        # _send_local_file's OTHER steps are
         # already mocked in every earlier full-stack test in this file).
         # Attempt 2: clears immediately (the transient condition
         # resolved itself between attempts, exactly like a real
@@ -4838,7 +4838,7 @@ def main():
         take1_target_135 = _send_target("take1-135", "take", 1)
         take1_target_135["destination_group"] = "Dest Group"
         take1_target_135["caption"] = "Audition Take 1"
-        result_take1_135 = asyncio.run(mark_scan._send_one_target_native_forward(_FakeComposeBoxPage(), "Talent Group", take1_target_135))
+        result_take1_135 = asyncio.run(mark_scan._send_one_target_via_download(_FakeComposeBoxPage(), "Talent Group", take1_target_135))
 
         # Introduction — existing caption, needs the OUTER bounded
         # recovery wrapper to succeed.
@@ -4846,7 +4846,7 @@ def main():
         intro_target_135 = _send_target("intro-135", "intro")
         intro_target_135["destination_group"] = "Dest Group"
         intro_target_135["caption"] = "Introduction Take"
-        result_intro_135 = asyncio.run(mark_scan._send_one_target_native_forward(_FakeComposeBoxPage(), "Talent Group", intro_target_135))
+        result_intro_135 = asyncio.run(mark_scan._send_one_target_via_download(_FakeComposeBoxPage(), "Talent Group", intro_target_135))
     finally:
         mark_scan._open_media_and_get_forward_button = orig_ready_135
         mark_scan._select_forward_destination = orig_select_135
@@ -4916,7 +4916,7 @@ def main():
             intro_target_13x = _send_target("intro-13x", "intro")
             intro_target_13x["destination_group"] = "Dest Group"
             intro_target_13x["caption"] = "Introduction Take"
-            result_13x = asyncio.run(mark_scan._send_one_target_native_forward(
+            result_13x = asyncio.run(mark_scan._send_one_target_via_download(
                 page_13x, source_name_13x, intro_target_13x, source_type=source_type_13x,
             ))
         finally:
@@ -4983,13 +4983,13 @@ def main():
         take_target_138 = _send_target("take-phone-138", "take", 1)
         take_target_138["destination_group"] = "Dest Group"
         take_target_138["caption"] = "Audition Take 1"
-        result_take_138 = asyncio.run(mark_scan._send_one_target_native_forward(
+        result_take_138 = asyncio.run(mark_scan._send_one_target_via_download(
             page_take_138, "919990000555", take_target_138, source_type="phone",
         ))
         intro_target_138 = _send_target("intro-group-138", "intro")
         intro_target_138["destination_group"] = "Dest Group"
         intro_target_138["caption"] = "Introduction Take"
-        result_intro_138 = asyncio.run(mark_scan._send_one_target_native_forward(
+        result_intro_138 = asyncio.run(mark_scan._send_one_target_via_download(
             page_intro_138, "Talent Group", intro_target_138, source_type="group",
         ))
     finally:
@@ -5504,7 +5504,7 @@ def main():
     # inherits a leftover overlay (the Sahal Mansuri cascade).
     neutral_calls_153 = {"n": 0}
     orig_neutral_153 = mark_scan._return_forward_ui_to_neutral
-    orig_fwd_153 = mark_scan._send_one_target_native_forward
+    orig_fwd_153 = mark_scan._send_one_target_via_download
     orig_open_153 = sender._open_group_chat
     orig_text_153 = mark_scan._send_text_message
 
@@ -5526,7 +5526,7 @@ def main():
         return {"ok": True}
 
     mark_scan._return_forward_ui_to_neutral = _spy_neutral_153
-    mark_scan._send_one_target_native_forward = _fake_fwd_153
+    mark_scan._send_one_target_via_download = _fake_fwd_153
     sender._open_group_chat = _fake_open_153
     mark_scan._send_text_message = _fake_text_153
     try:
@@ -5541,7 +5541,7 @@ def main():
         result_153 = asyncio.run(mark_scan._run_send(_FakePage73(), req_153))
     finally:
         mark_scan._return_forward_ui_to_neutral = orig_neutral_153
-        mark_scan._send_one_target_native_forward = orig_fwd_153
+        mark_scan._send_one_target_via_download = orig_fwd_153
         sender._open_group_chat = orig_open_153
         mark_scan._send_text_message = orig_text_153
     assert attempted_153 == ["take1", "take2", "intro1"], attempted_153  # take2's failure never blocks intro1

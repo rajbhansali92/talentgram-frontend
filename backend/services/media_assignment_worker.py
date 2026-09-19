@@ -905,6 +905,8 @@ async def _process_scan_done() -> bool:
             "pending_report_context": {
                 "talent_label": talent_label, "project_label": project_label,
                 "already": already, "upload_advisory": upload_advisory,
+                "submission_id": doc.get("submission_id"),
+                "approve_on_success": bool(doc.get("approve_on_success")),
             },
             "updated_at": _now(),
         }},
@@ -1019,6 +1021,19 @@ async def _process_download_done() -> bool:
                 # transition or duplicate notification.
                 submission_id = ctx.get("submission_id")
                 if submission_id:
+                    # operation_ok (Approve + Send status polling,
+                    # 2026-09-20) — a plain, independent field on this
+                    # exact scan_request doc recording that THIS run's own
+                    # media+form+marker all genuinely succeeded, so
+                    # agents.modules.submission_whatsapp_actions.
+                    # get_action_status never has to infer success by
+                    # checking the submission's decision field (which
+                    # could already be "approved" from a completely
+                    # unrelated earlier action and would otherwise read as
+                    # a false positive for a run that actually failed).
+                    await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+                        {"id": doc["id"]}, {"$set": {"operation_ok": True}},
+                    )
                     try:
                         admin = await _service_admin()
                         await set_decision(
@@ -1092,6 +1107,39 @@ async def _process_download_done() -> bool:
         elif not already_before:
             item_result = dl_results[i] if i < len(dl_results) else None
             failed_items.append({"label": label, "error": (item_result or {}).get("error") or "no result reported"})
+
+    # Post-UPLOAD approval (Approve + Upload, 2026-09-20) — mirrors SEND's
+    # own auto-approve-on-success hook above: only fires when this run
+    # carried a submission_id + approve_on_success (the original WhatsApp
+    # UPLOAD command never sets either, so this stays a no-op there) AND
+    # every download attempted this run genuinely succeeded (zero
+    # failed_items — a partial failure never auto-approves). Reuses the
+    # SAME real production approval mechanism (routers.submissions.
+    # set_decision), which is itself idempotent, so a later unrelated
+    # UPLOAD for an already-approved submission never double-fires.
+    if ctx.get("approve_on_success") and not failed_items and ctx.get("submission_id"):
+        submission_id = ctx["submission_id"]
+        # operation_ok — see the identical field in the SEND completion
+        # branch above for the full rationale (status-polling ground
+        # truth independent of the submission's possibly-already-
+        # "approved" decision field).
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": doc["id"]}, {"$set": {"operation_ok": True}},
+        )
+        try:
+            admin = await _service_admin()
+            await set_decision(
+                project_id, submission_id,
+                SubmissionDecisionIn(decision="approved", note="Auto-approved after successful Approve + Upload"),
+                admin,
+            )
+        except Exception:
+            logger.exception(
+                "media_assignment_worker: Approve + Upload completed but the post-upload "
+                "approval transition failed for submission %r (project %r) — the media "
+                "itself was still uploaded successfully; this does not roll it back.",
+                submission_id, project_id,
+            )
 
     report = _report_upload_result(talent_label, project_label, uploaded_labels, failed_items, ctx.get("already") or [])
     await _finish(doc["id"], report + (ctx.get("upload_advisory") or ""), worker_id=doc.get("worker_id", "default"))

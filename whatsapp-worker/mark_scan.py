@@ -8215,21 +8215,20 @@ async def _run_download_one(page, http: httpx.AsyncClient, group_name: str, targ
 # _download_photo_album_tile_via_blob — none of those are called anywhere
 # below, by design, so SEND cannot accidentally route through UPLOAD's
 # downloader.
-# PER_ITEM_SEND_TIMEOUT (Production fix, 2026-09-09 — SEND reliability/
-# self-healing: real incident, Padm Rautela / Mahindra Thar Film 1 & 2,
-# Introduction Take failed "could not reopen the marked media" while
-# Take 1/Take 2 succeeded moments apart in the SAME send) — raised from
-# 90.0 to comfortably fit MAX_SEND_ITEM_ATTEMPTS full attempts of the
-# per-item sequence (see _send_one_target_native_forward's own
-# docstring) plus the one bounded backoff before the final attempt.
-# Still a hard, bounded ceiling — never unbounded/infinite — just sized
-# for the new deterministic bounded-retry architecture instead of a
-# single shot; this is not "fix it by bumping a timeout" on its own
-# (that alone would still be a single un-retried attempt, just a
-# slower one) — it's the budget the real fix (reacquire-by-identity +
-# bounded retry + delivery verification, below) needs to run to
-# completion within one worker claim.
-PER_ITEM_SEND_TIMEOUT = 240.0
+# PER_ITEM_SEND_TIMEOUT (Production fix, 2026-09-09, revised 2026-09-19)
+# — budgets ONE item's full sequence, including MAX_SEND_ITEM_ATTEMPTS
+# retries and their backoff (see _send_one_target_via_download's own
+# docstring). Raised again 2026-09-19 (download-based SEND transport):
+# the per-item sequence can now include a real WhatsApp video download
+# (PER_VIDEO_DOWNLOAD_TIMEOUT=500s, same ceiling UPLOAD already budgets
+# for a large video) BEFORE any attach/send is even attempted — the old
+# 240s ceiling, tuned for native-Forward's UI-click-only sequence, would
+# cut off a large-video download partway through. The download itself
+# only ever happens ONCE per item (retries reuse the already-downloaded
+# local file — see _send_one_target_via_download), so this still only
+# needs to cover one download plus a few retried send attempts, not
+# MAX_SEND_ITEM_ATTEMPTS full downloads.
+PER_ITEM_SEND_TIMEOUT = 700.0
 MAX_FORWARD_READINESS_ROUNDS = 3
 # Per-attempt wall-clock ceiling for "open the media + get its on-screen
 # Forward control" (2026-09-11 — Sahal Mansuri / Mahindra Thar incident,
@@ -8967,8 +8966,8 @@ async def _capture_destination_baseline(page, destination_group: str) -> Dict[st
     primitive send_whatsapp_message's own strict_send_confirmation
     already uses to tell a genuinely NEW outgoing message apart from
     whatever was already sitting in the chat. Called once per item,
-    immediately before that item's own reacquire-and-forward sequence
-    begins (see _send_one_target_native_forward_attempt) — this is a
+    immediately before that item's own reacquire-and-send sequence
+    begins (see _send_local_file) — this is a
     real, extra WhatsApp round trip per item, the deliberate cost of
     actually proving THIS attempt's own delivery rather than a
     proportionally cheaper but weaker check."""
@@ -9035,231 +9034,234 @@ async def _verify_forward_delivered(
     return {"verified": False, "reason": "no NEW matching outgoing message found in the destination chat after send"}
 
 
-async def _send_one_target_native_forward_attempt(
-    page, group_name: str, target: Dict[str, Any], item_label: str = "", source_type: str = "group",
-) -> Dict[str, Any]:
-    """ONE attempt at one SEND item end-to-end via native Forward — NEVER
-    downloads media. Opens the exact marked source (re-resolved by
-    identity), ensures the real Forward control is available (bounded
-    close/reopen for video), clicks Forward, selects the destination
-    group by exact unique match, enters an optional caption, clicks the
-    real Send control, and VERIFIES the message actually landed in the
-    destination (Production fix, 2026-09-09 — see _verify_forward_
-    delivered) before ever returning ok=True. `item_label` (e.g. "3/6")
-    is currently unused but kept for parity with _run_send's per-item
-    logging/timeout bookkeeping.
-
-    `source_type` ("group" | "phone", SEND Path B, Production fix
-    2026-09-03) — see _open_source_chat; `group_name` holds the phone
-    digits when source_type=="phone".
-
-    Retrying a WHOLE attempt (never just this function retrying itself)
-    is _send_one_target_native_forward's job, immediately below — this
-    function is the single, non-duplicated unit that wrapper calls
-    again, unchanged, on every retry.
-
-    SEND_TIMING (Production fix, 2026-09-08 — performance audit): one
-    structured log line per item, timing exactly the stages a real SEND
-    E2E showed noticeable per-item delay across (source open, media
-    prepare/readiness, forward-button click, destination select, caption
-    +send) — never spammy (one line per item, not per sub-step), so a
-    future "SEND feels slow" report can be diagnosed from Railway logs
-    instead of guessed at again."""
-    sm_id = target["source_message_id"]
-    t_start = time.monotonic()
-
-    # Delivery-verification baseline (Production fix, 2026-09-10 — see
-    # _capture_destination_baseline's own docstring for the audit
-    # finding this fixes: SEND's own role captions are deliberately
-    # generic — "Introduction Take"/"Photo" carry no talent/project/take
-    # distinction — so verification without a fresh, per-item baseline
-    # cannot tell THIS attempt's own just-forwarded message apart from a
-    # different talent's earlier send to the same shared destination
-    # group). Captured BEFORE the source chat is even opened, so the
-    # subsequent _open_source_chat call below correctly re-navigates
-    # back to the source afterward — this is a real, deliberate extra
-    # WhatsApp round trip per item; not attempted at all if it fails
-    # (baseline=None degrades to the older, weaker "last 8 messages"
-    # check — see _verify_forward_delivered — rather than failing this
-    # whole attempt over a problem in a side-channel check that hasn't
-    # even reached the actual forward yet).
-    baseline_result = await _capture_destination_baseline(page, target["destination_group"])
-    dest_baselines = baseline_result.get("baselines") if baseline_result.get("ok") else None
-
-    status = await _open_source_chat(page, source_type, group_name)
-    t_source_open = time.monotonic()
-    if status != "OPENED":
-        return {"ok": False, "source_message_id": sm_id, "error": f"source group not open (status={status})"}
-    logger.info("SEND_MEDIA_SOURCE_OPEN item=%s source_message_id=%s source_type=%s elapsed_ms=%d",
-                item_label, sm_id, source_type, int((t_source_open - t_start) * 1000))
-
-    is_photo = target.get("source_media_type") != "video"
-    tile_index = target.get("album_tile_index") or 0
-
-    ready = await _open_media_and_get_forward_button(page, group_name, sm_id, tile_index, is_photo)
-    t_media_ready = time.monotonic()
-    if not ready.get("ok"):
-        logger.info(
-            "SEND_TIMING item=%s source_message_id=%s source_open=%.2fs media_prepare=%.2fs FAILED=media_not_ready",
-            item_label, sm_id, t_source_open - t_start, t_media_ready - t_source_open,
-        )
-        return {"ok": False, "source_message_id": sm_id, "error": f"forward not ready: {ready.get('reason')}"}
-    logger.info("SEND_MEDIA_REACQUIRE item=%s source_message_id=%s elapsed_ms=%d",
-                item_label, sm_id, int((t_media_ready - t_source_open) * 1000))
-    logger.info("SEND_MEDIA_FORWARD_READY item=%s source_message_id=%s take=%s role=%s",
-                item_label, sm_id, target.get("take_number"), target.get("media_role"))
-
-    forward_btn = ready["forward_button"]
-    try:
-        cx = forward_btn["rect"][0] + forward_btn["rect"][2] / 2
-        cy = forward_btn["rect"][1] + forward_btn["rect"][3] / 2
-        await page.mouse.click(cx, cy, button="left")
-    except Exception as exc:
-        return {"ok": False, "source_message_id": sm_id, "error": f"forward click failed: {exc}"}
-    t_forward_click = time.monotonic()
-    # Speed fix — this used to be a blind 1200ms wait before the picker
-    # was even checked once. _select_forward_destination immediately below
-    # already does its OWN bounded poll for the picker's dialog (up to 10
-    # tries x 500ms, breaking the instant it appears — see that function's
-    # own docstring, added specifically because a fixed wait here was
-    # sometimes too short for a video source and always too long for a
-    # photo). This fixed sleep was pure dead weight on top of a strictly
-    # better check that already existed: removing it costs nothing in
-    # reliability (the same bounded poll still runs, unchanged) and saves
-    # up to 1.2s per forwarded item — 2.4s+ on a typical 2-item SEND.
-
-    select_result = await _select_forward_destination(page, target["destination_group"])
-    t_dest_select = time.monotonic()
-    if not select_result.get("ok"):
-        closed = await _ensure_forward_dialog_closed(page)
-        reason = select_result.get("reason")
-        if not closed:
-            reason = f"{reason} (also: Forward dialog would not close afterward)"
-        return {"ok": False, "source_message_id": sm_id, "error": f"destination selection failed: {reason}"}
-
-    send_result = await _enter_forward_caption_and_send(page, target.get("caption") or "")
-    t_send = time.monotonic()
-    if not send_result.get("ok"):
-        # Verified cleanup on failure (2026-08-27 fix) — mirrors the
-        # destination-selection failure path above. A real production SEND
-        # found that leaving the Forward dialog open after a caption/send
-        # failure poisoned the VERY NEXT operation (opening the
-        # destination group directly to send the form text) — a single
-        # unverified Escape press was not reliable enough (see
-        # _ensure_forward_dialog_closed's own docstring).
-        closed = await _ensure_forward_dialog_closed(page)
-        reason = send_result.get("reason")
-        if not closed:
-            reason = f"{reason} (also: Forward dialog would not close afterward)"
-        # Carry the exact stalled state (FORWARD_DIALOG_READY /
-        # CAPTION_STATE / SEND_CONTROL_READY) into the error string so
-        # _humanize_media_send_error (backend) can report the real
-        # failure, not a catch-all "Send control could not be confirmed".
-        fs = send_result.get("failed_state")
-        prefix = f"send failed [{fs}]" if fs else "send failed"
-        return {"ok": False, "source_message_id": sm_id, "error": f"{prefix}: {reason}"}
-    logger.info("SEND_MEDIA_FORWARD_SENT item=%s source_message_id=%s selector=%s",
-                item_label, sm_id, send_result.get("selector_used"))
-
-    # Verified close on SUCCESS too (2026-08-27 fix, unchanged) — a real
-    # live SEND found the ☑️ marker (the very next operation) fail with
-    # CHAT_NOT_OPENED immediately after a media item forwarded
-    # successfully but left the Forward dialog still open. A DIFFERENT
-    # real live SEND (2026-08-27) proved the dialog can stay open for a
-    # moment after a GENUINELY successful send too — closing it here is
-    # cleanup for whatever comes next, never evidence either way about
-    # whether THIS send worked, so it never turns a real success into a
-    # failure and is never itself treated as proof of one.
-    await _ensure_forward_dialog_closed(page)
-
-    # Delivery verification (Production fix, 2026-09-09 — the master
-    # prompt's own explicit requirement): the ONLY authoritative signal
-    # is whether the item's own caption actually appears as a NEW
-    # outgoing message in the destination chat — see
-    # _verify_forward_delivered. Deliberately NOT gated on how the
-    # Forward dialog behaved (see the comment just above) — that
-    # UI-timing detail proved unreliable in both directions on real
-    # production sends and is never trusted as proof of success OR
-    # failure on its own.
-    verify = await _verify_forward_delivered(page, target["destination_group"], target.get("caption") or "", baselines=dest_baselines)
-    if not verify.get("verified"):
-        return {"ok": False, "source_message_id": sm_id, "error": f"send unverified: {verify.get('reason')}"}
-
-    logger.info(
-        "SEND_TIMING item=%s source_message_id=%s source_open=%.2fs media_prepare=%.2fs "
-        "forward_click=%.2fs destination_select=%.2fs form_send=%.2fs total=%.2fs",
-        item_label, sm_id,
-        t_source_open - t_start, t_media_ready - t_source_open, t_forward_click - t_media_ready,
-        t_dest_select - t_forward_click, t_send - t_dest_select, time.monotonic() - t_start,
-    )
-    return {
-        "ok": True, "source_message_id": sm_id, "send_state": "MESSAGE_SENT",
-        "selector_used": send_result.get("selector_used"), "verified_message_id": verify.get("message_id"),
-    }
-
-
 MAX_SEND_ITEM_ATTEMPTS = 3
 SEND_ITEM_RECOVERY_BACKOFF_MS = 2000
 
+# Download-based SEND transport (2026-09-19) — reinstates the download+
+# verify+local-attach mechanism (originally shipped 2026-08-24, replaced
+# 2026-08-25 by native Forward — see git history on this file around that
+# date for the removed original) as the PRIMARY and ONLY SEND transport;
+# native Forward is no longer used anywhere in the live SEND path. Reason:
+# native Forward's own on-screen-control-readiness turned out to still be
+# unreliable enough in production (WhatsApp Web sometimes shows a video as
+# buffered/available but never reliably exposes Forward), and — unlike
+# Forward — a downloaded local file's validity (exists, non-zero size) can
+# be verified BEFORE any attempt to attach/send it, closing that failure
+# mode entirely rather than working around it.
+#
+# Reuses, byte-for-byte, the SAME acquisition mechanisms UPLOAD's own
+# _run_download_one already relies on in production today:
+# _open_tile_viewer_and_download_hardened (video), _download_photo_album_
+# tile_via_blob (album photo tile), the plain blob-fetch JS (single, non-
+# album photo) — no second/parallel download implementation. Delivery uses
+# sender.send_whatsapp_message's existing local_file_path param (2026-08-24,
+# never removed) — the exact same attach/caption/send flow every other
+# caller of that function already uses, called on a real local file instead
+# of a media_url. Post-send verification reuses _capture_destination_
+# baseline/_verify_forward_delivered unchanged (those helpers were never
+# Forward-specific — they only look at the destination chat's own outgoing
+# messages).
+MEDIA_STAGING_DIR = "/tmp/talentgram-whatsapp-media"
 
-async def _send_one_target_native_forward(
-    page, group_name: str, target: Dict[str, Any], item_label: str = "", source_type: str = "group",
+
+def _media_staging_path(job_id: str, media_id: str, ext: str) -> str:
+    """/tmp/talentgram-whatsapp-media/<job_id>_<media_id>.<ext> — a STABLE,
+    predictable path (not an auto-deleting tempfile) so a retry of the
+    SEND step alone (the download already having succeeded) reuses the
+    exact same bytes on disk instead of re-fetching a possibly-large video
+    a second time, and so a later, separate downstream operation needing
+    the SAME source media (e.g. Approve+Upload, if it runs against a
+    source already downloaded for Approve+Send within the same job) can
+    find and reuse it too. `media_id` should be a value stable across
+    retries for the SAME source media — target["source_thumbnail_hash"]
+    when present (unique per tile), else target["source_message_id"]."""
+    os.makedirs(MEDIA_STAGING_DIR, exist_ok=True)
+    safe_job = re.sub(r"[^A-Za-z0-9_-]", "_", job_id or "job")
+    safe_media = re.sub(r"[^A-Za-z0-9_-]", "_", media_id or "media")
+    return os.path.join(MEDIA_STAGING_DIR, f"{safe_job}_{safe_media}.{ext}")
+
+
+async def _download_source_media(
+    page, group_name: str, target: Dict[str, Any], *, job_id: str, source_type: str = "group",
 ) -> Dict[str, Any]:
-    """Bounded automatic recovery wrapper around ONE SEND item (Production
-    fix, 2026-09-09 — real incident: Padm Rautela / Mahindra Thar Film 1
-    & 2, Introduction Take failed "could not reopen the marked media"
-    while Take 1 and Take 2 succeeded moments apart in the SAME send).
+    """Downloads ONE SEND target's ORIGINAL WhatsApp source media to a
+    local file on disk. Returns {"ok", "source_message_id",
+    "local_file_path", "byte_length"} on success, or {"ok": False,
+    "source_message_id", "error"} otherwise — the error string carries the
+    same bracketed state tokens (e.g. "[DOWNLOAD_TIMEOUT]",
+    "[SOURCE_NOT_FOUND]") UPLOAD's own _run_download_one already uses, for
+    consistent log/audit parsing across both workflows. Never deletes
+    anything and never decides retry policy itself — see
+    _send_one_target_via_download for both."""
+    sm_id = target["source_message_id"]
+    status = await _open_source_chat(page, source_type, group_name)
+    if status != "OPENED":
+        return {"ok": False, "source_message_id": sm_id, "error": f"[SOURCE_NOT_OPEN] source not open (status={status})"}
 
-    ROOT CAUSE (audited, not guessed — see this commit's own message for
-    the full trace): _open_media_and_get_forward_button already retries
-    reacquiring the media WITHIN one already-open source chat
-    (MAX_FORWARD_READINESS_ROUNDS, unchanged, still correct and still the
-    right layer for that job), but NOTHING above it ever retried the
-    WHOLE item — including reopening the source chat itself — once that
-    exhausted. A single transient WhatsApp Web virtualization/rendering
-    hiccup on exactly one item was therefore immediately, permanently
-    final, even though every OTHER item in the same send worked fine
-    seconds apart from an identical WhatsApp Web session.
-
-    Up to MAX_SEND_ITEM_ATTEMPTS full attempts of the EXACT SAME
-    deterministic sequence (_send_one_target_native_forward_attempt,
-    unchanged, never duplicated — this wrapper is the ONE place retry
-    logic exists, reused for Take 1, Take 2, Introduction, photos, every
-    role/source alike). Never forwards a different/nearby media item as
-    a substitute on any attempt: every attempt re-resolves the SAME
-    exact target["source_message_id"] by identity (never a stale
-    locator, never proximity); if identity can't be proven, that ONE
-    attempt fails and reports why — it never silently substitutes
-    anything.
-
-    Attempt 1 is exactly today's original single-shot behavior (zero
-    added cost on the common, successful path beyond the new delivery
-    verification every attempt now performs regardless — see
-    _send_one_target_native_forward_attempt). Attempts 2+ re-open the
-    source chat completely as their own very first step (built into
-    _send_one_target_native_forward_attempt already — no special-casing
-    needed here) before re-resolving the exact message fresh. Only the
-    FINAL attempt adds one short, bounded backoff first (never an
-    unbounded/long fixed sleep, never applied before earlier attempts) —
-    in case WhatsApp's own background sync genuinely just needed a
-    moment; spending it on the earliest retry would waste the one
-    backoff opportunity on a hiccup that's more likely to resolve with
-    time than immediately.
-
-    Structured SEND_MEDIA_* logs (RECOVERY_START/RETRY/SUCCESS/FAILED)
-    make an eventual retry decision traceable from Railway logs alone."""
-    log_fields = "item=%s source_message_id=%s role=%s take=%s source_type=%s destination=%s"
-    log_args = (
-        item_label, target.get("source_message_id"), target.get("media_role"),
-        target.get("take_number"), source_type, target.get("destination_group"),
+    idx, message, locate_reason = await _locate_download_message(
+        page, group_name, sm_id, target.get("mark_reply_message_id"),
+        source_thumbnail_hash=target.get("source_thumbnail_hash"),
     )
+    if message is None:
+        locate_state = "SOURCE_NOT_HYDRATED" if "did not finish rendering" in (locate_reason or "") else "SOURCE_NOT_FOUND"
+        return {"ok": False, "source_message_id": sm_id, "error": f"[{locate_state}] {locate_reason}"}
+    scope = await sender._resolve_scope(page)
+    full_sel = f"{scope} [data-testid^='conv-msg-']"
+
+    raw: Optional[bytes] = None
+    content_type = ""
+
+    if target.get("source_media_type") == "video":
+        tile_index = target.get("album_tile_index")
+        if tile_index is None:
+            tile_index = 0
+        try:
+            dl = await asyncio.wait_for(
+                _open_tile_viewer_and_download_hardened(
+                    page, group_name, sm_id, target.get("source_thumbnail_hash"), tile_index,
+                    mark_reply_message_id=target.get("mark_reply_message_id"),
+                ),
+                timeout=PER_VIDEO_DOWNLOAD_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            return {"ok": False, "source_message_id": sm_id, "error": f"[DOWNLOAD_TIMEOUT] timed out after {PER_VIDEO_DOWNLOAD_TIMEOUT}s"}
+        if not dl.get("ok"):
+            state = dl.get("state") or "DOWNLOAD_NOT_STARTED"
+            reason = dl.get("reason") or f"failed at stage {dl.get('stage')}"
+            return {"ok": False, "source_message_id": sm_id, "error": f"[{state}] {reason}"}
+        downloads = dl.get("downloads") or []
+        raw = next((d.get("_raw_bytes") for d in downloads if d.get("ok") and d.get("_raw_bytes")), None)
+        if not raw:
+            return {"ok": False, "source_message_id": sm_id, "error": "[ZERO_BYTE_FILE] downloaded zero bytes"}
+    elif target.get("album_tile_index") is not None:
+        dl = await _download_photo_album_tile_via_blob(
+            message, page, target.get("album_tile_index"), target["source_thumbnail_hash"],
+        )
+        if not dl.get("ok"):
+            reason = dl.get("reason") or f"failed at stage {dl.get('stage')}"
+            return {"ok": False, "source_message_id": sm_id, "error": f"[DOWNLOAD_FAILED] {reason}"}
+        raw = dl.get("_raw_bytes")
+        content_type = dl.get("content_type") or ""
+        if not raw:
+            return {"ok": False, "source_message_id": sm_id, "error": "[ZERO_BYTE_FILE] downloaded zero bytes"}
+    else:
+        try:
+            if idx is None:
+                fetched = await message.evaluate(_DOWNLOAD_ONE_MESSAGE_JS)
+            else:
+                fetched = await _evaluate(page, _DOWNLOAD_JS, [full_sel, idx])
+        except Exception as exc:
+            return {"ok": False, "source_message_id": sm_id, "error": f"[DOWNLOAD_FAILED] download failed: {exc}"}
+        if not fetched.get("ok"):
+            return {"ok": False, "source_message_id": sm_id, "error": f"[DOWNLOAD_FAILED] {fetched.get('reason')}"}
+        if not fetched.get("base64"):
+            return {"ok": False, "source_message_id": sm_id, "error": "[ZERO_BYTE_FILE] downloaded zero bytes"}
+        raw = b64mod.b64decode(fetched["base64"])
+        content_type = fetched.get("contentType", "")
+
+    if not raw:
+        # Defensive only — every branch above already returns on its own
+        # empty-`raw` case; kept as a final backstop in case a future
+        # branch is added without one, never expected to actually fire.
+        return {"ok": False, "source_message_id": sm_id, "error": "[ZERO_BYTE_FILE] downloaded zero bytes"}
+
+    media_id = target.get("source_thumbnail_hash") or sm_id
+    detected = _detect_mime_type(raw, target.get("source_media_type")) or content_type
+    ext = _MIME_BY_EXT.get(detected, "bin")
+    local_path = _media_staging_path(job_id, media_id, ext)
+    try:
+        with open(local_path, "wb") as f:
+            f.write(raw)
+    except OSError as exc:
+        return {"ok": False, "source_message_id": sm_id, "error": f"[TEMP_FILE_WRITE_FAILED] {exc}"}
+
+    # Verify: exists on disk, non-zero size — the task's own explicit
+    # "verify the downloaded file is valid" requirement, checked against
+    # the ACTUAL file on disk (not just the in-memory byte count above),
+    # since attachment happens from that file, not from `raw` directly.
+    if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
+        return {"ok": False, "source_message_id": sm_id, "error": "[TEMP_FILE_INVALID] file missing or zero-size on disk after write"}
+
+    return {
+        "ok": True, "source_message_id": sm_id, "local_file_path": local_path,
+        "byte_length": os.path.getsize(local_path),
+    }
+
+
+async def _send_local_file(page, target: Dict[str, Any], local_file_path: str) -> Dict[str, Any]:
+    """Attaches an already-downloaded local file to the destination group
+    and sends it as a genuinely new message — reuses sender.
+    send_whatsapp_message's existing, unmodified local_file_path param
+    (the caller — this function's own caller — owns the file; never
+    deleted here). Verified the same way the prior native-Forward path
+    was (Production fix, 2026-09-09/10, kept unchanged): a fresh per-item
+    destination baseline, then confirming the item's own caption shows up
+    as a genuinely NEW outgoing message afterward — SEND's role captions
+    ("Introduction Take") are deliberately generic and could otherwise
+    match a different talent's earlier send to the same shared casting
+    group, so send_whatsapp_message's own internal verification alone is
+    not trusted as sufficient on its own here, same as before."""
+    sm_id = target["source_message_id"]
+    baseline_result = await _capture_destination_baseline(page, target["destination_group"])
+    dest_baselines = baseline_result.get("baselines") if baseline_result.get("ok") else None
+
+    try:
+        result = await sender.send_whatsapp_message(
+            page=page, destination_type="group", destination=target["destination_group"],
+            message_body=target.get("caption") or "", local_file_path=local_file_path,
+            strict_send_confirmation=True,
+        )
+    except Exception as exc:
+        return {"ok": False, "source_message_id": sm_id, "error": f"send failed: {exc}"}
+    state = result.get("state")
+    if state not in _FORM_SEND_SUCCESS_STATES:
+        return {"ok": False, "source_message_id": sm_id, "error": f"send state {state!r}", "send_state": state}
+
+    verify = await _verify_forward_delivered(
+        page, target["destination_group"], target.get("caption") or "", baselines=dest_baselines,
+    )
+    if not verify.get("verified"):
+        return {"ok": False, "source_message_id": sm_id, "error": f"send unverified: {verify.get('reason')}", "send_state": state}
+
+    return {
+        "ok": True, "source_message_id": sm_id, "send_state": state,
+        "verified_message_id": verify.get("message_id"),
+    }
+
+
+async def _send_one_target_via_download(
+    page, group_name: str, target: Dict[str, Any], item_label: str = "", source_type: str = "group",
+    *, job_id: str = "job",
+) -> Dict[str, Any]:
+    """Bounded automatic recovery wrapper around ONE SEND item — download
+    once, then retry only the ATTACH/SEND step on failure (never re-
+    downloading a possibly-large video for a flaky final click), up to
+    MAX_SEND_ITEM_ATTEMPTS total. Mirrors the prior native-Forward
+    wrapper's own retry shape (SEND_MEDIA_* structured logs, per-item
+    budget, final-attempt-only backoff) but the retry unit here is
+    strictly cheaper: _download_source_media runs at most ONCE per item;
+    only _send_local_file (typically a few seconds) is retried.
+
+    Never deletes the downloaded file itself — see _run_send, which owns
+    that decision (retained on failure for a later retry to reuse without
+    re-downloading; deleted only once every operation this job actually
+    needs the file for has succeeded)."""
+    sm_id = target.get("source_message_id")
+    log_fields = "item=%s source_message_id=%s role=%s take=%s source_type=%s destination=%s"
+    log_args = (item_label, sm_id, target.get("media_role"), target.get("take_number"), source_type, target.get("destination_group"))
     logger.info("SEND_MEDIA_START " + log_fields, *log_args)
-    last_result: Dict[str, Any] = {"ok": False, "source_message_id": target.get("source_message_id"), "error": "never attempted"}
-    # Own the whole per-item budget here so the outer asyncio.wait_for in
-    # _run_send NEVER has to cancel a running attempt (a cancel skips
-    # every cleanup — see _return_forward_ui_to_neutral). Stop starting a
-    # new attempt once there isn't a realistic full attempt's worth of
-    # budget left; the last real error is returned as-is (2026-09-11).
+
+    dl = await _download_source_media(page, group_name, target, job_id=job_id, source_type=source_type)
+    if not dl.get("ok"):
+        logger.info("SEND_MEDIA_DOWNLOAD_FAILED " + log_fields + " error=%r", *log_args, dl.get("error"))
+        return dl
+    local_path = dl["local_file_path"]
+    logger.info(
+        "SEND_MEDIA_DOWNLOADED " + log_fields + " local_file_path=%s byte_length=%d",
+        *log_args, local_path, dl.get("byte_length") or 0,
+    )
+
+    last_result: Dict[str, Any] = {"ok": False, "source_message_id": sm_id, "error": "never attempted"}
     overall_deadline = time.monotonic() + PER_ITEM_SEND_TIMEOUT - 20.0
     for attempt_num in range(1, MAX_SEND_ITEM_ATTEMPTS + 1):
         if attempt_num > 1:
@@ -9269,14 +9271,14 @@ async def _send_one_target_native_forward(
             )
             if attempt_num == MAX_SEND_ITEM_ATTEMPTS:
                 await page.wait_for_timeout(SEND_ITEM_RECOVERY_BACKOFF_MS)
-        if attempt_num > 1 and time.monotonic() + _MEDIA_READY_BUDGET_S > overall_deadline:
+        if attempt_num > 1 and time.monotonic() + 10.0 > overall_deadline:
             logger.info(
                 "SEND_MEDIA_BUDGET_EXHAUSTED " + log_fields + " attempt=%d/%d — not starting (no full attempt's budget left)",
                 *log_args, attempt_num, MAX_SEND_ITEM_ATTEMPTS,
             )
             break
         t_attempt = time.monotonic()
-        last_result = await _send_one_target_native_forward_attempt(page, group_name, target, item_label, source_type)
+        last_result = await _send_local_file(page, target, local_path)
         elapsed_ms = int((time.monotonic() - t_attempt) * 1000)
         if last_result.get("ok"):
             if attempt_num > 1:
@@ -9286,6 +9288,8 @@ async def _send_one_target_native_forward(
                 )
             logger.info("SEND_MEDIA_DELIVERY_VERIFIED " + log_fields + " attempt=%d elapsed_ms=%d",
                         *log_args, attempt_num, elapsed_ms)
+            last_result["local_file_path"] = local_path
+            last_result["byte_length"] = dl.get("byte_length")
             return last_result
         if attempt_num < MAX_SEND_ITEM_ATTEMPTS:
             logger.info(
@@ -9296,6 +9300,8 @@ async def _send_one_target_native_forward(
         "SEND_MEDIA_RECOVERY_FAILED " + log_fields + " attempts=%d final_reason=%r",
         *log_args, MAX_SEND_ITEM_ATTEMPTS, last_result.get("error"),
     )
+    last_result["local_file_path"] = local_path
+    last_result["byte_length"] = dl.get("byte_length")
     return last_result
 
 
@@ -9335,11 +9341,14 @@ async def _send_text_message(
 
 
 async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
-    """SEND workflow — independent of UPLOAD: forwards the ORIGINAL
-    WhatsApp source media via WhatsApp's own native Forward mechanism,
-    never downloading it — see _send_one_target_native_forward. Each
-    target is independently resilient: one item's failure never prevents
-    the rest from being attempted, and never substitutes another item.
+    """SEND workflow — independent of UPLOAD, but now (2026-09-19) reuses
+    UPLOAD's own proven download mechanisms internally: downloads the
+    ORIGINAL WhatsApp source media to a local file, verifies it, and
+    attaches/sends that local file — see _send_one_target_via_download.
+    No longer forwards via WhatsApp's native Forward control anywhere in
+    this path (see that function's own docstring for why). Each target is
+    independently resilient: one item's failure never prevents the rest
+    from being attempted, and never substitutes another item.
 
     Ordering (Phase 5, 2026-08-26) is fixed and never reshuffled: Takes ->
     Introduction -> Form -> Pictures -> completion marker. The backend
@@ -9384,6 +9393,20 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     group_name = req["group_name"]
     source_type = req.get("source_type") or "group"
     project_label = req.get("project_label") or ""
+    job_id = req.get("id") or "job"
+    # (2026-09-19) A downloaded target's own local file is deleted only
+    # after every operation THIS job needs it for has succeeded — never
+    # on failure (a later retry of this same job reuses it without
+    # re-downloading a possibly-large video), and never before a separate
+    # downstream operation on the SAME source media (e.g. a combined
+    # send+upload job, if one is ever dispatched) has also finished with
+    # it. `req.get("also_upload_after_send")` is an explicit, opt-in
+    # per-request flag — absent (every SEND-only request today, including
+    # every request this phase's Approve+Send dispatch creates) means
+    # "send is the only thing that needs this file", so it's cleaned up
+    # right after a successful send, same as if there were no sharing
+    # concept at all.
+    also_upload_after_send = bool(req.get("also_upload_after_send"))
 
     results: List[Dict[str, Any]] = []
     form_send_result: Optional[Dict[str, Any]] = None
@@ -9400,14 +9423,14 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
     # their individual chat in the SAME send (one item marked in each) —
     # each target below now carries its OWN source_type/source_group_name
     # (Production fix, casting_pipeline.build_send_targets) and
-    # _send_one_target_native_forward already re-opens the correct
-    # source chat itself before every single item regardless (see its
-    # own docstring), so this upfront open is a pure "fail fast with one
-    # clear message" optimization for the common single-source case —
-    # never a correctness requirement. It is SKIPPED when targets span
-    # more than one distinct source: one source failing to open must
-    # never abort items that belong to a DIFFERENT, perfectly openable
-    # source (a real correctness gap a single upfront gate would
+    # _send_one_target_via_download already re-opens the correct source
+    # chat itself before every single item regardless (see that
+    # function's own docstring), so this upfront open is a pure "fail
+    # fast with one clear message" optimization for the common single-
+    # source case — never a correctness requirement. It is SKIPPED when
+    # targets span more than one distinct source: one source failing to
+    # open must never abort items that belong to a DIFFERENT, perfectly
+    # openable source (a real correctness gap a single upfront gate would
     # otherwise introduce for a mixed-source send).
     distinct_sources = {(t.get("source_type") or source_type, t.get("source_group_name") or group_name) for t in send_targets}
     if send_targets and len(distinct_sources) <= 1:
@@ -9434,7 +9457,9 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
         target_source_type = target.get("source_type") or source_type
         try:
             result = await asyncio.wait_for(
-                _send_one_target_native_forward(page, target_group_name, target, item_label, source_type=target_source_type),
+                _send_one_target_via_download(
+                    page, target_group_name, target, item_label, source_type=target_source_type, job_id=job_id,
+                ),
                 timeout=PER_ITEM_SEND_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -9443,17 +9468,34 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
             result = {"ok": False, "source_message_id": target["source_message_id"], "error": f"item failed: {exc}"}
         finally:
             # Guarantee the NEXT item (and the form) never inherits a
-            # leftover media viewer / Forward dialog from this one —
+            # leftover media viewer / attach dialog from this one —
             # including when the wait_for above CANCELLED a stuck item
             # mid-step (no except/finally inside the attempt runs then).
-            # This is the cascade fix for the Sahal Mansuri incident
-            # (2026-09-11): a safety net around the state machine, not a
-            # substitute for the dialog-scoped caption/send fix.
+            # Kept from the prior native-Forward path (renamed neither —
+            # still a general "return the page to neutral" cleanup, not
+            # Forward-specific despite predating this phase).
             await _return_forward_ui_to_neutral(page)
+        # Temp-file lifecycle (2026-09-19, task requirement: "retain the
+        # downloaded file long enough for the retry mechanism to reuse
+        # it" + "retain until every required downstream operation has
+        # succeeded"). Delete only on a genuinely successful send, and
+        # only when nothing else in THIS job still needs the file
+        # (also_upload_after_send unset/False for every current caller —
+        # see this function's own top-of-function comment). Retained
+        # on failure unconditionally, so a later retry of this same job
+        # reuses the already-downloaded bytes instead of re-fetching a
+        # possibly large video.
+        local_path = result.get("local_file_path")
+        if local_path and result.get("ok") and not also_upload_after_send:
+            try:
+                if os.path.exists(local_path):
+                    os.unlink(local_path)
+            except OSError as exc:
+                logger.info("SEND_MEDIA_CLEANUP_FAILED item=%s local_file_path=%s error=%s", item_label, local_path, exc)
         results.append(result)
         logger.info(
             "%s item=%s source_message_id=%s role=%s%s",
-            "FORWARD_SENT" if result.get("ok") else "FORWARD_FAILED", item_label,
+            "SEND_MEDIA_OK" if result.get("ok") else "SEND_MEDIA_FAILED", item_label,
             target.get("source_message_id"), target.get("media_role"),
             "" if result.get("ok") else f" error={result.get('error')}",
         )

@@ -389,6 +389,7 @@ def extract_role_and_project(raw_mark_text: str) -> Optional[ParsedMark]:
 async def create_scan_request(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str, group_name: str,
     worker_id: str = "default",
+    submission_id: Optional[str] = None, approve_on_success: bool = False,
 ) -> str:
     """`worker_id` (multi-worker support, 2026-09-13) is the WhatsApp
     worker/session the UPLOAD command that triggered this scan actually
@@ -397,7 +398,16 @@ async def create_scan_request(
     from dispatcher.handle_inbound_message's own worker_id parameter.
     Stored on the request doc so services/media_assignment_worker.py's
     eventual completion report is sent from the SAME worker the command
-    came from, never guessed."""
+    came from, never guessed.
+
+    `submission_id`/`approve_on_success` (Approve + Upload, 2026-09-20) —
+    optional, backward-compatible: when set, services/media_assignment_worker.py
+    auto-approves this exact submission once every download this run
+    genuinely succeeds (zero failures), mirroring the SEND workflow's own
+    existing auto-approve-on-success hook (media_send.record_marker_sent /
+    routers.submissions.set_decision). Omitted entirely by the original
+    WhatsApp UPLOAD command caller (casting_pipeline._upload_executor),
+    which never approves anything — this stays a no-op for that path."""
     req_id = str(uuid.uuid4())
     await db[SCAN_REQUESTS_COLLECTION].insert_one({
         "id": req_id,
@@ -414,6 +424,8 @@ async def create_scan_request(
         "download_targets": None,
         "download_results": None,
         "report": None,
+        "submission_id": submission_id,
+        "approve_on_success": approve_on_success,
         "created_at": _now(),
         "updated_at": _now(),
         "completed_at": None,

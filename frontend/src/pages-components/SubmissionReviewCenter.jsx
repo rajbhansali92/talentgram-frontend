@@ -24,6 +24,7 @@ import {
     Phone,
     Mail,
     Upload,
+    Send,
     Trash2,
     Plus,
     Copy
@@ -761,6 +762,14 @@ export default function SubmissionReviewCenter() {
     // Issue #5: holds the new decision awaiting confirmation when the recruiter
     // changes an already-registered decision. null = no pending confirmation.
     const [pendingDecision, setPendingDecision] = useState(null);
+    // Approve + Upload / Approve + Send (2026-09-20) — { submissionId, action }
+    // while a dispatched WhatsApp operation is in flight for the CURRENTLY
+    // selected submission ("upload" | "send"), else null. Deliberately never
+    // optimistic like executeDecision above — these are real, possibly
+    // slow (large video download) WhatsApp operations, so the submission is
+    // only shown as approved once the backend confirms it actually happened.
+    const [whatsappAction, setWhatsappAction] = useState(null);
+    const [whatsappActionError, setWhatsappActionError] = useState("");
     const [form, setForm] = useState({});
     const [fv, setFv] = useState({});
     const [mediaList, setMediaList] = useState([]);
@@ -916,6 +925,7 @@ export default function SubmissionReviewCenter() {
 
     // 3. Load selected submission details
     useEffect(() => {
+        setWhatsappActionError("");
         if (!selectedId) {
             setDetail(null);
             setTalentPortfolioMedia([]);
@@ -1419,7 +1429,75 @@ export default function SubmissionReviewCenter() {
         executeDecision(decision);
     }, [selectedId, saving, detail, executeDecision]);
 
-
+    // Approve + Upload / Approve + Send (2026-09-20) — dispatches the
+    // EXISTING WhatsApp mark-based UPLOAD/SEND pipeline (backend:
+    // agents.modules.submission_whatsapp_actions), then polls the status
+    // endpoint until the worker finishes. The submission is only marked
+    // approved in this UI once the backend confirms the real WhatsApp
+    // operation succeeded — a failure never advances/approves anything,
+    // and the WhatsApp report text is shown so the recruiter knows why.
+    const runWhatsappAction = useCallback(async (action) => {
+        if (!selectedId || saving || (whatsappAction && whatsappAction.submissionId === selectedId)) return;
+        const actedId = selectedId;
+        const endpoint = action === "upload" ? "approve-upload" : "approve-send";
+        const verb = action === "upload" ? "Upload" : "Send";
+        setWhatsappAction({ submissionId: actedId, action });
+        setWhatsappActionError("");
+        try {
+            const { data } = await adminApi.post(`/projects/${id}/submissions/${actedId}/${endpoint}`);
+            const requestId = data.request_id;
+            const POLL_MS = 3000;
+            // Real video downloads can take minutes — bound the poll at 10
+            // minutes so a genuinely stuck run doesn't spin the button
+            // forever; the backend operation itself keeps running/retrying
+            // independently of this poll giving up.
+            const deadline = Date.now() + 10 * 60 * 1000;
+            for (;;) {
+                await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+                const { data: status } = await adminApi.get(
+                    `/projects/${id}/submissions/${actedId}/whatsapp-action-status/${requestId}`
+                );
+                if (status.done) {
+                    // `status.decision` is a fresh read of the REAL submission
+                    // document, never assumed from `ok` — the WhatsApp media
+                    // operation succeeding and the decision actually flipping
+                    // to "approved" are two separate writes server-side (the
+                    // approval write can fail independently, in which case
+                    // the media still went out but the submission stays
+                    // "pending" — the UI must reflect that truthfully, not
+                    // claim "approved" because the send/upload itself worked).
+                    if (status.ok && status.decision === "approved") {
+                        toast.success(`${verb} complete — submission approved`);
+                        setSubmissions((prev) => prev.map((s) => (s.id === actedId ? { ...s, decision: "approved" } : s)));
+                        setDetail((prev) => (prev && prev.id === actedId ? { ...prev, decision: "approved" } : prev));
+                    } else if (status.ok) {
+                        toast.error(`${verb} succeeded, but approving the submission failed — please approve it manually.`);
+                        if (actedId === selectedId) {
+                            setWhatsappActionError("The WhatsApp media operation succeeded, but the submission could not be auto-approved. Approve it manually.");
+                        }
+                    } else {
+                        toast.error(`${verb} did not complete successfully — submission was NOT approved.`);
+                        if (actedId === selectedId) {
+                            setWhatsappActionError(status.report || "The WhatsApp operation did not complete successfully.");
+                        }
+                    }
+                    return;
+                }
+                if (Date.now() > deadline) {
+                    toast.error(`${verb} is taking longer than expected — it may still complete; check back shortly.`);
+                    return;
+                }
+            }
+        } catch (e) {
+            const msg = e?.response?.data?.detail || `Failed to start ${verb.toLowerCase()}.`;
+            toast.error(msg);
+            if (actedId === selectedId) {
+                setWhatsappActionError(msg);
+            }
+        } finally {
+            setWhatsappAction((prev) => (prev && prev.submissionId === actedId ? null : prev));
+        }
+    }, [selectedId, saving, whatsappAction, id]);
 
     // Media grouping helper
     const getCuratedMedia = (categoryGroup) => {
@@ -2918,6 +2996,11 @@ export default function SubmissionReviewCenter() {
                     {/* Sticky Decision Footer — hidden in read-only Original view */}
                     {detail && !isPreviewMode && !isOriginalMode && (
                         <footer className="px-6 py-5 bg-white border-t-2 border-black/[0.08] shrink-0 flex flex-col gap-4 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] z-20">
+                            {whatsappActionError && (
+                                <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-4 py-2.5 whitespace-pre-wrap">
+                                    {whatsappActionError}
+                                </div>
+                            )}
                             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
                                 {/* Phase 4 — this flex item had no min-w-0, so at the
                                     lg breakpoint (row layout kicks in right around where
@@ -2935,25 +3018,53 @@ export default function SubmissionReviewCenter() {
                                         className="w-full text-sm px-4 py-3 border border-black/[0.12] focus:border-black/50 rounded-xl outline-none bg-[#fafaf9] focus:bg-white transition-all text-black/90 shadow-sm"
                                     />
                                 </div>
-                                <div className="flex items-center gap-3 shrink-0 mt-2 lg:mt-0">
+                                <div className="flex items-center gap-3 shrink-0 mt-2 lg:mt-0 flex-wrap">
                                     <button
                                         onClick={() => handleDecision("rejected")}
-                                        disabled={saving}
-                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-rose-200 text-rose-700 hover:bg-rose-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm"
+                                        disabled={saving || !!whatsappAction}
+                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-rose-200 text-rose-700 hover:bg-rose-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
                                     >
                                         <XCircle className="w-4 h-4" /> Reject
                                     </button>
                                     <button
                                         onClick={() => handleDecision("hold")}
-                                        disabled={saving}
-                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm"
+                                        disabled={saving || !!whatsappAction}
+                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
                                     >
                                         <PauseCircle className="w-4 h-4" /> Hold
                                     </button>
+                                    {/* Approve + Upload / Approve + Send (2026-09-20) — independent of
+                                        the ordinary Approve button; each dispatches the existing
+                                        WhatsApp mark-based UPLOAD/SEND pipeline and only approves the
+                                        submission once that real operation succeeds. */}
+                                    <button
+                                        onClick={() => runWhatsappAction("upload")}
+                                        disabled={saving || !!whatsappAction}
+                                        title="Download the marked WhatsApp media and attach it to this submission, then approve"
+                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-sky-200 text-sky-700 hover:bg-sky-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
+                                    >
+                                        {whatsappAction?.submissionId === selectedId && whatsappAction.action === "upload" ? (
+                                            <><Loader2 className="w-4 h-4 animate-spin" /> Uploading…</>
+                                        ) : (
+                                            <><Upload className="w-4 h-4" /> Approve + Upload</>
+                                        )}
+                                    </button>
+                                    <button
+                                        onClick={() => runWhatsappAction("send")}
+                                        disabled={saving || !!whatsappAction}
+                                        title="Download the marked WhatsApp media and send it to the project's casting group, then approve"
+                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-indigo-200 text-indigo-700 hover:bg-indigo-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
+                                    >
+                                        {whatsappAction?.submissionId === selectedId && whatsappAction.action === "send" ? (
+                                            <><Loader2 className="w-4 h-4 animate-spin" /> Sending…</>
+                                        ) : (
+                                            <><Send className="w-4 h-4" /> Approve + Send</>
+                                        )}
+                                    </button>
                                     <button
                                         onClick={() => handleDecision("approved")}
-                                        disabled={saving}
-                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition-all shadow-md hover:shadow-lg"
+                                        disabled={saving || !!whatsappAction}
+                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition-all shadow-md hover:shadow-lg disabled:opacity-60"
                                     >
                                         <Check className="w-4 h-4" /> Approve
                                     </button>

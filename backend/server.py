@@ -490,6 +490,11 @@ async def on_startup():
         from services.import_seed import seed_data_hub_config
         await seed_data_hub_config()
 
+        # Seed CRM contact-type defaults + migrate existing free-text
+        # company_name values into the new company directory (idempotent).
+        from routers.marketing import seed_crm_lookups
+        await seed_crm_lookups()
+
 
         await ensure_notifications_indexes(db)
         logger.info("Notification indexes ready")

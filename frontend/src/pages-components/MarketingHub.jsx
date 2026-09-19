@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
-import { adminApi } from "@/lib/api";
+import { adminApi, isAdmin } from "@/lib/api";
 import CommTimeline from "@/components/CommTimeline";
 import { toast } from "sonner";
+import { formatErrorDetail } from "@/lib/errorFormatter";
 import {
     Sheet,
     SheetContent,
@@ -17,10 +18,16 @@ import {
     DialogDescription,
     DialogFooter,
 } from "@/components/ui/dialog";
-import { 
-    Plus, Loader2, Phone, Mail, Users as UsersIcon, MessageSquare, 
-    Calendar, Building2, PhoneCall, Clock, TrendingUp, Users, Activity, 
-    ChevronRight, Sparkles, Zap, Target, AlertCircle, Edit2, Share2, DollarSign, X, Check, ChevronDown
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import {
+    Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem,
+} from "@/components/ui/command";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+    Plus, Loader2, Phone, Mail, Users as UsersIcon, MessageSquare,
+    Calendar, Building2, PhoneCall, Clock, TrendingUp, Users, Activity,
+    ChevronRight, Sparkles, Zap, Target, AlertCircle, Edit2, Share2, DollarSign, X, Check, ChevronDown, Settings2
 } from "lucide-react";
 
 const CONTACT_TYPES = [
@@ -42,6 +49,26 @@ const CONTACT_TYPES = [
     { value: "talent_agency", label: "Talent Agency", group: "Agency" },
     { value: "modeling_agency", label: "Modeling Agency", group: "Agency" },
     { value: "casting_agency", label: "Casting Agency", group: "Agency" }
+];
+// ^ Used only as the initial render fallback for the `contactTypes` state
+// below, so the filter pills aren't empty for one frame before the
+// GET /marketing/contact-types fetch resolves — the backend seeds these
+// exact 15 as defaults on first boot (routers/marketing.py), so this stays
+// in sync with real data, not a second source of truth.
+
+// Relationship Status — replaces the old generic "Lifecycle Stage" concept.
+// `key_account` is kept (not part of the new 5) because the existing "Key
+// Accounts" dashboard stat/filter already depends on it and removing it
+// would destroy that working feature and any already-flagged contact's
+// status; the stage field itself is untouched (still `clients.stage`),
+// only the presented label set changes (2026-09-19).
+const RELATIONSHIP_STATUSES = [
+    { value: "lead", label: "New Contact" },
+    { value: "active", label: "Active Relationship" },
+    { value: "project_based", label: "Project-Based" },
+    { value: "past_contact", label: "Past Contact" },
+    { value: "dormant", label: "Dormant" },
+    { value: "key_account", label: "Key Account" },
 ];
 
 // ============================================================================
@@ -184,7 +211,7 @@ const EmptyState = ({ hasSearch, hasFilters, onClearFilters, onAddClient }) => (
         {hasSearch || hasFilters ? (
             <>
                 <div className="text-[#111111] text-sm font-medium mb-1">No matching clients found</div>
-                <p className="text-[#333333] text-xs max-w-xs mx-auto">Try refining your fuzzy match filter, lifecycle stage selectors, or query terms.</p>
+                <p className="text-[#333333] text-xs max-w-xs mx-auto">Try refining your search, relationship status filter, or contact type.</p>
                 <button
                     onClick={onClearFilters}
                     className="mt-4 text-xs font-semibold px-4 py-2 border border-[#eaeaea] bg-white hover:border-[#d4d4d4] rounded-xl text-[#222222] hover:text-[#111111] shadow-sm transition-colors"
@@ -194,13 +221,13 @@ const EmptyState = ({ hasSearch, hasFilters, onClearFilters, onAddClient }) => (
             </>
         ) : (
             <>
-                <div className="text-[#111111] text-sm font-medium mb-1">Ecosystem Empty</div>
-                <p className="text-[#333333] text-xs max-w-xs mx-auto mb-5">Begin scaling your production relationships by cataloging your first corporate lead.</p>
+                <div className="text-[#111111] text-sm font-medium mb-1">No industry contacts yet</div>
+                <p className="text-[#333333] text-xs max-w-xs mx-auto mb-5">Start building your production house, casting, and brand relationships.</p>
                 <button
                     onClick={onAddClient}
                     className="inline-flex items-center gap-1.5 bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-medium hover:bg-slate-800 transition-colors shadow-sm"
                 >
-                    <Plus className="w-3.5 h-3.5" /> Add First Client
+                    <Plus className="w-3.5 h-3.5" /> Add First Contact
                 </button>
             </>
         )}
@@ -230,6 +257,239 @@ const FieldInput = ({ label, value, onChange, required, placeholder, testId, aut
     </label>
 );
 
+const FieldTextarea = ({ label, value, onChange, placeholder, testId, rows = 2 }) => (
+    <label className="block">
+        <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono flex justify-between select-none">
+            <span>{label}</span>
+        </div>
+        <textarea
+            value={value || ""}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+            rows={rows}
+            data-testid={testId}
+            className="mt-1.5 w-full bg-slate-50/40 rounded-xl border border-[#eaeaea]/80 focus:ring-4 focus:ring-amber-100/50 focus:border-amber-200 outline-none py-2.5 px-4 text-[15px] sm:text-sm text-[#111111] placeholder:text-[#333333] transition-all duration-200 shadow-sm resize-none"
+        />
+    </label>
+);
+
+// ============================================================================
+// Lookup Picker — searchable select + inline "+ Add" (admin-only), reusing
+// the exact Popover/Command pattern ProductionDesk.jsx already uses for its
+// CRM-contact picker, so Company and Contact Type get a consistent,
+// familiar searchable-select instead of a bespoke dropdown (2026-09-19 CRM
+// talent-industry adaptation). `items` is a flat [{key, label, group?}]
+// list; `itemKey` is the currently selected key (company id, or contact-type
+// slug). Non-admins simply don't see the "+ Add" footer — creation is admin-
+// gated server-side too (current_admin on POST /companies, /contact-types).
+// ============================================================================
+function LookupPicker({ label, items, itemKey, onSelect, onCreate, onManage, isAdminUser, placeholder, entityName, testId, groupLabel }) {
+    const [open, setOpen] = useState(false);
+    const [query, setQuery] = useState("");
+    const [creating, setCreating] = useState(false);
+    const [newLabel, setNewLabel] = useState("");
+    const [saving, setSaving] = useState(false);
+
+    const selected = items.find((i) => i.key === itemKey);
+
+    const grouped = useMemo(() => {
+        const groups = new Map();
+        for (const item of items) {
+            const g = item.group || groupLabel || "";
+            if (!groups.has(g)) groups.set(g, []);
+            groups.get(g).push(item);
+        }
+        return Array.from(groups.entries());
+    }, [items, groupLabel]);
+
+    const create = async () => {
+        if (!newLabel.trim()) return;
+        setSaving(true);
+        try {
+            const created = await onCreate(newLabel.trim());
+            onSelect(created.key);
+            setOpen(false);
+            setCreating(false);
+            setNewLabel("");
+        } catch (err) {
+            toast.error(formatErrorDetail(err, `Failed to add ${entityName}`));
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <label className="block">
+            <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 select-none">
+                <span>{label}</span>
+            </div>
+            <Popover open={open} onOpenChange={(v) => { setOpen(v); if (!v) setCreating(false); }}>
+                <PopoverTrigger asChild>
+                    <button
+                        type="button"
+                        data-testid={testId}
+                        className="w-full flex items-center justify-between bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] hover:border-[#d4d4d4] transition-colors"
+                    >
+                        <span className={selected ? "" : "text-[#333333]"}>{selected ? selected.label : (placeholder || `Select ${entityName}...`)}</span>
+                        <ChevronDown className="w-3.5 h-3.5 text-[#333333] shrink-0" />
+                    </button>
+                </PopoverTrigger>
+                <PopoverContent className="w-72 p-0" align="start">
+                    {!creating ? (
+                        <Command shouldFilter={false}>
+                            <CommandInput placeholder={`Search ${entityName.toLowerCase()}...`} value={query} onValueChange={setQuery} className="text-xs" />
+                            <CommandList>
+                                <CommandEmpty className="py-4 text-center text-xs text-black/40">No {entityName.toLowerCase()} found.</CommandEmpty>
+                                <CommandItem
+                                    value="__none__"
+                                    onSelect={() => { onSelect(null); setOpen(false); }}
+                                    className="text-xs cursor-pointer text-[#333333] italic"
+                                >
+                                    None
+                                </CommandItem>
+                                {grouped.map(([groupName, groupItems]) => {
+                                    const filtered = groupItems.filter((i) => !query.trim() || i.label.toLowerCase().includes(query.trim().toLowerCase()));
+                                    if (filtered.length === 0) return null;
+                                    return (
+                                        <CommandGroup key={groupName || "_"} heading={groupName || undefined}>
+                                            {filtered.map((item) => (
+                                                <CommandItem
+                                                    key={item.key}
+                                                    value={item.key}
+                                                    onSelect={() => { onSelect(item.key); setOpen(false); }}
+                                                    className="text-xs cursor-pointer"
+                                                >
+                                                    {item.label}
+                                                </CommandItem>
+                                            ))}
+                                        </CommandGroup>
+                                    );
+                                })}
+                            </CommandList>
+                            {isAdminUser && (onCreate || onManage) && (
+                                <div className="border-t border-black/[0.06] p-1.5 flex gap-1">
+                                    {onCreate && (
+                                        <Button variant="ghost" size="sm" className="flex-1 h-7 text-xs justify-start" onClick={() => { setCreating(true); setNewLabel(query); }}>
+                                            <Plus className="h-3 w-3 mr-1.5" /> Add
+                                        </Button>
+                                    )}
+                                    {onManage && (
+                                        <Button variant="ghost" size="sm" className="flex-1 h-7 text-xs justify-start" onClick={() => { setOpen(false); onManage(); }}>
+                                            <Settings2 className="h-3 w-3 mr-1.5" /> Manage
+                                        </Button>
+                                    )}
+                                </div>
+                            )}
+                        </Command>
+                    ) : (
+                        <div className="p-3 space-y-2">
+                            <Input placeholder={`New ${entityName.toLowerCase()} name`} value={newLabel} onChange={(e) => setNewLabel(e.target.value)} className="h-8 text-xs" autoFocus />
+                            <div className="flex gap-2 justify-end pt-1">
+                                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setCreating(false)}>Cancel</Button>
+                                <Button size="sm" className="h-7 text-xs" disabled={!newLabel.trim() || saving} onClick={create}>
+                                    {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
+                                </Button>
+                            </div>
+                        </div>
+                    )}
+                </PopoverContent>
+            </Popover>
+        </label>
+    );
+}
+
+// ============================================================================
+// Manage Lookup Dialog — admin-only rename/deactivate/reactivate for the
+// Company directory and Contact Type list. Deliberately reuses the existing
+// Dialog component (same one AddClientDialog uses) instead of a new settings
+// page/route — this is the smallest surface that satisfies "admins can add/
+// rename/deactivate/reactivate" without inventing new admin infrastructure.
+// ============================================================================
+function ManageLookupDialog({ open, onClose, title, items, onRename, onDeactivate, onReactivate }) {
+    const [editingKey, setEditingKey] = useState(null);
+    const [editValue, setEditValue] = useState("");
+    const [busyKey, setBusyKey] = useState(null);
+
+    useEffect(() => {
+        if (!open) { setEditingKey(null); setEditValue(""); }
+    }, [open]);
+
+    const startEdit = (item) => { setEditingKey(item.id); setEditValue(item.label); };
+
+    const saveEdit = async (item) => {
+        if (!editValue.trim()) return;
+        setBusyKey(item.id);
+        try {
+            await onRename(item.id, editValue.trim());
+            setEditingKey(null);
+        } catch (err) {
+            toast.error(formatErrorDetail(err, "Failed to rename"));
+        } finally {
+            setBusyKey(null);
+        }
+    };
+
+    const toggleActive = async (item) => {
+        setBusyKey(item.id);
+        try {
+            if (item.active) await onDeactivate(item.id);
+            else await onReactivate(item.id);
+        } catch (err) {
+            toast.error(formatErrorDetail(err, "Failed to update"));
+        } finally {
+            setBusyKey(null);
+        }
+    };
+
+    return (
+        <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+            <DialogContent className="bg-white border-[#eaeaea] text-[#111111] sm:max-w-md rounded-2xl shadow-xl" data-testid="marketing-manage-lookup-dialog">
+                <DialogHeader>
+                    <DialogTitle className="text-lg font-display text-slate-950">{title}</DialogTitle>
+                    <DialogDescription className="text-[#333333] text-xs">
+                        Rename or deactivate entries used across all industry contacts.
+                    </DialogDescription>
+                </DialogHeader>
+                <div className="max-h-96 overflow-y-auto space-y-2 py-2">
+                    {items.length === 0 && <p className="text-xs text-[#333333] italic py-4 text-center">Nothing here yet.</p>}
+                    {items.map((item) => (
+                        <div key={item.id} data-testid={`marketing-manage-lookup-row-${item.id}`} className={`flex items-center gap-2 border border-[#eaeaea] rounded-xl px-3 py-2 ${!item.active ? "opacity-50" : ""}`}>
+                            {editingKey === item.id ? (
+                                <>
+                                    <input
+                                        value={editValue}
+                                        onChange={(e) => setEditValue(e.target.value)}
+                                        className="flex-1 text-xs border border-[#eaeaea] rounded-lg px-2 py-1 outline-none focus:border-[#d4d4d4]"
+                                        autoFocus
+                                    />
+                                    <button type="button" onClick={() => saveEdit(item)} disabled={busyKey === item.id} className="text-xs font-semibold text-[#5A7D5A]">Save</button>
+                                    <button type="button" onClick={() => setEditingKey(null)} className="text-xs text-[#333333]">Cancel</button>
+                                </>
+                            ) : (
+                                <>
+                                    <span className="flex-1 text-xs text-[#111111] truncate">{item.label}</span>
+                                    <button type="button" onClick={() => startEdit(item)} className="text-[#333333] hover:text-[#111111]"><Edit2 className="w-3.5 h-3.5" /></button>
+                                    <button
+                                        type="button"
+                                        onClick={() => toggleActive(item)}
+                                        disabled={busyKey === item.id}
+                                        className={`text-[10px] font-semibold px-2 py-1 rounded-lg border ${item.active ? "text-red-700 border-red-200 hover:bg-red-50" : "text-[#5A7D5A] border-[#5A7D5A]/30 hover:bg-[#5A7D5A]/5"}`}
+                                    >
+                                        {item.active ? "Deactivate" : "Reactivate"}
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    ))}
+                </div>
+                <DialogFooter>
+                    <button type="button" onClick={onClose} className="px-4 py-2 text-xs font-semibold text-[#333333] hover:text-[#111111]">Close</button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    );
+}
+
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
@@ -257,6 +517,22 @@ export default function MarketingHub() {
     const [newBulkTagInput, setNewBulkTagInput] = useState("");
     const [updating, setUpdating] = useState(false);
 
+    // Company directory + Contact Type lookup lists (2026-09-19 CRM
+    // talent-industry adaptation) — admin-managed via ManageLookupDialog,
+    // selected via LookupPicker. Initial fallback keeps the Contact Type
+    // filter pills populated for one frame before the fetch resolves.
+    const [companies, setCompanies] = useState([]);
+    const [contactTypes, setContactTypes] = useState(CONTACT_TYPES.map((t) => ({ ...t, active: true })));
+    const [manageCompaniesOpen, setManageCompaniesOpen] = useState(false);
+    const [manageTypesOpen, setManageTypesOpen] = useState(false);
+    // Separate from `companies`/`contactTypes` above (those stay
+    // active-only, feeding LookupPicker + the filter pills) — the Manage
+    // dialog needs inactive entries too, so it gets its own state rather
+    // than leaking deactivated items into every picker.
+    const [managedCompanies, setManagedCompanies] = useState([]);
+    const [managedContactTypes, setManagedContactTypes] = useState([]);
+    const isAdminUser = isAdmin();
+
     const searchInputRef = useRef(null);
 
 
@@ -277,9 +553,69 @@ export default function MarketingHub() {
         }
     }, []);
 
+    const loadCompanies = useCallback(async (includeInactive = false) => {
+        try {
+            const { data } = await adminApi.get("/marketing/companies", { params: includeInactive ? { include_inactive: true } : {} });
+            return Array.isArray(data) ? data : [];
+        } catch (e) {
+            toast.error(formatErrorDetail(e, "Failed to load companies"));
+            return [];
+        }
+    }, []);
+
+    const loadContactTypes = useCallback(async (includeInactive = false) => {
+        try {
+            const { data } = await adminApi.get("/marketing/contact-types", { params: includeInactive ? { include_inactive: true } : {} });
+            return Array.isArray(data) ? data : [];
+        } catch (e) {
+            toast.error(formatErrorDetail(e, "Failed to load contact types"));
+            return [];
+        }
+    }, []);
+
     useEffect(() => {
         load();
-    }, [load]);
+        loadCompanies().then((data) => { if (data.length) setCompanies(data); });
+        loadContactTypes().then((data) => { if (data.length) setContactTypes(data); });
+    }, [load, loadCompanies, loadContactTypes]);
+
+    const handleCompanyCreate = useCallback(async (name) => {
+        const { data } = await adminApi.post("/marketing/companies", { name });
+        setCompanies((prev) => (prev.some((c) => c.id === data.id) ? prev : [...prev, data].sort((a, b) => a.name.localeCompare(b.name))));
+        return { key: data.id, label: data.name };
+    }, []);
+
+    const handleContactTypeCreate = useCallback(async (label) => {
+        const { data } = await adminApi.post("/marketing/contact-types", { label });
+        setContactTypes((prev) => (prev.some((t) => t.value === data.value) ? prev : [...prev, data]));
+        return { key: data.value, label: data.label };
+    }, []);
+
+    // Refresh BOTH the active-only picker list and the manage dialog's
+    // full (incl. inactive) list — a rename/deactivate/reactivate must be
+    // reflected in each independently.
+    const refreshCompanies = useCallback(async () => {
+        const [activeOnly, all] = await Promise.all([loadCompanies(false), loadCompanies(true)]);
+        setCompanies(activeOnly);
+        setManagedCompanies(all);
+    }, [loadCompanies]);
+
+    const refreshContactTypes = useCallback(async () => {
+        const [activeOnly, all] = await Promise.all([loadContactTypes(false), loadContactTypes(true)]);
+        setContactTypes(activeOnly);
+        setManagedContactTypes(all);
+    }, [loadContactTypes]);
+
+    const openManageCompanies = () => { refreshCompanies(); setManageCompaniesOpen(true); };
+    const openManageContactTypes = () => { refreshContactTypes(); setManageTypesOpen(true); };
+
+    const renameCompany = async (id, name) => { await adminApi.put(`/marketing/companies/${id}`, { name }); await refreshCompanies(); };
+    const deactivateCompany = async (id) => { await adminApi.post(`/marketing/companies/${id}/deactivate`); await refreshCompanies(); };
+    const reactivateCompany = async (id) => { await adminApi.post(`/marketing/companies/${id}/reactivate`); await refreshCompanies(); };
+
+    const renameContactType = async (id, label) => { await adminApi.put(`/marketing/contact-types/${id}`, { label }); await refreshContactTypes(); };
+    const deactivateContactType = async (id) => { await adminApi.post(`/marketing/contact-types/${id}/deactivate`); await refreshContactTypes(); };
+    const reactivateContactType = async (id) => { await adminApi.post(`/marketing/contact-types/${id}/reactivate`); await refreshContactTypes(); };
 
     // Load recent searches on mount
     useEffect(() => {
@@ -353,7 +689,7 @@ export default function MarketingHub() {
 
     const contactTypeCounts = useMemo(() => {
         const counts = {};
-        CONTACT_TYPES.forEach(t => {
+        contactTypes.forEach(t => {
             counts[t.value] = 0;
         });
         clients.forEach(c => {
@@ -362,7 +698,7 @@ export default function MarketingHub() {
             }
         });
         return counts;
-    }, [clients]);
+    }, [clients, contactTypes]);
 
     // Handle arrow keys and CMD+K keyboard focus shortcuts
     useEffect(() => {
@@ -645,11 +981,11 @@ export default function MarketingHub() {
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 mb-8 sm:mb-10">
                     <div>
                         <h1 className="text-3xl sm:text-4xl font-light tracking-tight text-[#111111] font-display">
-                            Client Intelligence
+                            Talentgram Relationships
                         </h1>
                         <p className="text-sm text-[#333333] mt-2 font-mono tracking-tight flex items-center gap-1.5">
                             <Activity className="w-3.5 h-3.5 text-[#333333]" />
-                            Executive Relationship Operating System
+                            Industry Contacts — production houses, casting, brands
                         </p>
                     </div>
                     <button
@@ -658,7 +994,7 @@ export default function MarketingHub() {
                         data-testid="marketing-add-client-btn"
                         className="shrink-0 inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-3 rounded-2xl text-xs font-semibold hover:bg-slate-800 transition-all hover:shadow-md hover:scale-[1.01] active:scale-[0.98] whitespace-nowrap"
                     >
-                        <Plus className="w-4 h-4" /> Add Corporate Client
+                        <Plus className="w-4 h-4" /> Add Industry Contact
                     </button>
                 </div>
 
@@ -755,7 +1091,7 @@ export default function MarketingHub() {
                         >
                             All Types
                         </button>
-                        {CONTACT_TYPES.map((t) => {
+                        {contactTypes.map((t) => {
                             const count = contactTypeCounts[t.value] || 0;
                             const active = selectedContactType === t.value;
                             return (
@@ -776,6 +1112,17 @@ export default function MarketingHub() {
                                 </button>
                             );
                         })}
+                        {isAdminUser && (
+                            <button
+                                type="button"
+                                onClick={openManageContactTypes}
+                                data-testid="marketing-manage-contact-types-btn"
+                                className="inline-flex items-center gap-1 px-2.5 py-1 border border-dashed border-[#d4d4d4] rounded-full text-[10px] font-semibold text-[#333333] hover:text-[#111111] hover:border-[#333333] transition-colors shrink-0 whitespace-nowrap"
+                                title="Manage Contact Types"
+                            >
+                                <Settings2 className="w-3 h-3" /> Manage
+                            </button>
+                        )}
                     </div>
                 </div>
             </div>
@@ -908,9 +1255,9 @@ export default function MarketingHub() {
                                                 <HealthIcon className="w-2.5 h-2.5" />
                                                 {health.label}
                                             </span>
-                                            {c.value && (
-                                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 bg-[#B89B5E]/6 border border-[#B89B5E]/15 rounded-lg text-[9px] font-mono font-bold text-[#B89B5E]">
-                                                    {formatCurrency(c.value)}
+                                            {c.designation && (
+                                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 bg-[#B89B5E]/6 border border-[#B89B5E]/15 rounded-lg text-[9px] font-mono font-bold text-[#B89B5E] uppercase tracking-wider">
+                                                    {c.designation}
                                                 </span>
                                             )}
                                         </div>
@@ -978,6 +1325,32 @@ export default function MarketingHub() {
                 open={addOpen}
                 onClose={() => setAddOpen(false)}
                 onCreated={handleClientCreated}
+                companies={companies}
+                contactTypes={contactTypes}
+                onCompanyCreate={handleCompanyCreate}
+                onContactTypeCreate={handleContactTypeCreate}
+                onManageCompanies={openManageCompanies}
+                onManageContactTypes={openManageContactTypes}
+                isAdminUser={isAdminUser}
+            />
+
+            <ManageLookupDialog
+                open={manageCompaniesOpen}
+                onClose={() => setManageCompaniesOpen(false)}
+                title="Manage Production Houses / Companies"
+                items={managedCompanies.map((c) => ({ id: c.id, label: c.name, active: c.active }))}
+                onRename={renameCompany}
+                onDeactivate={deactivateCompany}
+                onReactivate={reactivateCompany}
+            />
+            <ManageLookupDialog
+                open={manageTypesOpen}
+                onClose={() => setManageTypesOpen(false)}
+                title="Manage Contact Types"
+                items={managedContactTypes.map((t) => ({ id: t.id, label: t.label, active: t.active }))}
+                onRename={renameContactType}
+                onDeactivate={deactivateContactType}
+                onReactivate={reactivateContactType}
             />
 
             {/* Mobile Sticky Bottom Action Bar */}
@@ -1186,6 +1559,13 @@ export default function MarketingHub() {
                 onClientUpdated={handleClientUpdated}
                 onClientDeleted={handleClientDeleted}
                 onInteractionAdded={handleInteractionAdded}
+                companies={companies}
+                contactTypes={contactTypes}
+                onCompanyCreate={handleCompanyCreate}
+                onContactTypeCreate={handleContactTypeCreate}
+                onManageCompanies={openManageCompanies}
+                onManageContactTypes={openManageContactTypes}
+                isAdminUser={isAdminUser}
             />
         </div>
     );
@@ -1195,27 +1575,27 @@ export default function MarketingHub() {
 // ADD CLIENT DIALOG (UPGRADED)
 // ============================================================================
 
-function AddClientDialog({ open, onClose, onCreated }) {
+function AddClientDialog({ open, onClose, onCreated, companies, contactTypes, onCompanyCreate, onContactTypeCreate, onManageCompanies, onManageContactTypes, isAdminUser }) {
     const [name, setName] = useState("");
-    const [company, setCompany] = useState("");
+    const [companyId, setCompanyId] = useState(null);
     const [phone, setPhone] = useState("");
     const [email, setEmail] = useState("");
     const [stage, setStage] = useState("lead");
-    const [value, setValue] = useState("");
-    const [tags, setTags] = useState("");
-    const [contactType, setContactType] = useState("");
+    const [contactType, setContactType] = useState(null);
+    const [designation, setDesignation] = useState("");
+    const [notes, setNotes] = useState("");
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
         if (!open) {
             setName("");
-            setCompany("");
+            setCompanyId(null);
             setPhone("");
             setEmail("");
             setStage("lead");
-            setValue("");
-            setTags("");
-            setContactType("");
+            setContactType(null);
+            setDesignation("");
+            setNotes("");
             setSaving(false);
         }
     }, [open]);
@@ -1223,44 +1603,45 @@ function AddClientDialog({ open, onClose, onCreated }) {
     const submit = async (e) => {
         e.preventDefault();
         if (!name.trim()) {
-            toast.error("Client name is required");
+            toast.error("Contact name is required");
             return;
         }
         setSaving(true);
         try {
-            const tagsList = tags.split(",").map(t => t.trim()).filter(Boolean);
-            const valNum = value.trim() ? parseFloat(value) : null;
             const { data } = await adminApi.post("/marketing/clients", {
                 name: name.trim(),
-                company_name: company.trim() || null,
+                company_id: companyId || null,
                 phone_number: phone.trim() || null,
                 email: email.trim() || null,
                 stage: stage,
-                value: valNum,
-                tags: tagsList,
-                contact_type: contactType || null
+                contact_type: contactType || null,
+                designation: designation.trim() || null,
+                notes: notes.trim() || null,
             });
             onCreated(data);
         } catch (err) {
-            toast.error(err?.response?.data?.detail || "Failed to create client");
+            toast.error(formatErrorDetail(err, "Failed to create contact"));
         } finally {
             setSaving(false);
         }
     };
 
+    const companyItems = useMemo(() => companies.map((c) => ({ key: c.id, label: c.name })), [companies]);
+    const typeItems = useMemo(() => contactTypes.map((t) => ({ key: t.value, label: t.label, group: t.group })), [contactTypes]);
+
     return (
         <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
             <DialogContent
-                className="bg-white border-[#eaeaea] text-[#111111] sm:max-w-lg rounded-2xl shadow-xl overflow-hidden p-0"
+                className="bg-white border-[#eaeaea] text-[#111111] sm:max-w-lg rounded-2xl shadow-xl overflow-y-auto max-h-[90vh] p-0"
                 data-testid="marketing-add-client-dialog"
             >
                 <div className="bg-slate-50 border-b border-slate-100 p-6">
                     <DialogHeader>
                         <DialogTitle className="text-2xl font-light tracking-tight text-slate-950 font-display">
-                            Create Client Record
+                            Create Industry Contact
                         </DialogTitle>
                         <DialogDescription className="text-[#333333] text-xs">
-                            Establish a new corporate relationship file inside your executive CRM.
+                            Log a new person in Talentgram's industry relationship directory.
                         </DialogDescription>
                     </DialogHeader>
                 </div>
@@ -1275,12 +1656,38 @@ function AddClientDialog({ open, onClose, onCreated }) {
                             testId="marketing-input-name"
                             autoFocus
                         />
-                        <FieldInput
-                            label="Company Name"
-                            value={company}
-                            onChange={setCompany}
-                            placeholder="E.g. Metro-Goldwyn-Mayer"
+                        <LookupPicker
+                            label="Production House / Company"
+                            items={companyItems}
+                            itemKey={companyId}
+                            onSelect={setCompanyId}
+                            onCreate={onCompanyCreate}
+                            onManage={onManageCompanies}
+                            isAdminUser={isAdminUser}
+                            entityName="Company"
+                            placeholder="Select company..."
                             testId="marketing-input-company"
+                        />
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <LookupPicker
+                            label="Contact Type"
+                            items={typeItems}
+                            itemKey={contactType}
+                            onSelect={setContactType}
+                            onCreate={onContactTypeCreate}
+                            onManage={onManageContactTypes}
+                            isAdminUser={isAdminUser}
+                            entityName="Contact Type"
+                            placeholder="Select type (optional)..."
+                            testId="marketing-input-contact-type"
+                        />
+                        <FieldInput
+                            label="Designation / Role"
+                            value={designation}
+                            onChange={setDesignation}
+                            placeholder="E.g. Line Producer"
+                            testId="marketing-input-designation"
                         />
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1303,71 +1710,28 @@ function AddClientDialog({ open, onClose, onCreated }) {
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <label className="block">
                             <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 flex justify-between select-none">
-                                <span>Lifecycle Stage</span>
+                                <span>Relationship Status</span>
                             </div>
                             <select
                                 value={stage}
                                 onChange={(e) => setStage(e.target.value)}
+                                data-testid="marketing-input-stage"
                                 className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                             >
-                                <option value="lead">New Lead</option>
-                                <option value="active">Active partner</option>
-                                <option value="key_account">Key Account (High Value)</option>
+                                {RELATIONSHIP_STATUSES.map((s) => (
+                                    <option key={s.value} value={s.value}>{s.label}</option>
+                                ))}
                             </select>
                         </label>
-                        <FieldInput
-                            label="Deal/Relationship Value (INR)"
-                            value={value}
-                            onChange={setValue}
-                            placeholder="E.g. 500000"
-                            testId="marketing-input-value"
-                        />
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <label className="block">
-                            <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 flex justify-between select-none">
-                                <span>Contact Type</span>
-                            </div>
-                            <select
-                                value={contactType}
-                                onChange={(e) => setContactType(e.target.value)}
-                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
-                            >
-                                <option value="">Select Type (optional)</option>
-                                <optgroup label="Brand & Marketing">
-                                    <option value="brand_manager">Brand Manager</option>
-                                    <option value="marketing_manager">Marketing Manager</option>
-                                    <option value="influencer_marketing">Influencer Marketing Manager</option>
-                                    <option value="creative_director">Creative Director</option>
-                                    <option value="agency_producer">Agency Producer</option>
-                                </optgroup>
-                                <optgroup label="Casting">
-                                    <option value="casting_director">Casting Director</option>
-                                    <option value="casting_assistant">Casting Assistant</option>
-                                    <option value="casting_company">Casting Company</option>
-                                </optgroup>
-                                <optgroup label="Production">
-                                    <option value="producer">Producer</option>
-                                    <option value="executive_producer">Executive Producer</option>
-                                    <option value="production_house">Production House</option>
-                                    <option value="line_producer">Line Producer</option>
-                                </optgroup>
-                                <optgroup label="Agency">
-                                    <option value="talent_agency">Talent Agency</option>
-                                    <option value="modeling_agency">Modeling Agency</option>
-                                    <option value="casting_agency">Casting Agency</option>
-                                </optgroup>
-                            </select>
-                        </label>
-                        <FieldInput
-                            label="Relationship Tags (Comma-separated)"
-                            value={tags}
-                            onChange={setTags}
-                            placeholder="E.g. Producer, Mumbai"
-                            testId="marketing-input-tags"
-                        />
-                    </div>
+                    <FieldTextarea
+                        label="Notes"
+                        value={notes}
+                        onChange={setNotes}
+                        placeholder="Anything worth remembering about this relationship..."
+                        testId="marketing-input-notes"
+                    />
 
                     <DialogFooter className="pt-4 border-t border-slate-100 gap-3">
                         <button
@@ -1385,7 +1749,7 @@ function AddClientDialog({ open, onClose, onCreated }) {
                             data-testid="marketing-add-submit-btn"
                             className="inline-flex items-center justify-center gap-2 bg-slate-900 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-slate-800 transition-colors disabled:opacity-50 min-w-36 shadow-sm"
                         >
-                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save Client"}
+                            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save Contact"}
                         </button>
                     </DialogFooter>
                 </form>
@@ -1405,7 +1769,7 @@ const INTERACTION_TYPES = [
     { value: "whatsapp", label: "WhatsApp", icon: MessageSquare },
 ];
 
-function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInteractionAdded }) {
+function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInteractionAdded, companies, contactTypes, onCompanyCreate, onContactTypeCreate, onManageCompanies, onManageContactTypes, isAdminUser }) {
     const open = !!client;
     const [interactions, setInteractions] = useState([]);
     const [loadingList, setLoadingList] = useState(false);
@@ -1416,14 +1780,17 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
     // Editing states
     const [isEditing, setIsEditing] = useState(false);
     const [editName, setEditName] = useState("");
-    const [editCompany, setEditCompany] = useState("");
+    const [editCompanyId, setEditCompanyId] = useState(null);
     const [editPhone, setEditPhone] = useState("");
     const [editEmail, setEditEmail] = useState("");
     const [editStage, setEditStage] = useState("lead");
-    const [editValue, setEditValue] = useState("");
-    const [editTags, setEditTags] = useState("");
-    const [editContactType, setEditContactType] = useState("");
+    const [editContactType, setEditContactType] = useState(null);
+    const [editDesignation, setEditDesignation] = useState("");
+    const [editNotes, setEditNotes] = useState("");
     const [updating, setUpdating] = useState(false);
+
+    const companyItems = useMemo(() => companies.map((c) => ({ key: c.id, label: c.name })), [companies]);
+    const typeItems = useMemo(() => contactTypes.map((t) => ({ key: t.value, label: t.label, group: t.group })), [contactTypes]);
 
     // Escape key listener to close drawer
     useEffect(() => {
@@ -1506,13 +1873,13 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
 
         // Populate edit values
         setEditName(client.name || "");
-        setEditCompany(client.company_name || "");
+        setEditCompanyId(client.company_id || null);
         setEditPhone(client.phone_number || "");
         setEditEmail(client.email || "");
         setEditStage(client.stage || "lead");
-        setEditValue(client.value !== undefined && client.value !== null ? String(client.value) : "");
-        setEditTags((client.tags || []).join(", "));
-        setEditContactType(client.contact_type || "");
+        setEditContactType(client.contact_type || null);
+        setEditDesignation(client.designation || "");
+        setEditNotes(client.notes || "");
     }, [client, loadInteractions]);
 
     const submitInteraction = async (e) => {
@@ -1545,21 +1912,19 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
         }
         setUpdating(true);
         try {
-            const tagsList = editTags.split(",").map(t => t.trim()).filter(Boolean);
-            const valNum = editValue.trim() ? parseFloat(editValue) : null;
             const { data } = await adminApi.put(`/marketing/clients/${client.id}`, {
                 name: editName.trim(),
-                company_name: editCompany.trim() || null,
+                company_id: editCompanyId || "",
                 phone_number: editPhone.trim() || null,
                 email: editEmail.trim() || null,
                 stage: editStage,
-                value: valNum,
-                tags: tagsList,
-                contact_type: editContactType || null
+                contact_type: editContactType || null,
+                designation: editDesignation.trim() || null,
+                notes: editNotes.trim() || null,
             });
             onClientUpdated(data);
             setIsEditing(false);
-            toast.success("Client record updated successfully.");
+            toast.success("Contact updated successfully.");
         } catch (err) {
             toast.error(err?.response?.data?.detail || "Failed to update client");
         } finally {
@@ -1602,12 +1967,18 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     {client.name}
                                 </SheetTitle>
                                 <SheetDescription className="text-[#333333] text-sm sm:text-base font-mono flex items-center gap-2 flex-wrap">
-                                    <span>{client.company_name || "Independent Account"}</span>
+                                    <span>{client.company_name || "Independent Contact"}</span>
+                                    {client.designation && (
+                                        <>
+                                            <span className="text-slate-300">•</span>
+                                            <span>{client.designation}</span>
+                                        </>
+                                    )}
                                     {client.contact_type && (
                                         <>
                                             <span className="text-slate-300">•</span>
                                             <span className="bg-amber-50 text-amber-800 border border-amber-200/50 px-2 py-0.5 rounded-full text-xs font-semibold font-sans tracking-normal uppercase">
-                                                {CONTACT_TYPES.find(t => t.value === client.contact_type)?.label || client.contact_type}
+                                                {contactTypes.find(t => t.value === client.contact_type)?.label || client.contact_type}
                                             </span>
                                         </>
                                     )}
@@ -1639,10 +2010,34 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                             {/* Inline Editing Form Toggle */}
                             {isEditing ? (
                                 <form onSubmit={submitUpdate} className="bg-slate-50/50 border border-[#eaeaea] rounded-2xl p-5 space-y-4 shadow-sm animate-in fade-in duration-200">
-                                    <h4 className="text-xs font-mono font-semibold text-[#333333] uppercase tracking-wider mb-2">Edit Relationship File</h4>
+                                    <h4 className="text-xs font-mono font-semibold text-[#333333] uppercase tracking-wider mb-2">Edit Contact</h4>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         <FieldInput label="Name" value={editName} onChange={setEditName} required />
-                                        <FieldInput label="Company" value={editCompany} onChange={setEditCompany} />
+                                        <LookupPicker
+                                            label="Production House / Company"
+                                            items={companyItems}
+                                            itemKey={editCompanyId}
+                                            onSelect={setEditCompanyId}
+                                            onCreate={onCompanyCreate}
+                                            onManage={onManageCompanies}
+                                            isAdminUser={isAdminUser}
+                                            entityName="Company"
+                                            placeholder="Select company..."
+                                        />
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <LookupPicker
+                                            label="Contact Type"
+                                            items={typeItems}
+                                            itemKey={editContactType}
+                                            onSelect={setEditContactType}
+                                            onCreate={onContactTypeCreate}
+                                            onManage={onManageContactTypes}
+                                            isAdminUser={isAdminUser}
+                                            entityName="Contact Type"
+                                            placeholder="Select type (optional)..."
+                                        />
+                                        <FieldInput label="Designation / Role" value={editDesignation} onChange={setEditDesignation} placeholder="E.g. Line Producer" />
                                     </div>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         <FieldInput label="Phone" value={editPhone} onChange={setEditPhone} />
@@ -1651,59 +2046,21 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         <label className="block">
                                             <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 flex justify-between select-none">
-                                                <span>Lifecycle Stage</span>
+                                                <span>Relationship Status</span>
                                             </div>
                                             <select
                                                 value={editStage}
                                                 onChange={(e) => setEditStage(e.target.value)}
                                                 className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
                                             >
-                                                <option value="lead">New Lead</option>
-                                                <option value="active">Active partner</option>
-                                                <option value="key_account">Key Account (High Value)</option>
-                                            </select>
-                                        </label>
-                                        <label className="block">
-                                            <div className="text-[10px] tracking-[0.08em] font-semibold text-[#333333] uppercase font-mono mb-1.5 flex justify-between select-none">
-                                                <span>Contact Type</span>
-                                            </div>
-                                            <select
-                                                value={editContactType}
-                                                onChange={(e) => setEditContactType(e.target.value)}
-                                                className="mt-1.5 w-full bg-slate-50 border border-[#eaeaea] rounded-xl px-4 py-2.5 text-sm text-[#111111] focus:bg-white focus:border-[#d4d4d4] focus:outline-none transition-colors"
-                                            >
-                                                <option value="">Select Type (optional)</option>
-                                                <optgroup label="Brand & Marketing">
-                                                    <option value="brand_manager">Brand Manager</option>
-                                                    <option value="marketing_manager">Marketing Manager</option>
-                                                    <option value="influencer_marketing">Influencer Marketing Manager</option>
-                                                    <option value="creative_director">Creative Director</option>
-                                                    <option value="agency_producer">Agency Producer</option>
-                                                </optgroup>
-                                                <optgroup label="Casting">
-                                                    <option value="casting_director">Casting Director</option>
-                                                    <option value="casting_assistant">Casting Assistant</option>
-                                                    <option value="casting_company">Casting Company</option>
-                                                </optgroup>
-                                                <optgroup label="Production">
-                                                    <option value="producer">Producer</option>
-                                                    <option value="executive_producer">Executive Producer</option>
-                                                    <option value="production_house">Production House</option>
-                                                    <option value="line_producer">Line Producer</option>
-                                                </optgroup>
-                                                <optgroup label="Agency">
-                                                    <option value="talent_agency">Talent Agency</option>
-                                                    <option value="modeling_agency">Modeling Agency</option>
-                                                    <option value="casting_agency">Casting Agency</option>
-                                                </optgroup>
+                                                {RELATIONSHIP_STATUSES.map((s) => (
+                                                    <option key={s.value} value={s.value}>{s.label}</option>
+                                                ))}
                                             </select>
                                         </label>
                                     </div>
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                        <FieldInput label="Deal Value (INR)" value={editValue} onChange={setEditValue} />
-                                        <FieldInput label="Tags (comma-separated)" value={editTags} onChange={setEditTags} />
-                                    </div>
-                                    
+                                    <FieldTextarea label="Notes" value={editNotes} onChange={setEditNotes} placeholder="Anything worth remembering about this relationship..." />
+
                                     <div className="flex gap-2.5 justify-end pt-2">
                                         <button
                                             type="button"
@@ -1792,9 +2149,9 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             <div className="text-xs font-semibold text-[#111111]">{client.interaction_count || 0} times</div>
                                         </div>
                                         <div className="bg-slate-50/50 border border-slate-100 rounded-xl p-3.5 text-center">
-                                            <div className="text-[10px] font-semibold font-mono text-[#333333] uppercase mb-1">Value</div>
-                                            <div className="text-xs font-mono font-bold text-[#B89B5E]">
-                                                {client.value ? formatCurrency(client.value) : "—"}
+                                            <div className="text-[10px] font-semibold font-mono text-[#333333] uppercase mb-1">Role</div>
+                                            <div className="text-xs font-semibold text-[#111111] truncate" title={client.designation || ""}>
+                                                {client.designation || "—"}
                                             </div>
                                         </div>
                                     </div>
@@ -1809,12 +2166,20 @@ function ClientDrawer({ client, onClose, onClientUpdated, onClientDeleted, onInt
                                             <span className="text-[#333333] font-medium">Phone Number</span>
                                             <span className="font-mono text-[#111111] font-semibold">{client.phone_number || "—"}</span>
                                         </div>
-                                        <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
-                                            <span className="text-[#333333] font-medium">Tags Registered</span>
-                                            <span className="font-mono text-[#222222] font-medium">
-                                                {client.tags && client.tags.length > 0 ? client.tags.map(t => `#${t}`).join(" ") : "—"}
-                                            </span>
-                                        </div>
+                                        {client.tags && client.tags.length > 0 && (
+                                            <div className="flex flex-col sm:flex-row sm:justify-between gap-1 border-b border-slate-100 pb-2.5">
+                                                <span className="text-[#333333] font-medium">Tags Registered</span>
+                                                <span className="font-mono text-[#222222] font-medium">
+                                                    {client.tags.map(t => `#${t}`).join(" ")}
+                                                </span>
+                                            </div>
+                                        )}
+                                        {client.notes && (
+                                            <div className="flex flex-col gap-1 border-b border-slate-100 pb-2.5">
+                                                <span className="text-[#333333] font-medium">Notes</span>
+                                                <span className="text-[#111111] whitespace-pre-wrap">{client.notes}</span>
+                                            </div>
+                                        )}
                                         <div className="flex flex-col sm:flex-row sm:justify-between gap-1">
                                             <span className="text-[#333333] font-medium">Last Contacted</span>
                                             <span className="text-[#111111] font-semibold">

@@ -3915,6 +3915,20 @@ def test_humanize_media_error_destination_selection():
     assert "no exact match" not in msg, msg
 
 
+# Production fix (2026-09-20 — Raj Mehta / Pepsi live-test incident):
+# sender.py's local-file attach path returns DESTINATION_CHAT_NOT_READY
+# (never raises) when the visible chat header hasn't actually settled on
+# the destination by attach-click time; mark_scan.py's _send_local_file
+# then builds the raw error as f"send state {state!r}" — must map to its
+# own precise sentence, never fall into the generic "Send control could
+# not be confirmed" bucket (that would misdescribe the real cause).
+def test_humanize_media_error_destination_chat_not_ready():
+    msg = orch._humanize_media_send_error("send state 'DESTINATION_CHAT_NOT_READY'")
+    assert "confirmed" not in msg.lower(), msg  # must NOT reuse the generic Send-control wording
+    assert "destination group" in msg.lower(), msg
+    assert "attached" in msg.lower(), msg
+
+
 def test_humanize_media_error_send_failed():
     msg = orch._humanize_media_send_error("send failed: no Send control found")
     assert "no Send control found" not in msg, msg  # the raw diagnostic phrase itself, never repeated verbatim

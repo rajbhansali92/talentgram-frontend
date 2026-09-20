@@ -471,6 +471,13 @@ MESSAGE_NOT_SENT = "MESSAGE_NOT_SENT"                     # composer still full 
 MESSAGE_SENT_BUT_NOT_VERIFIED = "MESSAGE_SENT_BUT_NOT_VERIFIED"  # left composer, no bubble -> DO NOT retry
 MESSAGE_SENT_AND_VERIFIED = "MESSAGE_SENT_AND_VERIFIED"   # outgoing bubble confirmed -> SENT
 INVALID_DESTINATION = "INVALID_DESTINATION"              # bad number / group missing -> terminal
+# Production fix (2026-09-20) — real incident: _verify_chat_open's own
+# header-match check (STEP 8-14, below) passed, but several more awaits ran
+# between that check and the attach-button click (baseline snapshot,
+# duplicate-check, DOM dump) — long enough for WhatsApp Web's visible chat
+# panel to drift back to a DIFFERENT chat while the compose box's own
+# aria-label still claimed the new one. See _wait_for_destination_chat_ready.
+DESTINATION_CHAT_NOT_READY = "DESTINATION_CHAT_NOT_READY"  # header/attach control never matched dest -> retry
 
 # Conversation-open signals. #main is the open-chat pane (absent on the home
 # screen), so it is a reliable "a chat is actually open" signal — unlike the
@@ -557,6 +564,74 @@ async def _verify_chat_open(page: Page, expected_name: Optional[str] = None) -> 
         logger.info("sender:   expected_name=%r title_match=%s", expected_name[:60], title_match)
     logger.info("sender:   conversation_ready=%s", conversation_ready)
     return conversation_ready, header_found, recipient_found, recipient_text
+
+
+# Media-attach destination-readiness gate (Production fix, 2026-09-20) —
+# see DESTINATION_CHAT_NOT_READY's own comment for the full incident this
+# closes. Deliberately narrow and late: _verify_chat_open (STEP 8-14,
+# above) already proves the chat is open and correctly addressed at THAT
+# moment, for both text and media sends alike — this is an ADDITIONAL,
+# separate re-check immediately before the attach-button click only,
+# because a real production failure showed the visible chat header can
+# drift back to the previous chat in the gap between that earlier check
+# and the click (baseline snapshot / duplicate-check / DOM dump all run
+# in between and are each a real await). Polls — never a fixed sleep — so
+# a genuine re-render is given real time to complete without blocking the
+# happy path, where it resolves on the very first check.
+DESTINATION_READY_TIMEOUT_MS = 15_000
+DESTINATION_READY_POLL_INTERVAL_S = 0.4
+
+
+async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[str]) -> bool:
+    """Re-verifies, immediately before the attach-button click, that (a) the
+    VISIBLE chat header still names the intended destination — reusing the
+    exact same selectors/normalization _verify_chat_open itself uses, so
+    this can never disagree with what "the right chat" means elsewhere in
+    this file — and (b) the attach control itself is actually present and
+    visible. `expected_name` is None for a phone/number destination (same
+    asymmetry _verify_chat_open already has — a 1:1 header's title is not
+    guaranteed to equal the raw phone string), in which case only the
+    attach-control presence is required. Returns True once both hold;
+    False if the deadline passes without ever seeing that combination —
+    the caller must treat False as retryable, never as a send-control
+    failure (see DESTINATION_CHAT_NOT_READY)."""
+    deadline = time.monotonic() + DESTINATION_READY_TIMEOUT_MS / 1000
+    expected_norm = _norm_title(expected_name) if expected_name else None
+    while True:
+        header_ok = expected_norm is None
+        if expected_norm is not None:
+            try:
+                for sel in RECIPIENT_SELECTORS:
+                    loc = page.locator(sel)
+                    n = await loc.count()
+                    for i in range(min(n, 6)):
+                        item = loc.nth(i)
+                        t = (await item.inner_text()).strip() or \
+                            (await item.get_attribute("title") or "").strip()
+                        if t and _norm_title(t) == expected_norm:
+                            header_ok = True
+                            break
+                    if header_ok:
+                        break
+            except Exception:
+                header_ok = False
+        attach_ok = False
+        if header_ok:
+            try:
+                attach_loc = page.locator(SEL["attach_btn"]).first
+                attach_ok = bool(await attach_loc.count()) and await attach_loc.is_visible()
+            except Exception:
+                attach_ok = False
+        if header_ok and attach_ok:
+            return True
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "sender: DESTINATION_CHAT_NOT_READY — header_ok=%s attach_ok=%s "
+                "expected=%r after %dms",
+                header_ok, attach_ok, expected_name, DESTINATION_READY_TIMEOUT_MS,
+            )
+            return False
+        await asyncio.sleep(DESTINATION_READY_POLL_INTERVAL_S)
 
 
 async def _dump_outgoing_dom(page: Page) -> None:
@@ -2200,6 +2275,27 @@ async def send_whatsapp_message(
                     out_file.write(response.read())
 
                 logger.info("sender: downloaded media to %s", temp_file_path)
+
+            # Destination-chat readiness gate (Production fix, 2026-09-20) —
+            # re-verify, right here, immediately before the attach click,
+            # that the visible chat is still genuinely the destination —
+            # see _wait_for_destination_chat_ready's own docstring and
+            # DESTINATION_CHAT_NOT_READY's comment for the exact incident
+            # this closes (a real production failure where the header had
+            # drifted back to the previous chat in the gap between the
+            # earlier STEP 8-14 check and this click). Never a fixed sleep
+            # — polls up to DESTINATION_READY_TIMEOUT_MS. A failure here is
+            # reported as its own precise state, never miscast as "Send
+            # control could not be confirmed".
+            if not await _wait_for_destination_chat_ready(page, expected_name):
+                await _capture_attach_click_failure_diagnostics(
+                    page,
+                    RuntimeError(
+                        f"destination chat not ready before attach click (expected={expected_name!r})"
+                    ),
+                    diagnostic_meta,
+                )
+                return {"state": DESTINATION_CHAT_NOT_READY, "evidence": evidence, "timing": timing}
 
             # Click attachment button (+) to open the attach menu, then click
             # "Photos & videos" and let Playwright's own file-chooser

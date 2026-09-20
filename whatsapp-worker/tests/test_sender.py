@@ -79,6 +79,15 @@ sender.dismiss_blocking_dialogs = _true
 _REAL_OPEN_GROUP_CHAT = sender._open_group_chat
 sender._open_group_chat = _opened
 sender._wait_for_chat_ready = _noop
+# Saved BEFORE the fake overwrite below — the destination-chat-readiness
+# tests (2026-09-20, near the end of this file) restore the REAL
+# implementation for their duration, since they exist specifically to
+# exercise its actual polling/matching logic. Every other, pre-existing
+# test in this file is about the attach/caption/send mechanism AFTER the
+# destination is already ready, so it stays neutralized to `_true` here —
+# unaffected by, and unaware of, this gate's own internals.
+_REAL_WAIT_FOR_DESTINATION_CHAT_READY = sender._wait_for_destination_chat_ready
+sender._wait_for_destination_chat_ready = _true
 sender._p26b_dump = _noop
 sender._verify_chat_open = _chat_open
 sender._resolve_scope = _resolve_scope
@@ -100,6 +109,49 @@ sender.asyncio.sleep = _noop
 class _FakeLocator:
     async def count(self):
         return 1
+
+
+class _FakeHeaderItem:
+    """One RECIPIENT_SELECTORS candidate element."""
+    def __init__(self, text):
+        self._text = text
+
+    async def inner_text(self):
+        return self._text
+
+    async def get_attribute(self, name):
+        return self._text if name == "title" else None
+
+
+class _FakeHeaderLocator:
+    """A RECIPIENT_SELECTORS locator whose candidate texts are supplied
+    fresh (via FakePage's provider callback) on every access — lets a test
+    simulate the header text changing across successive polls of
+    _wait_for_destination_chat_ready, the same way a real WhatsApp Web
+    chat-panel transition would."""
+    def __init__(self, texts):
+        self._texts = texts
+
+    async def count(self):
+        return len(self._texts)
+
+    def nth(self, i):
+        return _FakeHeaderItem(self._texts[i])
+
+
+class _FakeAttachLocator:
+    def __init__(self, present):
+        self._present = present
+
+    async def count(self):
+        return 1 if self._present else 0
+
+    @property
+    def first(self):
+        return self
+
+    async def is_visible(self):
+        return self._present
 
 
 class _FakeCaptionLocator:
@@ -204,7 +256,8 @@ class _FileChooserCtx:
 class FakePage:
     def __init__(self, *, chooser_should_raise=False, attach_click_should_raise=False,
                  caption_selector_that_matches="__default__",
-                 send_button_selector_that_matches="__default__"):
+                 send_button_selector_that_matches="__default__",
+                 header_provider=None, attach_present_provider=None):
         """`caption_selector_that_matches`: which entry of
         sender.CAPTION_INPUT_SELECTORS "exists and is visible" on this fake
         preview screen. "__default__" (the sentinel, not a real selector)
@@ -217,7 +270,19 @@ class FakePage:
         sender.SEND_BUTTON_SELECTORS — "__default__" means the confirmed-
         live entry (index 0) matches, matching the fixed production
         behavior. Pass None to simulate NO selector matching (the real
-        2026-08-24 bug scenario that used to fall through to Enter)."""
+        2026-08-24 bug scenario that used to fall through to Enter).
+
+        `header_provider`/`attach_present_provider` (2026-09-20, destination-
+        chat-readiness gate) — zero-arg callables, called fresh on every
+        `page.locator(...)` access, so a test can vary the "live" chat
+        header text / attach-button presence across successive polls of
+        _wait_for_destination_chat_ready — exactly modeling the real
+        incident (header shows the source chat on early polls, the real
+        destination once the transition genuinely completes). Defaults
+        report the destination as already ready, since only the dedicated
+        readiness tests below (which restore the REAL gate function) ever
+        exercise this at all — every other test has the gate stubbed to
+        `_true` and never touches these providers."""
         self.action_log = []
         self.clicks = []
         self.keyboard = _FakeKeyboard(log=self.action_log)
@@ -237,6 +302,8 @@ class FakePage:
             else send_button_selector_that_matches
         )
         self.send_button_clicks = []
+        self._header_provider = header_provider or (lambda: ["Talentgram Casting Test"])
+        self._attach_present_provider = attach_present_provider or (lambda: True)
 
     async def click(self, selector, timeout=None):
         if self._attach_click_should_raise and selector == sender.SEL["attach_btn"]:
@@ -265,6 +332,12 @@ class FakePage:
                 self.send_button_clicks.append(_sel)
                 self.action_log.append(("send_button_click", _sel))
             return _FakeCaptionLocator(count=1 if matches else 0, visible=matches, on_click=_on_send_click if matches else None)
+        if sel == sender.SEL["attach_btn"]:
+            return _FakeAttachLocator(self._attach_present_provider())
+        if sel == sender.RECIPIENT_SELECTORS[0]:
+            return _FakeHeaderLocator(self._header_provider())
+        if sel in sender.RECIPIENT_SELECTORS:
+            return _FakeHeaderLocator([])
         return _FakeLocator()
 
     async def evaluate(self, js, arg=None):
@@ -1418,6 +1491,140 @@ def test_open_source_chat_dispatches_phone_vs_group():
         ("phone", "919990000203"),
         ("group", "Talentgram Casting Test"),
     ], calls
+
+
+# ---------------------------------------------------------------------------
+# Destination-chat readiness gate (Production fix, 2026-09-20) — real
+# incident: a live Approve + Send against "Pepsi x Talentgram Agency"
+# failed 6/6 times with a Page.click timeout on SEL["attach_btn"]
+# ([data-testid="plus-rounded"]); the worker's own diagnostic capture
+# showed the visible chat header still read the SOURCE chat ("Raj, You")
+# while the compose box's aria-label had already updated to the
+# destination — a chat-panel transition that had NOT actually finished
+# settling by the time the attach click ran, even though the earlier
+# _verify_chat_open check (STEP 8-14) had passed moments before. These
+# tests exercise the REAL _wait_for_destination_chat_ready (restored via
+# _real_destination_ready() below), never the file-wide `_true` stub every
+# other test in this file relies on.
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _real_destination_ready():
+    sender._wait_for_destination_chat_ready = _REAL_WAIT_FOR_DESTINATION_CHAT_READY
+    try:
+        yield
+    finally:
+        sender._wait_for_destination_chat_ready = _true
+
+
+def test_attach_click_never_attempted_while_header_still_shows_source_chat():
+    """The exact real-incident shape: the header NEVER matches the
+    destination for the gate's entire bounded wait — proves the worker
+    gives up with a precise DESTINATION_CHAT_NOT_READY state and never
+    even attempts page.click(SEL["attach_btn"]), rather than time out
+    deep inside the click itself and get misreported as a Send-control
+    failure."""
+    orig_timeout, orig_poll = sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S
+    sender.DESTINATION_READY_TIMEOUT_MS = 80   # bounded — this test must not take 15 real seconds
+    sender.DESTINATION_READY_POLL_INTERVAL_S = 0.01
+    page = FakePage(header_provider=lambda: ["Raj Mehta x Talentgram Agency"])
+    path = _real_temp_file(".mp4")
+    try:
+        with _real_destination_ready():
+            result = run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Pepsi x Talentgram Agency",
+                message_body="", local_file_path=path, strict_send_confirmation=True,
+            ))
+        assert result["state"] == sender.DESTINATION_CHAT_NOT_READY, result
+        assert sender.SEL["attach_btn"] not in page.clicks, (
+            "the attach button must never be clicked while the destination chat isn't genuinely ready"
+        )
+        assert page.file_choosers == [], "no file chooser must ever open if the attach click never happens"
+        assert os.path.exists(path), "a caller-owned local_file_path must survive this failure too"
+    finally:
+        sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S = orig_timeout, orig_poll
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_attach_click_proceeds_once_destination_chat_genuinely_becomes_ready():
+    """The header shows the SOURCE chat for the first two polls, then
+    genuinely transitions to the destination (matching a real, if slow,
+    WhatsApp Web re-render) — the gate must wait for that real transition
+    rather than either giving up early or racing ahead, and the attach
+    click must only happen afterward."""
+    orig_timeout, orig_poll = sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S
+    sender.DESTINATION_READY_TIMEOUT_MS = 5_000
+    sender.DESTINATION_READY_POLL_INTERVAL_S = 0.01
+    poll_count = {"n": 0}
+
+    def header_provider():
+        poll_count["n"] += 1
+        if poll_count["n"] <= 2:
+            return ["Raj Mehta x Talentgram Agency"]
+        return ["Pepsi x Talentgram Agency"]
+
+    page = FakePage(header_provider=header_provider)
+    path = _real_temp_file(".mp4")
+    try:
+        with _real_destination_ready():
+            result = run(sender.send_whatsapp_message(
+                page=page, destination_type="group", destination="Pepsi x Talentgram Agency",
+                message_body="", local_file_path=path, strict_send_confirmation=True,
+            ))
+        assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED, result
+        assert sender.SEL["attach_btn"] in page.clicks, "attach must proceed once the destination is genuinely ready"
+        assert poll_count["n"] >= 3, (
+            "must have genuinely polled past the source-chat readings, not gotten lucky on the first check"
+        )
+    finally:
+        sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S = orig_timeout, orig_poll
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_wait_for_destination_chat_ready_false_when_attach_button_never_appears():
+    """Direct unit coverage of the gate itself: the header matches the
+    destination immediately, but the attach control never appears (a
+    distinct failure mode from the header staying stale) — must still
+    return False, not True, since BOTH conditions are required."""
+    orig_timeout, orig_poll = sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S
+    sender.DESTINATION_READY_TIMEOUT_MS = 80
+    sender.DESTINATION_READY_POLL_INTERVAL_S = 0.01
+    page = FakePage(
+        header_provider=lambda: ["Pepsi x Talentgram Agency"],
+        attach_present_provider=lambda: False,
+    )
+    try:
+        ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+        assert ready is False
+    finally:
+        sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S = orig_timeout, orig_poll
+
+
+def test_wait_for_destination_chat_ready_true_immediately_when_already_ready():
+    """The happy path — header already matches and the attach control is
+    already present on the very first check, so the gate must resolve
+    immediately (never wait out its own timeout unnecessarily)."""
+    page = FakePage(
+        header_provider=lambda: ["Pepsi x Talentgram Agency"],
+        attach_present_provider=lambda: True,
+    )
+    ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+    assert ready is True
+
+
+def test_wait_for_destination_chat_ready_skips_header_match_for_phone_destination():
+    """Mirrors _verify_chat_open's own asymmetry: a phone/number
+    destination's `expected_name` is None (a 1:1 header's title is not
+    guaranteed to equal the raw phone string), so the gate must only wait
+    for the attach control, never require a header-text match that could
+    never realistically succeed."""
+    page = FakePage(
+        header_provider=lambda: ["some unrelated header text"],
+        attach_present_provider=lambda: True,
+    )
+    ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, None))
+    assert ready is True
 
 
 if __name__ == "__main__":

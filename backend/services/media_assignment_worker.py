@@ -392,6 +392,19 @@ def _humanize_media_send_error(raw_error: str) -> str:
     # control could not be confirmed" even when the real failure was the
     # video never becoming forward-ready or the compose box never
     # appearing). mark_scan.py now tags the exact stalled state.
+    # Production fix (2026-09-20) — real incident: sender.py's local-file
+    # attach path (mark_scan.py's SEND transport, download -> verify ->
+    # attach) hit a genuine WhatsApp Web chat-panel race — the destination
+    # group had been correctly selected moments earlier, but the visible
+    # chat header had drifted back to the source chat by the time the
+    # attach-button click ran. sender.DESTINATION_CHAT_NOT_READY names
+    # this exact, distinct condition — never collapse it into the generic
+    # "Send control could not be confirmed" bucket below, which would
+    # incorrectly suggest the Send button itself was the problem when the
+    # file was never even attached.
+    if "destination_chat_not_ready" in low:
+        return ("could not be sent because WhatsApp Web's chat view had not fully switched to the "
+                "destination group before the file could be attached. Please try SEND again.")
     if "video forward control not ready" in low or "forward control not ready" in low:
         return "could not be sent because WhatsApp Web could not make the video's Forward control ready in time. Please try SEND again."
     if "tile click failed" in low or "forward not ready" in low or "no <video> mounted" in low or "no clickable" in low or "no longer found in window" in low or "message not found in current window" in low:

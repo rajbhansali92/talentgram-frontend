@@ -314,6 +314,96 @@ async def test_approve_upload_dispatches_upload_request_with_correct_worker_id()
 
 
 # ---------------------------------------------------------------------------
+# NEW job ownership must be explicit (2026-09-20 pre-deployment review) —
+# the None/absent-means-Worker-1 compatibility rule in
+# _scan_request_worker_filter exists ONLY for documents that already
+# existed before the worker-affinity fix; it must never silently absorb a
+# BRAND NEW job whose caller forgot to resolve a real worker identity.
+# Two layers prove this: (1) dispatch_approve_upload/dispatch_approve_send
+# with no worker_id override still persist a concrete, non-None worker_id
+# (resolved from submission_whatsapp_actions.PRIMARY_WORKER_ID BEFORE the
+# document is ever inserted); (2) the lower-level create_* functions that
+# actually perform the insert reject worker_id=None outright, so even a
+# caller that bypasses the dispatch layer entirely can never persist a
+# NEW ownerless document.
+# ---------------------------------------------------------------------------
+async def test_approve_upload_with_no_worker_override_still_gets_explicit_worker_id():
+    """The real production call shape — routers/submissions.py never
+    passes worker_id at all — must never persist worker_id=None."""
+    project_id, talent_id, submission_id, _ = await _seed_full()
+    try:
+        req_id = await swa.dispatch_approve_upload(project_id, submission_id)
+        doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id}, {"_id": 0})
+        assert doc is not None
+        assert doc["worker_id"] is not None and doc["worker_id"] != "", doc
+        assert doc["worker_id"] == swa.PRIMARY_WORKER_ID, doc
+    finally:
+        await _cleanup_full(project_id, talent_id, submission_id)
+
+
+async def test_approve_send_with_no_worker_override_still_gets_explicit_worker_id():
+    """Same rule for SEND — dispatch_approve_send's default call shape
+    must resolve a concrete worker_id before create_send_dispatch_from_
+    approved_plan is ever reached, never pass None through."""
+    project_id, talent_id, submission_id, tag = await _seed_full()
+    project_label = f"SWA Project {tag}"
+    try:
+        worker = _with_simulated_send_preview(talent_id, project_id, [
+            _mark(
+                mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 1 for {project_label}",
+                source_message_id=f"swa-noworker-{tag}", media_type="video",
+            ),
+        ])
+        req_id = await swa.dispatch_approve_send(project_id, submission_id)
+        await worker
+        doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id}, {"_id": 0})
+        assert doc is not None
+        assert doc["worker_id"] is not None and doc["worker_id"] != "", doc
+        assert doc["worker_id"] == swa.PRIMARY_WORKER_ID, doc
+    finally:
+        await _cleanup_full(project_id, talent_id, submission_id)
+
+
+async def test_create_scan_request_rejects_none_worker_id():
+    """Defensive insertion-time guard, independent of the dispatch layer
+    above — even a caller that bypasses submission_whatsapp_actions
+    entirely can never persist a NEW ownerless UPLOAD document."""
+    with pytest.raises(ValueError, match="worker_id is required"):
+        await ma.create_scan_request(
+            talent_id="t-x", talent_label="X", project_id="p-x", project_label="P",
+            group_name="X x Talentgram", worker_id=None,
+        )
+    assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"talent_id": "t-x"}) == 0
+
+
+async def test_create_scan_request_rejects_empty_string_worker_id():
+    with pytest.raises(ValueError, match="worker_id is required"):
+        await ma.create_scan_request(
+            talent_id="t-x2", talent_label="X2", project_id="p-x2", project_label="P",
+            group_name="X2 x Talentgram", worker_id="",
+        )
+    assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"talent_id": "t-x2"}) == 0
+
+
+async def test_create_send_dispatch_from_approved_plan_rejects_none_worker_id():
+    """Defensive insertion-time guard for the SEND equivalent — same rule,
+    same reasoning: this is the exact function that (before the
+    worker-affinity fix) silently wrote worker_id=None onto every SEND
+    request dispatched through Approve + Send."""
+    from agents.modules import media_send as ms
+    with pytest.raises(ValueError, match="worker_id is required"):
+        await ms.create_send_dispatch_from_approved_plan(
+            talent_id="t-y", project_id="p-y", talent_label="Y", project_label="P",
+            destination_group="Dest Y",
+            assignments=[{"media_role": "take", "take_number": 1, "source_message_id": "src-y", "source_thumbnail_hash": "hash-y"}],
+            default_source_type="group", default_group_name="Y x Talentgram",
+            form_message=None, submission_id=None, content_hash=None,
+            worker_id=None,
+        )
+    assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"talent_id": "t-y"}) == 0
+
+
+# ---------------------------------------------------------------------------
 # Worker-side auto-approve-on-success (UPLOAD) — mirrors SEND's own,
 # already-covered hook in test_media_send.py's approval-lifecycle suite.
 # ---------------------------------------------------------------------------

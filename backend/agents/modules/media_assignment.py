@@ -393,12 +393,25 @@ async def create_scan_request(
 ) -> str:
     """`worker_id` (multi-worker support, 2026-09-13) is the WhatsApp
     worker/session the UPLOAD command that triggered this scan actually
-    arrived through — the sole caller (casting_pipeline.py's
+    arrived through — the original caller (casting_pipeline.py's
     _upload_executor) passes ctx.worker_id, itself threaded all the way
-    from dispatcher.handle_inbound_message's own worker_id parameter.
-    Stored on the request doc so services/media_assignment_worker.py's
-    eventual completion report is sent from the SAME worker the command
-    came from, never guessed.
+    from dispatcher.handle_inbound_message's own worker_id parameter; the
+    second caller (submission_whatsapp_actions.dispatch_approve_upload,
+    2026-09-20) resolves its own worker_id from that module's
+    PRIMARY_WORKER_ID policy constant before ever calling here. Stored on
+    the request doc so services/media_assignment_worker.py's eventual
+    completion report is sent from the SAME worker the command came from,
+    never guessed, and so routers.agents_whatsapp.claim_scan_request only
+    lets the intended worker claim this job (worker-affinity fix,
+    2026-09-20).
+
+    Deliberately REQUIRED and validated below, never silently defaulted
+    to None/empty here — the None/absent-means-legacy-Worker-1
+    compatibility rule (_scan_request_worker_filter) exists only for
+    documents that already predate this fix; a NEW document must always
+    carry a concrete, explicitly-resolved worker_id, so a caller that
+    forgets to resolve one gets a loud, immediate error instead of a job
+    silently absorbed into Worker 1's default bucket.
 
     `submission_id`/`approve_on_success` (Approve + Upload, 2026-09-20) —
     optional, backward-compatible: when set, services/media_assignment_worker.py
@@ -408,6 +421,13 @@ async def create_scan_request(
     routers.submissions.set_decision). Omitted entirely by the original
     WhatsApp UPLOAD command caller (casting_pipeline._upload_executor),
     which never approves anything — this stays a no-op for that path."""
+    if not worker_id:
+        raise ValueError(
+            "create_scan_request: worker_id is required for a new job — "
+            "resolve a concrete worker identity before calling this function; "
+            "the None/absent-means-Worker-1 compatibility rule applies only "
+            "to documents that already exist, never to new job creation."
+        )
     req_id = str(uuid.uuid4())
     await db[SCAN_REQUESTS_COLLECTION].insert_one({
         "id": req_id,

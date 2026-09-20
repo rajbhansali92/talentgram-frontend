@@ -21,16 +21,40 @@ routers.submissions.set_decision's own talent-creation fallback. A
 submission with no linked talent yet must be approved normally first.
 """
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from core import db
+from agents import registry
 from agents.modules import media_assignment, media_send
 from agents.modules.casting_pipeline import _preview_send_marks, _send_approval_overrides
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# The single authoritative source for which worker a NEW Submission Review
+# Center dispatch (Approve + Upload / Approve + Send) targets when the
+# caller (routers/submissions.py's HTTP endpoints — see their own
+# docstrings) doesn't pass one explicitly, which today is every real
+# caller (2026-09-20 worker-affinity pre-deployment review). Deliberately
+# a named, centrally-documented, env-overridable constant rather than the
+# literal "default" duplicated independently inside dispatch_approve_upload/
+# dispatch_approve_send's own signatures — one source both read, so there
+# is exactly one place to change if the routing policy ever changes,
+# instead of two call sites that could silently drift apart.
+#
+# Defaults to registry.DEFAULT_WORKER_ID ("default", i.e. Worker 1) because
+# Worker 2 is CONFIRMED (Worker 2 investigation, 2026-09-20) still running
+# stale, pre-download-reattach code with a live legacy native-Forward SEND
+# path — it must not receive any NEW Approve + Upload/Send job until it is
+# upgraded to the same commit as Worker 1 (see the deployment-sequencing
+# section of that review). This is a deliberate, explicit policy choice,
+# never inferred from the browser/frontend (the HTTP endpoints above take
+# no worker_id from the client at all) and never a bare hard-coded literal.
+PRIMARY_WORKER_ID = os.environ.get("PRIMARY_WHATSAPP_WORKER_ID", registry.DEFAULT_WORKER_ID)
 
 
 # A short-lived dispatch lock (Production-safety fix, 2026-09-20) — closes
@@ -149,7 +173,7 @@ async def _resolve_common(project_id: str, submission_id: str) -> Tuple[Dict[str
     return sub, project, talent_label, group_name
 
 
-async def dispatch_approve_upload(project_id: str, submission_id: str, *, worker_id: str = "default") -> str:
+async def dispatch_approve_upload(project_id: str, submission_id: str, *, worker_id: Optional[str] = None) -> str:
     """Identify submission -> talent -> project -> marked WhatsApp media,
     then dispatch the EXISTING scan/download/upload pipeline
     (media_assignment.create_scan_request), with approve_on_success=True
@@ -157,7 +181,19 @@ async def dispatch_approve_upload(project_id: str, submission_id: str, *, worker
     submission once every download this run genuinely succeeds (mirrors
     SEND's own existing auto-approve hook). Returns the scan_requests id
     for status polling. Raises SubmissionActionError on any pre-dispatch
-    validation failure — nothing is dispatched in that case."""
+    validation failure — nothing is dispatched in that case.
+
+    `worker_id` (worker-affinity pre-deployment review, 2026-09-20): the
+    caller (routers/submissions.py's HTTP endpoint) never passes one — an
+    explicit override exists only for tests/future callers. A missing
+    worker_id resolves to PRIMARY_WORKER_ID (the one authoritative,
+    centrally-documented policy constant this module defines) BEFORE the
+    request ever reaches create_scan_request, so a NEW job's worker_id is
+    always a concrete, explicitly-assigned identity by the time it's
+    persisted — the None/absent-means-legacy-Worker-1 compatibility rule
+    is claim-time-only and belongs to pre-existing documents, never to a
+    job being created right now."""
+    worker_id = worker_id or PRIMARY_WORKER_ID
     in_flight = await _find_in_flight_request(project_id, submission_id, "upload")
     if in_flight:
         return in_flight
@@ -194,7 +230,7 @@ async def dispatch_approve_upload(project_id: str, submission_id: str, *, worker
 
 
 async def dispatch_approve_send(
-    project_id: str, submission_id: str, *, worker_id: str = "default", approved_by: str = "admin",
+    project_id: str, submission_id: str, *, worker_id: Optional[str] = None, approved_by: str = "admin",
 ) -> str:
     """Resolve the project's configured WhatsApp casting group, identify
     the exact marked media already resolved for this talent/project (the
@@ -209,7 +245,14 @@ async def dispatch_approve_send(
     succeeded, then sends the existing talent acknowledgement. Returns
     the scan_requests id for status polling. Raises SubmissionActionError
     on any pre-dispatch validation failure — nothing is sent in that
-    case."""
+    case.
+
+    `worker_id` (worker-affinity pre-deployment review, 2026-09-20): same
+    resolution rule as dispatch_approve_upload's own — see its docstring.
+    The real caller (routers/submissions.py) never passes one; it always
+    resolves to PRIMARY_WORKER_ID before create_send_dispatch_from_approved_plan
+    is ever called, so the persisted document's worker_id is never None."""
+    worker_id = worker_id or PRIMARY_WORKER_ID
     in_flight = await _find_in_flight_request(project_id, submission_id, "send")
     if in_flight:
         return in_flight

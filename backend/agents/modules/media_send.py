@@ -217,7 +217,21 @@ async def create_send_scan_request(
     no report-routing decision this value could ever affect for that path;
     threading it through several more layers of plain talent/project-id
     functions for a value that's provably never read would be exactly the
-    kind of unnecessary complexity worth avoiding."""
+    kind of unnecessary complexity worth avoiding.
+
+    Deliberately REQUIRED and validated below (worker-affinity
+    pre-deployment review, 2026-09-20) — see media_assignment.
+    create_scan_request's matching docstring for why: a NEW document must
+    always carry a concrete worker_id, never fall through to the
+    None/absent legacy-compatibility bucket _scan_request_worker_filter
+    reserves for pre-existing documents."""
+    if not worker_id:
+        raise ValueError(
+            "create_send_scan_request: worker_id is required for a new job — "
+            "resolve a concrete worker identity before calling this function; "
+            "the None/absent-means-Worker-1 compatibility rule applies only "
+            "to documents that already exist, never to new job creation."
+        )
     req_id = str(uuid.uuid4())
     await db[SCAN_REQUESTS_COLLECTION].insert_one({
         "id": req_id,
@@ -517,7 +531,21 @@ async def create_send_dispatch_from_approved_plan(
     for a non-default caller, or (harmlessly) by any default-scoped
     worker for the common "default" case. Defaults to "default", matching
     every existing caller (dispatch_approve_send never passed one before
-    this fix either) — this is purely additive."""
+    this fix either) — this is purely additive.
+
+    Deliberately REQUIRED and validated below (worker-affinity
+    pre-deployment review, 2026-09-20) — same reasoning as
+    media_assignment.create_scan_request's matching guard: a NEW document
+    must always carry a concrete worker_id, never silently fall into the
+    None/absent legacy-compatibility bucket _scan_request_worker_filter
+    reserves for documents that already existed before this fix."""
+    if not worker_id:
+        raise ValueError(
+            "create_send_dispatch_from_approved_plan: worker_id is required for "
+            "a new job — resolve a concrete worker identity before calling this "
+            "function; the None/absent-means-Worker-1 compatibility rule applies "
+            "only to documents that already exist, never to new job creation."
+        )
     send_targets, form_insert_index, send_marker_on_success, already = await prepare_send_targets(
         talent_id=talent_id, project_id=project_id, destination_group=destination_group,
         assignments=assignments, default_source_type=default_source_type,

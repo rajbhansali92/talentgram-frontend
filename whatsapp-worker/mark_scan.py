@@ -3622,7 +3622,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic", "scan_reliability_diagnostic", "open_group_chat_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic", "scan_reliability_diagnostic", "open_group_chat_diagnostic", "attachment_toolbar_survey_diagnostic"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -6152,6 +6152,146 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "ok": True, "group_name": group_name,
             "chat_ready_error": ready_error,
             "plus_rounded_locations": dom_result,
+        }], "session_identity": session_identity}
+
+    if probe_type == "attachment_toolbar_survey_diagnostic":
+        # Diagnostic-only (2026-09-20, fourth production incident) — the
+        # fourth incident in this saga: [data-testid="plus-rounded"] (the
+        # eb3c781 fix for the THIRD incident's stale "attach-menu-plus")
+        # itself now returns null on a confirmed-open, confirmed-composer-
+        # focused destination chat, 6/6 attempts, 100% deterministic (see
+        # ATTACH_CLICK_FAILURE_DIAGNOSTIC in production logs). Every
+        # existing probe here is either too narrow (attach_button_diagnostic:
+        # data-testid only, no aria-label/title, no file-input enumeration,
+        # no composer scoping) or performs a real click
+        # (attach_mechanism_full_diagnostic: clicks plus-rounded itself,
+        # which cannot exist today and would anyway violate a strict no-
+        # click observation pass). This probe is STRICTLY non-clicking: it
+        # never touches attach/Photos & videos/Send/any file chooser — the
+        # only interaction is a SINGLE composer click, the exact same
+        # action _wait_for_destination_chat_ready already performs in
+        # production and text-send has always performed, never anything
+        # attach-menu-related.
+        #
+        # Reuses sender._destination_header_authoritative (the SAME fixed
+        # resolver proven live in 357bc14) to re-confirm the active chat
+        # before surveying — never trusts _open_group_chat's own "OPENED"
+        # return alone for THIS specific report.
+        try:
+            header_state = await sender._destination_header_authoritative(page)
+        except Exception as exc:
+            header_state = {"error": str(exc)}
+
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        _describe_js = """
+            () => {
+              function describe(el) {
+                if (!el) return null;
+                const rect = el.getBoundingClientRect();
+                let anc = el.parentElement, chain = [];
+                for (let d = 0; d < 8 && anc; d++) {
+                  const t = anc.getAttribute && anc.getAttribute('data-testid');
+                  if (t) chain.push(t);
+                  anc = anc.parentElement;
+                }
+                return {
+                  tag: el.tagName,
+                  testid: el.getAttribute ? el.getAttribute('data-testid') : null,
+                  aria_label: el.getAttribute ? el.getAttribute('aria-label') : null,
+                  title: el.getAttribute ? el.getAttribute('title') : null,
+                  role: el.getAttribute ? el.getAttribute('role') : null,
+                  text: (el.innerText || '').slice(0, 60),
+                  visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                  enabled: !el.disabled,
+                  rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                  ancestor_testids: chain,
+                };
+              }
+              const composer = document.querySelector('[data-testid="conversation-compose-box-input"]');
+              let footer = composer;
+              for (let d = 0; d < 8 && footer; d++) {
+                if (footer.tagName === 'FOOTER') break;
+                footer = footer.parentElement;
+              }
+              const scope = footer || document;
+              const composerButtons = Array.from(
+                scope.querySelectorAll('button, [role="button"], span[data-testid], div[data-testid]')
+              ).map(describe);
+
+              const KEYWORD_RE = /attach|attachment|file|photo|video|document|plus|clip|media/i;
+              const keywordEls = Array.from(document.querySelectorAll('[data-testid], [aria-label], [title]'))
+                .filter(el => KEYWORD_RE.test(el.getAttribute('data-testid') || '')
+                            || KEYWORD_RE.test(el.getAttribute('aria-label') || '')
+                            || KEYWORD_RE.test(el.getAttribute('title') || ''))
+                .slice(0, 60)
+                .map(describe);
+
+              const fileInputs = Array.from(document.querySelectorAll('input[type="file"]')).map((el, i) => {
+                const rect = el.getBoundingClientRect();
+                let anc = el.parentElement, chain = [];
+                for (let d = 0; d < 8 && anc; d++) {
+                  const t = anc.getAttribute && anc.getAttribute('data-testid');
+                  if (t) chain.push(t);
+                  anc = anc.parentElement;
+                }
+                return {
+                  index: i, id: el.id || null, accept: el.getAttribute('accept'), multiple: el.multiple,
+                  visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                  rect: {x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height)},
+                  ancestor_testids: chain,
+                };
+              });
+
+              const plusRoundedEls = Array.from(document.querySelectorAll('[data-testid="plus-rounded"]')).map(describe);
+
+              const modalLike = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [role="menu"]'))
+                .filter(el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                .map(describe);
+
+              return {
+                composer_found: !!composer,
+                composer_describe: describe(composer),
+                active_element: describe(document.activeElement),
+                composer_scoped_elements: composerButtons,
+                keyword_survey: keywordEls,
+                file_inputs: fileInputs,
+                plus_rounded_matches: plusRoundedEls,
+                modal_or_menu_visible: modalLike,
+                viewport: {w: window.innerWidth, h: window.innerHeight},
+                total_testid_elements: document.querySelectorAll('[data-testid]').length,
+                url: location.href,
+              };
+            }
+        """
+        try:
+            before_click = await _evaluate(page, _describe_js, [])
+        except Exception as exc:
+            before_click = {"error": str(exc)}
+
+        composer_click_error = None
+        try:
+            await page.click(sender.SEL["msg_box"], timeout=5_000)
+            await asyncio.sleep(0.3)
+        except Exception as exc:
+            composer_click_error = str(exc)
+
+        try:
+            after_click = await _evaluate(page, _describe_js, [])
+        except Exception as exc:
+            after_click = {"error": str(exc)}
+
+        return {"results": [{
+            "ok": True, "group_name": group_name,
+            "authoritative_header": header_state,
+            "chat_ready_error": ready_error,
+            "composer_click_error": composer_click_error,
+            "before_composer_click": before_click,
+            "after_composer_click": after_click,
         }], "session_identity": session_identity}
 
     if probe_type == "attach_menu_after_click_diagnostic":

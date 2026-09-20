@@ -729,6 +729,17 @@ export default function SubmissionReviewCenter() {
     const [submissions, setSubmissions] = useState([]);
     const [selectedId, setSelectedId] = useState(null);
     const [detail, setDetail] = useState(null);
+    // Stale-async-response guard (2026-09-20) — a delayed WhatsApp-action
+    // response (runWhatsappAction below) must only ever touch UI state if
+    // the user is STILL looking at the submission/project it belongs to.
+    // A closure-captured `selectedId` can't tell the difference (it's
+    // fixed at the moment the async call started), so this ref is kept in
+    // sync with the live current selection on every render instead —
+    // reading `.current` from inside an already-in-flight async callback
+    // always reflects what's on screen RIGHT NOW, not what was on screen
+    // when the request was fired.
+    const currentSelectionRef = useRef({ projectId: id, submissionId: selectedId });
+    currentSelectionRef.current = { projectId: id, submissionId: selectedId };
     
     // UI states
     const [loadingProject, setLoadingProject] = useState(true);
@@ -1439,6 +1450,17 @@ export default function SubmissionReviewCenter() {
     const runWhatsappAction = useCallback(async (action) => {
         if (!selectedId || saving || (whatsappAction && whatsappAction.submissionId === selectedId)) return;
         const actedId = selectedId;
+        const actedProjectId = id;
+        // Live check, NOT `actedId === selectedId` — that closure-captured
+        // `selectedId` is fixed at the value it had when THIS async call
+        // started, so it can never detect a navigation that happened
+        // while the request was in flight (see currentSelectionRef's own
+        // comment above). Reading the ref instead always reflects what's
+        // actually on screen at the moment the response arrives.
+        const isStillCurrent = () => (
+            currentSelectionRef.current.submissionId === actedId
+            && currentSelectionRef.current.projectId === actedProjectId
+        );
         const endpoint = action === "upload" ? "approve-upload" : "approve-send";
         const verb = action === "upload" ? "Upload" : "Send";
         setWhatsappAction({ submissionId: actedId, action });
@@ -1472,12 +1494,12 @@ export default function SubmissionReviewCenter() {
                         setDetail((prev) => (prev && prev.id === actedId ? { ...prev, decision: "approved" } : prev));
                     } else if (status.ok) {
                         toast.error(`${verb} succeeded, but approving the submission failed — please approve it manually.`);
-                        if (actedId === selectedId) {
+                        if (isStillCurrent()) {
                             setWhatsappActionError("The WhatsApp media operation succeeded, but the submission could not be auto-approved. Approve it manually.");
                         }
                     } else {
                         toast.error(`${verb} did not complete successfully — submission was NOT approved.`);
-                        if (actedId === selectedId) {
+                        if (isStillCurrent()) {
                             setWhatsappActionError(status.report || "The WhatsApp operation did not complete successfully.");
                         }
                     }
@@ -1491,7 +1513,7 @@ export default function SubmissionReviewCenter() {
         } catch (e) {
             const msg = e?.response?.data?.detail || `Failed to start ${verb.toLowerCase()}.`;
             toast.error(msg);
-            if (actedId === selectedId) {
+            if (isStillCurrent()) {
                 setWhatsappActionError(msg);
             }
         } finally {

@@ -257,7 +257,8 @@ class FakePage:
     def __init__(self, *, chooser_should_raise=False, attach_click_should_raise=False,
                  caption_selector_that_matches="__default__",
                  send_button_selector_that_matches="__default__",
-                 header_provider=None, attach_present_provider=None, header_visible_provider=None):
+                 header_provider=None, attach_present_provider=None, header_visible_provider=None,
+                 header_testid_title=None, header_testid_visible=True):
         """`caption_selector_that_matches`: which entry of
         sender.CAPTION_INPUT_SELECTORS "exists and is visible" on this fake
         preview screen. "__default__" (the sentinel, not a real selector)
@@ -282,7 +283,18 @@ class FakePage:
         report the destination as already ready, since only the dedicated
         readiness tests below (which restore the REAL gate function) ever
         exercise this at all — every other test has the gate stubbed to
-        `_true` and never touches these providers."""
+        `_true` and never touches these providers.
+
+        `header_testid_title`/`header_testid_visible` (2026-09-20, third
+        production incident, selector-priority fix) — when set, models
+        WhatsApp's own dedicated `[data-testid="conversation-info-header-
+        chat-title"]` element being present, which `evaluate()` below
+        answers FIRST (mirroring the real _DESTINATION_HEADER_JS priority).
+        When left None (the default), `evaluate()` falls back to scanning
+        `header_provider()`'s list in order and skipping any entry that
+        matches a known subtitle/button string (e.g. "click here for group
+        info") — mirroring the real fallback exactly, never picking a
+        candidate merely because it matches what the caller expects."""
         self.action_log = []
         self.clicks = []
         self.keyboard = _FakeKeyboard(log=self.action_log)
@@ -305,6 +317,8 @@ class FakePage:
         self._header_provider = header_provider or (lambda: ["Talentgram Casting Test"])
         self._attach_present_provider = attach_present_provider or (lambda: True)
         self._header_visible_provider = header_visible_provider or (lambda: True)
+        self._header_testid_title = header_testid_title
+        self._header_testid_visible = header_testid_visible
         self._msg_box_click_should_raise = False
 
     async def click(self, selector, timeout=None):
@@ -351,19 +365,29 @@ class FakePage:
         self.evaluate_calls.append((js, arg))
         if js == sender._DESTINATION_HEADER_JS:
             # Routes through the SAME header_provider/header_visible_provider
-            # every other test in this file already uses — the new
-            # _destination_header_authoritative reads via page.evaluate()
-            # (a single, first-match, visibility-checked query) instead of
-            # page.locator() (the old multi-candidate scan), so this fake
-            # must answer that exact query shape: {found, title, visible}.
-            # Only the FIRST provided candidate is "the" authoritative
-            # element — deliberately NOT every item in the list, mirroring
-            # the fix's whole point (ignore whatever else might exist
-            # elsewhere in the DOM; only the primary match counts).
-            candidates = self._header_provider()
-            if candidates:
-                return {"found": True, "title": candidates[0], "visible": self._header_visible_provider()}
-            return {"found": False, "title": None, "visible": False}
+            # every other test in this file already uses — mirrors the real
+            # _DESTINATION_HEADER_JS priority: try the dedicated testid
+            # element first (header_testid_title), else fall back to
+            # scanning header_provider()'s list in DOM order, skipping any
+            # entry that is a known subtitle/button string. Selection never
+            # depends on `arg` (the known-subtitle list) matching what the
+            # caller expects — only on what this fake was told the DOM
+            # contains, exactly like the real JS.
+            if self._header_testid_title is not None:
+                return {
+                    "found": True, "title": self._header_testid_title,
+                    "visible": self._header_testid_visible,
+                    "selector": '[data-testid="conversation-info-header-chat-title"]',
+                }
+            known_subtitles = {s.lower() for s in (arg or sender._KNOWN_HEADER_SUBTITLE_TEXTS)}
+            for candidate in self._header_provider():
+                if not candidate or candidate.strip().lower() in known_subtitles:
+                    continue
+                return {
+                    "found": True, "title": candidate, "visible": self._header_visible_provider(),
+                    "selector": '#main header span[title] (filtered fallback)',
+                }
+            return {"found": False, "title": None, "visible": False, "selector": None}
         return {
             "attach_button": {"testid": "plus-rounded", "visible": True},
             "click_point": {"x": 614, "y": 762},
@@ -889,7 +913,8 @@ class _FakeGroupPage:
     _verify_chat_open, _read_search_value) is monkeypatched directly per
     test instead of being simulated through real DOM selectors, so these
     tests isolate the NEW bounded-retry/verification logic itself."""
-    def __init__(self, all_filter=None, header_provider=None, header_visible_provider=None):
+    def __init__(self, all_filter=None, header_provider=None, header_visible_provider=None,
+                 header_testid_title=None, header_testid_visible=True):
         self.keyboard = _FakeKeyboard()
         self.url = "https://web.whatsapp.com/"
         # Defaults to "already selected" so every pre-existing test in this
@@ -903,8 +928,16 @@ class _FakeGroupPage:
         # SAFE default (fast path never falsely fires, post-click
         # verification is never falsely satisfied either); a test that
         # specifically wants a genuine match passes its own provider.
+        #
+        # header_testid_title/header_testid_visible (2026-09-20, selector-
+        # priority fix) — models the dedicated
+        # [data-testid="conversation-info-header-chat-title"] element; see
+        # evaluate() below and FakePage's own docstring for the exact
+        # priority/fallback semantics this mirrors.
         self._header_provider = header_provider or (lambda: [])
         self._header_visible_provider = header_visible_provider or (lambda: True)
+        self._header_testid_title = header_testid_title
+        self._header_testid_visible = header_testid_visible
 
     async def title(self):
         return "WhatsApp"
@@ -926,10 +959,23 @@ class _FakeGroupPage:
         if "document.activeElement" in js:
             return {"tag": "input", "id": "_r_a_", "in_side": True, "in_main": False, "value": "Test Group", "path": "#_r_a_"}
         if js == sender._DESTINATION_HEADER_JS:
-            candidates = self._header_provider()
-            if candidates:
-                return {"found": True, "title": candidates[0], "visible": self._header_visible_provider()}
-            return {"found": False, "title": None, "visible": False}
+            testid_title = self._header_testid_title() if callable(self._header_testid_title) \
+                else self._header_testid_title
+            if testid_title is not None:
+                return {
+                    "found": True, "title": testid_title,
+                    "visible": self._header_testid_visible,
+                    "selector": '[data-testid="conversation-info-header-chat-title"]',
+                }
+            known_subtitles = {s.lower() for s in (arg or sender._KNOWN_HEADER_SUBTITLE_TEXTS)}
+            for candidate in self._header_provider():
+                if not candidate or candidate.strip().lower() in known_subtitles:
+                    continue
+                return {
+                    "found": True, "title": candidate, "visible": self._header_visible_provider(),
+                    "selector": '#main header span[title] (filtered fallback)',
+                }
+            return {"found": False, "title": None, "visible": False, "selector": None}
         return {}
 
 
@@ -963,8 +1009,8 @@ def test_open_group_chat_bounded_candidate_polling_recovers():
     async def _fake_verify(page, expected_name):
         verify_calls["n"] += 1
         if verify_calls["n"] == 1:
-            return False, ""  # fast-path: not already open
-        return True, expected_name  # post-click verify: succeeds
+            return False, "", None, False  # fast-path: not already open
+        return True, expected_name, '[data-testid="conversation-info-header-chat-title"]', True  # post-click verify: succeeds
 
     collect_calls = {"n": 0}
     async def _fake_collect(page):
@@ -1027,8 +1073,8 @@ def test_open_group_chat_post_click_verification_recovers():
     async def _fake_verify(page, expected_name):
         verify_calls["n"] += 1
         if verify_calls["n"] <= 2:  # call 1 = fast-path (not open); call 2 = first post-click attempt (not yet rendered)
-            return False, ""
-        return True, expected_name
+            return False, "", None, False
+        return True, expected_name, '[data-testid="conversation-info-header-chat-title"]', True
 
     async def _fake_collect(page):
         return "sel", [_fake_candidate(GROUP_NAME, row)]
@@ -1084,7 +1130,7 @@ def test_open_group_chat_already_open_fast_path_unaffected():
     page = _FakeGroupPage()
 
     async def _fake_verify(page, expected_name):
-        return True, expected_name  # already open on the very first (fast-path) call
+        return True, expected_name, '[data-testid="conversation-info-header-chat-title"]', True  # already open on the very first (fast-path) call
 
     collect_calls = {"n": 0}
     async def _fake_collect(page):
@@ -1427,8 +1473,8 @@ def test_open_group_chat_resets_all_filter_before_searching():
     async def _fake_verify(page, expected_name):
         verify_calls["n"] += 1
         if verify_calls["n"] == 1:
-            return False, ""  # fast-path: not already open
-        return True, expected_name  # post-click verify: succeeds
+            return False, "", None, False  # fast-path: not already open
+        return True, expected_name, '[data-testid="conversation-info-header-chat-title"]', True  # post-click verify: succeeds
 
     async def _fake_collect(page):
         assert flt._selected is True, "search ran before the All filter was confirmed selected"
@@ -1845,9 +1891,10 @@ def test_destination_header_matches_reproduces_and_rejects_the_production_contra
     "elsewhere" at all, closing the contradiction by construction rather
     than by chance."""
     page = FakePage(header_provider=lambda: ["Raj, You"])
-    match, actual = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
+    match, actual, selector, visible = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
     assert match is False
     assert actual == "Raj, You"
+    assert selector == '#main header span[title] (filtered fallback)'
 
 
 def test_destination_header_matches_requires_genuine_visibility():
@@ -1859,14 +1906,247 @@ def test_destination_header_matches_requires_genuine_visibility():
         header_provider=lambda: ["Pepsi x Talentgram Agency"],
         header_visible_provider=lambda: False,
     )
-    match, actual = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
+    match, actual, selector, visible = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
     assert match is False
     assert actual == "Pepsi x Talentgram Agency", "the real (if hidden) title is still reported for diagnostics"
 
 
 def test_destination_header_matches_true_when_authoritative_element_genuinely_correct():
     page = FakePage(header_provider=lambda: ["Pepsi x Talentgram Agency"])
-    match, actual = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
+    match, actual, selector, visible = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is True
+    assert actual == "Pepsi x Talentgram Agency"
+
+
+# ---------------------------------------------------------------------------
+# Selector-priority fix (2026-09-20, fourth production incident) — the
+# single-element `#main header span[title]` FIRST-match check above (root-
+# cause fix #2's whole purpose) was itself proven wrong for GROUP chats:
+# live logs showed EVERY one of 8 distinct groups post-click-verified as
+# actual='click here for group info' — a 100% failure rate, since WhatsApp
+# Web renders the group's own subtitle ("click here for group info" / the
+# participant list) as a span[title] element that resolves BEFORE the
+# group-name span in DOM order. These tests prove the fix: WhatsApp's own
+# dedicated [data-testid="conversation-info-header-chat-title"] element is
+# tried first (never the subtitle), with a filtered span[title] fallback
+# for when that element is absent — while still never reintroducing the
+# ORIGINAL bug (accepting ANY candidate that happens to match what the
+# caller expects, regardless of which element is genuinely active).
+# ---------------------------------------------------------------------------
+def test_destination_header_matches_group_prefers_dedicated_testid_over_subtitle():
+    """The exact incident shape: WhatsApp's own dedicated title element
+    correctly says the group name — the resolver must use IT, never fall
+    through to a subtitle span just because one also happens to exist."""
+    page = FakePage(
+        header_testid_title="Raj Mehta x Talentgram Agency",
+        header_provider=lambda: ["click here for group info"],
+    )
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Raj Mehta x Talentgram Agency")))
+    assert match is True
+    assert actual == "Raj Mehta x Talentgram Agency"
+    assert selector == '[data-testid="conversation-info-header-chat-title"]'
+
+
+def test_destination_header_matches_group_fallback_skips_subtitle_text():
+    """When the dedicated testid element is absent, the fallback must
+    still never accept "click here for group info" as the title — it
+    skips that candidate and finds the real group name later in DOM
+    order, exactly reproducing the Pepsi x Talentgram Agency incident
+    shape (subtitle resolves first, name resolves second)."""
+    page = FakePage(header_provider=lambda: ["click here for group info", "Pepsi x Talentgram Agency"])
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is True
+    assert actual == "Pepsi x Talentgram Agency"
+    assert selector == '#main header span[title] (filtered fallback)'
+
+
+def test_destination_header_matches_group_fallback_all_subtitle_text_is_not_found():
+    """If every span[title] candidate is a known subtitle/button string
+    (the group name span genuinely isn't there yet — e.g. mid-render),
+    the resolver must honestly report not-found, never fabricate a
+    match from subtitle text."""
+    page = FakePage(header_provider=lambda: ["click here for group info", "Profile details"])
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is False
+    assert actual is None
+    assert selector is None
+
+
+def test_destination_header_matches_original_false_positive_still_prevented():
+    """STEP 4's required regression: DOM has the active chat = 'Raj, You'
+    AND a stale/secondary element containing 'Pepsi x Talentgram Agency'
+    elsewhere. The resolver must return match=False — it must NOT scan
+    every candidate and accept Pepsi merely because a candidate matching
+    the expected name exists SOMEWHERE. This is the exact original
+    (pre-23e1dba) bug shape; proving it stays fixed even after the
+    selector-priority change above."""
+    # No dedicated testid element (simulates it not existing for this
+    # DOM state); the ONE genuinely active span[title] element is "Raj,
+    # You" — "Pepsi x Talentgram Agency" is deliberately NOT anywhere in
+    # this fake's candidate list, because the real fix's whole point is
+    # that the resolver only ever looks at ONE genuine element (chosen
+    # independently of the expected name) — it has no mechanism to "find
+    # Pepsi elsewhere" even if such an element existed in the real DOM.
+    page = FakePage(header_provider=lambda: ["Raj, You"])
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is False
+    assert actual == "Raj, You"
+
+
+def test_destination_header_matches_group_with_subtitle_present_still_matches_correctly():
+    """STEP 3's exact requirement, restated with the subtitle explicitly
+    present alongside the correct name (dedicated testid element
+    available, as the real WhatsApp Web DOM has for genuine groups):
+    actual_title must be 'Pepsi x Talentgram Agency', never 'click here
+    for group info'."""
+    page = FakePage(
+        header_testid_title="Pepsi x Talentgram Agency",
+        header_provider=lambda: ["click here for group info"],
+    )
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is True
+    assert actual == "Pepsi x Talentgram Agency"
+
+
+def test_destination_header_matches_1on1_chat_matches_by_name():
+    """STEP 5: 1:1 chats must keep working — no group-specific subtitle
+    exists, and a plain 1:1 name (via the testid element, as WhatsApp
+    Web renders it for both chat types) matches directly."""
+    page = FakePage(header_testid_title="Raj, You")
+    match, actual, selector, visible = run(sender._destination_header_matches(page, sender._norm_title("Raj, You")))
+    assert match is True
+    assert actual == "Raj, You"
+
+
+def test_destination_header_matches_1on1_chat_wrong_expected_is_rejected():
+    """STEP 5: a 1:1 chat must never match an unrelated expected name."""
+    page = FakePage(header_testid_title="Raj, You")
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is False
+    assert actual == "Raj, You"
+
+
+def test_destination_header_matches_visibility_hidden_testid_element():
+    """STEP 6: the dedicated testid element existing with the right text
+    is not enough if it is not genuinely visible (e.g. display:none / a
+    torn-down stale node)."""
+    page = FakePage(header_testid_title="Pepsi x Talentgram Agency", header_testid_visible=False)
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is False
+    assert visible is False, "diagnostics must distinguish 'wrong title' from 'right title but invisible'"
+    assert actual == "Pepsi x Talentgram Agency", "text still reported for diagnostics even though hidden"
+
+
+def test_destination_header_matches_visibility_hidden_fallback_element():
+    """STEP 6, fallback path: a filtered span[title] candidate that is
+    zero-size/hidden must not satisfy readiness either."""
+    page = FakePage(
+        header_provider=lambda: ["Pepsi x Talentgram Agency"],
+        header_visible_provider=lambda: False,
+    )
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is False
+    assert visible is False
+    assert actual == "Pepsi x Talentgram Agency"
+
+
+def test_destination_header_matches_visibility_visible_element_matches():
+    """STEP 6 positive case: a genuinely visible matching element passes."""
+    page = FakePage(header_testid_title="Pepsi x Talentgram Agency", header_testid_visible=True)
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is True
+    assert visible is True
+
+
+def test_open_group_chat_post_click_group_with_subtitle_now_verifies_correctly():
+    """End-to-end through the REAL _open_group_chat (not monkeypatched),
+    reproducing the exact production DOM shape for Raj Mehta x Talentgram
+    Agency: BEFORE the click, the active chat is genuinely something else
+    (fast path correctly refuses and a real search+click happens); AFTER
+    the click, the header resolver — via the dedicated testid element —
+    now correctly identifies the real group name instead of the 'click
+    here for group info' subtitle, so _open_group_chat correctly returns
+    OPENED instead of SEARCH_FAILED."""
+    row = _FakeGroupCandidateLocator()
+    page = _FakeGroupPage(
+        header_testid_title=lambda: ("Raj Mehta x Talentgram Agency" if row.click_count > 0 else None),
+    )
+
+    async def _fake_collect(page):
+        return "sel", [_fake_candidate("Raj Mehta x Talentgram Agency", row)]
+
+    async def _fake_read_value(page, sel):
+        return True, "Raj Mehta x Talentgram Agency"
+
+    orig_collect, orig_read = sender._collect_search_candidates, sender._read_search_value
+    sender._collect_search_candidates, sender._read_search_value = _fake_collect, _fake_read_value
+    try:
+        with _real_open_group_chat():
+            result = run(sender._open_group_chat(page, "Raj Mehta x Talentgram Agency"))
+    finally:
+        sender._collect_search_candidates, sender._read_search_value = orig_collect, orig_read
+
+    assert result == "OPENED", result
+    assert row.click_count == 1, "a real search+click must have happened (fast path correctly refused before the click)"
+
+
+# ---------------------------------------------------------------------------
+# STEP 7: chat-transition scenarios, through the real resolver.
+# ---------------------------------------------------------------------------
+def test_destination_header_matches_transition_raj_to_pepsi():
+    """A: Raj -> Pepsi. Once the active element genuinely becomes Pepsi,
+    the resolver must reflect that (no stickiness to the prior chat)."""
+    page = FakePage(header_testid_title="Pepsi x Talentgram Agency")
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is True
+    assert actual == "Pepsi x Talentgram Agency"
+
+
+def test_destination_header_matches_transition_pepsi_to_raj():
+    """B: Pepsi -> Raj. Same, in the other direction."""
+    page = FakePage(header_testid_title="Raj, You")
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Raj, You")))
+    assert match is True
+    assert actual == "Raj, You"
+
+
+def test_destination_header_matches_transition_stale_pepsi_dom_remains_present():
+    """C: Raj -> Pepsi while a stale Pepsi DOM element remains present
+    elsewhere is the SAME shape as the original false-positive test
+    above, restated as an explicit transition scenario: the resolver
+    must key off the one genuinely active element (here: still Raj),
+    never a stale element merely because it contains 'Pepsi'."""
+    page = FakePage(header_provider=lambda: ["Raj, You"])
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is False
+    assert actual == "Raj, You"
+
+
+def test_destination_header_matches_transition_group_header_with_subtitle_pair():
+    """D: the active group header genuinely contains BOTH the group name
+    'Pepsi x Talentgram Agency' AND the 'click here for group info'
+    subtitle at once (the normal, fully-settled state of any real group
+    conversation) — the resolver must always identify the actual group
+    name, never the subtitle, regardless of which one a naive DOM scan
+    would see first."""
+    page = FakePage(
+        header_testid_title="Pepsi x Talentgram Agency",
+        header_provider=lambda: ["click here for group info", "Pepsi x Talentgram Agency"],
+    )
+    match, actual, selector, visible = run(sender._destination_header_matches(
+        page, sender._norm_title("Pepsi x Talentgram Agency")))
     assert match is True
     assert actual == "Pepsi x Talentgram Agency"
 

@@ -598,42 +598,102 @@ DESTINATION_READY_POLL_INTERVAL_S = 0.4
 # "click here for group info" subtitle, "Profile details" — so "any
 # candidate matches" was never a safe proxy for "the chat is genuinely
 # this one"). _destination_header_authoritative below closes this by
-# construction: it queries the exact same first-match element the
-# diagnostic treats as ground truth, in one atomic JS evaluate (so
-# nothing can change between "read the text" and "read visibility"), and
-# additionally requires that element to be genuinely visible — something
-# neither the old gate check NOR the diagnostic previously verified.
+# construction: it identifies exactly ONE element as the active chat
+# title — never influenced by what the caller expects, only compared to
+# it afterward — and additionally requires that element to be genuinely
+# visible.
+#
+# Root-cause fix #2 (2026-09-20, THIRD production incident) — the
+# single-element selector above (`#main header span[title]`, first
+# match) was itself proven wrong for GROUP chats: WhatsApp Web renders
+# the group name AND a subtitle span (literally "click here for group
+# info", or the participant list once settled) both as `span[title]`
+# elements under `#main header`, and the subtitle consistently resolves
+# FIRST in DOM order — live logs showed EVERY one of 8 distinct groups
+# post-click-verified as `actual='click here for group info'`, a 100%
+# failure rate for genuine group navigation. Fixed by adding a real
+# selector PRIORITY: WhatsApp Web's own dedicated
+# `[data-testid="conversation-info-header-chat-title"]` element (present
+# for both 1:1 and group headers, and — unlike the generic span[title]
+# scan — specific to the title itself, never the subtitle) is tried
+# first; only if that element is absent does the code fall back to the
+# generic span[title] scan, and even then it deterministically skips
+# known non-title subtitle/button strings (never accepting them, never
+# scanning for "any candidate that happens to match" — the selection
+# itself never depends on what the caller expects, preserving the exact
+# safety property root-cause fix #1 above established).
+_KNOWN_HEADER_SUBTITLE_TEXTS = (
+    "click here for group info",
+    "click here for contact info",
+    "tap here for group info",
+    "tap here for contact info",
+    "profile details",
+)
 _DESTINATION_HEADER_JS = """
-() => {
-    const hdr = document.querySelector('#main header span[title]');
-    if (!hdr) return {found: false, title: null, visible: false};
-    const visible = !!(hdr.offsetWidth || hdr.offsetHeight || hdr.getClientRects().length);
-    return {found: true, title: hdr.getAttribute('title') || hdr.innerText || '', visible};
+(knownSubtitles) => {
+    const KNOWN = new Set(knownSubtitles.map((s) => s.toLowerCase()));
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+    function readTitle(el) {
+        return (el.getAttribute('title') || el.innerText || '').trim();
+    }
+    // Priority 1: WhatsApp's own dedicated chat-title element — specific
+    // to the title, distinct from the subtitle/participants line, and
+    // present for both 1:1 and group headers.
+    const primary = document.querySelector('#main header [data-testid="conversation-info-header-chat-title"]');
+    if (primary) {
+        const title = readTitle(primary);
+        if (title) {
+            return {found: true, title, visible: isVisible(primary),
+                     selector: '[data-testid="conversation-info-header-chat-title"]'};
+        }
+    }
+    // Priority 2 (fallback, only if the dedicated element is absent):
+    // scan span[title] elements under #main header in DOM order, but
+    // deterministically skip known non-title subtitle/button text —
+    // never accept the first match blindly, and never accept a
+    // candidate merely because it happens to match what the caller
+    // expects (that selection-time dependency was the original,
+    // unsafe behavior this function replaces).
+    const spans = Array.from(document.querySelectorAll('#main header span[title]'));
+    for (const el of spans) {
+        const title = readTitle(el);
+        if (!title || KNOWN.has(title.toLowerCase())) continue;
+        return {found: true, title, visible: isVisible(el),
+                 selector: '#main header span[title] (filtered fallback)'};
+    }
+    return {found: false, title: null, visible: false, selector: null};
 }
 """
 
 
 async def _destination_header_authoritative(page: Page) -> Dict[str, Any]:
-    """Returns {"found", "title", "visible"} for the SAME single element
-    the ATTACH_CLICK_FAILURE_DIAGNOSTIC's own chat_title read treats as
-    ground truth — deliberately NOT a multi-candidate scan (see this
-    module's own comment above for why "any of several candidates"
-    proved unsafe)."""
+    """Returns {"found", "title", "visible", "selector"} for exactly ONE
+    element identified as the active chat's title — chosen by a fixed
+    selector priority (see _DESTINATION_HEADER_JS), never by whether it
+    matches what the caller expects. Deliberately NOT a multi-candidate
+    "any of several matches" scan (see this module's own comment above
+    for why that proved unsafe)."""
     try:
-        return await page.evaluate(_DESTINATION_HEADER_JS)
+        return await page.evaluate(_DESTINATION_HEADER_JS, list(_KNOWN_HEADER_SUBTITLE_TEXTS))
     except Exception:
-        return {"found": False, "title": None, "visible": False}
+        return {"found": False, "title": None, "visible": False, "selector": None}
 
 
-async def _destination_header_matches(page: Page, expected_norm: str) -> Tuple[bool, Optional[str]]:
-    """Returns (match, actual_title) — the actual title is always
-    returned (even on a non-match) so callers can log what the header
-    genuinely said, not just whether it matched."""
+async def _destination_header_matches(page: Page, expected_norm: str) -> Tuple[bool, Optional[str], Optional[str], bool]:
+    """Returns (match, actual_title, selector_used, visible) — the actual
+    title, selector, and raw visibility are always returned (even on a
+    non-match) so callers can log what the header genuinely said, how it
+    was found, and whether the reason for a non-match was a wrong title
+    or a genuinely invisible element — not just whether it matched."""
     state = await _destination_header_authoritative(page)
     title = state.get("title")
-    if not state.get("found") or not state.get("visible") or not title:
-        return False, title
-    return _norm_title(title) == expected_norm, title
+    selector = state.get("selector")
+    visible = bool(state.get("visible"))
+    if not state.get("found") or not visible or not title:
+        return False, title, selector, visible
+    return _norm_title(title) == expected_norm, title, selector, visible
 
 
 async def _attach_control_visible(page: Page) -> bool:
@@ -682,13 +742,13 @@ async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[s
     last_actual_title: Optional[str] = None
     while True:
         if expected_norm is None:
-            header_ok, actual_title = True, None
+            header_ok, actual_title, actual_selector, actual_visible = True, None, None, True
         else:
-            header_ok, actual_title = await _destination_header_matches(page, expected_norm)
+            header_ok, actual_title, actual_selector, actual_visible = await _destination_header_matches(page, expected_norm)
         if header_ok != last_header_ok or actual_title != last_actual_title:
             logger.info(
-                "sender: SEND_DESTINATION_HEADER_CHECK expected=%r actual=%r match=%s",
-                expected_name, actual_title, header_ok,
+                "sender: SEND_DESTINATION_HEADER_CHECK expected=%r actual=%r selector=%r visible=%s match=%s",
+                expected_name, actual_title, actual_selector, actual_visible, header_ok,
             )
             last_header_ok = header_ok
             last_actual_title = actual_title
@@ -1668,11 +1728,12 @@ POST_CLICK_VERIFY_DELAY_S = 0.5
 # improves every one of _open_group_chat's 20+ callers uniformly — upload
 # scanning, the inbound listener, text sends, and SEND alike — without
 # any of them needing to change.
-async def _group_chat_authoritative_match(page: Page, expected_name: str) -> Tuple[bool, Optional[str]]:
+async def _group_chat_authoritative_match(page: Page, expected_name: str) -> Tuple[bool, Optional[str], Optional[str], bool]:
     """_open_group_chat's own name for _destination_header_matches — same
     function, reused rather than duplicated (see this module's own
-    _destination_header_matches docstring for the exact semantics: a
-    single, first-match, visibility-checked #main header element)."""
+    _destination_header_matches docstring for the exact semantics: one
+    priority-selected, visibility-checked #main header element, never a
+    multi-candidate "any match" scan)."""
     return await _destination_header_matches(page, _norm_title(expected_name))
 
 
@@ -1722,10 +1783,10 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     post-click verification below.
     """
     try:
-        already_ready, actual = await _group_chat_authoritative_match(page, group_name)
+        already_ready, actual, actual_selector, actual_visible = await _group_chat_authoritative_match(page, group_name)
         logger.info(
-            "sender: GROUP_OPEN_FAST_PATH_CHECK requested=%r actual=%r match=%s",
-            group_name, actual, already_ready,
+            "sender: GROUP_OPEN_FAST_PATH_CHECK requested=%r actual=%r selector=%r visible=%s match=%s",
+            group_name, actual, actual_selector, actual_visible, already_ready,
         )
         if already_ready:
             logger.info("sender: group %r already open — skipping sidebar search (fast path)", group_name)
@@ -1984,18 +2045,20 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     # before, only the check itself is now authoritative.
     verified = False
     actual_at_verify: Optional[str] = None
+    actual_selector: Optional[str] = None
+    actual_visible: bool = False
     for _ in range(MAX_POST_CLICK_VERIFY_ATTEMPTS):
         await asyncio.sleep(POST_CLICK_VERIFY_DELAY_S)
         try:
-            verified, actual_at_verify = await _group_chat_authoritative_match(page, group_name)
+            verified, actual_at_verify, actual_selector, actual_visible = await _group_chat_authoritative_match(page, group_name)
         except Exception as exc:
             logger.info("sender: post-click verify error (advisory): %s", exc)
-            verified, actual_at_verify = False, None
+            verified, actual_at_verify, actual_selector, actual_visible = False, None, None, False
         if verified:
             break
     logger.info(
-        "sender: GROUP_OPEN_POST_CLICK_CHECK requested=%r actual=%r match=%s",
-        group_name, actual_at_verify, verified,
+        "sender: GROUP_OPEN_POST_CLICK_CHECK requested=%r actual=%r selector=%r visible=%s match=%s",
+        group_name, actual_at_verify, actual_selector, actual_visible, verified,
     )
     await _p26b_dump(page, "group_after_select", extra={"selected": match["title"], "verified": verified})  # PHASE26B
     if not verified:

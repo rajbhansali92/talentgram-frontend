@@ -582,53 +582,109 @@ DESTINATION_READY_TIMEOUT_MS = 15_000
 DESTINATION_READY_POLL_INTERVAL_S = 0.4
 
 
+async def _destination_header_matches(page: Page, expected_norm: str) -> bool:
+    """The SAME candidate-scan _verify_chat_open uses (multiple span[title]
+    elements are normal within one real header — group name + "click here
+    for group info" subtitle), so this can never disagree with what "the
+    right chat" means elsewhere in this file."""
+    try:
+        for sel in RECIPIENT_SELECTORS:
+            loc = page.locator(sel)
+            n = await loc.count()
+            for i in range(min(n, 6)):
+                item = loc.nth(i)
+                t = (await item.inner_text()).strip() or \
+                    (await item.get_attribute("title") or "").strip()
+                if t and _norm_title(t) == expected_norm:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+async def _attach_control_visible(page: Page) -> bool:
+    try:
+        attach_loc = page.locator(SEL["attach_btn"]).first
+        return bool(await attach_loc.count()) and await attach_loc.is_visible()
+    except Exception:
+        return False
+
+
 async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[str]) -> bool:
     """Re-verifies, immediately before the attach-button click, that (a) the
-    VISIBLE chat header still names the intended destination — reusing the
-    exact same selectors/normalization _verify_chat_open itself uses, so
-    this can never disagree with what "the right chat" means elsewhere in
-    this file — and (b) the attach control itself is actually present and
-    visible. `expected_name` is None for a phone/number destination (same
-    asymmetry _verify_chat_open already has — a 1:1 header's title is not
-    guaranteed to equal the raw phone string), in which case only the
-    attach-control presence is required. Returns True once both hold;
-    False if the deadline passes without ever seeing that combination —
-    the caller must treat False as retryable, never as a send-control
-    failure (see DESTINATION_CHAT_NOT_READY)."""
+    VISIBLE chat header still names the intended destination and (b) the
+    attach control itself is present and visible.
+
+    Root-cause fix (2026-09-20, real production incident — live logs showed
+    the header AND a full DOM instrumentation dump both independently
+    confirm the destination is genuinely open, yet ~15s of pure polling
+    later the attach control still never appears and a fresh diagnostic
+    capture shows the header back on the SOURCE chat): the text-send path
+    (_send_text_message, below) has always explicitly clicked into the
+    compose box before typing; the media-attach path never did — it only
+    verified the box was "visible and editable" (_wait_for_chat_ready),
+    never gave it a REAL focus/click event. WhatsApp Web's per-chat
+    toolbar (attach button included) is plausibly gated on that genuine
+    interaction, and a chat opened purely by background reads (baseline
+    snapshot, duplicate-check, DOM dump — no click, no focus) is also the
+    kind WhatsApp Web's own client has no signal a real user is still
+    looking at, which is consistent with it reverting to the previously-
+    active chat. This function now performs that SAME real click, once,
+    the moment the destination header is first confirmed — before
+    polling for the attach control at all — rather than only re-reading
+    DOM state and hoping it eventually matches.
+
+    `expected_name` is None for a phone/number destination (same asymmetry
+    _verify_chat_open already has). Returns True once both header and
+    attach control hold; False if the deadline passes first — the caller
+    must treat False as retryable, never as a send-control failure (see
+    DESTINATION_CHAT_NOT_READY)."""
     deadline = time.monotonic() + DESTINATION_READY_TIMEOUT_MS / 1000
     expected_norm = _norm_title(expected_name) if expected_name else None
+    logger.info("sender: SEND_DESTINATION_NAV_START expected=%r", expected_name)
+    composer_clicked = False
+    last_header_ok = expected_norm is None
+    last_attach_ok = False
     while True:
-        header_ok = expected_norm is None
-        if expected_norm is not None:
+        header_ok = expected_norm is None or await _destination_header_matches(page, expected_norm)
+        if header_ok != last_header_ok:
+            logger.info(
+                "sender: SEND_DESTINATION_HEADER_CHECK expected=%r match=%s", expected_name, header_ok,
+            )
+            last_header_ok = header_ok
+
+        if header_ok and not composer_clicked:
+            # The deterministic action: a genuine click into the compose
+            # box, exactly once, the first moment we know we're in the
+            # right chat — mirrors what the text-send path has always
+            # done, and gives WhatsApp Web the same real-user signal that
+            # path relies on. Never repeated (a real user clicks a
+            # composer once, not every 0.4s), and failure here is not
+            # fatal — it just means this poll iteration's attach-control
+            # check runs without it, same as before this fix.
             try:
-                for sel in RECIPIENT_SELECTORS:
-                    loc = page.locator(sel)
-                    n = await loc.count()
-                    for i in range(min(n, 6)):
-                        item = loc.nth(i)
-                        t = (await item.inner_text()).strip() or \
-                            (await item.get_attribute("title") or "").strip()
-                        if t and _norm_title(t) == expected_norm:
-                            header_ok = True
-                            break
-                    if header_ok:
-                        break
-            except Exception:
-                header_ok = False
-        attach_ok = False
-        if header_ok:
-            try:
-                attach_loc = page.locator(SEL["attach_btn"]).first
-                attach_ok = bool(await attach_loc.count()) and await attach_loc.is_visible()
-            except Exception:
-                attach_ok = False
+                await page.click(SEL["msg_box"], timeout=2_000)
+                composer_clicked = True
+                logger.info("sender: SEND_DESTINATION_COMPOSER_CHECK expected=%r state=clicked", expected_name)
+            except Exception as exc:
+                logger.info(
+                    "sender: SEND_DESTINATION_COMPOSER_CHECK expected=%r state=click_failed error=%s",
+                    expected_name, exc,
+                )
+
+        attach_ok = await _attach_control_visible(page) if header_ok else False
+        if attach_ok != last_attach_ok:
+            logger.info("sender: SEND_ATTACH_CONTROL_CHECK present=%s", attach_ok)
+            last_attach_ok = attach_ok
+
         if header_ok and attach_ok:
+            logger.info("sender: SEND_DESTINATION_READY destination=%r", expected_name)
             return True
         if time.monotonic() >= deadline:
             logger.warning(
-                "sender: DESTINATION_CHAT_NOT_READY — header_ok=%s attach_ok=%s "
+                "sender: DESTINATION_CHAT_NOT_READY — header_ok=%s attach_ok=%s composer_clicked=%s "
                 "expected=%r after %dms",
-                header_ok, attach_ok, expected_name, DESTINATION_READY_TIMEOUT_MS,
+                header_ok, attach_ok, composer_clicked, expected_name, DESTINATION_READY_TIMEOUT_MS,
             )
             return False
         await asyncio.sleep(DESTINATION_READY_POLL_INTERVAL_S)

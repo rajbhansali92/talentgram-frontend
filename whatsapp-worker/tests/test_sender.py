@@ -304,11 +304,17 @@ class FakePage:
         self.send_button_clicks = []
         self._header_provider = header_provider or (lambda: ["Talentgram Casting Test"])
         self._attach_present_provider = attach_present_provider or (lambda: True)
+        self._msg_box_click_should_raise = False
 
     async def click(self, selector, timeout=None):
         if self._attach_click_should_raise and selector == sender.SEL["attach_btn"]:
             raise sender.PlaywrightTimeoutError(
                 f'Page.click: Timeout {timeout or 30000}ms exceeded.\n'
+                f'  - element intercepts pointer events'
+            )
+        if self._msg_box_click_should_raise and selector == sender.SEL["msg_box"]:
+            raise sender.PlaywrightTimeoutError(
+                f'Page.click: Timeout {timeout or 2000}ms exceeded.\n'
                 f'  - element intercepts pointer events'
             )
         self.clicks.append(selector)
@@ -1625,6 +1631,72 @@ def test_wait_for_destination_chat_ready_skips_header_match_for_phone_destinatio
     )
     ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, None))
     assert ready is True
+
+
+# ---------------------------------------------------------------------------
+# Composer-click root-cause fix (2026-09-20, real production incident #2) —
+# a controlled live test with c5d590f's polling-only gate STILL failed
+# identically (6/6): the header AND a full DOM instrumentation dump both
+# independently confirmed the destination was genuinely open, yet the
+# attach control never appeared across the entire 15s poll, and a fresh
+# diagnostic capture at the deadline showed the header back on the SOURCE
+# chat. Root cause: the text-send path has always explicitly clicked into
+# the compose box before typing; the media-attach path never did. These
+# tests cover the fix — a real, one-time compose-box click the moment the
+# destination header is first confirmed, before polling for the attach
+# control at all.
+# ---------------------------------------------------------------------------
+def test_wait_for_destination_chat_ready_clicks_composer_exactly_once():
+    """The composer must be clicked genuinely once — the moment the header
+    is first confirmed — never repeated on every 0.4s poll tick, even
+    though several poll iterations elapse before the attach control
+    itself appears."""
+    poll_count = {"n": 0}
+
+    def attach_provider():
+        poll_count["n"] += 1
+        return poll_count["n"] >= 3
+
+    page = FakePage(
+        header_provider=lambda: ["Pepsi x Talentgram Agency"],
+        attach_present_provider=attach_provider,
+    )
+    ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+    assert ready is True
+    assert page.clicks.count(sender.SEL["msg_box"]) == 1, (
+        f"composer must be clicked exactly once, got {page.clicks.count(sender.SEL['msg_box'])}"
+    )
+
+
+def test_wait_for_destination_chat_ready_never_clicks_composer_before_header_matches():
+    """No composer click at all while the header still shows the wrong
+    (source) chat — clicking into a chat we don't actually believe is the
+    destination would be a real, wrong interaction, not a diagnostic no-op."""
+    orig_timeout, orig_poll = sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S
+    sender.DESTINATION_READY_TIMEOUT_MS = 80
+    sender.DESTINATION_READY_POLL_INTERVAL_S = 0.01
+    page = FakePage(header_provider=lambda: ["Raj Mehta x Talentgram Agency"])
+    try:
+        ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+        assert ready is False
+        assert sender.SEL["msg_box"] not in page.clicks
+    finally:
+        sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S = orig_timeout, orig_poll
+
+
+def test_wait_for_destination_chat_ready_survives_composer_click_failure():
+    """A failed composer click (e.g. something briefly overlays it) must
+    not crash the gate — the attach-control check still runs every poll
+    regardless, and the gate can still succeed if the control becomes
+    visible on its own."""
+    page = FakePage(
+        header_provider=lambda: ["Pepsi x Talentgram Agency"],
+        attach_present_provider=lambda: True,
+    )
+    page._msg_box_click_should_raise = True
+    ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+    assert ready is True
+    assert sender.SEL["msg_box"] not in page.clicks, "a raised click must never be recorded as successful"
 
 
 if __name__ == "__main__":

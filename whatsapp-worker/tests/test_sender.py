@@ -257,7 +257,7 @@ class FakePage:
     def __init__(self, *, chooser_should_raise=False, attach_click_should_raise=False,
                  caption_selector_that_matches="__default__",
                  send_button_selector_that_matches="__default__",
-                 header_provider=None, attach_present_provider=None):
+                 header_provider=None, attach_present_provider=None, header_visible_provider=None):
         """`caption_selector_that_matches`: which entry of
         sender.CAPTION_INPUT_SELECTORS "exists and is visible" on this fake
         preview screen. "__default__" (the sentinel, not a real selector)
@@ -304,6 +304,7 @@ class FakePage:
         self.send_button_clicks = []
         self._header_provider = header_provider or (lambda: ["Talentgram Casting Test"])
         self._attach_present_provider = attach_present_provider or (lambda: True)
+        self._header_visible_provider = header_visible_provider or (lambda: True)
         self._msg_box_click_should_raise = False
 
     async def click(self, selector, timeout=None):
@@ -348,6 +349,21 @@ class FakePage:
 
     async def evaluate(self, js, arg=None):
         self.evaluate_calls.append((js, arg))
+        if js == sender._DESTINATION_HEADER_JS:
+            # Routes through the SAME header_provider/header_visible_provider
+            # every other test in this file already uses — the new
+            # _destination_header_authoritative reads via page.evaluate()
+            # (a single, first-match, visibility-checked query) instead of
+            # page.locator() (the old multi-candidate scan), so this fake
+            # must answer that exact query shape: {found, title, visible}.
+            # Only the FIRST provided candidate is "the" authoritative
+            # element — deliberately NOT every item in the list, mirroring
+            # the fix's whole point (ignore whatever else might exist
+            # elsewhere in the DOM; only the primary match counts).
+            candidates = self._header_provider()
+            if candidates:
+                return {"found": True, "title": candidates[0], "visible": self._header_visible_provider()}
+            return {"found": False, "title": None, "visible": False}
         return {
             "attach_button": {"testid": "plus-rounded", "visible": True},
             "click_point": {"x": 614, "y": 762},
@@ -1697,6 +1713,85 @@ def test_wait_for_destination_chat_ready_survives_composer_click_failure():
     ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
     assert ready is True
     assert sender.SEL["msg_box"] not in page.clicks, "a raised click must never be recorded as successful"
+
+
+# ---------------------------------------------------------------------------
+# Authoritative single-match header check (2026-09-20, second production
+# incident) — a controlled live test proved a genuine contradiction: the
+# gate's own multi-candidate scan (RECIPIENT_SELECTORS, "any of up to 6
+# title-bearing spans") reported header_ok=True while the SAME failure's
+# own diagnostic (a single first-match `#main header span[title]`, no
+# candidate scan at all) read "Raj, You" at the identical moment. These
+# tests prove the NEW _destination_header_authoritative/_matches close
+# this by construction: they read the exact same single, first-match,
+# visibility-checked element the diagnostic treats as ground truth, so
+# they can never again disagree with it.
+# ---------------------------------------------------------------------------
+def test_destination_header_matches_reproduces_and_rejects_the_production_contradiction():
+    """The exact real-incident shape: the DOM element WhatsApp genuinely
+    renders first/authoritative under #main header still says the SOURCE
+    chat — regardless of what might exist anywhere else in the page
+    (search results, profile drawer, cached candidates) — so the
+    authoritative check must return NOT READY. The gate no longer scans
+    "elsewhere" at all, closing the contradiction by construction rather
+    than by chance."""
+    page = FakePage(header_provider=lambda: ["Raj, You"])
+    match, actual = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is False
+    assert actual == "Raj, You"
+
+
+def test_destination_header_matches_requires_genuine_visibility():
+    """Text alone is not enough — a stale/torn-down element that still
+    carries the right title text but is no longer actually visible must
+    not count as a match. Neither the old gate check nor the original
+    diagnostic verified this; the fix adds it."""
+    page = FakePage(
+        header_provider=lambda: ["Pepsi x Talentgram Agency"],
+        header_visible_provider=lambda: False,
+    )
+    match, actual = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is False
+    assert actual == "Pepsi x Talentgram Agency", "the real (if hidden) title is still reported for diagnostics"
+
+
+def test_destination_header_matches_true_when_authoritative_element_genuinely_correct():
+    page = FakePage(header_provider=lambda: ["Pepsi x Talentgram Agency"])
+    match, actual = run(sender._destination_header_matches(page, sender._norm_title("Pepsi x Talentgram Agency")))
+    assert match is True
+    assert actual == "Pepsi x Talentgram Agency"
+
+
+def test_wait_for_destination_chat_ready_reverts_mid_poll_never_becomes_ready():
+    """Models the exact production timeline: the header genuinely reads
+    the destination on an early poll (the gate proceeds to click the
+    composer, exactly as it did in production), then reverts to the
+    source chat for the remainder of the window — attach never becomes
+    reachable, and the gate must honestly report NOT READY, never having
+    been fooled by the early, since-reverted match."""
+    orig_timeout, orig_poll = sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S
+    sender.DESTINATION_READY_TIMEOUT_MS = 60
+    sender.DESTINATION_READY_POLL_INTERVAL_S = 0.01
+    poll_count = {"n": 0}
+
+    def header_provider():
+        poll_count["n"] += 1
+        if poll_count["n"] == 1:
+            return ["Pepsi x Talentgram Agency"]
+        return ["Raj, You"]
+
+    page = FakePage(header_provider=header_provider, attach_present_provider=lambda: False)
+    try:
+        ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+        assert ready is False
+        assert sender.SEL["attach_btn"] not in page.clicks
+        # The composer WAS clicked once, during the brief genuine match —
+        # this is expected and correct (mirrors the real production
+        # sequence exactly); the point of this test is that the gate
+        # still correctly reports NOT READY overall despite that.
+        assert page.clicks.count(sender.SEL["msg_box"]) == 1
+    finally:
+        sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S = orig_timeout, orig_poll
 
 
 if __name__ == "__main__":

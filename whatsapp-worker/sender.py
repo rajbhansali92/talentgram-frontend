@@ -582,24 +582,58 @@ DESTINATION_READY_TIMEOUT_MS = 15_000
 DESTINATION_READY_POLL_INTERVAL_S = 0.4
 
 
-async def _destination_header_matches(page: Page, expected_norm: str) -> bool:
-    """The SAME candidate-scan _verify_chat_open uses (multiple span[title]
-    elements are normal within one real header — group name + "click here
-    for group info" subtitle), so this can never disagree with what "the
-    right chat" means elsewhere in this file."""
+# Root-cause fix (2026-09-20, second production incident) — real
+# controlled test proved a genuine contradiction: this file's own
+# multi-candidate header scan (RECIPIENT_SELECTORS, "any of up to 6
+# title-bearing spans across 3 selectors") reported header_ok=True, while
+# the SAME failure's own diagnostic capture — a single, first-match
+# `document.querySelector('#main header span[title]')` with NO visibility
+# filter — read "Raj, You" at the exact same moment. Two different
+# semantics ("any matching candidate exists anywhere" vs "the first DOM
+# match") checking nominally "the same thing" can disagree whenever more
+# than one title-bearing element is present under #main header at once —
+# WhatsApp Web's own transition/virtualization can legitimately leave a
+# stale element around (see _verify_chat_open's own docstring: even a
+# GENUINELY correct header has 3 span[title] candidates — group name,
+# "click here for group info" subtitle, "Profile details" — so "any
+# candidate matches" was never a safe proxy for "the chat is genuinely
+# this one"). _destination_header_authoritative below closes this by
+# construction: it queries the exact same first-match element the
+# diagnostic treats as ground truth, in one atomic JS evaluate (so
+# nothing can change between "read the text" and "read visibility"), and
+# additionally requires that element to be genuinely visible — something
+# neither the old gate check NOR the diagnostic previously verified.
+_DESTINATION_HEADER_JS = """
+() => {
+    const hdr = document.querySelector('#main header span[title]');
+    if (!hdr) return {found: false, title: null, visible: false};
+    const visible = !!(hdr.offsetWidth || hdr.offsetHeight || hdr.getClientRects().length);
+    return {found: true, title: hdr.getAttribute('title') || hdr.innerText || '', visible};
+}
+"""
+
+
+async def _destination_header_authoritative(page: Page) -> Dict[str, Any]:
+    """Returns {"found", "title", "visible"} for the SAME single element
+    the ATTACH_CLICK_FAILURE_DIAGNOSTIC's own chat_title read treats as
+    ground truth — deliberately NOT a multi-candidate scan (see this
+    module's own comment above for why "any of several candidates"
+    proved unsafe)."""
     try:
-        for sel in RECIPIENT_SELECTORS:
-            loc = page.locator(sel)
-            n = await loc.count()
-            for i in range(min(n, 6)):
-                item = loc.nth(i)
-                t = (await item.inner_text()).strip() or \
-                    (await item.get_attribute("title") or "").strip()
-                if t and _norm_title(t) == expected_norm:
-                    return True
+        return await page.evaluate(_DESTINATION_HEADER_JS)
     except Exception:
-        pass
-    return False
+        return {"found": False, "title": None, "visible": False}
+
+
+async def _destination_header_matches(page: Page, expected_norm: str) -> Tuple[bool, Optional[str]]:
+    """Returns (match, actual_title) — the actual title is always
+    returned (even on a non-match) so callers can log what the header
+    genuinely said, not just whether it matched."""
+    state = await _destination_header_authoritative(page)
+    title = state.get("title")
+    if not state.get("found") or not state.get("visible") or not title:
+        return False, title
+    return _norm_title(title) == expected_norm, title
 
 
 async def _attach_control_visible(page: Page) -> bool:
@@ -645,13 +679,19 @@ async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[s
     composer_clicked = False
     last_header_ok = expected_norm is None
     last_attach_ok = False
+    last_actual_title: Optional[str] = None
     while True:
-        header_ok = expected_norm is None or await _destination_header_matches(page, expected_norm)
-        if header_ok != last_header_ok:
+        if expected_norm is None:
+            header_ok, actual_title = True, None
+        else:
+            header_ok, actual_title = await _destination_header_matches(page, expected_norm)
+        if header_ok != last_header_ok or actual_title != last_actual_title:
             logger.info(
-                "sender: SEND_DESTINATION_HEADER_CHECK expected=%r match=%s", expected_name, header_ok,
+                "sender: SEND_DESTINATION_HEADER_CHECK expected=%r actual=%r match=%s",
+                expected_name, actual_title, header_ok,
             )
             last_header_ok = header_ok
+            last_actual_title = actual_title
 
         if header_ok and not composer_clicked:
             # The deterministic action: a genuine click into the compose
@@ -662,6 +702,25 @@ async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[s
             # composer once, not every 0.4s), and failure here is not
             # fatal — it just means this poll iteration's attach-control
             # check runs without it, same as before this fix.
+            #
+            # SEND_COMPOSER_TARGET (2026-09-20) — "page.click() didn't
+            # throw" was proven, in the second production incident, to
+            # NOT be proof the click landed on the genuinely active
+            # composer. Log exactly which element SEL["msg_box"] resolved
+            # to (count/visible/bounding box) so a future incident can
+            # tell "clicked the right element but it made no difference"
+            # apart from "clicked the wrong element" without guessing.
+            try:
+                target_loc = page.locator(SEL["msg_box"]).first
+                target_count = await target_loc.count()
+                target_visible = bool(target_count) and await target_loc.is_visible()
+                target_box = await target_loc.bounding_box() if target_visible else None
+                logger.info(
+                    "sender: SEND_COMPOSER_TARGET selector=%r count=%d visible=%s bounding_box=%s",
+                    SEL["msg_box"], target_count, target_visible, target_box,
+                )
+            except Exception as exc:
+                logger.info("sender: SEND_COMPOSER_TARGET selector=%r inspect_failed error=%s", SEL["msg_box"], exc)
             try:
                 await page.click(SEL["msg_box"], timeout=2_000)
                 composer_clicked = True
@@ -683,8 +742,8 @@ async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[s
         if time.monotonic() >= deadline:
             logger.warning(
                 "sender: DESTINATION_CHAT_NOT_READY — header_ok=%s attach_ok=%s composer_clicked=%s "
-                "expected=%r after %dms",
-                header_ok, attach_ok, composer_clicked, expected_name, DESTINATION_READY_TIMEOUT_MS,
+                "expected=%r actual_header=%r after %dms",
+                header_ok, attach_ok, composer_clicked, expected_name, actual_title, DESTINATION_READY_TIMEOUT_MS,
             )
             return False
         await asyncio.sleep(DESTINATION_READY_POLL_INTERVAL_S)

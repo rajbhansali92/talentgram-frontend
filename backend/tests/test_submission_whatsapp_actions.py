@@ -28,6 +28,11 @@ os.environ.setdefault("SEND_PREVIEW_MAX_WAIT_SEC", "1.0")
 os.environ.setdefault("SEND_PREVIEW_TOTAL_MAX_WAIT_SEC", "1.2")
 os.environ.setdefault("SEND_ACTION_RETRY_BACKOFF_SEC", "0.05")
 os.environ.setdefault("SEND_ACTION_MAX_VERIFY_ATTEMPTS", "3")
+# Shrunk to match the shrunk SEND_PREVIEW_TOTAL_MAX_WAIT_SEC above (1.2s) —
+# still comfortably larger than a single test attempt's own scan wait, so
+# the late-tombstone-recovery check (get_freshly_resolved_if_complete)
+# still has a real, meaningful window to prove against in tests.
+os.environ.setdefault("SEND_ACTION_LATE_RESOLUTION_WINDOW_SEC", "5")
 
 import asyncio
 import sys
@@ -809,6 +814,107 @@ async def test_late_mark_intent_resolution_after_deadline_action_continues():
         assert final["state"] == queue.STATE_MEDIA_RESOLVED, final
         doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": final["dispatch_scan_request_id"]}, {"_id": 0})
         assert doc["send_targets"][0]["source_message_id"] == "MEDIA-LATE-RESOLVE"
+    finally:
+        await _cleanup_full(project_id, talent_id, submission_id)
+
+
+async def test_late_tombstone_recovery_caught_within_same_attempt_no_blind_retry_loop():
+    """Regression test for a bug caught LIVE in production (2026-09-21,
+    action_id 8ce521a4-625e-4b19-8a51-c66b16abe18c, Raj Mehta / Limca
+    Film1): a real worker result can land via the EXISTING, unchanged
+    late-worker/tombstone mechanism (routers.agents_whatsapp.
+    report_scan_result's own 404 branch) a few seconds AFTER this
+    action's own _scan_and_validate_multi_source call already returned
+    its pure (None, None) timeout — a code path advance_send_action's
+    per-attempt scan never itself observes. Before the fix, this looped
+    blind retries (mark_intent_ids stuck at []) even though the correct
+    MarkIntent was already sitting there, freshly resolved. This test
+    proves the SAME first attempt now catches it directly via
+    mark_intent.get_freshly_resolved_if_complete, without needing (and
+    without waiting for) a second scan attempt at all."""
+    project_id, talent_id, submission_id, tag = await _seed_full()
+    project_label = f"SWA Project {tag}"
+    try:
+        action = await swa.dispatch_approve_send(project_id, submission_id)
+
+        # Simulate the late-tombstone path having ALREADY written a fully
+        # resolved MarkIntent for this exact (talent, project) moments
+        # ago — exactly what report_scan_result's 404 branch does when a
+        # late worker result lands, entirely independent of (and never
+        # touched by) this test's own upcoming advance_send_action call.
+        late_intent = await mi.get_or_create_mark_intent(
+            reply_message_id=f"reply-late-tombstone-{tag}", talent_id=talent_id, project_id=project_id,
+            project_label=project_label, media_role="take", take_number=1,
+            mark_text=f"mark audition take 1 for {project_label}", quoted_thumbnail_hash="hash-TOMBSTONE",
+            quoted_media_type="video", source_chat_name=f"SWA Talent {tag} x Talentgram", worker_id="default",
+        )
+        await mi.apply_resolution(
+            late_intent["id"], candidate_source_message_id="MEDIA-TOMBSTONE-RECOVERED",
+            candidate_source_thumbnail_hash="hash-TOMBSTONE", candidate_source_media_type="video",
+            resolution_method=mi.RESOLUTION_METHOD_PRIMARY, worker_id="default",
+        )
+
+        # No worker ever answers THIS action's own scan (no
+        # _with_simulated_send_preview task started) — a genuine,
+        # real (unmocked, shrunk-to-1.2s) pure timeout, exactly the
+        # proven production characteristic.
+        result = await queue.advance_send_action(action)
+        assert result is True
+
+        mid = await queue.get_action(action["id"])
+        assert mid["state"] == queue.STATE_MEDIA_RESOLVED, mid
+        assert mid["attempt_count"] == 1, (
+            "must be caught within the SAME first attempt — a second attempt "
+            "would mean the blind-retry-loop bug is still present"
+        )
+        assert mid["mark_intent_ids"] == [late_intent["id"]], mid
+
+        doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": mid["dispatch_scan_request_id"]}, {"_id": 0})
+        assert doc["send_targets"][0]["source_message_id"] == "MEDIA-TOMBSTONE-RECOVERED"
+    finally:
+        await _cleanup_full(project_id, talent_id, submission_id)
+
+
+async def test_late_tombstone_recovery_ignores_stale_resolution_outside_window():
+    """The other half of the same fix's safety property: a MarkIntent
+    resolved LONG ago (outside SEND_ACTION_LATE_RESOLUTION_WINDOW_SEC)
+    must NOT be picked up as if it were a fresh late-tombstone result —
+    that would be exactly the proven-unsafe get_ready_assignments
+    shortcut this module's whole redesign removed. With no fresh
+    evidence, a pure timeout must fall through to the normal
+    stay-VERIFYING/retry path, never a silent resolve."""
+    project_id, talent_id, submission_id, tag = await _seed_full()
+    project_label = f"SWA Project {tag}"
+    try:
+        action = await swa.dispatch_approve_send(project_id, submission_id)
+
+        stale_intent = await mi.get_or_create_mark_intent(
+            reply_message_id=f"reply-stale-{tag}", talent_id=talent_id, project_id=project_id,
+            project_label=project_label, media_role="take", take_number=1,
+            mark_text=f"mark audition take 1 for {project_label}", quoted_thumbnail_hash="hash-STALE",
+            quoted_media_type="video", source_chat_name=f"SWA Talent {tag} x Talentgram", worker_id="default",
+        )
+        await mi.apply_resolution(
+            stale_intent["id"], candidate_source_message_id="MEDIA-STALE-OLD",
+            candidate_source_thumbnail_hash="hash-STALE", candidate_source_media_type="video",
+            resolution_method=mi.RESOLUTION_METHOD_PRIMARY, worker_id="default",
+        )
+        # Backdate resolved_at well outside the test's 5s window, exactly
+        # as a genuinely old resolution (from a prior, unrelated action)
+        # would look.
+        from datetime import timedelta
+        await db[mi.MARK_INTENTS_COLLECTION].update_one(
+            {"id": stale_intent["id"]}, {"$set": {"resolved_at": mi._now() - timedelta(seconds=120)}},
+        )
+
+        result = await queue.advance_send_action(action)
+        assert result is True
+
+        mid = await queue.get_action(action["id"])
+        assert mid["state"] == queue.STATE_VERIFYING, mid
+        assert mid.get("mark_intent_ids") in (None, []), (
+            "a stale resolution outside the recency window must never be silently reused"
+        )
     finally:
         await _cleanup_full(project_id, talent_id, submission_id)
 

@@ -80,7 +80,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from core import db
@@ -153,6 +153,94 @@ async def any_permanently_failed(talent_id: str, project_id: str) -> bool:
         "talent_id": talent_id, "project_id": project_id,
         "status": STATUS_FAILED_PERMANENTLY,
     }) > 0
+
+
+async def get_freshly_resolved_if_complete(
+    talent_id: str, project_id: str, *, within_seconds: float,
+) -> Optional[List[Dict[str, Any]]]:
+    """Closes a gap caught LIVE in production (2026-09-21): a SEND
+    action's own per-attempt scan can genuinely take longer than its
+    bounded budget (~20-22s) for a busy, heavily-marked group — the
+    worker's real answer still lands, via the EXISTING, unchanged
+    late-worker/tombstone mechanism (routers.agents_whatsapp.
+    report_scan_result's own 404 branch feeding observe_candidates
+    directly), but on a code path SEPARATE from
+    casting_pipeline._scan_and_validate_multi_source's own (None, None)
+    pure-timeout return — so submission_action_queue's verification loop
+    never directly observes that its OWN just-triggered scan actually
+    succeeded a few seconds late, and would otherwise blindly keep
+    retrying (or exhaust its attempt ceiling) even though the answer is
+    sitting there, freshly resolved, seconds old. Proven live: a real
+    Limca Film1 SEND action logged 10 consecutive "pure timeout" attempts
+    while the correct MarkIntents had already been resolved via a late
+    report within the FIRST attempt's own window.
+
+    Deliberately NOT a reincarnation of the proven-unsafe
+    get_ready_assignments this module removed: that function trusted a
+    resolved intent from ANY point in the past, indistinguishable from
+    one silently superseded by an unobserved re-mark. This one requires
+    POSITIVE, RECENT evidence — at least one intent for this (talent,
+    project) resolved within the last `within_seconds` — proving a real
+    scan actually ran moments ago and is the direct source of this
+    answer, never a stale historical value. `within_seconds` is
+    deliberately small, tied to the caller's own verification cadence.
+    If a re-mark for an already-resolved slot exists and was visible to
+    that SAME recent scan, observe_candidates would already have
+    recorded it (a new unresolved intent, or a second resolved one
+    colliding on the slot) — both cases are still refused below by the
+    unchanged all-resolved / no-collision checks, exactly as
+    get_ready_assignments' own removed logic required. If NOTHING was
+    resolved recently, returns None — the caller's existing
+    has_retryable_intents/any_permanently_failed messaging is unaffected."""
+    cutoff = _now() - timedelta(seconds=within_seconds)
+    docs = await db[MARK_INTENTS_COLLECTION].find(
+        {"talent_id": talent_id, "project_id": project_id},
+    ).to_list(200)
+    if not docs:
+        return None
+
+    def _aware(dt):
+        # Motor/pymongo hand back naive UTC datetimes on read (BSON has no
+        # tz), while _now()/cutoff above are tz-aware — same normalization
+        # this codebase already applies at every other Mongo-datetime
+        # comparison site (e.g. media_lifecycle.py, core.py's session
+        # expiry checks). Without this, every real (non-test) call here
+        # would raise on the very first comparison.
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    if not any(d.get("resolved_at") and _aware(d["resolved_at"]) >= cutoff for d in docs):
+        return None  # nothing resolved recently -- no evidence a scan just ran
+
+    by_slot: Dict[tuple, List[Dict[str, Any]]] = {}
+    for d in docs:
+        if d.get("status") != STATUS_RESOLVED:
+            return None  # something still pending or permanently failed -- not fully ready
+        slot = _slot_key(d["media_role"], d.get("take_number"))
+        by_slot.setdefault(slot, []).append(d)
+
+    assignments: List[Dict[str, Any]] = []
+    for slot, group in by_slot.items():
+        if len(group) > 1:
+            logger.warning(
+                "MARK_INTENT slot collision in get_freshly_resolved_if_complete talent_id=%s "
+                "project_id=%s slot=%s intent_ids=%s — refusing to guess, not ready",
+                talent_id, project_id, slot, [g["id"] for g in group],
+            )
+            return None
+        d = group[0]
+        assignments.append({
+            "media_role": d["media_role"],
+            "take_number": d.get("take_number"),
+            "resolved_source_message_id": d["resolved_source_message_id"],
+            "quoted_thumbnail_hash": d.get("resolved_source_thumbnail_hash"),
+            "source_media_type": d.get("resolved_source_media_type"),
+            "album_tile_index": d.get("resolved_album_tile_index"),
+            "is_album_tile": d.get("resolved_is_album_tile", False),
+            "reply_message_id": d.get("reply_message_id"),
+            "mark_text": d.get("mark_text"),
+            "mark_intent_id": d["id"],
+        })
+    return assignments or None
 
 
 async def get_or_create_mark_intent(

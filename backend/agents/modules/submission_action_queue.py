@@ -108,6 +108,17 @@ MAX_SEND_VERIFY_ATTEMPTS = int(os.environ.get("SEND_ACTION_MAX_VERIFY_ATTEMPTS",
 # WhatsApp Web's own state a moment to settle between live scans rather
 # than hammering it back-to-back.
 SEND_VERIFY_RETRY_BACKOFF_SEC = float(os.environ.get("SEND_ACTION_RETRY_BACKOFF_SEC", "5"))
+# Window for mark_intent.get_freshly_resolved_if_complete's "did a scan
+# just resolve this, moments ago, via the late-tombstone path" check
+# (2026-09-21 live-production fix). Must comfortably exceed a single
+# attempt's own scan budget (casting_pipeline._SEND_PREVIEW_TOTAL_MAX_
+# WAIT_SEC, ~22s) plus a margin for the late worker result to actually
+# land and get written — the proven live case was a real result landing
+# ~26s after dispatch against a 22s scan budget. Deliberately NOT tied
+# to MAX_SEND_VERIFY_ATTEMPTS' cumulative window: this only ever looks
+# at THIS one just-completed attempt's own timing, never reaching back
+# into an earlier attempt's stale resolution.
+SEND_LATE_RESOLUTION_WINDOW_SEC = float(os.environ.get("SEND_ACTION_LATE_RESOLUTION_WINDOW_SEC", "35"))
 
 
 def _now() -> datetime:
@@ -368,6 +379,25 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
             else:
                 await _retry(last_error=error)
             return True
+        # Pure timeout (error is None) — before treating this as "still
+        # nothing conclusive", check whether the late-worker/tombstone
+        # path (report_scan_result's own 404 branch, unchanged) already
+        # resolved this action's marks moments ago on a code path this
+        # attempt's own _scan_and_validate_multi_source call never sees.
+        # See get_freshly_resolved_if_complete's own docstring for why
+        # this is safe and not a reincarnation of the removed
+        # get_ready_assignments shortcut.
+        late_assignments = await mark_intent.get_freshly_resolved_if_complete(
+            action["talent_id"], action["project_id"],
+            within_seconds=SEND_LATE_RESOLUTION_WINDOW_SEC,
+        )
+        if late_assignments:
+            logger.info(
+                "SUBMISSION_ACTION_LATE_RESOLUTION_CAUGHT action_id=%s mark_intent_ids=%s",
+                action_id, [a["mark_intent_id"] for a in late_assignments],
+            )
+            await _resolve_and_dispatch(action_id, late_assignments, attempt_count)
+            return True
         if attempt_count >= MAX_SEND_VERIFY_ATTEMPTS:
             await fail_action(
                 action_id, code="verification_timeout",
@@ -446,7 +476,19 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
         )
         return True
 
-    mark_intent_ids = [a["mark_intent_id"] for a in outcome.assignments if a.get("mark_intent_id")]
+    await _resolve_and_dispatch(action_id, outcome.assignments, attempt_count)
+    return True
+
+
+async def _resolve_and_dispatch(action_id: str, assignments: List[Dict[str, Any]], attempt_count: int) -> None:
+    """Shared tail for both ways an action can become ready: its own
+    scan directly succeeding, or (see get_freshly_resolved_if_complete's
+    own docstring) a late tombstone-recovered report resolving things a
+    few seconds after this same attempt's own scan call returned a pure
+    timeout. Either way, mark_intent_ids come only from already-locked
+    MarkIntent documents this action's own scan activity produced —
+    never a historical read spanning outside this action's own attempts."""
+    mark_intent_ids = [a["mark_intent_id"] for a in assignments if a.get("mark_intent_id")]
     await db[ACTIONS_COLLECTION].update_one(
         {"id": action_id},
         {"$set": {
@@ -458,7 +500,7 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
 
     action = await get_action(action_id)
     try:
-        await _dispatch_send(action, outcome.assignments)
+        await _dispatch_send(action, assignments)
     except Exception as exc:
         # Robustness gap closed (2026-09-21 review): without this, an
         # unexpected failure partway through _dispatch_send (e.g. a
@@ -478,7 +520,6 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
             message=f"Media was resolved but dispatching the send failed unexpectedly: {exc}",
             retryable=True,
         )
-    return True
 
 
 async def _dispatch_send(action: Dict[str, Any], assignments: List[Dict[str, Any]]) -> None:

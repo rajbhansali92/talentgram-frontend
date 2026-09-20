@@ -1641,6 +1641,40 @@ CANDIDATE_COLLECT_RETRY_DELAY_S = 0.8
 MAX_POST_CLICK_VERIFY_ATTEMPTS = 4
 POST_CLICK_VERIFY_DELAY_S = 0.5
 
+# Root-cause fix (2026-09-20, third production incident) — proven from live
+# logs: _open_group_chat's OWN two internal "did this succeed" checks (the
+# fast-path skip below, and the post-click verify further down) both used
+# _verify_chat_open — the SAME loose "any of up to several title-bearing
+# candidates matches" scan that DESTINATION_CHAT_NOT_READY's own fix
+# (_destination_header_authoritative) already proved unreliable. Live
+# evidence: _verify_chat_open logged title_match=True for "Pepsi x
+# Talentgram Agency" at 06:09:56.392 — 271ms later, the authoritative
+# single-match+visibility check proved the active chat was still "Raj,
+# You". _open_group_chat trusted the wrong (loose) answer and returned
+# "OPENED" (post-click case) / took the "already open" fast path on every
+# retry (fast-path case) — so navigation was never actually re-attempted,
+# and the real, active chat never became the destination.
+#
+# Scope decision: _verify_chat_open itself is NOT changed — it is shared
+# by _open_chat_by_phone's own check (expected_name=None, a different
+# concern entirely) and by send_whatsapp_message's own STEP 8-14 (used
+# identically by both the text-send and media-attach paths, and the
+# media-attach path is already independently re-verified afterward by
+# _wait_for_destination_chat_ready's own authoritative gate — see that
+# function's docstring). Only _open_group_chat's own two internal success
+# determinations are made authoritative here: this is a strict
+# tightening (a stricter check can only prevent a WRONG "yes", never
+# produce a new wrong "no" for a genuinely correct state), so it safely
+# improves every one of _open_group_chat's 20+ callers uniformly — upload
+# scanning, the inbound listener, text sends, and SEND alike — without
+# any of them needing to change.
+async def _group_chat_authoritative_match(page: Page, expected_name: str) -> Tuple[bool, Optional[str]]:
+    """_open_group_chat's own name for _destination_header_matches — same
+    function, reused rather than duplicated (see this module's own
+    _destination_header_matches docstring for the exact semantics: a
+    single, first-match, visibility-checked #main header element)."""
+    return await _destination_header_matches(page, _norm_title(expected_name))
+
 
 async def _open_group_chat(page: Page, group_name: str) -> str:
     """Open a group conversation deterministically. Returns:
@@ -1678,12 +1712,22 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     absent. Candidate collection is now bounded-polled
     (MAX_CANDIDATE_COLLECT_ATTEMPTS), and the click itself is no longer
     trusted blindly — the opened chat's own header/title is verified
-    (reusing the same _verify_chat_open the fast-path already relies on)
-    before OPENED is ever returned.
+    against the SAME authoritative, single-match, visibility-checked
+    element DESTINATION_CHAT_NOT_READY's own fix relies on (2026-09-20 —
+    the OLD loose _verify_chat_open-based check here proved, in real
+    production logs, that it can claim a group is already open while the
+    active chat authoritatively is not — see this module's own
+    _group_chat_authoritative_match docstring for the full incident)
+    before OPENED is ever returned, on both the fast path and the
+    post-click verification below.
     """
     try:
-        already_ready, hdr_found, _, _ = await _verify_chat_open(page, group_name)
-        if already_ready and hdr_found:
+        already_ready, actual = await _group_chat_authoritative_match(page, group_name)
+        logger.info(
+            "sender: GROUP_OPEN_FAST_PATH_CHECK requested=%r actual=%r match=%s",
+            group_name, actual, already_ready,
+        )
+        if already_ready:
             logger.info("sender: group %r already open — skipping sidebar search (fast path)", group_name)
             return "OPENED"
     except Exception as exc:
@@ -1882,6 +1926,40 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     diag["worker_stage"] = "open"
     _emit("open")
     logger.info("sender: STEP 5 candidate selected %r", match["title"])
+
+    # SEND_DESTINATION_RESULT_CLICK target diagnostic (2026-09-20) — distinct
+    # from SEND_COMPOSER_TARGET above: this inspects the SEARCH RESULT row
+    # itself, before it is clicked, not the composer. Compact (row-scoped),
+    # not a full-DOM dump, per the same "don't dump the whole DOM" constraint
+    # as the composer-target diagnostic.
+    try:
+        row_handle = await match["locator"].element_handle(timeout=2_000)
+        row_info = await page.evaluate(
+            """(el) => {
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                const parent = el.parentElement;
+                return {
+                    text: (el.innerText || "").slice(0, 120),
+                    title: el.getAttribute("title"),
+                    aria_label: el.getAttribute("aria-label"),
+                    parent_tag: parent ? parent.tagName : null,
+                    parent_aria_label: parent ? parent.getAttribute("aria-label") : null,
+                    visible: r.width > 0 && r.height > 0,
+                    bounding_box: {x: r.x, y: r.y, width: r.width, height: r.height},
+                };
+            }""",
+            row_handle,
+        ) if row_handle else None
+        logger.info(
+            "sender: SEND_DESTINATION_RESULT_CLICK requested=%r selector=%r count=1 info=%s",
+            group_name, result_sel, row_info,
+        )
+    except Exception as exc:
+        logger.info(
+            "sender: SEND_DESTINATION_RESULT_CLICK requested=%r selector=%r inspect_failed error=%s",
+            group_name, result_sel, exc,
+        )
     try:
         await match["locator"].click(timeout=5_000)
     except Exception as exc:
@@ -1897,26 +1975,35 @@ async def _open_group_chat(page: Page, group_name: str) -> str:
     await _safe_screenshot(page, "/tmp/after_click.png")
 
     # 7) Verify the opened chat's own header/title actually matches the
-    # requested group BEFORE ever returning OPENED (2026-08-25 fix) — the
-    # old code blindly slept 1s after the click and claimed success with
-    # no check at all. Reuses the SAME _verify_chat_open the fast-path
-    # check at the top of this function already trusts, bounded (never
-    # unbounded) in case WhatsApp is still rendering the conversation pane.
+    # requested group BEFORE ever returning OPENED (2026-08-25 fix,
+    # tightened 2026-09-20 — see _group_chat_authoritative_match's own
+    # docstring for the real incident this closes: the old loose check
+    # here could report "verified" while the active chat authoritatively
+    # was not the requested group). Bounded (never unbounded) in case
+    # WhatsApp is still rendering the conversation pane — same budget as
+    # before, only the check itself is now authoritative.
     verified = False
+    actual_at_verify: Optional[str] = None
     for _ in range(MAX_POST_CLICK_VERIFY_ATTEMPTS):
         await asyncio.sleep(POST_CLICK_VERIFY_DELAY_S)
         try:
-            ready, hdr_found, _, _ = await _verify_chat_open(page, group_name)
+            verified, actual_at_verify = await _group_chat_authoritative_match(page, group_name)
         except Exception as exc:
             logger.info("sender: post-click verify error (advisory): %s", exc)
-            ready, hdr_found = False, False
-        if ready and hdr_found:
-            verified = True
+            verified, actual_at_verify = False, None
+        if verified:
             break
+    logger.info(
+        "sender: GROUP_OPEN_POST_CLICK_CHECK requested=%r actual=%r match=%s",
+        group_name, actual_at_verify, verified,
+    )
     await _p26b_dump(page, "group_after_select", extra={"selected": match["title"], "verified": verified})  # PHASE26B
     if not verified:
-        logger.warning("sender: clicked %r but the opened chat's header never matched — refusing to claim OPENED", match["title"])
-        await _store_dom_snapshot(page, "group_open_unverified", {"group": group_name, "selected": match["title"]})
+        logger.warning(
+            "sender: clicked %r but the active chat's authoritative header never matched (actual=%r) "
+            "— refusing to claim OPENED", match["title"], actual_at_verify,
+        )
+        await _store_dom_snapshot(page, "group_open_unverified", {"group": group_name, "selected": match["title"], "actual": actual_at_verify})
         return "SEARCH_FAILED"
     return "OPENED"
 
@@ -2257,9 +2344,27 @@ async def send_whatsapp_message(
         evidence["chat_opened"] = True
 
     elif destination_type == "group":
+        # SEND-specific navigation diagnostics (2026-09-20, third production
+        # incident). These wrap the SHARED _open_group_chat() call from the
+        # SEND caller's own point of view — they do NOT duplicate that
+        # function's internal search/click/verify instrumentation under a
+        # "SEND_" name, because _open_group_chat is called by 20+ non-SEND
+        # callers (upload scanning, the inbound listener, text sends,
+        # diagnostic probes) and mislabeling its generic internal steps as
+        # "SEND_*" would misrepresent those other callers' own log lines.
+        # The internal steps this brackets are, in order: the authoritative
+        # "already open" fast-path check (logged as GROUP_OPEN_FAST_PATH_CHECK
+        # inside _open_group_chat), the sidebar search + candidate collection
+        # (logged as "GROUP-RESOLVE DIAG" inside _open_group_chat), the result
+        # row click, and the authoritative post-click verification (logged as
+        # GROUP_OPEN_POST_CLICK_CHECK inside _open_group_chat) — see that
+        # function for the exact per-step evidence when diagnosing a SEND
+        # navigation failure.
+        logger.info("sender: SEND_DESTINATION_CURRENT_CHAT_CHECK requested=%r", destination)
         logger.info("sender: searching for group name '%s'", destination)
         result = await _open_group_chat(page, destination)
         if result == "SEARCH_FAILED":
+            logger.warning("sender: SEND_DESTINATION_NAV_FAILED requested=%r result=%r", destination, result)
             # PHASE26B: full evidence capture BEFORE returning the terminal
             # CHAT_NOT_OPENED state (mission: "capture ALL evidence before throwing").
             await _p26b_dump(page, "chat_not_opened_search_failed", extra={"group": destination})
@@ -2270,11 +2375,13 @@ async def send_whatsapp_message(
                            destination)
             return {"state": CHAT_NOT_OPENED, "evidence": evidence, "timing": timing}
         if result == "NOT_FOUND":
+            logger.warning("sender: SEND_DESTINATION_NAV_FAILED requested=%r result=%r", destination, result)
             # PHASE26B: full evidence capture BEFORE raising (terminal, not retried).
             await _p26b_dump(page, "group_not_found_before_raise", extra={"group": destination})
             # Group genuinely absent — terminal (do not retry).
             raise ValueError(f"WhatsApp group '{destination}' not found in chat list")
         # result == "OPENED" -> fall through to chat-ready + typing + verify (unchanged)
+        logger.info("sender: SEND_DESTINATION_NAV_READY requested=%r result=%r", destination, result)
         evidence["chat_opened"] = True
     else:
         raise ValueError(f"Unknown destination type '{destination_type}'")

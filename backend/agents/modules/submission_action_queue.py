@@ -457,7 +457,27 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
     logger.info("SUBMISSION_ACTION_MEDIA_RESOLVED action_id=%s mark_intent_ids=%s", action_id, mark_intent_ids)
 
     action = await get_action(action_id)
-    await _dispatch_send(action, outcome.assignments)
+    try:
+        await _dispatch_send(action, outcome.assignments)
+    except Exception as exc:
+        # Robustness gap closed (2026-09-21 review): without this, an
+        # unexpected failure partway through _dispatch_send (e.g. a
+        # transient DB/network error calling media_send's own functions)
+        # would leave the action stuck in MEDIA_RESOLVED forever — its
+        # dispatch_scan_request_id never gets set, and
+        # claim_next_send_action_due only ever looks at QUEUED/VERIFYING,
+        # so nothing would ever retry it again. The admin would see a
+        # permanently frozen "Media resolved…" row with no error and no
+        # Retry button. Converting to a normal, visible, retryable
+        # failure here means retry_action's own reset-to-QUEUED path
+        # (which re-enters advance_send_action from the top, including a
+        # fresh live scan) is what recovers it — never a silent freeze.
+        logger.exception("SUBMISSION_ACTION_DISPATCH_FAILED action_id=%s", action_id)
+        await fail_action(
+            action_id, code="dispatch_failed",
+            message=f"Media was resolved but dispatching the send failed unexpectedly: {exc}",
+            retryable=True,
+        )
     return True
 
 

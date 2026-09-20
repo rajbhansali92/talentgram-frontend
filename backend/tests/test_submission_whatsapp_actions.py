@@ -989,3 +989,36 @@ async def test_worker_restart_while_sending_relies_on_existing_reap_mechanism():
     finally:
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
         await _cleanup_full(project_id, talent_id, submission_id)
+
+
+async def test_dispatch_failure_becomes_retryable_failed_never_stuck_in_media_resolved():
+    """Robustness gap closed in review (2026-09-21): a resolved action
+    whose actual dispatch call throws (e.g. a transient error inside
+    media_send's own functions) must surface as a normal, visible,
+    retryable FAILED action — never freeze silently in MEDIA_RESOLVED
+    forever with no error and no way for claim_next_send_action_due (which
+    only ever looks at QUEUED/VERIFYING) to pick it up again."""
+    project_id, talent_id, submission_id, tag = await _seed_full()
+    project_label = f"SWA Project {tag}"
+    try:
+        action = await swa.dispatch_approve_send(project_id, submission_id)
+
+        # Corrupt the submission's own project_id linkage so
+        # _dispatch_send's own project re-read finds nothing -- deliberately
+        # a NATURAL failure path (submission_or_project_missing), not a
+        # patched-in exception, so this proves the real code's own
+        # behavior end-to-end.
+        await db.submissions.update_one({"id": submission_id}, {"$set": {"project_id": "does-not-exist"}})
+
+        final = await _run_send_with_candidates(
+            project_id, submission_id, talent_id,
+            [_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 1 for {project_label}",
+                   source_message_id="MEDIA-DISPATCH-FAIL", media_type="video")],
+        )
+        assert final["state"] == queue.STATE_FAILED, final
+        assert final["retryable"] is True
+        assert final["error_code"] in ("submission_or_project_missing", "dispatch_failed")
+        assert final.get("dispatch_scan_request_id") is None
+    finally:
+        await db.submissions.update_one({"id": submission_id}, {"$set": {"project_id": project_id}})
+        await _cleanup_full(project_id, talent_id, submission_id)

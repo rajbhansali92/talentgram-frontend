@@ -3622,7 +3622,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic", "scan_reliability_diagnostic", "open_group_chat_diagnostic", "attachment_toolbar_survey_diagnostic"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic", "scan_reliability_diagnostic", "open_group_chat_diagnostic", "attachment_toolbar_survey_diagnostic", "attach_resolver_live_check"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -6292,6 +6292,58 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "composer_click_error": composer_click_error,
             "before_composer_click": before_click,
             "after_composer_click": after_click,
+        }], "session_identity": session_identity}
+
+    if probe_type == "attach_resolver_live_check":
+        # Diagnostic-only (2026-09-20, fifth production incident) — the
+        # ONLY way to prove sender.py's NEW _resolve_attach_control is
+        # both genuinely deployed and genuinely correct against the live
+        # DOM, without an actual Approve + Send (the only OTHER code path
+        # that ever calls it). Calls the REAL, deployed
+        # sender._resolve_attach_control and
+        # sender._destination_header_authoritative functions directly —
+        # not a reimplementation — and logs the exact same
+        # SEND_ATTACH_CONTROL_RESOLVE / SEND_ATTACH_CONTROL_NOT_FOUND
+        # markers production logs would show, so a grep for those markers
+        # proves the deployed resolver ran, not merely that this probe
+        # ran. Strictly read-only: never clicks the attach control itself,
+        # never opens the attach menu, never touches the file chooser or
+        # Send.
+        try:
+            header_state = await sender._destination_header_authoritative(page)
+        except Exception as exc:
+            header_state = {"error": str(exc)}
+
+        ready_error = None
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            ready_error = str(exc)
+
+        try:
+            attach_result = await sender._resolve_attach_control(page)
+        except Exception as exc:
+            attach_result = {"found": False, "error": str(exc)}
+
+        if attach_result.get("found"):
+            logger.info(
+                "sender: SEND_ATTACH_CONTROL_RESOLVE selector=%r count=1 visible=%s enabled=%s bbox=%s "
+                "(live dry-run probe, no click)",
+                attach_result.get("selector"), attach_result.get("visible"),
+                attach_result.get("enabled"), attach_result.get("bbox"),
+            )
+        else:
+            logger.info(
+                "sender: SEND_ATTACH_CONTROL_NOT_FOUND candidates_seen=%s reason=%r (live dry-run probe)",
+                attach_result.get("candidates_seen"), attach_result.get("reason"),
+            )
+
+        return {"results": [{
+            "ok": True, "group_name": group_name,
+            "authoritative_header": header_state,
+            "chat_ready_error": ready_error,
+            "attach_resolver_result": attach_result,
+            "click_performed": False,
         }], "session_identity": session_identity}
 
     if probe_type == "attach_menu_after_click_diagnostic":

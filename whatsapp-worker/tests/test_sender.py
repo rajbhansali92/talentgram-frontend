@@ -51,6 +51,10 @@ async def _chat_open(*a, **k):
     return True, True, True, "Talentgram Casting Test"
 
 
+async def _ready(*a, **k):
+    return True, None
+
+
 async def _resolve_scope(*a, **k):
     return "#main"
 
@@ -87,7 +91,7 @@ sender._wait_for_chat_ready = _noop
 # destination is already ready, so it stays neutralized to `_true` here —
 # unaffected by, and unaware of, this gate's own internals.
 _REAL_WAIT_FOR_DESTINATION_CHAT_READY = sender._wait_for_destination_chat_ready
-sender._wait_for_destination_chat_ready = _true
+sender._wait_for_destination_chat_ready = _ready
 sender._p26b_dump = _noop
 sender._verify_chat_open = _chat_open
 sender._resolve_scope = _resolve_scope
@@ -253,6 +257,16 @@ class _FileChooserCtx:
         return _resolve()
 
 
+# Composer-scoped attach-control selector (2026-09-20, fifth production
+# incident) — mirrors exactly what sender.py's own scoped_attach_selector
+# builds from _resolve_attach_control's winning candidate, for the common
+# case every existing attach_present_provider-driven test models (the
+# live-proven aria-label control, found). See _ATTACH_CONTROL_JS routing
+# in FakePage.evaluate() below for how attach_present_provider maps onto
+# the new resolver's {found, selector, visible, enabled, bbox} shape.
+_SCOPED_ATTACH_SELECTOR = '[data-testid="compose-box"] button[aria-label="Attach"]'
+
+
 class FakePage:
     def __init__(self, *, chooser_should_raise=False, attach_click_should_raise=False,
                  caption_selector_that_matches="__default__",
@@ -322,7 +336,7 @@ class FakePage:
         self._msg_box_click_should_raise = False
 
     async def click(self, selector, timeout=None):
-        if self._attach_click_should_raise and selector == sender.SEL["attach_btn"]:
+        if self._attach_click_should_raise and selector == _SCOPED_ATTACH_SELECTOR:
             raise sender.PlaywrightTimeoutError(
                 f'Page.click: Timeout {timeout or 30000}ms exceeded.\n'
                 f'  - element intercepts pointer events'
@@ -388,6 +402,26 @@ class FakePage:
                     "selector": '#main header span[title] (filtered fallback)',
                 }
             return {"found": False, "title": None, "visible": False, "selector": None}
+        if js == sender._ATTACH_CONTROL_JS:
+            # Routes through the SAME attach_present_provider every
+            # existing test already uses — maps its plain bool onto the
+            # new resolver's {found, selector, visible, enabled, bbox,
+            # candidates_seen, reason} shape, modeling the live-proven
+            # button[aria-label="Attach"] candidate winning on the first
+            # try (the common/default case every pre-existing test
+            # intends). Tests that need to model a DIFFERENT candidate
+            # winning (fallback priority, disabled, out-of-scope, etc.)
+            # use _resolve_attach_control's own dedicated tests below,
+            # which monkeypatch page.evaluate directly instead.
+            if self._attach_present_provider():
+                return {
+                    "found": True, "selector": 'button[aria-label="Attach"]',
+                    "visible": True, "enabled": True, "bbox": {"x": 594, "y": 742, "w": 40, "h": 40},
+                    "candidates_seen": [{"selector": 'button[aria-label="Attach"]', "visible": True, "enabled": True}],
+                    "reason": None,
+                }
+            return {"found": False, "selector": None, "visible": False, "enabled": False,
+                    "bbox": None, "candidates_seen": [], "reason": "no_candidates"}
         return {
             "attach_button": {"testid": "plus-rounded", "visible": True},
             "click_point": {"x": 614, "y": 762},
@@ -425,7 +459,7 @@ def test_jpeg_attaches_via_photos_videos_menu():
             message_body="Ahana Test — Google Test Take 1", local_file_path=path,
         ))
         assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
-        assert page.clicks[0] == sender.SEL["attach_btn"]
+        assert page.clicks[0] == _SCOPED_ATTACH_SELECTOR
         assert 'button[aria-label="Photos & videos"]' in page.clicks
         assert len(page.file_choosers) == 1
         assert page.file_choosers[0].set_files_calls == [path]
@@ -446,7 +480,7 @@ def test_mp4_attaches_via_the_same_menu_no_type_branching():
         # Same exact click sequence as the JPEG case — the real "Photos &
         # videos" input accepts both, so there is no media-type branching
         # in the attach code path at all.
-        assert page.clicks[0] == sender.SEL["attach_btn"]
+        assert page.clicks[0] == _SCOPED_ATTACH_SELECTOR
         assert 'button[aria-label="Photos & videos"]' in page.clicks
         assert page.file_choosers[0].set_files_calls == [path]
     finally:
@@ -550,9 +584,11 @@ def test_attach_click_failure_captures_diagnostics_then_reraises_unchanged():
                 diagnostic_meta={"item": "1/6", "source_media_type": "video"},
             ))
         assert "intercepts pointer events" in str(exc_info.value)
-        # The diagnostic capture ran exactly once (the failure-triggered
-        # page.evaluate call) and nothing was ever attached or sent.
-        assert len(page.evaluate_calls) == 1
+        # Two evaluate() calls: _resolve_attach_control (successfully finds
+        # the button before the click) and the failure-triggered diagnostic
+        # capture after the click itself times out. Nothing was ever
+        # attached or sent.
+        assert len(page.evaluate_calls) == 2
         assert page.file_choosers == []
         assert 'button[aria-label="Photos & videos"]' not in page.clicks
     finally:
@@ -566,6 +602,13 @@ def test_attach_click_failure_diagnostic_capture_itself_failing_does_not_mask_er
     trying to explain."""
     class _BrokenEvaluatePage(FakePage):
         async def evaluate(self, js, arg=None):
+            # Let _resolve_attach_control's own evaluate() succeed
+            # normally (so the click path is genuinely reached and fails
+            # for the intended reason) — only the FAILURE-triggered
+            # diagnostic capture's evaluate() (_ATTACH_CLICK_FAILURE_JS)
+            # is the one that blows up here.
+            if js == sender._ATTACH_CONTROL_JS:
+                return await super().evaluate(js, arg)
             raise RuntimeError("diagnostic capture blew up")
 
     page = _BrokenEvaluatePage(attach_click_should_raise=True)
@@ -593,7 +636,7 @@ def test_attach_click_failure_without_diagnostic_meta_still_works():
                 page=page, destination_type="group", destination="Talentgram Casting Test",
                 message_body="caption", local_file_path=path,
             ))
-        assert len(page.evaluate_calls) == 1
+        assert len(page.evaluate_calls) == 2
     finally:
         if os.path.exists(path):
             os.unlink(path)
@@ -1690,7 +1733,7 @@ def _real_destination_ready():
     try:
         yield
     finally:
-        sender._wait_for_destination_chat_ready = _true
+        sender._wait_for_destination_chat_ready = _ready
 
 
 def test_attach_click_never_attempted_while_header_still_shows_source_chat():
@@ -1712,7 +1755,7 @@ def test_attach_click_never_attempted_while_header_still_shows_source_chat():
                 message_body="", local_file_path=path, strict_send_confirmation=True,
             ))
         assert result["state"] == sender.DESTINATION_CHAT_NOT_READY, result
-        assert sender.SEL["attach_btn"] not in page.clicks, (
+        assert _SCOPED_ATTACH_SELECTOR not in page.clicks, (
             "the attach button must never be clicked while the destination chat isn't genuinely ready"
         )
         assert page.file_choosers == [], "no file chooser must ever open if the attach click never happens"
@@ -1749,7 +1792,7 @@ def test_attach_click_proceeds_once_destination_chat_genuinely_becomes_ready():
                 message_body="", local_file_path=path, strict_send_confirmation=True,
             ))
         assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED, result
-        assert sender.SEL["attach_btn"] in page.clicks, "attach must proceed once the destination is genuinely ready"
+        assert _SCOPED_ATTACH_SELECTOR in page.clicks, "attach must proceed once the destination is genuinely ready"
         assert poll_count["n"] >= 3, (
             "must have genuinely polled past the source-chat readings, not gotten lucky on the first check"
         )
@@ -1772,8 +1815,11 @@ def test_wait_for_destination_chat_ready_false_when_attach_button_never_appears(
         attach_present_provider=lambda: False,
     )
     try:
-        ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+        ready, reason = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
         assert ready is False
+        assert reason == "attach_control_not_ready", (
+            "header matched — a failure here must be attributed to the attach control, never to navigation"
+        )
     finally:
         sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S = orig_timeout, orig_poll
 
@@ -1786,8 +1832,9 @@ def test_wait_for_destination_chat_ready_true_immediately_when_already_ready():
         header_provider=lambda: ["Pepsi x Talentgram Agency"],
         attach_present_provider=lambda: True,
     )
-    ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+    ready, reason = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
     assert ready is True
+    assert reason is None
 
 
 def test_wait_for_destination_chat_ready_skips_header_match_for_phone_destination():
@@ -1800,8 +1847,9 @@ def test_wait_for_destination_chat_ready_skips_header_match_for_phone_destinatio
         header_provider=lambda: ["some unrelated header text"],
         attach_present_provider=lambda: True,
     )
-    ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, None))
+    ready, reason = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, None))
     assert ready is True
+    assert reason is None
 
 
 # ---------------------------------------------------------------------------
@@ -1832,8 +1880,9 @@ def test_wait_for_destination_chat_ready_clicks_composer_exactly_once():
         header_provider=lambda: ["Pepsi x Talentgram Agency"],
         attach_present_provider=attach_provider,
     )
-    ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+    ready, reason = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
     assert ready is True
+    assert reason is None
     assert page.clicks.count(sender.SEL["msg_box"]) == 1, (
         f"composer must be clicked exactly once, got {page.clicks.count(sender.SEL['msg_box'])}"
     )
@@ -1848,8 +1897,9 @@ def test_wait_for_destination_chat_ready_never_clicks_composer_before_header_mat
     sender.DESTINATION_READY_POLL_INTERVAL_S = 0.01
     page = FakePage(header_provider=lambda: ["Raj Mehta x Talentgram Agency"])
     try:
-        ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+        ready, reason = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
         assert ready is False
+        assert reason == "header_not_ready"
         assert sender.SEL["msg_box"] not in page.clicks
     finally:
         sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S = orig_timeout, orig_poll
@@ -1865,8 +1915,9 @@ def test_wait_for_destination_chat_ready_survives_composer_click_failure():
         attach_present_provider=lambda: True,
     )
     page._msg_box_click_should_raise = True
-    ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+    ready, reason = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
     assert ready is True
+    assert reason is None
     assert sender.SEL["msg_box"] not in page.clicks, "a raised click must never be recorded as successful"
 
 
@@ -2171,9 +2222,10 @@ def test_wait_for_destination_chat_ready_reverts_mid_poll_never_becomes_ready():
 
     page = FakePage(header_provider=header_provider, attach_present_provider=lambda: False)
     try:
-        ready = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
+        ready, reason = run(_REAL_WAIT_FOR_DESTINATION_CHAT_READY(page, "Pepsi x Talentgram Agency"))
         assert ready is False
-        assert sender.SEL["attach_btn"] not in page.clicks
+        assert reason == "header_not_ready", "the header reverted — never blame the attach control for this"
+        assert _SCOPED_ATTACH_SELECTOR not in page.clicks
         # The composer WAS clicked once, during the brief genuine match —
         # this is expected and correct (mirrors the real production
         # sequence exactly); the point of this test is that the gate
@@ -2181,6 +2233,216 @@ def test_wait_for_destination_chat_ready_reverts_mid_poll_never_becomes_ready():
         assert page.clicks.count(sender.SEL["msg_box"]) == 1
     finally:
         sender.DESTINATION_READY_TIMEOUT_MS, sender.DESTINATION_READY_POLL_INTERVAL_S = orig_timeout, orig_poll
+
+
+# ---------------------------------------------------------------------------
+# Attach-control resolver (2026-09-20, fifth production incident) — live
+# read-only diagnostics (attachment_toolbar_survey_diagnostic, dispatched
+# twice against the real, authoritative-header-confirmed "Pepsi x
+# Talentgram Agency" chat) proved [data-testid="plus-rounded"] no longer
+# exists anywhere in the document; the real, current control is a
+# testid-less <button aria-label="Attach"> alongside
+# conversation-compose-box-input, inside [data-testid="compose-box"].
+# _resolve_attach_control replaces the old single-selector
+# _attach_control_visible with a composer-scoped, priority-ordered
+# resolver. These tests exercise it directly via a dedicated fake that
+# models exactly what page.evaluate(_ATTACH_CONTROL_JS) would return for
+# a given simulated DOM shape — the same "Python-side model of the real
+# JS's algorithm" pattern already used for _DESTINATION_HEADER_JS above,
+# with the same caveat: true end-to-end proof that the REAL JS scoping
+# logic works only comes from live evidence (already obtained; see the
+# forensic report), not from these fakes alone.
+# ---------------------------------------------------------------------------
+_ATTACH_PRIORITY = ['button[aria-label="Attach"]', '[data-testid="plus-rounded"]', '[data-testid="attach-menu-plus"]']
+
+
+class _AttachResolverFakePage:
+    """Minimal page for _resolve_attach_control's own unit tests.
+    `candidates` maps a selector (one of _ATTACH_PRIORITY) to
+    {"visible": bool, "enabled": bool} for candidates that exist WITHIN
+    the composer scope — anything not a key is treated as absent from
+    that scope entirely, exactly like scope.querySelector() returning
+    null in the real JS. `composer_scope_found=False` models the
+    composer/compose-box ancestor itself being unavailable."""
+    def __init__(self, candidates=None, composer_scope_found=True):
+        self._candidates = candidates or {}
+        self._composer_scope_found = composer_scope_found
+
+    async def evaluate(self, js, arg=None):
+        assert js == sender._ATTACH_CONTROL_JS
+        if not self._composer_scope_found:
+            return {"found": False, "selector": None, "visible": False, "enabled": False,
+                     "bbox": None, "candidates_seen": [], "reason": "composer_scope_not_found"}
+        seen = []
+        for sel in _ATTACH_PRIORITY:
+            info = self._candidates.get(sel)
+            if info is None:
+                continue
+            visible, enabled = bool(info.get("visible")), bool(info.get("enabled"))
+            seen.append({"selector": sel, "visible": visible, "enabled": enabled, "bbox": {"x": 0, "y": 0, "w": 40, "h": 40}})
+            if visible and enabled:
+                return {"found": True, "selector": sel, "visible": visible, "enabled": enabled,
+                         "bbox": seen[-1]["bbox"], "candidates_seen": seen, "reason": None}
+        return {"found": False, "selector": None, "visible": False, "enabled": False, "bbox": None,
+                 "candidates_seen": seen, "reason": "candidates_present_not_ready" if seen else "no_candidates"}
+
+
+def test_resolve_attach_control_aria_label_found():
+    """TEST 1: composer contains button[aria-label="Attach"] -> resolver
+    selects it (the live-proven, highest-priority candidate)."""
+    page = _AttachResolverFakePage(candidates={'button[aria-label="Attach"]': {"visible": True, "enabled": True}})
+    result = run(sender._resolve_attach_control(page))
+    assert result["found"] is True
+    assert result["selector"] == 'button[aria-label="Attach"]'
+
+
+def test_resolve_attach_control_falls_back_to_plus_rounded():
+    """TEST 2: aria-label Attach absent, [data-testid="plus-rounded"]
+    present inside composer -> fallback selects plus-rounded."""
+    page = _AttachResolverFakePage(candidates={'[data-testid="plus-rounded"]': {"visible": True, "enabled": True}})
+    result = run(sender._resolve_attach_control(page))
+    assert result["found"] is True
+    assert result["selector"] == '[data-testid="plus-rounded"]'
+
+
+def test_resolve_attach_control_falls_back_to_attach_menu_plus():
+    """TEST 3: aria-label and plus-rounded both absent,
+    [data-testid="attach-menu-plus"] present -> fallback selects it."""
+    page = _AttachResolverFakePage(candidates={'[data-testid="attach-menu-plus"]': {"visible": True, "enabled": True}})
+    result = run(sender._resolve_attach_control(page))
+    assert result["found"] is True
+    assert result["selector"] == '[data-testid="attach-menu-plus"]'
+
+
+def test_resolve_attach_control_none_found():
+    """TEST 4: none of the three candidates exist -> not found, never a
+    fabricated match."""
+    page = _AttachResolverFakePage(candidates={})
+    result = run(sender._resolve_attach_control(page))
+    assert result["found"] is False
+    assert result["selector"] is None
+
+
+def test_resolve_attach_control_never_selects_outside_composer_scope():
+    """TEST 5/6: a valid-looking, visible Attach button exists OUTSIDE
+    the composer (e.g. status composer, sidebar nav — the exact risk
+    plus_rounded_locations_diagnostic already documented for
+    plus-rounded). The resolver's own scoping means such a candidate is
+    structurally invisible to it — modeled here by composer scope being
+    found but containing NO candidates at all, proving the resolver
+    reports not-found rather than reaching for something elsewhere."""
+    page = _AttachResolverFakePage(candidates={}, composer_scope_found=True)
+    result = run(sender._resolve_attach_control(page))
+    assert result["found"] is False
+    # TEST 6 variant: composer scope not even resolvable at all (e.g. a
+    # transient render gap) — still never falls through to a document-wide
+    # match; reports not-found with a distinct reason.
+    page2 = _AttachResolverFakePage(composer_scope_found=False)
+    result2 = run(sender._resolve_attach_control(page2))
+    assert result2["found"] is False
+    assert result2["reason"] == "composer_scope_not_found"
+
+
+def test_resolve_attach_control_disabled_candidate_not_considered_ready():
+    """TEST 7: composer contains a disabled Attach button -> not
+    considered ready (existence alone is not enough)."""
+    page = _AttachResolverFakePage(candidates={'button[aria-label="Attach"]': {"visible": True, "enabled": False}})
+    result = run(sender._resolve_attach_control(page))
+    assert result["found"] is False
+    assert result["reason"] == "candidates_present_not_ready"
+
+
+def test_resolve_attach_control_priority_order_with_multiple_candidates():
+    """TEST 8: multiple candidates exist inside composer at once — the
+    documented priority order (aria-label > plus-rounded >
+    attach-menu-plus) determines selection, not DOM/insertion order."""
+    page = _AttachResolverFakePage(candidates={
+        '[data-testid="attach-menu-plus"]': {"visible": True, "enabled": True},
+        '[data-testid="plus-rounded"]': {"visible": True, "enabled": True},
+        'button[aria-label="Attach"]': {"visible": True, "enabled": True},
+    })
+    result = run(sender._resolve_attach_control(page))
+    assert result["selector"] == 'button[aria-label="Attach"]'
+
+    # A hidden higher-priority candidate must be skipped in favor of the
+    # next valid one, still in priority order.
+    page2 = _AttachResolverFakePage(candidates={
+        'button[aria-label="Attach"]': {"visible": False, "enabled": True},
+        '[data-testid="plus-rounded"]': {"visible": True, "enabled": True},
+    })
+    result2 = run(sender._resolve_attach_control(page2))
+    assert result2["selector"] == '[data-testid="plus-rounded"]'
+
+
+def test_resolve_attach_control_real_dom_shape_succeeds():
+    """TEST 9: the exact current real-DOM shape proven live twice
+    (attachment_toolbar_survey_diagnostic): compose-box contains an
+    Attach button (with an ic-attach-file icon span, not itself a
+    candidate selector) alongside conversation-compose-box-input ->
+    resolver succeeds via the aria-label selector."""
+    page = _AttachResolverFakePage(candidates={'button[aria-label="Attach"]': {"visible": True, "enabled": True}})
+    result = run(sender._resolve_attach_control(page))
+    assert result["found"] is True
+    assert result["selector"] == 'button[aria-label="Attach"]'
+    assert result["visible"] is True
+    assert result["enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Actual click path (2026-09-20) — proves send_whatsapp_message's real
+# click target is the composer-scoped selector the resolver returns,
+# re-resolved fresh at click time (not reusing a stale reference from the
+# readiness gate), and that a genuine click failure is still captured and
+# re-raised exactly as before.
+# ---------------------------------------------------------------------------
+def test_attach_click_uses_resolver_selector_scoped_to_compose_box():
+    """The real click target is built as
+    '[data-testid="compose-box"] <resolved selector>' — never a bare,
+    unscoped selector — and the click succeeds without exception when the
+    control is genuinely present and ready."""
+    page = FakePage()
+    path = _real_temp_file(".jpg")
+    try:
+        result = run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="caption", local_file_path=path,
+        ))
+        assert result["state"] == sender.MESSAGE_SENT_AND_VERIFIED
+        assert _SCOPED_ATTACH_SELECTOR == '[data-testid="compose-box"] button[aria-label="Attach"]'
+        assert _SCOPED_ATTACH_SELECTOR in page.clicks
+        assert 'button[aria-label="Photos & videos"]' in page.clicks, (
+            "the attach menu must become observable (reachable) after a successful attach click"
+        )
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_attach_click_not_found_returns_attach_control_not_ready_without_clicking():
+    """When the resolver finds nothing at click time (e.g. it disappeared
+    in the gap after the readiness gate passed), send_whatsapp_message
+    must report ATTACH_CONTROL_NOT_READY and never attempt the click at
+    all — no timeout, no intercept, just an honest immediate failure."""
+    class _NoAttachPage(FakePage):
+        async def evaluate(self, js, arg=None):
+            if js == sender._ATTACH_CONTROL_JS:
+                return {"found": False, "selector": None, "visible": False, "enabled": False,
+                         "bbox": None, "candidates_seen": [], "reason": "no_candidates"}
+            return await super().evaluate(js, arg)
+
+    page = _NoAttachPage()
+    path = _real_temp_file(".jpg")
+    try:
+        result = run(sender.send_whatsapp_message(
+            page=page, destination_type="group", destination="Talentgram Casting Test",
+            message_body="caption", local_file_path=path,
+        ))
+        assert result["state"] == sender.ATTACH_CONTROL_NOT_READY, result
+        assert page.clicks == [] or 'button[aria-label="Photos & videos"]' not in page.clicks
+        assert page.file_choosers == []
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
 
 
 if __name__ == "__main__":

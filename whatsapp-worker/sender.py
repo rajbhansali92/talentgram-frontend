@@ -477,7 +477,14 @@ INVALID_DESTINATION = "INVALID_DESTINATION"              # bad number / group mi
 # duplicate-check, DOM dump) — long enough for WhatsApp Web's visible chat
 # panel to drift back to a DIFFERENT chat while the compose box's own
 # aria-label still claimed the new one. See _wait_for_destination_chat_ready.
-DESTINATION_CHAT_NOT_READY = "DESTINATION_CHAT_NOT_READY"  # header/attach control never matched dest -> retry
+DESTINATION_CHAT_NOT_READY = "DESTINATION_CHAT_NOT_READY"  # header never matched dest -> retry
+# Error-semantics split (2026-09-20, fifth production incident) — the
+# destination header can be genuinely, authoritatively confirmed correct
+# while the attach control is still unavailable; collapsing both into
+# DESTINATION_CHAT_NOT_READY falsely blamed navigation for a real
+# incident where navigation had already succeeded. See
+# _wait_for_destination_chat_ready's own docstring for the exact split.
+ATTACH_CONTROL_NOT_READY = "ATTACH_CONTROL_NOT_READY"  # destination confirmed; attach control never resolved -> retry
 
 # Conversation-open signals. #main is the open-chat pane (absent on the home
 # screen), so it is a reliable "a chat is actually open" signal — unlike the
@@ -696,18 +703,96 @@ async def _destination_header_matches(page: Page, expected_norm: str) -> Tuple[b
     return _norm_title(title) == expected_norm, title, selector, visible
 
 
-async def _attach_control_visible(page: Page) -> bool:
+# Composer-scoped attachment-control resolver (2026-09-20, fifth
+# production incident) — [data-testid="plus-rounded"] (itself the
+# eb3c781 fix for the even-older stale "attach-menu-plus") was proven,
+# via a live read-only diagnostic (attachment_toolbar_survey_diagnostic)
+# dispatched twice against the real, authoritative-header-confirmed
+# "Pepsi x Talentgram Agency" chat, to no longer exist anywhere in the
+# document — 100% of 6 production attempts. The SAME diagnostic found
+# the real, current control: a <button aria-label="Attach"> (no
+# data-testid at all) containing a <span data-testid="ic-attach-file">
+# icon, sitting directly alongside conversation-compose-box-input inside
+# [data-testid="compose-box"].
+#
+# This resolver is deliberately NOT a document-wide query — WhatsApp
+# reuses both "plus-rounded" and, plausibly, "Attach"-labeled controls
+# elsewhere in the app (sidebar nav, status composer — see
+# plus_rounded_locations_diagnostic's own findings from the prior
+# incident), so every candidate is scoped to the compose-box ancestor of
+# the composer input itself, never anywhere else in the page. Ordered
+# priority: the live-proven aria-label first, the two historical testids
+# kept only as inert fallbacks in case WhatsApp Web ever reverts. A
+# candidate only counts if it is visible AND enabled — existing in the
+# DOM is not enough (same lesson _destination_header_authoritative's own
+# visibility check already encodes for the header).
+_ATTACH_CONTROL_JS = """
+() => {
+    function bbox(el) {
+        const r = el.getBoundingClientRect();
+        return {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)};
+    }
+    function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    }
+    function isEnabled(el) {
+        return !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+    }
+    const composerInput = document.querySelector('[data-testid="conversation-compose-box-input"]');
+    let scope = composerInput;
+    for (let d = 0; d < 8 && scope; d++) {
+        if (scope.getAttribute && scope.getAttribute('data-testid') === 'compose-box') break;
+        scope = scope.parentElement;
+    }
+    if (!scope || !(scope.getAttribute && scope.getAttribute('data-testid') === 'compose-box')) {
+        return {found: false, selector: null, visible: false, enabled: false, bbox: null,
+                 candidates_seen: [], reason: 'composer_scope_not_found'};
+    }
+    const CANDIDATES = [
+        'button[aria-label="Attach"]',
+        '[data-testid="plus-rounded"]',
+        '[data-testid="attach-menu-plus"]',
+    ];
+    const seen = [];
+    for (const sel of CANDIDATES) {
+        const el = scope.querySelector(sel);
+        if (!el) continue;
+        const visible = isVisible(el);
+        const enabled = isEnabled(el);
+        seen.push({selector: sel, visible, enabled, bbox: bbox(el)});
+        if (visible && enabled) {
+            return {found: true, selector: sel, visible, enabled, bbox: bbox(el), candidates_seen: seen, reason: null};
+        }
+    }
+    return {found: false, selector: null, visible: false, enabled: false, bbox: null,
+             candidates_seen: seen, reason: seen.length ? 'candidates_present_not_ready' : 'no_candidates'};
+}
+"""
+
+
+async def _resolve_attach_control(page: Page) -> Dict[str, Any]:
+    """Returns {"found", "selector", "visible", "enabled", "bbox",
+    "candidates_seen", "reason"} — see _ATTACH_CONTROL_JS above for the
+    exact composer-scoped, priority-ordered semantics."""
     try:
-        attach_loc = page.locator(SEL["attach_btn"]).first
-        return bool(await attach_loc.count()) and await attach_loc.is_visible()
-    except Exception:
-        return False
+        return await page.evaluate(_ATTACH_CONTROL_JS)
+    except Exception as exc:
+        return {"found": False, "selector": None, "visible": False, "enabled": False,
+                "bbox": None, "candidates_seen": [], "reason": f"evaluate_failed: {exc}"}
 
 
-async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[str]) -> bool:
+async def _attach_control_visible(page: Page) -> bool:
+    """Thin bool-only convenience wrapper around _resolve_attach_control
+    — kept for any caller that only needs presence, not the full
+    diagnostic result."""
+    result = await _resolve_attach_control(page)
+    return bool(result.get("found"))
+
+
+async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[str]) -> Tuple[bool, Optional[str]]:
     """Re-verifies, immediately before the attach-button click, that (a) the
     VISIBLE chat header still names the intended destination and (b) the
-    attach control itself is present and visible.
+    attach control itself is present, visible, and enabled.
 
     Root-cause fix (2026-09-20, real production incident — live logs showed
     the header AND a full DOM instrumentation dump both independently
@@ -729,16 +814,23 @@ async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[s
     DOM state and hoping it eventually matches.
 
     `expected_name` is None for a phone/number destination (same asymmetry
-    _verify_chat_open already has). Returns True once both header and
-    attach control hold; False if the deadline passes first — the caller
-    must treat False as retryable, never as a send-control failure (see
-    DESTINATION_CHAT_NOT_READY)."""
+    _verify_chat_open already has). Returns (ready, not_ready_reason).
+    `not_ready_reason` is None when ready=True; otherwise one of
+    "header_not_ready" or "attach_control_not_ready" — a DISTINCT signal
+    (2026-09-20, fifth production incident: a real attempt had
+    header_ok=True and a correctly-confirmed destination for the ENTIRE
+    15s window, yet the old code still reported the generic
+    DESTINATION_CHAT_NOT_READY, falsely implicating navigation when the
+    attach control itself was the actual, sole problem). The caller must
+    treat either reason as retryable, never as a send-control failure —
+    see DESTINATION_CHAT_NOT_READY / ATTACH_CONTROL_NOT_READY."""
     deadline = time.monotonic() + DESTINATION_READY_TIMEOUT_MS / 1000
     expected_norm = _norm_title(expected_name) if expected_name else None
     logger.info("sender: SEND_DESTINATION_NAV_START expected=%r", expected_name)
     composer_clicked = False
     last_header_ok = expected_norm is None
     last_attach_ok = False
+    last_attach_selector: Optional[str] = None
     last_actual_title: Optional[str] = None
     while True:
         if expected_norm is None:
@@ -791,21 +883,41 @@ async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[s
                     expected_name, exc,
                 )
 
-        attach_ok = await _attach_control_visible(page) if header_ok else False
-        if attach_ok != last_attach_ok:
-            logger.info("sender: SEND_ATTACH_CONTROL_CHECK present=%s", attach_ok)
+        attach_result = await _resolve_attach_control(page) if header_ok else \
+            {"found": False, "selector": None, "visible": False, "enabled": False, "bbox": None, "candidates_seen": [], "reason": None}
+        attach_ok = bool(attach_result.get("found"))
+        attach_selector = attach_result.get("selector")
+        if attach_ok != last_attach_ok or attach_selector != last_attach_selector:
+            if attach_ok:
+                logger.info(
+                    "sender: SEND_ATTACH_CONTROL_RESOLVE selector=%r count=1 visible=%s enabled=%s bbox=%s",
+                    attach_selector, attach_result.get("visible"), attach_result.get("enabled"), attach_result.get("bbox"),
+                )
+            else:
+                logger.info(
+                    "sender: SEND_ATTACH_CONTROL_NOT_FOUND candidates_seen=%s reason=%r",
+                    attach_result.get("candidates_seen"), attach_result.get("reason"),
+                )
             last_attach_ok = attach_ok
+            last_attach_selector = attach_selector
 
         if header_ok and attach_ok:
-            logger.info("sender: SEND_DESTINATION_READY destination=%r", expected_name)
-            return True
+            logger.info("sender: SEND_DESTINATION_READY destination=%r attach_selector=%r", expected_name, attach_selector)
+            return True, None
         if time.monotonic() >= deadline:
+            if not header_ok:
+                logger.warning(
+                    "sender: DESTINATION_CHAT_NOT_READY — header_ok=%s attach_ok=%s composer_clicked=%s "
+                    "expected=%r actual_header=%r after %dms",
+                    header_ok, attach_ok, composer_clicked, expected_name, actual_title, DESTINATION_READY_TIMEOUT_MS,
+                )
+                return False, "header_not_ready"
             logger.warning(
-                "sender: DESTINATION_CHAT_NOT_READY — header_ok=%s attach_ok=%s composer_clicked=%s "
-                "expected=%r actual_header=%r after %dms",
-                header_ok, attach_ok, composer_clicked, expected_name, actual_title, DESTINATION_READY_TIMEOUT_MS,
+                "sender: ATTACH_CONTROL_NOT_READY — destination chat was confirmed (actual_header=%r), but "
+                "WhatsApp Web's attachment control was not available. composer_clicked=%s candidates_seen=%s after %dms",
+                actual_title, composer_clicked, attach_result.get("candidates_seen"), DESTINATION_READY_TIMEOUT_MS,
             )
-            return False
+            return False, "attach_control_not_ready"
         await asyncio.sleep(DESTINATION_READY_POLL_INTERVAL_S)
 
 
@@ -2572,38 +2684,63 @@ async def send_whatsapp_message(
             # — polls up to DESTINATION_READY_TIMEOUT_MS. A failure here is
             # reported as its own precise state, never miscast as "Send
             # control could not be confirmed".
-            if not await _wait_for_destination_chat_ready(page, expected_name):
+            ready, not_ready_reason = await _wait_for_destination_chat_ready(page, expected_name)
+            if not ready:
                 await _capture_attach_click_failure_diagnostics(
                     page,
                     RuntimeError(
-                        f"destination chat not ready before attach click (expected={expected_name!r})"
+                        f"destination chat not ready before attach click (expected={expected_name!r}, "
+                        f"reason={not_ready_reason!r})"
                     ),
                     diagnostic_meta,
                 )
-                return {"state": DESTINATION_CHAT_NOT_READY, "evidence": evidence, "timing": timing}
+                # Error-semantics split (2026-09-20, fifth production
+                # incident) — never collapse "attach control genuinely
+                # unavailable on a CONFIRMED-correct destination" into the
+                # same DESTINATION_CHAT_NOT_READY bucket that means
+                # "navigation itself never settled"; see
+                # _wait_for_destination_chat_ready's own docstring.
+                state = ATTACH_CONTROL_NOT_READY if not_ready_reason == "attach_control_not_ready" else DESTINATION_CHAT_NOT_READY
+                return {"state": state, "evidence": evidence, "timing": timing}
 
-            # Click attachment button (+) to open the attach menu, then click
+            # Click attachment button to open the attach menu, then click
             # "Photos & videos" and let Playwright's own file-chooser
             # interception hand us the exact <input> WhatsApp wires up for
-            # it (2026-08-24 fix — read-only diagnostics on a real disposable
-            # group proved: (a) SEL["attach_btn"]'s old testid no longer
-            # exists, the real button is [data-testid="plus-rounded"]; (b)
-            # the attach menu's items carry no data-testid at all, only
-            # role="menuitem"/aria-label, which is why a blind first
-            # `input[type="file"]` on the page previously grabbed one of two
-            # unrelated, image-only inputs elsewhere on the page (a
-            # group-icon-change input and an unrelated main-screen input)
-            # instead of the real one; (c) "Photos & videos" bundles both
-            # media types into a single control —
-            # accept="image/*,video/mp4,video/3gpp,video/quicktime,video/webm,video/x-matroska",
-            # multiple=True — confirmed via page.expect_file_chooser(),
-            # Playwright's own non-synthetic mechanism for this exact case.
+            # it. The attach button itself is resolved via
+            # _resolve_attach_control (2026-09-20 fix — see that function's
+            # own docstring: [data-testid="plus-rounded"], the 2026-08-24
+            # fix for the even older stale "attach-menu-plus", was itself
+            # proven gone from the live DOM; the current real control is a
+            # testid-less <button aria-label="Attach">, composer-scoped,
+            # with the two historical testids kept only as fallbacks).
+            # Re-resolved here (not reusing the gate's own last result)
+            # since some time may have passed since the gate returned.
+            # "Photos & videos" bundles both media types into a single
+            # control — accept="image/*,video/mp4,video/3gpp,video/quicktime,
+            # video/webm,video/x-matroska", multiple=True — confirmed via
+            # page.expect_file_chooser(), Playwright's own non-synthetic
+            # mechanism for this exact case; unchanged by this fix.
+            attach_result = await _resolve_attach_control(page)
+            if not attach_result.get("found"):
+                await _capture_attach_click_failure_diagnostics(
+                    page,
+                    RuntimeError(f"attach control not found at click time (expected={expected_name!r})"),
+                    diagnostic_meta,
+                )
+                return {"state": ATTACH_CONTROL_NOT_READY, "evidence": evidence, "timing": timing}
+            attach_selector = attach_result["selector"]
+            scoped_attach_selector = f'[data-testid="compose-box"] {attach_selector}'
+            logger.info(
+                "sender: SEND_ATTACH_CONTROL_RESOLVE (click-time) selector=%r scoped=%r visible=%s enabled=%s",
+                attach_selector, scoped_attach_selector, attach_result.get("visible"), attach_result.get("enabled"),
+            )
             try:
-                await page.click(SEL["attach_btn"])
+                await page.click(scoped_attach_selector, timeout=5_000)
             except Exception as click_exc:
-                # Diagnostic-only (2026-08-24) — capture live DOM evidence
-                # at the exact instant of a real attach-click failure, then
-                # re-raise the SAME exception unchanged. Never retried here.
+                # Diagnostic-only (2026-08-24, extended 2026-09-20) — capture
+                # live DOM evidence at the exact instant of a real attach-
+                # click failure, then re-raise the SAME exception unchanged.
+                # Never retried here.
                 await _capture_attach_click_failure_diagnostics(page, click_exc, diagnostic_meta)
                 raise
             await asyncio.sleep(0.5)

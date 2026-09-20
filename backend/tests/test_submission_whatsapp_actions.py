@@ -34,8 +34,9 @@ from agents.modules import submission_whatsapp_actions as swa  # noqa: E402
 from services import media_assignment_worker as orch  # noqa: E402
 
 from tests.test_media_assignment import (  # noqa: E402
-    GUNWANTI_LID, _cleanup, _seed_project, _seed_submission, _seed_talent,
+    GUNWANTI_LID, _cleanup, _mark, _seed_project, _seed_submission, _seed_talent,
 )
+from tests.test_media_send import _with_simulated_send_preview  # noqa: E402
 
 agent_modules.register_all()
 
@@ -265,6 +266,49 @@ async def test_approve_send_no_marked_media_reports_honestly():
         assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents(
             {"project_id": project_id, "mode": "send"}
         ) == 0
+    finally:
+        await _cleanup_full(project_id, talent_id, submission_id)
+
+
+# ---------------------------------------------------------------------------
+# Worker-affinity fix (2026-09-20, real production incident): a Limca Film1
+# SEND request dispatched for Worker 1 was instead claimed and processed by
+# Worker 2, because dispatch_approve_send -> create_send_dispatch_from_
+# approved_plan never wrote a worker_id onto the persisted document at all.
+# Both dispatch_approve_send and dispatch_approve_upload now accept and
+# thread their own worker_id argument straight through to the scan_requests
+# document routers.agents_whatsapp.claim_scan_request's new worker-scoped
+# filter reads back (see test_media_assignment.py's test_claim_* suite for
+# the claim-side half of this fix).
+# ---------------------------------------------------------------------------
+async def test_approve_send_dispatches_send_request_with_correct_worker_id():
+    project_id, talent_id, submission_id, tag = await _seed_full()
+    project_label = f"SWA Project {tag}"
+    try:
+        worker = _with_simulated_send_preview(talent_id, project_id, [
+            _mark(
+                mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 1 for {project_label}",
+                source_message_id=f"swa-take1-{tag}", media_type="video",
+            ),
+        ])
+        req_id = await swa.dispatch_approve_send(project_id, submission_id, worker_id="wa-worker-2")
+        await worker
+        doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id}, {"_id": 0})
+        assert doc is not None
+        assert doc["mode"] == "send"
+        assert doc["worker_id"] == "wa-worker-2", doc
+    finally:
+        await _cleanup_full(project_id, talent_id, submission_id)
+
+
+async def test_approve_upload_dispatches_upload_request_with_correct_worker_id():
+    project_id, talent_id, submission_id, _ = await _seed_full()
+    try:
+        req_id = await swa.dispatch_approve_upload(project_id, submission_id, worker_id="wa-worker-2")
+        doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id}, {"_id": 0})
+        assert doc is not None
+        assert doc["mode"] == "scan"
+        assert doc["worker_id"] == "wa-worker-2", doc
     finally:
         await _cleanup_full(project_id, talent_id, submission_id)
 

@@ -21,6 +21,7 @@ into a single "happy path" test.
 import os
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -31,6 +32,7 @@ from agents import modules as agent_modules  # noqa: E402
 from agents import registry  # noqa: E402
 from agents.dispatcher import handle_inbound_message  # noqa: E402
 from agents.modules import media_assignment as ma  # noqa: E402
+from agents.modules import casting_pipeline_nlu as nlu  # noqa: E402
 from agents.modules.casting_pipeline import AGENT_ID  # noqa: E402
 from services import media_assignment_worker as orch  # noqa: E402
 from routers import agents_whatsapp  # noqa: E402
@@ -1396,6 +1398,147 @@ async def test_orchestrator_never_claims_resolve_recipient_scan_requests():
         await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
 
 
+# ---------------------------------------------------------------------------
+# Worker-affinity — root-cause fix (2026-09-20, real production incident):
+# a Limca Film1 SEND request, dispatched for the default worker (Worker 1),
+# was instead claimed and processed by Worker 2 (running older, pre-
+# download-reattach code, still reachable via its own legacy native-Forward
+# path) — POST /scan-requests/claim had no worker_id condition at all, so
+# ANY authenticated worker polling it could win ANY pending job regardless
+# of which worker it was created for. routers.agents_whatsapp.claim_scan_request
+# now scopes its claim query via _scan_request_worker_filter, deliberately
+# mirroring whatsapp-worker/worker.py's own _worker_scope_filter() — the
+# SAME existing pattern, not a second worker-identity mechanism, applied to
+# whatsapp_scan_requests the same way it already protects whatsapp_batches/
+# whatsapp_jobs. Exercised by calling claim_scan_request directly (same
+# convention test_media_assignment.py already uses for agents_whatsapp.
+# media_upload above), never over real HTTP.
+# ---------------------------------------------------------------------------
+WORKER_2_ID = "wa-worker-2"
+
+
+async def _insert_pending_send(*, worker_id, tag=None, created_at=None):
+    """Minimal mode="send" doc in the exact ready-for-claim shape
+    create_send_dispatch_from_approved_plan produces (status=
+    DOWNLOAD_STATUS_PENDING) — `worker_id` may be a real string, None
+    (the exact bug this fix closes — every document
+    create_send_dispatch_from_approved_plan ever produced before this fix
+    had this literal value), or the special sentinel "__absent__" to omit
+    the key entirely (the OTHER pre-fix legacy shape, e.g. documents from
+    even older code paths)."""
+    tag = tag or uuid.uuid4().hex[:6]
+    req_id = f"req-{tag}"
+    doc = {
+        "id": req_id, "mode": "send", "workflow": "send",
+        "status": ma.DOWNLOAD_STATUS_PENDING,
+        "group_name": f"Talent {tag} x Talentgram", "destination_group": f"Dest {tag}",
+        "talent_id": f"t-{tag}", "project_id": f"p-{tag}",
+        "send_targets": [], "download_results": None,
+        "created_at": created_at or _now(), "updated_at": _now(), "completed_at": None,
+    }
+    if worker_id != "__absent__":
+        doc["worker_id"] = worker_id
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one(doc)
+    return req_id
+
+
+async def test_claim_worker1_cannot_claim_worker2_send_job():
+    req_id = await _insert_pending_send(worker_id=WORKER_2_ID)
+    try:
+        claimed = await agents_whatsapp.claim_scan_request(worker_id="default")
+        assert claimed.get("id") != req_id, "the default (Worker 1) caller must never claim a Worker 2-tagged job"
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+async def test_claim_worker2_cannot_claim_worker1_send_job():
+    req_id = await _insert_pending_send(worker_id="default")
+    try:
+        claimed = await agents_whatsapp.claim_scan_request(worker_id=WORKER_2_ID)
+        assert claimed.get("id") != req_id, "the Worker 2 caller must never claim a default (Worker 1)-tagged job"
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+async def test_claim_worker1_can_claim_its_own_send_job():
+    req_id = await _insert_pending_send(worker_id="default")
+    try:
+        claimed = await agents_whatsapp.claim_scan_request(worker_id="default")
+        assert claimed.get("id") == req_id
+        assert claimed.get("status") == "processing"
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+async def test_claim_worker2_can_claim_its_own_send_job():
+    req_id = await _insert_pending_send(worker_id=WORKER_2_ID)
+    try:
+        claimed = await agents_whatsapp.claim_scan_request(worker_id=WORKER_2_ID)
+        assert claimed.get("id") == req_id
+        assert claimed.get("status") == "processing"
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+async def test_claim_older_other_worker_job_never_wins_over_own_newer_job():
+    """The exact production shape: an OLDER pending job exists for a
+    DIFFERENT worker, and a NEWER pending job exists for the calling
+    worker itself. The claim's own sort=[("created_at", 1)] (oldest
+    first) must never let the older, wrong-worker job win merely because
+    it is older — worker affinity is checked BEFORE age, not after."""
+    ten_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    older = await _insert_pending_send(worker_id=WORKER_2_ID, created_at=ten_min_ago)
+    newer = await _insert_pending_send(worker_id="default", created_at=_now())
+    try:
+        claimed = await agents_whatsapp.claim_scan_request(worker_id="default")
+        assert claimed.get("id") == newer, (
+            f"expected the caller's own job ({newer}) despite being newer, got {claimed.get('id')}"
+        )
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"id": {"$in": [older, newer]}})
+
+
+async def test_claim_legacy_worker_id_none_is_claimable_by_default_caller():
+    """Compatibility rule chosen: worker_id=None (the exact value every
+    document create_send_dispatch_from_approved_plan produced before
+    this fix) is treated as "belongs to the default worker" — the same
+    treatment whatsapp-worker/worker.py's own _worker_scope_filter
+    already gives an entirely-absent worker_id, so an in-flight or
+    historical pre-fix document keeps being claimable by Worker 1 with
+    zero backfill/migration."""
+    req_id = await _insert_pending_send(worker_id=None)
+    try:
+        claimed = await agents_whatsapp.claim_scan_request(worker_id="default")
+        assert claimed.get("id") == req_id
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+async def test_claim_legacy_worker_id_absent_is_claimable_by_default_caller():
+    """The OTHER legacy shape — worker_id key entirely absent from the
+    document (not even null) — same compatibility rule, same result."""
+    req_id = await _insert_pending_send(worker_id="__absent__")
+    try:
+        claimed = await agents_whatsapp.claim_scan_request(worker_id="default")
+        assert claimed.get("id") == req_id
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
+async def test_claim_legacy_worker_id_none_not_claimable_by_non_default_worker():
+    """The flip side of the compatibility rule: a non-default worker
+    (Worker 2) must NOT inherit legacy/untagged documents — only an
+    explicitly-tagged document belongs to it. Otherwise Worker 2 would
+    still race Worker 1 for every historical/legacy document, which is
+    exactly the non-determinism this fix removes."""
+    req_id = await _insert_pending_send(worker_id=None)
+    try:
+        claimed = await agents_whatsapp.claim_scan_request(worker_id=WORKER_2_ID)
+        assert claimed.get("id") != req_id
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+
+
 async def test_orchestrator_scan_done_unresolved_mark_finished_with_report():
     tag = uuid.uuid4().hex[:6]
     project_id, project_label = f"p-{tag}", f"Google {tag}"
@@ -1708,22 +1851,45 @@ async def test_orchestrator_zero_candidates_reports_honestly_not_already_complet
 # production incident's second root cause. The admin's UPLOAD command
 # already explicitly resolves the target project; a mark's job is
 # identifying WHICH media, not re-proving which project via informal
-# WhatsApp shorthand. Four cases, confirmed by the user:
-#   1/2/3. no confident project-text match -> defaults to the
-#      admin-requested project (this is what makes "Mark Tapti Ai Test
-#      take 1" resolve for the real "Tapti AI App (Ananya)").
-#   4. confidently matches a DIFFERENT real project -> excluded,
-#      reported as an advisory note, never uploaded to the wrong project.
-#   5. ambiguous between multiple real projects -> excluded, reported as
-#      an advisory note, never guessed.
-# Cases 4 and 5 are advisory-only (never block OTHER, correctly-resolved
+# WhatsApp shorthand. FIVE cases (updated 2026-09-20 — root-cause fix for
+# a real production incident, "Limca Film1" vs "Limca Film 2": a mark
+# meant for one sibling project was silently assigned to the OTHER
+# sibling project because resolve_project_by_name's `suggestions`
+# outcome — close candidates below the auto-resolve bar — was being
+# treated identically to "no match at all", defaulting silently instead
+# of being flagged. `suggestions` is now handled exactly like
+# `ambiguous`: excluded, reported as an advisory note, never guessed):
+#   1/2. a confident, UNIQUE project-text match -> accept (for the
+#      requested project) or exclude as a mismatch (for a different one).
+#   3. ambiguous between multiple real projects (ProjectNameMatch.
+#      ambiguous — a real tie at an early, precise tier) -> excluded,
+#      advisory note, never guessed.
+#   4. genuinely unrelated text — no confident match AND nothing even
+#      close enough to suggest -> defaults to the admin-requested
+#      project (the only case this fallback is safe for: text that
+#      cannot possibly point at a DIFFERENT real project because nothing
+#      about it resembles one).
+#   5. close candidates exist below the auto-resolve bar
+#      (ProjectNameMatch.suggestions) -> excluded, advisory note, never
+#      guessed — same treatment as case 3, because from the admin's
+#      point of view "close but not confident" and "confidently tied"
+#      both mean the same thing: the mark's own project identity is NOT
+#      independently established, so it must never be silently assigned
+#      to whichever project the CURRENT scan happens to be scoped to.
+# Cases 3 and 5 are advisory-only (never block OTHER, correctly-resolved
 # marks in the same scan) — a talent's WhatsApp group legitimately
 # accumulates marks for multiple projects over time.
 # ---------------------------------------------------------------------------
 def test_validate_candidates_informal_project_text_defaults_to_requested_project():
-    """Case 1/2 — "Mark Project A Test take 1" for a requested project
-    literally named "Project A" (case 2's shape: the informal mark text
-    doesn't need to exactly reproduce the DB's project name)."""
+    """"Mark Project A Test take 1" against a requested project literally
+    named "Project A (Ananya)" — and a sibling "Project B". Root-cause
+    fix (2026-09-20): the query's generic shared token "project" scores
+    near-identically against BOTH labels (neither shares anything else
+    with the query), landing in `suggestions` with BOTH as candidates —
+    the mark's own project identity is genuinely NOT independently
+    established here, so this must now be flagged, never silently
+    defaulted to whichever project happened to be requested (that was
+    the exact shape of the real Limca Film1/Film2 incident)."""
     projects = [{"id": "p-a", "label": "Project A (Ananya)"}, {"id": "p-b", "label": "Project B"}]
     candidates = [_mark(mention_lid=None, mark_text="mark project a test take 1", source_message_id="src-take1")]
     outcome = ma.validate_candidates(
@@ -1731,18 +1897,26 @@ def test_validate_candidates_informal_project_text_defaults_to_requested_project
         requested_project_label="Project A (Ananya)", projects=projects, talent_id="t1",
     )
     assert outcome.ok, outcome
-    assert len(outcome.assignments) == 1, outcome
-    assert outcome.assignments[0]["resolved_source_message_id"] == "src-take1"
+    assert outcome.assignments == [], outcome
     assert outcome.project_mismatch == []
-    assert outcome.project_ambiguous == []
+    assert len(outcome.project_ambiguous) == 1, outcome
+    assert outcome.project_ambiguous[0]["resolved_source_message_id"] == "src-take1"
 
 
-def test_validate_candidates_real_sharvari_shorthand_defaults_to_requested_project():
-    """Case 2/3, the exact real incident's shape: "Mark Tapti Ai Test
-    take 1"/"...Introduction" against the real "Tapti AI App (Ananya)" —
-    the fragment matches NEITHER Tapti variant confidently, so both
-    default to the admin-requested project rather than being silently
-    dropped."""
+def test_validate_candidates_real_sharvari_shorthand_now_flagged_ambiguous():
+    """The exact real Sharvari/Tapti incident's shape: "Mark Tapti Ai
+    Test take 1"/"...Introduction" against TWO near-identical sibling
+    projects, "Tapti AI App (Ananya)" and "Tapti AI App (Neelam)".
+    Root-cause fix (2026-09-20): this is numerically confirmed to land
+    in `suggestions` with BOTH siblings as candidates (their shared
+    "Tapti AI App" prefix scores them almost identically; neither
+    parenthetical name is referenced by the query at all) — the OLD
+    behavior silently defaulted to whichever project happened to be
+    requested, which is the exact same unsafe pattern that caused the
+    real, confirmed Limca Film1/Film2 media cross-contamination. Now
+    correctly flagged as ambiguous instead — this test's name and intent
+    are updated from "...defaults_to_requested_project" to reflect the
+    deliberately stricter, safer behavior."""
     projects = [
         {"id": "p-ananya", "label": "Tapti AI App (Ananya)"},
         {"id": "p-neelam", "label": "Tapti AI App (Neelam)"},
@@ -1756,10 +1930,121 @@ def test_validate_candidates_real_sharvari_shorthand_defaults_to_requested_proje
         requested_project_label="Tapti AI App (Ananya)", projects=projects, talent_id="t1",
     )
     assert outcome.ok, outcome
-    slots = {(a["media_role"], a["take_number"]) for a in outcome.assignments}
-    assert slots == {("take", 1), ("intro", None)}
+    assert outcome.assignments == [], outcome
     assert outcome.project_mismatch == []
-    assert outcome.project_ambiguous == []
+    assert len(outcome.project_ambiguous) == 2, outcome
+    flagged_sources = {m["resolved_source_message_id"] for m in outcome.project_ambiguous}
+    assert flagged_sources == {"src-take1", "src-intro"}
+
+
+# ---------------------------------------------------------------------------
+# Multi-project media isolation — root-cause fix (2026-09-20), the exact
+# real production incident: "Limca Film1" (id e94b23cf..., no space) vs
+# "Limca Film 2" (id 1c4da4f7..., with space), same talent, same WhatsApp
+# casting group. Film1's own take mark was silently assigned to Limca
+# Film 2, proven via hash comparison (media_assignments' persisted
+# source_thumbnail_hash for Film 2's "take" slot matched Film1's take
+# tile, not Film 2's own genuinely-marked tile). Two compounding causes:
+# (A) resolve_project_by_name's `suggestions` outcome silently defaulted
+# to whichever project the current scan was scoped to (fixed above,
+# validate_candidates now flags it as project_ambiguous), and (B) plain
+# letter/digit-boundary tokenization made "Limca Film1" and "Limca Film
+# 1" compare as DIFFERENT strings even though they are the same project
+# (fixed via _normalize_project_label's new letter/digit boundary split,
+# in casting_pipeline_nlu.py).
+# ---------------------------------------------------------------------------
+LIMCA_FILM1 = {"id": "e94b23cf-407d-4e94-8cd5-e38dedceebbd", "label": "Limca Film1"}
+LIMCA_FILM2 = {"id": "1c4da4f7-a4d1-4a27-9454-3d59588739fb", "label": "Limca Film 2"}
+LIMCA_PROJECTS = [LIMCA_FILM1, LIMCA_FILM2]
+
+
+def test_resolve_project_by_name_fused_and_spaced_digit_variants():
+    """Deterministic normalization, not a fuzzy-threshold tweak: "Limca
+    Film1" (fused) and "Limca Film 1" (spaced) must resolve to the exact
+    SAME project, and "Limca Film2"/"Limca Film 2" to the other — for
+    every spacing variant, with no ambiguity."""
+    for query, expected_id in [
+        ("Limca Film1", LIMCA_FILM1["id"]),
+        ("Limca Film 1", LIMCA_FILM1["id"]),
+        ("Limca Film2", LIMCA_FILM2["id"]),
+        ("Limca Film 2", LIMCA_FILM2["id"]),
+    ]:
+        m = nlu.resolve_project_by_name(query, LIMCA_PROJECTS)
+        assert m.project is not None, f"{query!r} did not confidently resolve: {m}"
+        assert m.project["id"] == expected_id, f"{query!r} resolved to {m.project!r}, expected {expected_id!r}"
+        assert m.ambiguous is None and m.suggestions is None, f"{query!r} should be unambiguous: {m}"
+
+
+def test_resolve_project_by_name_never_crosses_fused_sibling():
+    """The exact defect shape: "Limca Film 1" must never resolve to
+    "Limca Film 2" merely because Film1's own label has a fused token
+    ("Film1") that the naive token-subset tier can't match against a
+    spaced query, forcing a fuzzy fallback where a near-identical
+    sibling could win or tie."""
+    m = nlu.resolve_project_by_name("Limca Film 1", LIMCA_PROJECTS)
+    assert m.project is not None and m.project["id"] == LIMCA_FILM1["id"], m
+    # Explicitly confirm Film 2 is not even a suggestion once the
+    # deterministic tier resolves it — the fuzzy tier (where Film 2 could
+    # have competed) is never reached at all.
+
+
+def test_validate_candidates_limca_full_production_scenario():
+    """The exact real production fixture: same talent, same WhatsApp
+    group, one 3-tile album, two near-identical sibling projects. Marks:
+    intro->tile0 for BOTH projects (intentional reuse, not a bug), take
+    Film1->tile1, take Film2->tile2. Must resolve to two fully
+    independent, correct assignment sets — Film1's take must never reach
+    Film2's assignment and vice versa, by hash."""
+    tile0_hash, tile1_hash, tile2_hash = "hash-tile0", "hash-tile1-film1-take", "hash-tile2-film2-take"
+
+    def _tile_mark(text, source_message_id, thumbnail_hash, position):
+        m = _mark(mention_lid=None, mark_text=text, source_message_id=source_message_id, media_type="video",
+                   mark_window_position=position)
+        m["quoted_thumbnail_hash"] = thumbnail_hash
+        m["is_album_tile"] = True
+        return m
+
+    candidates = [
+        _tile_mark("MARK introduction video for Limca Film 1", "AC7E-album", tile0_hash, 4),
+        _tile_mark("MARK introduction video for Limca Film 2", "AC7E-album", tile0_hash, 5),
+        _tile_mark("MARK audition take for Limca Film 1", "AC7E-album", tile1_hash, 6),
+        _tile_mark("MARK audition take for Limca Film 2", "AC7E-album", tile2_hash, 7),
+    ]
+
+    outcome_film1 = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id=LIMCA_FILM1["id"],
+        requested_project_label=LIMCA_FILM1["label"], projects=LIMCA_PROJECTS, talent_id="t-raj",
+    )
+    outcome_film2 = ma.validate_candidates(
+        candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id=LIMCA_FILM2["id"],
+        requested_project_label=LIMCA_FILM2["label"], projects=LIMCA_PROJECTS, talent_id="t-raj",
+    )
+
+    assert outcome_film1.ok, outcome_film1
+    assert outcome_film2.ok, outcome_film2
+
+    film1_by_role = {a["media_role"]: a for a in outcome_film1.assignments}
+    film2_by_role = {a["media_role"]: a for a in outcome_film2.assignments}
+
+    # A. Film1 take assignment -> tile 1's hash, never tile 2's.
+    assert film1_by_role["take"]["quoted_thumbnail_hash"] == tile1_hash, film1_by_role["take"]
+    # B. Film2 take assignment -> tile 2's hash, never tile 1's (the exact
+    # real defect: this used to be tile1_hash).
+    assert film2_by_role["take"]["quoted_thumbnail_hash"] == tile2_hash, film2_by_role["take"]
+    # Film1 take hash != Film2 take hash.
+    assert film1_by_role["take"]["quoted_thumbnail_hash"] != film2_by_role["take"]["quoted_thumbnail_hash"]
+    # Intro: both intentionally reference tile 0 — correct, not a bug.
+    assert film1_by_role["intro"]["quoted_thumbnail_hash"] == tile0_hash
+    assert film2_by_role["intro"]["quoted_thumbnail_hash"] == tile0_hash
+
+    # Film1's media never appears in Film2's assignment set, and vice
+    # versa, by hash — the authoritative identity check the user
+    # specified, not by label text (which the old code's persisted
+    # mark_reply_text showed was itself misleading).
+    film1_hashes = {a["quoted_thumbnail_hash"] for a in outcome_film1.assignments}
+    film2_hashes = {a["quoted_thumbnail_hash"] for a in outcome_film2.assignments}
+    assert tile1_hash in film1_hashes and tile1_hash not in film2_hashes
+    assert tile2_hash in film2_hashes and tile2_hash not in film1_hashes
 
 
 def test_validate_candidates_no_project_match_defaults_to_requested_project():

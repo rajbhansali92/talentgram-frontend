@@ -280,7 +280,7 @@ async def dispatch_approve_send(
             destination_group=destination_group, assignments=assignments,
             default_source_type="group", default_group_name=group_name,
             form_message=form_message, submission_id=submission_id, content_hash=form_built["content_hash"],
-            created_by=approved_by,
+            created_by=approved_by, worker_id=worker_id,
         )
     finally:
         await _release_dispatch_lock(project_id, submission_id, "send")

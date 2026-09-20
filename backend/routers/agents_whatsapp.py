@@ -300,17 +300,64 @@ async def gunwanti_identity(x_internal_secret: Optional[str] = Header(default=No
     return identity or {}
 
 
+def _scan_request_worker_filter(worker_id: Optional[str]) -> Dict[str, Any]:
+    """Mongo filter fragment scoping a whatsapp_scan_requests claim to the
+    CALLING worker's own identity — root-cause fix (2026-09-20, real
+    production incident): a Limca Film1 SEND request, created for the
+    default worker (Worker 1), was instead claimed and processed by
+    Worker 2 (running older, pre-download-reattach code), because this
+    endpoint's claim query had no worker_id condition at all — ANY
+    authenticated worker polling this shared queue could claim ANY
+    pending job, regardless of which worker it was dispatched for.
+
+    Deliberately mirrors whatsapp-worker/worker.py's own
+    _worker_scope_filter() exactly — that function already solves this
+    identical problem for the whatsapp_batches/whatsapp_jobs queue, so
+    this is the SAME existing pattern applied to whatsapp_scan_requests,
+    not a second worker-identity mechanism. Same compatibility rule too:
+    every scan_requests document created before this fix has no
+    meaningful worker_id (either the key is entirely absent, as in
+    documents built via media_assignment.create_scan_request's early
+    callers, or present but None, as in every document
+    create_send_dispatch_from_approved_plan has ever produced — the
+    exact gap this fix also closes) — treating BOTH of those as
+    "belongs to the default worker" (the same treatment
+    _worker_scope_filter already gives an absent worker_id) means an
+    already-in-flight or historical job keeps being claimable by Worker 1
+    with zero backfill/migration, while a genuinely non-default caller
+    (Worker 2) only ever matches a document explicitly tagged with ITS
+    OWN worker_id."""
+    effective = worker_id or "default"
+    if effective == "default":
+        return {"$or": [{"worker_id": "default"}, {"worker_id": None}, {"worker_id": {"$exists": False}}]}
+    return {"worker_id": effective}
+
+
 @router.post("/scan-requests/claim")
-async def claim_scan_request(x_internal_secret: Optional[str] = Header(default=None)):
+async def claim_scan_request(
+    worker_id: Optional[str] = None,
+    x_internal_secret: Optional[str] = Header(default=None),
+):
     """Atomic claim of the oldest pending scan OR download request — same
     find_one_and_update claim pattern worker.py's poll_and_process_jobs
     already uses for send jobs. Returns {} (no request body-less 204, to
-    keep the worker's polling loop simple) when nothing is pending."""
+    keep the worker's polling loop simple) when nothing is pending.
+
+    `worker_id` (2026-09-20 worker-affinity fix): the calling worker's own
+    identity (whatsapp-worker/config.py's WORKER_ID, e.g. "default" for
+    Worker 1) — optional so an old, not-yet-updated worker binary calling
+    this new endpoint during a rolling deploy still gets a response
+    (falls back to "default" scoping, same as before this fix existed for
+    that one caller), rather than a hard error."""
     if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     now = datetime.now(timezone.utc)
+    query = {
+        "status": {"$in": [media_assignment.SCAN_STATUS_PENDING, media_assignment.DOWNLOAD_STATUS_PENDING]},
+        **_scan_request_worker_filter(worker_id),
+    }
     doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one_and_update(
-        {"status": {"$in": [media_assignment.SCAN_STATUS_PENDING, media_assignment.DOWNLOAD_STATUS_PENDING]}},
+        query,
         {"$set": {"status": "processing", "claimed_at": now}},
         sort=[("created_at", 1)],
         return_document=True,

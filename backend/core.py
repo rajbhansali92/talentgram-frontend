@@ -3090,23 +3090,19 @@ def _public_link_view(link: dict) -> dict:
     }
 
 
-def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, project_defaults: Optional[dict] = None) -> dict:
-    """Flatten a submission document into the shape clients expect.
-
-    Order rules (strict, see product spec):
-      1. Audition takes — renamable via `media.label`; legacy `take_1/2/3`
-         auto-map to label "Take 1/2/3". Max 5 takes.
-      2. Introduction video
-      3. Portfolio images
-
-    Field rules:
-      - Respects per-submission `field_visibility` for demographic + structured
-        fields (availability, budget, competitive_brand, custom_answers).
-      - `custom_answers` visibility can be a bool (all-or-nothing) OR a dict
-        `{question_label: bool}` for per-question control.
-      - When `project` is provided, question IDs in custom_answers are resolved
-        to their human-readable question text using project.custom_questions.
-    """
+def get_submission_field_visibility(
+    sub: dict, project: Optional[dict] = None, project_defaults: Optional[dict] = None,
+) -> Dict[str, bool]:
+    """Extracted (2026-09-20, hidden-field production fix — Instagram Link
+    appeared in the outgoing WhatsApp SEND message even when hidden in
+    the submission form) from _submission_to_client_shape's own former
+    inline block, unchanged in behavior, so a caller other than the
+    client-shape formatter (agents.modules.media_send.
+    build_form_send_message, specifically) can check per-field
+    visibility WITHOUT depending on _submission_to_client_shape's own
+    return shape or its media/name/age formatting side effects — this
+    function does exactly one thing, computing the same {field: visible}
+    dict _submission_to_client_shape has always computed."""
     s_fv = sub.get("field_visibility") or {}
     defaults = map_link_visibility_to_submission(project_defaults) if project_defaults else {}
 
@@ -3144,6 +3140,28 @@ def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, proje
         fv["work_links"] = False
     if reqs.get("intro_video") == "hidden":
         fv["intro_video"] = False
+    return fv
+
+
+def _submission_to_client_shape(sub: dict, project: Optional[dict] = None, project_defaults: Optional[dict] = None) -> dict:
+    """Flatten a submission document into the shape clients expect.
+
+    Order rules (strict, see product spec):
+      1. Audition takes — renamable via `media.label`; legacy `take_1/2/3`
+         auto-map to label "Take 1/2/3". Max 5 takes.
+      2. Introduction video
+      3. Portfolio images
+
+    Field rules:
+      - Respects per-submission `field_visibility` for demographic + structured
+        fields (availability, budget, competitive_brand, custom_answers).
+      - `custom_answers` visibility can be a bool (all-or-nothing) OR a dict
+        `{question_label: bool}` for per-question control.
+      - When `project` is provided, question IDs in custom_answers are resolved
+        to their human-readable question text using project.custom_questions.
+    """
+    fv = get_submission_field_visibility(sub, project=project, project_defaults=project_defaults)
+    reqs = (project or {}).get("submission_requirements") or {}
 
 
     # Single source of truth (Issue #1/#10): the client-facing shape is ALWAYS

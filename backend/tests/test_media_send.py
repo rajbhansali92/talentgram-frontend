@@ -2473,6 +2473,98 @@ def test_build_form_send_message_instagram_handle_becomes_full_url():
     assert "https://instagram.com/ahana.actor" in built["message"]
 
 
+# ---------------------------------------------------------------------------
+# Hidden-field omission (Production fix, 2026-09-20) — a real production
+# incident: "Instagram Link:" (empty) appeared in the outgoing WhatsApp
+# SEND message even though Instagram was configured hidden in the
+# submission's own form. Root cause: build_form_send_message only ever
+# checked the SEND-time admin-override sentinel (EXCLUDED_FIELD_VALUE),
+# never the submission's own field_visibility — a hidden field's None
+# value and a visible-but-genuinely-empty field's None value were
+# indistinguishable to it. field_visibility now gates the LINE itself
+# (label AND value, entirely omitted), independent of and in addition to
+# the existing override mechanism.
+# ---------------------------------------------------------------------------
+def test_build_form_send_message_visible_field_with_value_is_included():
+    sub = {
+        "id": "sub-vis-1", "form_data": {"instagram_handle": "ahana.actor"},
+        "field_visibility": {"instagram_handle": True},
+        "talent_name": "Ahana Visible", "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana Visible", "Google Test")
+    assert "Instagram Link:\nhttps://instagram.com/ahana.actor" in built["message"]
+
+
+def test_build_form_send_message_visible_field_empty_keeps_existing_behavior():
+    """Visible but genuinely empty -> the label still appears with no
+    value, exactly as before this fix (never conflated with 'hidden')."""
+    sub = {
+        "id": "sub-vis-2", "form_data": {},
+        "field_visibility": {"instagram_handle": True},
+        "talent_name": "Ahana Empty", "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana Empty", "Google Test")
+    assert "Instagram Link:" in built["message"]
+    assert "Instagram Link:\nhttps://" not in built["message"]
+
+
+def test_build_form_send_message_hidden_field_with_value_is_omitted():
+    """The exact production bug: Instagram has a real value but is
+    configured hidden -> the line must not appear at all, not even as
+    'Instagram Link:' with no value."""
+    sub = {
+        "id": "sub-hid-1", "form_data": {"instagram_handle": "ahana.actor"},
+        "field_visibility": {"instagram_handle": False},
+        "talent_name": "Ahana Hidden", "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana Hidden", "Google Test")
+    assert "Instagram" not in built["message"], built["message"]
+
+
+def test_build_form_send_message_hidden_field_empty_is_omitted():
+    sub = {
+        "id": "sub-hid-2", "form_data": {},
+        "field_visibility": {"instagram_handle": False},
+        "talent_name": "Ahana Hidden Empty", "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana Hidden Empty", "Google Test")
+    assert "Instagram" not in built["message"], built["message"]
+
+
+def test_build_form_send_message_hidden_field_historical_value_still_omitted():
+    """A field that WAS visible when the talent originally submitted a
+    real value, but is NOW configured hidden -> still omitted. The
+    historical stored value is never deleted (form_data is untouched by
+    this function), only never rendered into the outgoing message while
+    the field stays configured hidden."""
+    sub = {
+        "id": "sub-hid-3", "form_data": {"instagram_handle": "old.historical.handle"},
+        "field_visibility": {"instagram_handle": False},
+        "talent_name": "Ahana Historical", "media": [],
+    }
+    built = ms.build_form_send_message(sub, None, "Ahana Historical", "Google Test")
+    assert "Instagram" not in built["message"], built["message"]
+    # The historical value itself is untouched in form_data — only the
+    # outgoing message rendering omits it.
+    assert sub["form_data"]["instagram_handle"] == "old.historical.handle"
+
+
+def test_build_form_send_message_hidden_field_explicit_override_still_wins():
+    """An admin's real-time SEND-time override takes precedence even
+    over a field configured hidden — the same precedence the
+    EXCLUDED_FIELD_VALUE sentinel has always had."""
+    sub = {
+        "id": "sub-hid-4", "form_data": {"instagram_handle": "ahana.actor"},
+        "field_visibility": {"instagram_handle": False},
+        "talent_name": "Ahana Override", "media": [],
+    }
+    built = ms.build_form_send_message(
+        sub, None, "Ahana Override", "Google Test",
+        overrides={"instagram_link": "https://instagram.com/explicit.override"},
+    )
+    assert "https://instagram.com/explicit.override" in built["message"]
+
+
 def test_build_form_send_message_overrides_replace_submission_values():
     sub = {"id": "sub-o", "form_data": {"height": "5'6\""}, "talent_name": "Ahana Override", "media": []}
     built = ms.build_form_send_message(

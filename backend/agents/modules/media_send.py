@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from core import db, _submission_to_client_shape
+from core import db, _submission_to_client_shape, get_submission_field_visibility
 from agents.modules.media_assignment import (
     DOWNLOAD_STATUS_PENDING,
     MAX_SCAN_MESSAGES,
@@ -457,7 +457,7 @@ async def create_send_dispatch_from_approved_plan(
     destination_group: str, assignments: List[Dict[str, Any]],
     default_source_type: str, default_group_name: Optional[str],
     form_message: Optional[str], submission_id: Optional[str], content_hash: Optional[str],
-    created_by: str = "whatsapp-agent",
+    created_by: str = "whatsapp-agent", worker_id: str = "default",
 ) -> str:
     """Dispatch a REAL SEND execution directly from an ALREADY-RESOLVED
     assignments list — no fresh WhatsApp scan, no second
@@ -505,7 +505,19 @@ async def create_send_dispatch_from_approved_plan(
     so the ENTIRE downstream pipeline — claim endpoint, mark_scan.py's
     _run_send, /download-result, _process_download_done's report/
     idempotency/marker/post-approval logic — is reused completely
-    unchanged. Returns the new request's id."""
+    unchanged. Returns the new request's id.
+
+    `worker_id` (2026-09-20, worker-affinity fix — real production
+    incident: a Limca Film1 SEND request dispatched through THIS exact
+    function was claimed and processed by Worker 2 instead of Worker 1,
+    because this function never wrote a worker_id onto the document at
+    all — routers/agents_whatsapp.py's claim endpoint now filters by it,
+    so an unset value here would make this document claimable by NO
+    worker under the new default-only-matches-default/None/missing rule
+    for a non-default caller, or (harmlessly) by any default-scoped
+    worker for the common "default" case. Defaults to "default", matching
+    every existing caller (dispatch_approve_send never passed one before
+    this fix either) — this is purely additive."""
     send_targets, form_insert_index, send_marker_on_success, already = await prepare_send_targets(
         talent_id=talent_id, project_id=project_id, destination_group=destination_group,
         assignments=assignments, default_source_type=default_source_type,
@@ -518,6 +530,7 @@ async def create_send_dispatch_from_approved_plan(
         "mode": "send",
         "workflow": "send",
         "status": DOWNLOAD_STATUS_PENDING,
+        "worker_id": worker_id,
         "group_name": default_group_name,
         "source_type": default_source_type,
         "destination_group": destination_group,
@@ -828,13 +841,38 @@ def build_form_send_message(
     absent means "use the submission's value unchanged". Never mutates the
     submission itself; this is purely how the OUTGOING MESSAGE is rendered."""
     shape = _submission_to_client_shape(sub, project=project)
+    # Hidden-field fix (2026-09-20, real production incident) — a
+    # submission-form field the recruiter configured as HIDDEN
+    # ("Instagram Link:" with no value) was still appearing in the
+    # outgoing WhatsApp SEND message, because this function only ever
+    # checked the SEND-time admin-override sentinel (EXCLUDED_FIELD_VALUE
+    # below), never the submission's own field_visibility configuration.
+    # _submission_to_client_shape already correctly gates the VALUE
+    # (returns None for a hidden field) via the SAME visibility dict —
+    # but a None/empty value and a genuinely-empty-but-VISIBLE value were
+    # being treated identically by _add, both falling through to "print
+    # the label with an empty value" instead of omitting hidden fields
+    # entirely. field_visibility is fetched independently here (not by
+    # threading a new field through _submission_to_client_shape's own
+    # return shape, to avoid touching that widely-shared function's
+    # output — Client View/PDF/download-bundle all consume it unchanged).
+    field_visibility = get_submission_field_visibility(sub, project=project)
     overrides = overrides or {}
 
     lines: List[str] = []
 
-    def _add(label: str, value: Any, override_key: Optional[str] = None) -> None:
+    def _add(label: str, value: Any, override_key: Optional[str] = None, visibility_key: Optional[str] = None) -> None:
         if override_key is not None and override_key in overrides:
+            # An explicit SEND-time admin instruction always wins, even
+            # over a field configured hidden — same precedence the
+            # EXCLUDED_FIELD_VALUE sentinel below has always had.
             value = overrides[override_key]
+        elif visibility_key is not None and not field_visibility.get(visibility_key, True):
+            # Hidden per the submission's own form configuration — omit
+            # the field's line (label AND value) entirely, same as an
+            # explicit EXCLUDED_FIELD_VALUE, never shown as a blank/empty
+            # field and never leaking a historical stored value.
+            return
         if value == EXCLUDED_FIELD_VALUE:
             # "Exclude Instagram Link" etc. — the field's line (label AND
             # value) is omitted from the outgoing form entirely, never
@@ -847,12 +885,12 @@ def build_form_send_message(
 
     _add("Project Name", project_label)
     _add("Name", _format_talent_submission_name(talent_label))
-    _add("Age", shape.get("age"), "age")
-    _add("Height", shape.get("height"), "height")
-    _add("Current Location", _format_location(shape.get("location")), "location")
-    _add("Availability", _format_availability(shape.get("availability")), "availability")
-    _add("Competitive Brand", shape.get("competitive_brand"), "competitive_brand")
-    _add("Instagram Link", _format_instagram_link(shape.get("instagram_handle")), "instagram_link")
+    _add("Age", shape.get("age"), "age", "age")
+    _add("Height", shape.get("height"), "height", "height")
+    _add("Current Location", _format_location(shape.get("location")), "location", "location")
+    _add("Availability", _format_availability(shape.get("availability")), "availability", "availability")
+    _add("Competitive Brand", shape.get("competitive_brand"), "competitive_brand", "competitive_brand")
+    _add("Instagram Link", _format_instagram_link(shape.get("instagram_handle")), "instagram_link", "instagram_handle")
 
     custom_answers = shape.get("custom_answers") or []
     for qa in custom_answers:
@@ -860,7 +898,7 @@ def build_form_send_message(
         if question:
             _add(question, qa.get("answer"), question)
 
-    _add("Budget", _format_budget(shape.get("budget")), "budget")
+    _add("Budget", _format_budget(shape.get("budget")), "budget", "budget")
 
     message = "\n".join(lines).strip()
     content_hash = hashlib.sha256(

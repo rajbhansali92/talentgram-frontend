@@ -9902,7 +9902,21 @@ async def mark_scan_loop(session, http: httpx.AsyncClient) -> None:
     while True:
         try:
             if session.is_healthy:
-                resp = await http.post(f"{BASE}/scan-requests/claim", headers=_auth_headers(), timeout=15.0)
+                # Worker-affinity fix (2026-09-20, real production incident:
+                # a Limca Film1 SEND request was claimed and processed by
+                # Worker 2 instead of Worker 1 — the claim call never told
+                # the backend which worker was asking, and the backend's
+                # own claim query had no worker_id filter at all, so the
+                # oldest pending job went to whichever worker polled first,
+                # regardless of which worker it was actually created for.
+                # Sends this worker's own identity (the SAME config.WORKER_ID
+                # whatsapp-worker/worker.py's own _worker_scope_filter
+                # already uses for the whatsapp_batches/whatsapp_jobs queue)
+                # so the backend can scope the claim the same way.
+                resp = await http.post(
+                    f"{BASE}/scan-requests/claim", params={"worker_id": config.WORKER_ID},
+                    headers=_auth_headers(), timeout=15.0,
+                )
                 req = resp.json() if resp.status_code == 200 else {}
                 if req and req.get("id"):
                     # A claimed request must NEVER be left stuck in

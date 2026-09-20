@@ -897,8 +897,36 @@ def resolve_option_reply_multi(reply: str, options: List[Dict[str, str]]) -> Opt
     return picked or None
 
 
+# Letter/digit boundary — inserted ONLY for project-label normalization,
+# never for the shared _normalize_name talent-matching path (that blast
+# radius was deliberately not touched). Root-cause fix (2026-09-20, real
+# production incident): "Limca Film1" (no space) and "Limca Film 1" (a
+# mark's own free-text phrasing, WITH a space) tokenize completely
+# differently under plain whitespace-collapse — "film1" as one fused
+# token vs. "film"+"1" as two — so neither exact/substring/token-subset
+# tier ever matched them, and BOTH names fell all the way through to
+# Tier 5 character-fuzzy scoring, where a near-identical SIBLING project
+# ("Limca Film 2") could score competitively or even higher (its "film"
+# token gets a perfect exact match the fused "film1" can't earn),
+# producing a silent wrong-project assignment. Deterministically
+# splitting a letter/digit boundary ("film1" -> "film 1") BEFORE
+# whitespace-collapse makes "Limca Film1" and "Limca Film 1" normalize
+# to the IDENTICAL string and resolve via Tier 2 (normalized exact) —
+# no fuzzy tier ever needs to run for this case at all. This can only
+# ever make two names that already differ solely by this kind of
+# spacing compare as equal; it cannot make two genuinely different
+# names (different digits, different words) compare as equal.
+_LETTER_DIGIT_BOUNDARY_RE = re.compile(r"(?<=[a-z])(?=[0-9])|(?<=[0-9])(?=[a-z])")
+
+
 def _normalize_project_label(s: str) -> str:
-    return _normalize_name(s)  # same rules: lowercase, punctuation/hyphen-stripped, whitespace-collapsed
+    # same base rules as _normalize_name: lowercase, punctuation/hyphen-
+    # stripped, whitespace-collapsed — plus the letter/digit boundary
+    # split above, applied AFTER lowercasing (regex is case-sensitive to
+    # a-z) but BEFORE the final whitespace-collapse handles it.
+    normalized = _normalize_name(s)
+    split = _LETTER_DIGIT_BOUNDARY_RE.sub(" ", normalized)
+    return re.sub(r"\s+", " ", split).strip()
 
 
 def _token_subset_matches(query: str, labels: List[str]) -> List[int]:

@@ -652,17 +652,35 @@ def validate_candidates(
         # UPLOAD command already explicitly resolved the target project;
         # a mark's job is identifying WHICH media, not re-proving which
         # project via informal WhatsApp shorthand ("Tapti Ai Test" for
-        # "Tapti AI App (Ananya)"). Four distinct cases, never guessed:
+        # "Tapti AI App (Ananya)"). FIVE distinct cases, never guessed:
         #   1. confidently matches the REQUESTED project -> accept.
         #   2. confidently matches a DIFFERENT real project -> reject,
         #      flagged as a mismatch (never silently redirected).
-        #   3. tied between multiple real projects -> reject, flagged as
-        #      ambiguous (never guessed).
-        #   4. matches nothing confidently at all -> defaults to the
-        #      admin-requested project (safe: this can only ever resolve
-        #      to the ONE project this whole scan is already scoped to,
-        #      never to a wrong one — cases 2 and 3 already excluded any
-        #      mark that confidently points elsewhere).
+        #   3. tied between multiple real projects (ProjectNameMatch.
+        #      ambiguous) -> reject, flagged as ambiguous (never guessed).
+        #   4. matches nothing confidently at all, AND nothing close
+        #      enough to suggest (no project/ambiguous/suggestions at
+        #      all) -> defaults to the admin-requested project (safe:
+        #      genuinely unrelated text, e.g. talent chatter — the only
+        #      case this fallback was ever meant to cover).
+        #   5. close candidates exist below the auto-resolve bar
+        #      (ProjectNameMatch.suggestions) -> reject, flagged as
+        #      ambiguous — root-cause fix (2026-09-20, real production
+        #      incident: "Limca Film1" vs "Limca Film 2", a near-
+        #      identical sibling project pair). Case 4's own comment
+        #      claimed "cases 2 and 3 already excluded any mark that
+        #      confidently points elsewhere" — false whenever the
+        #      matcher can neither confidently resolve NOR confidently
+        #      tie: `suggestions` is a THIRD, distinct outcome the old
+        #      code silently funneled into case 4, defaulting a mark
+        #      that WAS meaningfully close to a specific sibling project
+        #      to whatever project the CURRENT scan happened to be
+        #      scoped to. A confirmed production incident: Limca Film1's
+        #      own take mark was silently assigned to Limca Film 2
+        #      during Film 2's scan this way. Treated identically to
+        #      case 3 (tied) here — from the admin's point of view,
+        #      "close but not confident" and "confidently tied" both
+        #      mean the same thing: don't guess, ask.
         if match.project:
             if match.project["id"] != requested_project_id:
                 project_mismatch.append({
@@ -677,8 +695,15 @@ def validate_candidates(
                 "ambiguous_projects": match.ambiguous,
             })
             continue
-        # else: no confident match to anything -> default to the
-        # admin-requested project (case 4 above) -> accept below.
+        elif match.suggestions:
+            project_ambiguous.append({
+                **c, "media_role": parsed.media_role, "take_number": parsed.take_number,
+                "ambiguous_projects": match.suggestions,
+            })
+            continue
+        # else: no confident match AND no suggestions at all -> genuinely
+        # unrelated text -> default to the admin-requested project
+        # (case 4) -> accept below.
         valid_marks.append({
             **c, "media_role": parsed.media_role, "take_number": parsed.take_number,
         })

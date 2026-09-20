@@ -41,6 +41,8 @@ from services import media_assignment_worker as orch  # noqa: E402
 from tests.test_media_assignment import (  # noqa: E402
     GUNWANTI_LID, _mark, _cleanup, _seed_project, _seed_talent,
 )
+from agents.modules import submission_whatsapp_actions as swa  # noqa: E402
+from tests.test_submission_whatsapp_actions import _seed_full, _cleanup_full  # noqa: E402
 
 agent_modules.register_all()
 

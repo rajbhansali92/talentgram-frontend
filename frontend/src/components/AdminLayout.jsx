@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { clearAdminSession, getAdmin } from "@/lib/api";
 import Logo from "@/components/Logo";
 import NotificationBell from "@/components/NotificationBell";
+import ActionQueuePanel from "@/components/ActionQueuePanel";
 import {
   LayoutDashboard,
   Users,
@@ -582,6 +583,14 @@ export default function AdminLayout() {
         <Suspense fallback={null}>
           <ChangePasswordModal open={pwOpen} onClose={() => setPwOpen(false)} />
         </Suspense>
+
+        {/* Action Queue (2026-09-21) — deliberately mounted at the layout
+            level, a sibling of <Outlet />, never inside a page component:
+            it must keep polling and showing progress regardless of which
+            page (or none) the admin is currently viewing, since the
+            underlying backend action it reflects keeps running
+            independently of any open Submission Review page. */}
+        <ActionQueuePanel />
       </div>
     </LayoutErrorBoundary>
   );

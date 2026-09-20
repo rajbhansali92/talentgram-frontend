@@ -33,6 +33,7 @@ from routers import (
     portal,
     production_desk,
     projects,
+    send_upload_agent,
     submissions,
     talents,
     users,
@@ -162,6 +163,7 @@ app.include_router(webhooks.router)
 app.include_router(cloudflare_stream.router)
 app.include_router(imports.router)
 app.include_router(agents_whatsapp.router)
+app.include_router(send_upload_agent.router)
 app.include_router(casting_desk.router)
 app.include_router(ai_scout.router)
 app.include_router(simple_assistant_router.router)
@@ -666,7 +668,20 @@ async def on_startup():
         await _media_send.ensure_indexes()
         from agents.modules import mark_intent as _mark_intent
         await _mark_intent.ensure_indexes()
+        from agents.modules import submission_action_queue as _submission_action_queue
+        await _submission_action_queue.ensure_indexes()
         start_media_assignment_worker()
+
+        # Send and Upload Agent (Phase 1, additive/dormant) — see
+        # agents/modules/send_upload_staging.py's module docstring. No
+        # WhatsApp involvement yet; this only creates the new collections'
+        # indexes, matching the non-fatal convention every index block
+        # above already uses.
+        try:
+            from agents.modules import send_upload_staging as _send_upload_staging
+            await _send_upload_staging.ensure_indexes(db)
+        except Exception as _e:
+            logger.warning("Send and Upload Agent staging index creation failed (non-fatal): %s", _e)
 
         # Production Reminder Worker (Phase G, 2026-09-07) — see
         # services/production_reminder_worker.py's module docstring for

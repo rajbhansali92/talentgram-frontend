@@ -1,18 +1,30 @@
-"""Approve + Upload / Approve + Send — Submission Review actions (2026-09-20).
+"""Approve + Upload / Approve + Send — Submission Review actions
+(2026-09-20, redesigned 2026-09-21 to fix stale-media risk).
 
 Dispatches the EXISTING WhatsApp mark-based UPLOAD/SEND pipelines
 (media_assignment.create_scan_request / media_send.
-create_send_dispatch_from_approved_plan / casting_pipeline._preview_send_marks)
-directly from a Submission Review button click, instead of a WhatsApp
-UPLOAD/SEND chat command. This is deliberately NOT a parallel workflow:
-both actions insert the SAME scan_requests document shapes the WhatsApp-
-triggered flows already produce, so services/media_assignment_worker.py's
-existing background loop (claim, download, upload/send, completion
-report, auto-approve-on-success) handles every downstream step unchanged.
-See media_assignment.create_scan_request's submission_id/approve_on_success
-params and media_send.create_send_dispatch_from_approved_plan's own
-submission_id/content_hash pending_report_context wiring — both already
-reused by the WhatsApp-command paths; this module is the second caller.
+create_send_dispatch_from_approved_plan) directly from a Submission
+Review button click, instead of a WhatsApp UPLOAD/SEND chat command.
+This is deliberately NOT a parallel workflow: both actions insert the
+SAME scan_requests document shapes the WhatsApp-triggered flows already
+produce, so services/media_assignment_worker.py's existing background
+loop (claim, download, upload/send, completion report, auto-approve-on-
+success) handles every downstream step unchanged.
+
+2026-09-21 redesign: dispatch_approve_send no longer blocks synchronously
+on a single bounded live scan inside the HTTP handler (the root cause of
+the "Couldn't verify marked media" incident — a slow/cold WhatsApp Web
+scan threw away the ENTIRE attempt on timeout, with no durable record
+ever created). It now creates a durable agents.modules.
+submission_action_queue action IMMEDIATELY and returns — a dedicated
+background loop (services/media_assignment_worker.py's
+_send_action_verification_loop) performs the real, repeated, live scans,
+explicitly associating this ONE action with the mark_intent_ids its own
+freshest scan actually observed (never a historical talent/project-wide
+read — see submission_action_queue.py's own module docstring for the
+full architecture). dispatch_approve_upload is unaffected in its own
+dispatch mechanics (it never blocked on a preview) but is now ALSO
+wrapped in the same durable action record for queue visibility.
 
 Scope note: both actions require the submission to already be linked to a
 talent record (sub["talent_id"] already resolved, e.g. by a prior ordinary
@@ -23,12 +35,12 @@ submission with no linked talent yet must be approved normally first.
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from core import db
 from agents import registry
-from agents.modules import media_assignment, media_send
-from agents.modules.casting_pipeline import _preview_send_marks, _send_approval_overrides
+from agents.modules import media_assignment
+from agents.modules import submission_action_queue as queue
 
 
 def _now() -> datetime:
@@ -58,30 +70,25 @@ PRIMARY_WORKER_ID = os.environ.get("PRIMARY_WHATSAPP_WORKER_ID", registry.DEFAUL
 
 
 # A short-lived dispatch lock (Production-safety fix, 2026-09-20) — closes
-# a real race _find_in_flight_request alone cannot: dispatch_approve_send's
-# own pre-dispatch marked-media scan (_preview_send_marks) can legitimately
-# run for several seconds (up to the production SEND_PREVIEW_MAX_WAIT_SEC
-# bound) BEFORE any scan_requests doc exists at all, so two requests
-# arriving within that window (a rapid double-click, two browser tabs, or
-# an HTTP-level retry) would both see "nothing in flight" and both go on
-# to dispatch an independent SEND — a genuine duplicate casting-group
-# message, not just a duplicate scan. Keyed on Mongo's own `_id` (always
-# uniquely enforced, no extra index/migration needed): the SECOND insert
-# for the same (project, submission, action) raises a duplicate-key error
-# and loses the race atomically, unlike a find-then-insert check. Always
+# a race the queue's own find_in_flight_action alone cannot: two requests
+# arriving within the same instant (a rapid double-click, two browser
+# tabs, or an HTTP-level retry), both seeing "nothing in flight yet"
+# before either has finished creating its own action document, would
+# otherwise both create one. Keyed on Mongo's own `_id` (always uniquely
+# enforced, no extra index/migration needed): the SECOND insert for the
+# same (project, submission, action) raises a duplicate-key error and
+# loses the race atomically, unlike a find-then-insert check. Always
 # released in the caller's `finally`, success or failure, so a genuine
 # retry after a real failure is never blocked — only genuinely concurrent
 # dispatches are.
 ACTION_LOCKS_COLLECTION = "submission_whatsapp_action_locks"
 
 # Stale-lock safety net: this lock is only ever held for the duration of
-# ONE dispatch call (resolution + the bounded preview scan, at most tens
-# of seconds) — the real WhatsApp work happens later, asynchronously,
-# AFTER the lock is released. A lock older than this can only mean the
-# backend process died mid-dispatch (never a legitimately slow dispatch),
-# so it's treated as abandoned and cleared rather than blocking every
-# retry forever.
-LOCK_STALE_AFTER_S = 120
+# ONE dispatch call (fast DB-only resolution + action-document creation,
+# never the WhatsApp scan itself anymore) — a lock older than this can
+# only mean the backend process died mid-dispatch, so it's treated as
+# abandoned and cleared rather than blocking every retry forever.
+LOCK_STALE_AFTER_S = 30
 
 
 def _lock_id(project_id: str, submission_id: str, action: str) -> str:
@@ -95,11 +102,6 @@ async def _acquire_dispatch_lock(project_id: str, submission_id: str, action: st
         return True
     except Exception:  # DuplicateKeyError — another dispatch may hold it
         pass
-    # Someone holds it — but if it's stale (abandoned by a crashed
-    # process), reclaim it atomically: only a delete that actually
-    # matched the STALE doc may proceed, so a genuinely-live lock
-    # (refreshed/replaced by its real owner) is never stolen out from
-    # under it.
     stale_cutoff = _now() - timedelta(seconds=LOCK_STALE_AFTER_S)
     deleted = await db[ACTION_LOCKS_COLLECTION].delete_one({"_id": lock_id, "created_at": {"$lt": stale_cutoff}})
     if deleted.deleted_count == 0:
@@ -120,30 +122,6 @@ class SubmissionActionError(Exception):
         self.code = code
         self.message = message
         super().__init__(message)
-
-
-async def _find_in_flight_request(project_id: str, submission_id: str, mode: str) -> Optional[str]:
-    """Idempotency guard against double-clicking (Production requirement,
-    2026-09-20) — "PENDING/PROCESSING dedupe": a scan_requests doc for
-    this exact (project, submission) pair that hasn't reached the
-    terminal STATUS_FINISHED yet means an identical Approve + Upload/Send
-    is already in flight, so a second click reattaches to that SAME
-    request instead of dispatching a genuinely new one (which could
-    otherwise download/send/upload the same media twice). `mode` scopes
-    the check to "scan"/"download" (UPLOAD's own mode sequence) or
-    "send" (SEND's), since an in-flight UPLOAD should never block a
-    separate SEND for the same submission, and vice versa."""
-    modes = ["scan", "download"] if mode == "upload" else ["send"]
-    doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
-        {
-            "project_id": project_id, "submission_id": submission_id,
-            "mode": {"$in": modes},
-            "status": {"$ne": media_assignment.STATUS_FINISHED},
-        },
-        {"_id": 0, "id": 1},
-        sort=[("created_at", -1)],
-    )
-    return doc["id"] if doc else None
 
 
 async def _resolve_common(project_id: str, submission_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], str, str]:
@@ -173,36 +151,32 @@ async def _resolve_common(project_id: str, submission_id: str) -> Tuple[Dict[str
     return sub, project, talent_label, group_name
 
 
-async def dispatch_approve_upload(project_id: str, submission_id: str, *, worker_id: Optional[str] = None) -> str:
+async def dispatch_approve_upload(project_id: str, submission_id: str, *, worker_id: Optional[str] = None) -> Dict[str, Any]:
     """Identify submission -> talent -> project -> marked WhatsApp media,
     then dispatch the EXISTING scan/download/upload pipeline
     (media_assignment.create_scan_request), with approve_on_success=True
     so services/media_assignment_worker.py auto-approves this exact
-    submission once every download this run genuinely succeeds (mirrors
-    SEND's own existing auto-approve hook). Returns the scan_requests id
-    for status polling. Raises SubmissionActionError on any pre-dispatch
-    validation failure — nothing is dispatched in that case.
+    submission once every download this run genuinely succeeds. Wrapped
+    in a durable submission_action_queue action for queue visibility —
+    the underlying dispatch mechanics are completely unchanged (this
+    never blocked on a preview scan; it dispatches immediately and the
+    worker's own existing scan+download lifecycle tracks it durably).
+    Returns the action document. Raises SubmissionActionError on any
+    pre-dispatch validation failure — nothing is dispatched in that case.
 
     `worker_id` (worker-affinity pre-deployment review, 2026-09-20): the
     caller (routers/submissions.py's HTTP endpoint) never passes one — an
     explicit override exists only for tests/future callers. A missing
-    worker_id resolves to PRIMARY_WORKER_ID (the one authoritative,
-    centrally-documented policy constant this module defines) BEFORE the
-    request ever reaches create_scan_request, so a NEW job's worker_id is
-    always a concrete, explicitly-assigned identity by the time it's
-    persisted — the None/absent-means-legacy-Worker-1 compatibility rule
-    is claim-time-only and belongs to pre-existing documents, never to a
-    job being created right now."""
+    worker_id resolves to PRIMARY_WORKER_ID BEFORE the request ever
+    reaches create_scan_request, so a NEW job's worker_id is always a
+    concrete, explicitly-assigned identity by the time it's persisted."""
     worker_id = worker_id or PRIMARY_WORKER_ID
-    in_flight = await _find_in_flight_request(project_id, submission_id, "upload")
+    in_flight = await queue.find_in_flight_action(project_id, submission_id, queue.ACTION_TYPE_UPLOAD)
     if in_flight:
         return in_flight
 
     if not await _acquire_dispatch_lock(project_id, submission_id, "upload"):
-        # Someone else is dispatching RIGHT NOW — their scan_requests doc
-        # should appear within moments; check once more before telling the
-        # caller to retry, rather than silently no-op'ing.
-        in_flight = await _find_in_flight_request(project_id, submission_id, "upload")
+        in_flight = await queue.find_in_flight_action(project_id, submission_id, queue.ACTION_TYPE_UPLOAD)
         if in_flight:
             return in_flight
         raise SubmissionActionError(
@@ -219,51 +193,61 @@ async def dispatch_approve_upload(project_id: str, submission_id: str, *, worker
                 "The WhatsApp agent identity is not configured yet — contact an admin.",
             )
 
-        return await media_assignment.create_scan_request(
+        action = await queue.create_action(
+            action_type=queue.ACTION_TYPE_UPLOAD, project_id=project_id, talent_id=sub["talent_id"],
+            talent_label=talent_label, project_label=project_label, submission_id=submission_id,
+            worker_id=worker_id, created_by="admin", source_group_name=group_name,
+        )
+        req_id = await media_assignment.create_scan_request(
             talent_id=sub["talent_id"], talent_label=talent_label,
             project_id=project_id, project_label=project_label,
             group_name=group_name, worker_id=worker_id,
             submission_id=submission_id, approve_on_success=True,
         )
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": req_id}, {"$set": {"action_id": action["id"]}},
+        )
+        # UPLOAD's own worker-side scan+download lifecycle is the SAME
+        # unchanged mechanism whether or not this queue exists — treat
+        # dispatch as immediately "media resolution handed off"; the
+        # fine-grained DOWNLOADING/UPLOADING states are then derived
+        # read-only from the linked document (see derive_display_state).
+        await db[queue.ACTIONS_COLLECTION].update_one(
+            {"id": action["id"]},
+            {"$set": {"state": queue.STATE_MEDIA_RESOLVED, "updated_at": _now()}},
+        )
+        await queue.mark_dispatched(action["id"], req_id)
+        return await queue.get_action(action["id"])
     finally:
         await _release_dispatch_lock(project_id, submission_id, "upload")
 
 
 async def dispatch_approve_send(
     project_id: str, submission_id: str, *, worker_id: Optional[str] = None, approved_by: str = "admin",
-) -> str:
-    """Resolve the project's configured WhatsApp casting group, identify
-    the exact marked media already resolved for this talent/project (the
-    SAME bounded preview scan the WhatsApp SEND confirmation card uses —
-    casting_pipeline._preview_send_marks), build the EXISTING SEND form
-    message, then dispatch DIRECTLY from that already-resolved plan
-    (media_send.create_send_dispatch_from_approved_plan) — never a native
-    WhatsApp Forward, never a second live re-scan at execution time.
-    Carries submission_id through so the worker's existing SEND
-    completion branch auto-approves this exact submission only once
-    every media item + form + the ☑️ completion marker have genuinely
-    succeeded, then sends the existing talent acknowledgement. Returns
-    the scan_requests id for status polling. Raises SubmissionActionError
-    on any pre-dispatch validation failure — nothing is sent in that
-    case.
+) -> Dict[str, Any]:
+    """Resolve the project's configured WhatsApp casting group, then
+    create a durable submission_action_queue action and return
+    IMMEDIATELY — no live WhatsApp scan happens inline in this call
+    anymore. The background verification loop (services/
+    media_assignment_worker.py's _send_action_verification_loop) performs
+    the real scans and, once THIS action's own freshest scan is fully
+    resolved, dispatches DIRECTLY from that already-resolved plan
+    (media_send.create_send_dispatch_from_approved_plan, via
+    submission_action_queue._dispatch_send) — never a native WhatsApp
+    Forward, never a guess. Returns the action document (state QUEUED)
+    for status polling / the Action Queue panel. Raises
+    SubmissionActionError on any pre-dispatch (fast, DB-only)
+    validation failure — nothing is queued in that case.
 
-    `worker_id` (worker-affinity pre-deployment review, 2026-09-20): same
-    resolution rule as dispatch_approve_upload's own — see its docstring.
-    The real caller (routers/submissions.py) never passes one; it always
-    resolves to PRIMARY_WORKER_ID before create_send_dispatch_from_approved_plan
-    is ever called, so the persisted document's worker_id is never None."""
+    `worker_id`: same resolution rule as dispatch_approve_upload's own —
+    see its docstring."""
     worker_id = worker_id or PRIMARY_WORKER_ID
-    in_flight = await _find_in_flight_request(project_id, submission_id, "send")
+    in_flight = await queue.find_in_flight_action(project_id, submission_id, queue.ACTION_TYPE_SEND)
     if in_flight:
         return in_flight
 
-    # Acquired BEFORE the preview scan below (not just before the eventual
-    # scan_requests insert) — that scan can legitimately run for several
-    # seconds with no scan_requests doc in existence yet, which is exactly
-    # the window _find_in_flight_request alone cannot cover. See the lock's
-    # own module-level docstring for the full race this closes.
     if not await _acquire_dispatch_lock(project_id, submission_id, "send"):
-        in_flight = await _find_in_flight_request(project_id, submission_id, "send")
+        in_flight = await queue.find_in_flight_action(project_id, submission_id, queue.ACTION_TYPE_SEND)
         if in_flight:
             return in_flight
         raise SubmissionActionError(
@@ -279,94 +263,86 @@ async def dispatch_approve_send(
                 f"{project_label} has no WhatsApp casting group configured yet — add one in Edit Project first.",
             )
 
-        talent_id = sub["talent_id"]
-        sources: List[Tuple[str, str]] = [("group", group_name)]
-        assignments, error = await _preview_send_marks(
-            talent_id=talent_id, talent_label=talent_label,
-            project_id=project_id, project_label=project_label,
-            destination_group=destination_group, sources=sources,
+        action = await queue.create_action(
+            action_type=queue.ACTION_TYPE_SEND, project_id=project_id, talent_id=sub["talent_id"],
+            talent_label=talent_label, project_label=project_label, submission_id=submission_id,
+            worker_id=worker_id, created_by=approved_by,
+            destination_group=destination_group, source_group_name=group_name,
         )
-        if assignments is None:
-            raise SubmissionActionError(
-                "marked_media_unresolved",
-                error or "Couldn't verify marked media for this talent/project right now — try again shortly.",
-            )
-        if not assignments:
-            raise SubmissionActionError(
-                "no_marked_media",
-                f"No marked WhatsApp media found for {talent_label} / {project_label} yet — "
-                "mark the audition takes/introduction on WhatsApp first.",
-            )
-
-        existing = await media_send.get_send_approval(talent_id, project_id, destination_group)
-        overrides = _send_approval_overrides(existing)
-        form_built = media_send.build_form_send_message(sub, project, talent_label, project_label, overrides)
-
-        await media_send.save_send_approval_draft(
-            talent_id=talent_id, project_id=project_id, destination_group=destination_group,
-            submission_id=submission_id, overrides=overrides,
-            message=form_built["message"], content_hash=form_built["content_hash"],
-        )
-        await media_send.approve_send_form(talent_id, project_id, destination_group, approved_by=approved_by)
-
-        form_message: Optional[str] = None
-        already_form = await media_send.already_sent_form(talent_id, project_id, destination_group, form_built["content_hash"])
-        if not already_form:
-            await media_send.record_form_send(
-                talent_id=talent_id, project_id=project_id, destination_group=destination_group,
-                submission_id=submission_id, content_hash=form_built["content_hash"], created_by=approved_by,
-            )
-            form_message = form_built["message"]
-
-        return await media_send.create_send_dispatch_from_approved_plan(
-            talent_id=talent_id, project_id=project_id, talent_label=talent_label, project_label=project_label,
-            destination_group=destination_group, assignments=assignments,
-            default_source_type="group", default_group_name=group_name,
-            form_message=form_message, submission_id=submission_id, content_hash=form_built["content_hash"],
-            created_by=approved_by, worker_id=worker_id,
-        )
+        return action
     finally:
         await _release_dispatch_lock(project_id, submission_id, "send")
 
 
-async def get_action_status(request_id: str, project_id: str, submission_id: str) -> Dict[str, Any]:
-    """Frontend-friendly status for polling a dispatched request. `done`
-    is True only once the worker has fully finished (success or failure)
-    — mirrors STATUS_FINISHED, the SAME terminal status _finish() always
-    writes for both UPLOAD and SEND, success or failure alike (failures
-    are reported in `report`, never a separate status; the scan_requests
-    doc itself carries no separate structured success flag).
+async def retry_action(action_id: str, project_id: str, submission_id: str) -> Dict[str, Any]:
+    """Explicit admin Retry (Phase 8 #14) — only valid for a FAILED,
+    retryable action belonging to this exact (project, submission).
+    For SEND, resets the action back to QUEUED; the background
+    verification loop picks it up on its own next cycle. For UPLOAD,
+    resets it AND immediately re-dispatches create_scan_request again
+    (mirroring the original dispatch — UPLOAD has no background
+    verification loop of its own to pick it back up)."""
+    action = await queue.get_action(action_id)
+    if not action or action["project_id"] != project_id or action["submission_id"] != submission_id:
+        raise SubmissionActionError("action_not_found", "Action not found.")
+    action = await queue.retry_action(action_id, created_by="admin")
 
-    `ok` is deliberately NOT inferred by sniffing `report`'s text (fragile
-    — the exact wording is free-form worker-report prose, not a contract).
-    It's also deliberately NOT the submission's own `decision` field alone
-    — that could already read "approved" from a completely unrelated
-    earlier action, which would false-positive a run that actually failed
-    this time. Instead `ok` reads `operation_ok`, a plain field services/
-    media_assignment_worker.py sets on THIS EXACT scan_request doc only
-    inside the same success-gated block that calls routers.submissions.
-    set_decision (zero failed items, and for SEND also a genuinely-
-    successful ☑️ marker) — see that file's SEND and UPLOAD completion
-    branches.
+    if action["action_type"] == queue.ACTION_TYPE_UPLOAD:
+        sub, project, talent_label, group_name = await _resolve_common(project_id, submission_id)
+        project_label = project.get("brand_name") or "(untitled project)"
+        req_id = await media_assignment.create_scan_request(
+            talent_id=sub["talent_id"], talent_label=talent_label,
+            project_id=project_id, project_label=project_label,
+            group_name=group_name, worker_id=action["worker_id"],
+            submission_id=submission_id, approve_on_success=True,
+        )
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": req_id}, {"$set": {"action_id": action_id}},
+        )
+        await db[queue.ACTIONS_COLLECTION].update_one(
+            {"id": action_id}, {"$set": {"state": queue.STATE_MEDIA_RESOLVED, "updated_at": _now()}},
+        )
+        await queue.mark_dispatched(action_id, req_id)
+        action = await queue.get_action(action_id)
 
-    `decision` (Production-safety fix, 2026-09-20) is a SEPARATE, freshly
-    read field: the real WhatsApp media operation succeeding
-    (operation_ok=True) and the submission's decision actually having
-    flipped to "approved" are two different writes — set_decision is
-    called in a try/except that deliberately never rolls the media back
-    on failure (see media_assignment_worker.py's own comment), so a rare
-    set_decision failure would otherwise leave operation_ok=True while
-    the submission is still "pending". The caller must show the REAL
-    decision it reads here, never assume "ok implies approved"."""
-    doc = await media_assignment.get_scan_request(request_id)
-    if not doc or doc.get("project_id") != project_id or doc.get("submission_id") != submission_id:
+    return action
+
+
+async def list_queue(*, limit: int = 100) -> Dict[str, Any]:
+    """The Action Queue panel's own feed — every non-terminal action plus
+    recently-terminal ones, independent of any single Submission Review
+    page (Phase 5's own explicit requirement)."""
+    actions = await queue.list_actions(limit=limit)
+    return {"actions": actions}
+
+
+async def get_action_status(action_id: str, project_id: str, submission_id: str) -> Dict[str, Any]:
+    """Frontend-friendly status for polling a dispatched action. `done`
+    is True only once the action has reached a terminal state (COMPLETED
+    or FAILED). `ok` is exactly `state == COMPLETED` — the action's own
+    state IS the authoritative success/failure signal now (previously
+    derived by sniffing a scan_requests document's `operation_ok` field;
+    that derivation still happens, just one layer down, inside
+    submission_action_queue.sync_from_finished_request, which is the
+    ONLY thing allowed to move an action to COMPLETED).
+
+    `decision` (Production-safety fix, 2026-09-20, preserved unchanged)
+    is a SEPARATE, freshly read field: the real WhatsApp media operation
+    succeeding and the submission's decision actually having flipped to
+    "approved" are two different writes — the caller must show the REAL
+    decision read here, never assume "ok implies approved"."""
+    action = await queue.get_action(action_id)
+    if not action or action.get("project_id") != project_id or action.get("submission_id") != submission_id:
         return {"found": False, "done": True, "status": "not_found", "report": None, "ok": False, "decision": None}
-    status = doc.get("status")
-    done = status == media_assignment.STATUS_FINISHED
-    report = doc.get("report")
-    ok: Optional[bool] = bool(doc.get("operation_ok")) if done else None
+    state = action.get("state")
+    done = state in (queue.STATE_COMPLETED, queue.STATE_FAILED)
     decision = None
     if done:
         sub = await db.submissions.find_one({"id": submission_id, "project_id": project_id}, {"_id": 0, "decision": 1})
         decision = sub.get("decision") if sub else None
-    return {"found": True, "done": done, "status": status, "report": report, "ok": ok, "decision": decision}
+    return {
+        "found": True, "done": done, "status": state, "display_state": await queue.derive_display_state(action),
+        "report": action.get("report"), "ok": (state == queue.STATE_COMPLETED) if done else None,
+        "decision": decision, "error_code": action.get("error_code"), "error_message": action.get("error_message"),
+        "retryable": action.get("retryable", False), "action": action,
+    }

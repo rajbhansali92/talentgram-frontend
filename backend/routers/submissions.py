@@ -3092,17 +3092,24 @@ async def set_decision(
     return {"ok": True}
 
 
-# Approve + Upload / Approve + Send (2026-09-20) — two independent,
-# additive Submission Review actions alongside the existing Reject/Hold/
-# Approve above. Neither changes set_decision's own behavior; each
-# dispatches the EXISTING WhatsApp mark-based UPLOAD/SEND pipeline
-# (agents.modules.submission_whatsapp_actions, itself a thin caller of
-# media_assignment.create_scan_request / media_send.
-# create_send_dispatch_from_approved_plan / casting_pipeline.
-# _preview_send_marks — no new WhatsApp workflow). The submission is only
-# actually approved once services/media_assignment_worker.py's existing
-# background loop confirms the real WhatsApp operation fully succeeded —
-# never optimistically here.
+# Approve + Upload / Approve + Send (2026-09-20, redesigned 2026-09-21) —
+# two independent, additive Submission Review actions alongside the
+# existing Reject/Hold/Approve above. Neither changes set_decision's own
+# behavior; each dispatches the EXISTING WhatsApp mark-based UPLOAD/SEND
+# pipeline (agents.modules.submission_whatsapp_actions, itself a thin
+# caller of media_assignment.create_scan_request / media_send.
+# create_send_dispatch_from_approved_plan — no new WhatsApp workflow).
+# The submission is only actually approved once services/
+# media_assignment_worker.py's existing background loop confirms the
+# real WhatsApp operation fully succeeded — never optimistically here.
+#
+# 2026-09-21: both now return the durable submission_action_queue action
+# document (never a bare scan_requests id) — Approve + Send in
+# particular no longer blocks this request on a live WhatsApp scan at
+# all; it returns immediately with the action in QUEUED state and a
+# background loop takes it from there (see submission_action_queue.py's
+# own module docstring for the full architecture and the incident it
+# replaces).
 @router.post("/projects/{pid}/submissions/{sid}/approve-upload")
 async def approve_and_upload(
     pid: str,
@@ -3110,10 +3117,10 @@ async def approve_and_upload(
     admin: dict = Depends(current_team_or_admin),
 ):
     try:
-        request_id = await submission_whatsapp_actions.dispatch_approve_upload(pid, sid)
+        action = await submission_whatsapp_actions.dispatch_approve_upload(pid, sid)
     except submission_whatsapp_actions.SubmissionActionError as exc:
         raise HTTPException(400, exc.message)
-    return {"ok": True, "request_id": request_id}
+    return {"ok": True, "request_id": action["id"], "action_id": action["id"], "action": action}
 
 
 @router.post("/projects/{pid}/submissions/{sid}/approve-send")
@@ -3123,12 +3130,12 @@ async def approve_and_send(
     admin: dict = Depends(current_team_or_admin),
 ):
     try:
-        request_id = await submission_whatsapp_actions.dispatch_approve_send(
+        action = await submission_whatsapp_actions.dispatch_approve_send(
             pid, sid, approved_by=admin.get("email") or admin.get("id") or "admin",
         )
     except submission_whatsapp_actions.SubmissionActionError as exc:
         raise HTTPException(400, exc.message)
-    return {"ok": True, "request_id": request_id}
+    return {"ok": True, "request_id": action["id"], "action_id": action["id"], "action": action}
 
 
 @router.get("/projects/{pid}/submissions/{sid}/whatsapp-action-status/{request_id}")
@@ -3139,6 +3146,31 @@ async def get_whatsapp_action_status(
     admin: dict = Depends(current_team_or_admin),
 ):
     return await submission_whatsapp_actions.get_action_status(request_id, pid, sid)
+
+
+@router.post("/projects/{pid}/submissions/{sid}/whatsapp-action/{action_id}/retry")
+async def retry_whatsapp_action(
+    pid: str,
+    sid: str,
+    action_id: str,
+    admin: dict = Depends(current_team_or_admin),
+):
+    try:
+        action = await submission_whatsapp_actions.retry_action(action_id, pid, sid)
+    except submission_whatsapp_actions.SubmissionActionError as exc:
+        raise HTTPException(400, exc.message)
+    return {"ok": True, "action": action}
+
+
+# Action Queue panel feed (Phase 5, 2026-09-21) — deliberately a GLOBAL,
+# project/submission-independent endpoint: the queue must stay visible
+# and keep updating regardless of which (or whether any) Submission
+# Review page is currently open, per its own explicit requirement.
+@router.get("/submission-actions")
+async def list_submission_actions(
+    admin: dict = Depends(current_team_or_admin),
+):
+    return await submission_whatsapp_actions.list_queue()
 
 
 @router.get("/projects/{pid}/submissions/{sid}")

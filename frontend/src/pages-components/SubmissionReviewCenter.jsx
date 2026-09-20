@@ -1447,16 +1447,30 @@ export default function SubmissionReviewCenter() {
     // approved in this UI once the backend confirms the real WhatsApp
     // operation succeeded — a failure never advances/approves anything,
     // and the WhatsApp report text is shown so the recruiter knows why.
+    // 2026-09-21 (Submission Action Queue) — this used to block the button
+    // for as long as the underlying WhatsApp operation took (sometimes
+    // minutes), polling THIS component's own state in a loop that died
+    // the moment the admin navigated away or closed the page — the exact
+    // "the human should not have to remain on the page" problem the new
+    // durable, backend-tracked Action Queue (ActionQueuePanel, mounted
+    // once at the AdminLayout level, independent of this page) now
+    // solves. dispatch_approve_upload/dispatch_approve_send both return
+    // IMMEDIATELY with a durable action record — this handler's only job
+    // now is to fire that dispatch and hand the rest off to the queue
+    // panel, so the recruiter can click Approve + Upload/Send and move on
+    // to the next talent right away.
     const runWhatsappAction = useCallback(async (action) => {
         if (!selectedId || saving || (whatsappAction && whatsappAction.submissionId === selectedId)) return;
         const actedId = selectedId;
         const actedProjectId = id;
-        // Live check, NOT `actedId === selectedId` — that closure-captured
-        // `selectedId` is fixed at the value it had when THIS async call
-        // started, so it can never detect a navigation that happened
-        // while the request was in flight (see currentSelectionRef's own
-        // comment above). Reading the ref instead always reflects what's
-        // actually on screen at the moment the response arrives.
+        // Same stale-async-error guard the OLD long-polling version of
+        // this handler had (Production fix, 2026-09-20) — still needed:
+        // even though dispatch itself is now a single fast call instead
+        // of a multi-minute poll loop, it's still an async network
+        // request the admin can outrun by navigating to a different
+        // submission before it resolves. Reads the LIVE ref, never the
+        // closure-captured selectedId, so it reflects what's actually on
+        // screen at the moment the response lands.
         const isStillCurrent = () => (
             currentSelectionRef.current.submissionId === actedId
             && currentSelectionRef.current.projectId === actedProjectId
@@ -1466,50 +1480,8 @@ export default function SubmissionReviewCenter() {
         setWhatsappAction({ submissionId: actedId, action });
         setWhatsappActionError("");
         try {
-            const { data } = await adminApi.post(`/projects/${id}/submissions/${actedId}/${endpoint}`);
-            const requestId = data.request_id;
-            const POLL_MS = 3000;
-            // Real video downloads can take minutes — bound the poll at 10
-            // minutes so a genuinely stuck run doesn't spin the button
-            // forever; the backend operation itself keeps running/retrying
-            // independently of this poll giving up.
-            const deadline = Date.now() + 10 * 60 * 1000;
-            for (;;) {
-                await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-                const { data: status } = await adminApi.get(
-                    `/projects/${id}/submissions/${actedId}/whatsapp-action-status/${requestId}`
-                );
-                if (status.done) {
-                    // `status.decision` is a fresh read of the REAL submission
-                    // document, never assumed from `ok` — the WhatsApp media
-                    // operation succeeding and the decision actually flipping
-                    // to "approved" are two separate writes server-side (the
-                    // approval write can fail independently, in which case
-                    // the media still went out but the submission stays
-                    // "pending" — the UI must reflect that truthfully, not
-                    // claim "approved" because the send/upload itself worked).
-                    if (status.ok && status.decision === "approved") {
-                        toast.success(`${verb} complete — submission approved`);
-                        setSubmissions((prev) => prev.map((s) => (s.id === actedId ? { ...s, decision: "approved" } : s)));
-                        setDetail((prev) => (prev && prev.id === actedId ? { ...prev, decision: "approved" } : prev));
-                    } else if (status.ok) {
-                        toast.error(`${verb} succeeded, but approving the submission failed — please approve it manually.`);
-                        if (isStillCurrent()) {
-                            setWhatsappActionError("The WhatsApp media operation succeeded, but the submission could not be auto-approved. Approve it manually.");
-                        }
-                    } else {
-                        toast.error(`${verb} did not complete successfully — submission was NOT approved.`);
-                        if (isStillCurrent()) {
-                            setWhatsappActionError(status.report || "The WhatsApp operation did not complete successfully.");
-                        }
-                    }
-                    return;
-                }
-                if (Date.now() > deadline) {
-                    toast.error(`${verb} is taking longer than expected — it may still complete; check back shortly.`);
-                    return;
-                }
-            }
+            await adminApi.post(`/projects/${id}/submissions/${actedId}/${endpoint}`);
+            toast.success(`${verb} queued — track its progress in the Action Queue (bottom right). You can keep reviewing.`);
         } catch (e) {
             const msg = e?.response?.data?.detail || `Failed to start ${verb.toLowerCase()}.`;
             toast.error(msg);
@@ -1520,6 +1492,35 @@ export default function SubmissionReviewCenter() {
             setWhatsappAction((prev) => (prev && prev.submissionId === actedId ? null : prev));
         }
     }, [selectedId, saving, whatsappAction, id]);
+
+    // Cross-component sync: ActionQueuePanel (mounted globally, outside
+    // this page) dispatches this event the moment ANY action it's
+    // tracking reaches a terminal state — if it's for the submission
+    // currently open here, refresh this page's own view of it so a
+    // recruiter who stayed on the page sees the real outcome without
+    // needing to navigate away and back.
+    useEffect(() => {
+        const onActionCompleted = (e) => {
+            const { submissionId, projectId, ok } = e.detail || {};
+            if (!submissionId || projectId !== id) return;
+            // Re-fetch from the server rather than guessing the new
+            // decision client-side — mirrors the OLD inline-poll code's
+            // own reasoning: "ok" (the WhatsApp media operation
+            // succeeding) and the submission's decision actually
+            // flipping to "approved" are two separate server writes, so
+            // only a fresh read is trustworthy.
+            loadSubmissions();
+            if (currentSelectionRef.current.submissionId === submissionId) {
+                if (ok) {
+                    toast.success("WhatsApp operation complete for this submission — refreshing.");
+                } else {
+                    toast.error("A queued WhatsApp operation for this submission did not complete successfully — check the Action Queue for details.");
+                }
+            }
+        };
+        window.addEventListener("submission-action-completed", onActionCompleted);
+        return () => window.removeEventListener("submission-action-completed", onActionCompleted);
+    }, [id, loadSubmissions]);
 
     // Media grouping helper
     const getCuratedMedia = (categoryGroup) => {

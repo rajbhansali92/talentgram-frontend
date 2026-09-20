@@ -217,6 +217,8 @@ async def get_or_create_mark_intent(
         "resolved_source_message_id": None,
         "resolved_source_thumbnail_hash": None,
         "resolved_source_media_type": None,
+        "resolved_album_tile_index": None,
+        "resolved_is_album_tile": False,
         "resolved_at": None,
         "resolution_method": None,
         "created_by_worker_id": worker_id,
@@ -247,10 +249,24 @@ async def apply_resolution(
     candidate_source_media_type: Optional[str],
     resolution_method: str,
     worker_id: str,
+    candidate_album_tile_index: Optional[int] = None,
+    candidate_is_album_tile: bool = False,
 ) -> Dict[str, Any]:
     """Write-once lock (Phase 2/17). `candidate_source_message_id` must be
     a real, non-None resolution this attempt actually found — a failed
     attempt never calls this, it calls record_unresolved_attempt instead.
+
+    `candidate_album_tile_index`/`candidate_is_album_tile` (SEND-preview
+    resolved-reuse fix, 2026-09-20): persisted alongside the source
+    identity so a LATER caller building a send-ready assignment purely
+    from this locked intent (get_ready_assignments — no fresh scan
+    candidate available at all) can still address the exact album tile
+    the worker's own download path requires (whatsapp-worker/mark_scan.py
+    defaults a missing album_tile_index to tile 0 for videos, and skips
+    the tile-specific photo path entirely when it's absent — either would
+    silently risk the WRONG media without this). Never used to pick
+    between competing tiles; still exactly the value the original
+    resolving scan observed on the raw candidate.
 
     Returns the CURRENT, authoritative mark_intent document after the
     operation — callers MUST use ITS resolved_source_message_id/hash for
@@ -268,6 +284,8 @@ async def apply_resolution(
                 "resolved_source_message_id": candidate_source_message_id,
                 "resolved_source_thumbnail_hash": candidate_source_thumbnail_hash,
                 "resolved_source_media_type": candidate_source_media_type,
+                "resolved_album_tile_index": candidate_album_tile_index,
+                "resolved_is_album_tile": bool(candidate_is_album_tile),
                 "resolved_at": now,
                 "resolution_method": resolution_method,
                 "status": STATUS_RESOLVED,
@@ -483,6 +501,8 @@ async def observe_candidates(
                 candidate_source_media_type=c.get("source_media_type"),
                 resolution_method=RESOLUTION_METHOD_PRIMARY,
                 worker_id=worker_id,
+                candidate_album_tile_index=c.get("album_tile_index"),
+                candidate_is_album_tile=bool(c.get("is_album_tile")),
             )
 
 
@@ -544,12 +564,16 @@ async def enrich_outcome_with_mark_intents(
             candidate_source_media_type=m.get("source_media_type"),
             resolution_method=RESOLUTION_METHOD_PRIMARY,
             worker_id=worker_id,
+            candidate_album_tile_index=m.get("album_tile_index"),
+            candidate_is_album_tile=bool(m.get("is_album_tile")),
         )
         locked = {
             **m,
             "resolved_source_message_id": result["resolved_source_message_id"],
             "quoted_thumbnail_hash": result.get("resolved_source_thumbnail_hash") or m.get("quoted_thumbnail_hash"),
             "source_media_type": result.get("resolved_source_media_type") or m.get("source_media_type"),
+            "album_tile_index": result.get("resolved_album_tile_index") if result.get("resolved_album_tile_index") is not None else m.get("album_tile_index"),
+            "is_album_tile": result.get("resolved_is_album_tile") if result.get("resolved_is_album_tile") is not None else m.get("is_album_tile"),
             "mark_intent_id": intent["id"],
         }
         locked_assignments.append(locked)
@@ -582,6 +606,8 @@ async def enrich_outcome_with_mark_intents(
                 "resolved_source_message_id": intent["resolved_source_message_id"],
                 "quoted_thumbnail_hash": intent.get("resolved_source_thumbnail_hash") or m.get("quoted_thumbnail_hash"),
                 "source_media_type": intent.get("resolved_source_media_type") or m.get("source_media_type"),
+                "album_tile_index": intent.get("resolved_album_tile_index") if intent.get("resolved_album_tile_index") is not None else m.get("album_tile_index"),
+                "is_album_tile": intent.get("resolved_is_album_tile") if intent.get("resolved_is_album_tile") is not None else m.get("is_album_tile"),
                 "mark_intent_id": intent["id"],
             }
             locked_assignments.append(promoted)
@@ -608,3 +634,33 @@ async def enrich_outcome_with_mark_intents(
         assignments=locked_assignments,
         unresolved=still_unresolved,
     )
+
+
+async def get_by_ids(mark_intent_ids: List[str]) -> List[Dict[str, Any]]:
+    """Action-scoped lookup (2026-09-21 architecture review) — the SAFE
+    replacement for the removed `get_ready_assignments(talent_id,
+    project_id)` shortcut, which was proven unsafe: a bare (talent_id,
+    project_id) read cannot distinguish a resolved-but-superseded
+    MarkIntent from a still-current one, because a brand-new re-MARK on
+    WhatsApp is invisible to mark_intents until SOME scan's raw
+    candidates actually include it — there is categorically no
+    "as-of-now this is still the latest mark" signal available from a
+    historical database read alone.
+
+    The correct identity boundary is the ACTION, not the (talent,
+    project) pair — see submission_action_queue.py. An action explicitly
+    records which mark_intent_ids belong to it, populated ONLY from that
+    action's own live scan results (mark_intent.observe_candidates /
+    enrich_outcome_with_mark_intents, called on THIS action's freshest
+    scan, exactly as before — completely unchanged). This function does
+    nothing more than fetch those SPECIFIC, already-decided documents by
+    id — it performs no scan, no talent/project-wide query, no slot
+    matching, and cannot select between competing candidates; the
+    caller already knows exactly which ids it wants."""
+    if not mark_intent_ids:
+        return []
+    docs = await db[MARK_INTENTS_COLLECTION].find(
+        {"id": {"$in": list(mark_intent_ids)}},
+    ).to_list(len(mark_intent_ids))
+    by_id = {d["id"]: d for d in docs}
+    return [by_id[i] for i in mark_intent_ids if i in by_id]

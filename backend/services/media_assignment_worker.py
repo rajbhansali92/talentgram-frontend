@@ -128,6 +128,18 @@ async def _finish(request_id: str, report_text: str, worker_id: str = "default")
         {"id": request_id},
         {"$set": {"status": media_assignment.STATUS_FINISHED, "report": report_text, "completed_at": _now()}},
     )
+    # Submission Action Queue sync (2026-09-21) — additive: does nothing
+    # unless this exact document carries an `action_id` (only ones the
+    # queue itself dispatched ever do). `operation_ok` is already on the
+    # document by now for a success (set by the caller's own success-gated
+    # block BEFORE it calls this function) — re-read the fresh doc rather
+    # than guessing from this function's own arguments.
+    finished_doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
+        {"id": request_id}, {"_id": 0, "action_id": 1, "operation_ok": 1, "report": 1},
+    )
+    if finished_doc and finished_doc.get("action_id"):
+        from agents.modules import submission_action_queue
+        await submission_action_queue.sync_from_finished_request(finished_doc)
     await _send_report(report_text, worker_id=worker_id)
 
 
@@ -1277,7 +1289,57 @@ async def _worker_loop() -> None:
         await asyncio.sleep(POLL_SEC if not did_work else 0.2)
 
 
+# Submission Action Queue — SEND verification loop (2026-09-21).
+#
+# Deliberately a SEPARATE persistent task from _worker_loop above, never
+# a new step folded into it: one SEND verification attempt can
+# legitimately block for up to ~20-22s waiting out a genuinely slow/cold
+# WhatsApp Web scan (casting_pipeline._scan_and_validate_multi_source's
+# own existing, unchanged bound) — running that inline in _worker_loop
+# would stall EVERY UPLOAD download/upload-completion poll for the same
+# 20-22s, a real throughput regression to the proven, unrelated pipeline
+# _worker_loop already drives. Kept fully independent instead: this loop
+# only ever touches agents.modules.submission_action_queue's own
+# collection plus (via _scan_and_validate_multi_source, completely
+# unchanged) the existing preview-scan/mark_intent machinery; it never
+# claims or writes a real UPLOAD/download/send-execution scan_requests
+# document itself — once an action is MEDIA_RESOLVED and dispatched
+# (submission_action_queue._dispatch_send calls the EXISTING
+# media_send.create_send_dispatch_from_approved_plan, unchanged), that
+# document is a completely ordinary send-mode job _worker_loop above
+# already knows how to drive to completion — this loop's job for that
+# action is done.
+#
+# Restart-safe by construction: this is a durable, DB-state-driven poll
+# loop exactly like _worker_loop's own, not an in-process asyncio task
+# per action — a backend restart mid-verification simply means the next
+# process's own instance of this loop picks the same QUEUED/VERIFYING
+# action back up on its next cycle (Phase 8 #16 — "worker restart while
+# job is VERIFYING must not corrupt the job").
+_send_action_task = None
+SEND_ACTION_POLL_SEC = 1.0
+
+
+async def _send_action_verification_loop() -> None:
+    logger.info("media_assignment_worker: starting persistent send-action verification loop...")
+    from agents.modules import submission_action_queue as queue
+
+    while True:
+        try:
+            action = await queue.claim_next_send_action_due()
+            did_work = False
+            if action:
+                did_work = await queue.advance_send_action(action)
+        except Exception:
+            logger.exception("media_assignment_worker: unexpected error in send-action verification cycle")
+            did_work = False
+        await asyncio.sleep(SEND_ACTION_POLL_SEC if not did_work else 0.2)
+
+
 def start_media_assignment_worker() -> None:
+    global _send_action_task
+    if not (_send_action_task and not _send_action_task.done()):
+        _send_action_task = asyncio.create_task(_send_action_verification_loop())
     global _worker_task
     if _worker_task and not _worker_task.done():
         return

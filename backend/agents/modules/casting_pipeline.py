@@ -8704,6 +8704,24 @@ async def _preview_send_marks(
         # fed (mark_intent.enrich_outcome_with_mark_intents, inside
         # _scan_and_validate_multi_source) keeps making progress across
         # calls even though THIS one timed out.
+        # 2026-09-21 (architecture review) — a `get_ready_assignments`-
+        # style "trust whatever's already resolved for this talent/
+        # project" shortcut was proposed and then REMOVED here: proven
+        # unsafe by direct test (a resolved-but-stale MarkIntent from a
+        # NOT-yet-superseded slot is indistinguishable, from a bare
+        # (talent_id, project_id) read, from one a brand-new re-MARK on
+        # WhatsApp simply hasn't been observed by any scan yet — the
+        # read has no way to know the difference, since nothing observes
+        # a WhatsApp reply until some scan's raw candidates actually
+        # include it). Per this session's explicit architectural rule,
+        # (talent_id, project_id) alone must never implicitly identify
+        # the current action, so this branch stays exactly what it was
+        # before that shortcut existed. The Submission Review Center's
+        # own Approve + Send button no longer calls this function at all
+        # for its resolution wait — see submission_action_queue.py's
+        # explicit per-action mark_intent_id association, which is the
+        # safe replacement (built from THIS action's own live scans
+        # only, never a historical database read).
         if error is None and await mark_intent.has_retryable_intents(talent_id, project_id):
             return None, (
                 f"Still verifying marked media for {talent_label} / {project_label} — "

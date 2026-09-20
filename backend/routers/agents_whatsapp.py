@@ -34,6 +34,7 @@ from core import (
 from agents import audit, registry, tasks
 from agents.dispatcher import handle_inbound_message
 from agents.modules import media_assignment
+from agents.modules import mark_intent
 # Phase 7 (Simple Assistant) — canonical, read-only inbound-message capture.
 # Off by default (SA_INBOUND_CAPTURE_ENABLED); a no-op when disabled, and it
 # never affects this endpoint's behaviour or response.
@@ -389,7 +390,26 @@ async def report_scan_result(
     """Worker reports the raw candidate list after a bounded scan (see
     mark_scan.py) — no filtering/interpretation done here beyond storing
     it; agents/modules/media_assignment.py's validate_candidates (run by
-    the backend orchestrator loop) owns everything downstream of this."""
+    the backend orchestrator loop) owns everything downstream of this.
+
+    Late preview result (2026-09-20, preview/late-worker race fix): if
+    `request_id` no longer exists (matched_count == 0), this is not
+    automatically treated as an unknown/bogus request — it's also the
+    exact shape of a genuine late report for a SEND preview whose own
+    caller already gave up on its bounded budget and deleted its
+    scan_requests document (casting_pipeline._scan_raw_candidates_for_
+    source's own unconditional cleanup, restored/kept exactly as it was
+    before this fix — see that function's own "Document lifecycle"
+    docstring). That function leaves a small recovery-context tombstone
+    in media_assignment.LATE_PREVIEW_CONTEXT_COLLECTION for exactly this
+    case. If one matches this request_id, the late candidates are fed
+    directly into mark_intent.observe_candidates here — the SAME
+    admission/locking logic every other caller uses, reused, not
+    reimplemented — durably capturing whatever exact media identity the
+    worker found, even though the admin-facing preview never saw it. The
+    tombstone is consumed (deleted) either way, once. A request_id that
+    matches NEITHER the live collection NOR a tombstone is still a
+    genuine 404, exactly as before — never silently swallowed."""
     if INBOUND_SECRET and x_internal_secret != INBOUND_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     status = media_assignment.SCAN_STATUS_FAILED if payload.error else media_assignment.SCAN_STATUS_DONE
@@ -403,7 +423,24 @@ async def report_scan_result(
         }},
     )
     if res.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Unknown scan request")
+        tombstone = await db[media_assignment.LATE_PREVIEW_CONTEXT_COLLECTION].find_one_and_delete({"id": request_id})
+        if tombstone is None:
+            raise HTTPException(status_code=404, detail="Unknown scan request")
+        if not payload.error and payload.candidates:
+            projects_docs = await db.projects.find(
+                {"status": "ongoing"}, {"_id": 0, "id": 1, "brand_name": 1}
+            ).to_list(2000)
+            projects = [{"id": p["id"], "label": p.get("brand_name") or "(untitled project)"} for p in projects_docs]
+            tagged = [
+                {**c, "source_type": tombstone.get("source_type"), "source_group_name": tombstone.get("group_name")}
+                for c in payload.candidates
+            ]
+            await mark_intent.observe_candidates(
+                tagged, talent_id=tombstone["talent_id"], project_id=tombstone["project_id"],
+                project_label=tombstone.get("project_label", ""), projects=projects,
+                source_chat_name=tombstone.get("group_name") or "", worker_id="default",
+            )
+        return {"ok": True}
     return {"ok": True}
 
 

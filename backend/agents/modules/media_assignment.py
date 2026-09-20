@@ -34,6 +34,17 @@ from agents.modules import casting_pipeline_nlu as nlu
 IDENTITY_COLLECTION = "whatsapp_agent_identity"
 SCAN_REQUESTS_COLLECTION = "whatsapp_scan_requests"
 ASSIGNMENTS_COLLECTION = "media_assignments"
+# Preview/late-worker lifecycle fix (2026-09-20) — see casting_pipeline.
+# _scan_raw_candidates_for_source's own "Document lifecycle" docstring
+# section and routers.agents_whatsapp.report_scan_result's "late preview
+# result" section for the full design. Deliberately a SEPARATE, tiny
+# collection from SCAN_REQUESTS_COLLECTION itself: several existing call
+# sites query that collection by plain (talent_id, project_id) with no
+# further scoping (this exact module's own tests included), an implicit
+# "no stale/abandoned documents ever linger there" invariant that must
+# stay intact — recovery context for a late-arriving worker result lives
+# here instead, never touching that collection's query surface at all.
+LATE_PREVIEW_CONTEXT_COLLECTION = "whatsapp_late_preview_context"
 
 # The worker never scrolls WhatsApp Web further back than this for a scan —
 # "smallest practical history window", not "scan indefinitely" (see plan).

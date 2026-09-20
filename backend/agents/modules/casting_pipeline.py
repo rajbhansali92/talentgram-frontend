@@ -80,6 +80,7 @@ from agents.parser import parse_confirmation_reply, parse_edit_instructions
 from agents.modules import casting_pipeline_nlu as nlu
 from agents.modules import media_assignment
 from agents.modules import media_send
+from agents.modules import mark_intent
 
 AGENT_ID = "casting-agent"
 UNDO_WINDOW_MINUTES = 5
@@ -8499,7 +8500,37 @@ async def _scan_raw_candidates_for_source(
     error): (list, None) on success (possibly empty — no marks found in
     THIS source is not an error), (None, message) on a genuine scan
     failure, (None, None) on a timeout (best-effort, never a hard
-    block — mirrors _preview_send_marks' own timeout handling)."""
+    block — mirrors _preview_send_marks' own timeout handling).
+
+    Document lifecycle (2026-09-20, preview/late-worker race fix — real
+    confirmed production failure: preview timeout -> this doc gets
+    deleted here, unconditionally, exactly as before -> a worker that was
+    still mid-scan and hadn't reported yet would eventually POST its
+    result to a document that no longer exists -> report_scan_result's
+    own 404 -> the worker's hard-won candidates silently discarded).
+    UNCHANGED from before: the scan_requests document itself is ALWAYS
+    deleted here, on every path — several existing call sites (this
+    module's own in-flight checks, and this exact codebase's own test
+    suite) rely on "no stale/abandoned document for this talent/project
+    ever lingers in whatsapp_scan_requests" as an implicit invariant; an
+    earlier version of this fix left the document alive on a timeout
+    instead, which broke that invariant and caused a real, confirmed test
+    regression (test_media_send.py's approval-lifecycle suite picking up
+    a stale preview document instead of the real dispatched one).
+
+    What DOES change: right before deleting on a TIMEOUT specifically
+    (never on the two terminal-result paths, which have nothing left to
+    recover), a small recovery-context tombstone is written to the
+    SEPARATE media_assignment.LATE_PREVIEW_CONTEXT_COLLECTION, keyed by
+    this exact req_id — just enough (talent_id/project_id/project_label/
+    source_type/group_name) for a later, out-of-band worker report to be
+    resolved correctly. routers.agents_whatsapp.report_scan_result reads
+    this tombstone on its own 404 path (the document is genuinely gone by
+    then) and, if found, feeds the late candidates directly into
+    mark_intent.observe_candidates right there — see that function's own
+    "late preview result" section for the full mechanism. This never
+    touches whatsapp_scan_requests' query surface at all, so the
+    invariant every other caller relies on stays fully intact."""
     from agents.modules import media_send
 
     req_id = await media_send.create_send_scan_request(
@@ -8509,25 +8540,34 @@ async def _scan_raw_candidates_for_source(
         destination_group=destination_group, preview_only=True, skip_validation=True,
     )
     deadline = time.monotonic() + (budget_s if budget_s is not None else _SEND_PREVIEW_MAX_WAIT_SEC)
-    try:
-        while True:
-            doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
-                {"id": req_id}, {"_id": 0, "status": 1, "candidates": 1, "scan_error": 1},
+    while True:
+        doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
+            {"id": req_id}, {"_id": 0, "status": 1, "candidates": 1, "scan_error": 1},
+        )
+        status = (doc or {}).get("status")
+        if status == media_assignment.STATUS_FINISHED:
+            await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+            if doc.get("scan_error"):
+                return None, doc["scan_error"]
+            raw = doc.get("candidates") or []
+            tagged = [{**c, "source_type": source_type, "source_group_name": group_name} for c in raw]
+            return tagged, None
+        if status == media_assignment.SCAN_STATUS_FAILED:
+            await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+            return None, (doc.get("scan_error") or "The WhatsApp scan failed.")
+        if time.monotonic() >= deadline:
+            await db[media_assignment.LATE_PREVIEW_CONTEXT_COLLECTION].update_one(
+                {"id": req_id},
+                {"$setOnInsert": {
+                    "id": req_id, "talent_id": talent_id, "project_id": project_id,
+                    "project_label": project_label, "source_type": source_type,
+                    "group_name": group_name, "created_at": datetime.now(timezone.utc),
+                }},
+                upsert=True,
             )
-            status = (doc or {}).get("status")
-            if status == media_assignment.STATUS_FINISHED:
-                if doc.get("scan_error"):
-                    return None, doc["scan_error"]
-                raw = doc.get("candidates") or []
-                tagged = [{**c, "source_type": source_type, "source_group_name": group_name} for c in raw]
-                return tagged, None
-            if status == media_assignment.SCAN_STATUS_FAILED:
-                return None, (doc.get("scan_error") or "The WhatsApp scan failed.")
-            if time.monotonic() >= deadline:
-                return None, None
-            await asyncio.sleep(_SEND_PREVIEW_POLL_INTERVAL_SEC)
-    finally:
-        await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+            await db[media_assignment.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+            return None, None
+        await asyncio.sleep(_SEND_PREVIEW_POLL_INTERVAL_SEC)
 
 
 async def _scan_and_validate_multi_source(
@@ -8594,10 +8634,31 @@ async def _scan_and_validate_multi_source(
         return None, None  # pure timeout, no source produced any result at all
     identity = await media_assignment.get_gunwanti_identity()
     projects = await _fetch_ongoing_projects()
+    # Mark Intent layer (2026-09-20 correctness audit) — observed on the
+    # RAW candidates, BEFORE validate_candidates, independent of its own
+    # control flow (see mark_intent.observe_candidates' own docstring).
+    await mark_intent.observe_candidates(
+        merged, talent_id=talent_id, project_id=project_id, project_label=project_label,
+        projects=projects, source_chat_name=sources[0][1] if sources else "", worker_id="default",
+    )
     outcome = media_assignment.validate_candidates(
         merged, gunwanti_lid=(identity or {}).get("lid") or "",
         requested_project_id=project_id, requested_project_label=project_label,
         projects=projects, talent_id=talent_id,
+    )
+    # Mark Intent layer (2026-09-20) — this preview pass is where the very
+    # SEND that later dispatches via _send_one_pair's own separate scan
+    # can be pre-locked: if THIS preview resolves a candidate, that lock
+    # is immediately available to the real execution-time scan too
+    # (Phase 8 — UPLOAD/SEND must consume the SAME locked resolution,
+    # never rediscover independently), and if a mark was already locked
+    # by an earlier preview or a real scan, this preview reuses it even
+    # when its OWN bounded scan couldn't relocate the source this time —
+    # the exact fix for the proven Limca Film 2 preview-timeout incident.
+    # Never modifies validate_candidates' own decisions.
+    outcome = await mark_intent.enrich_outcome_with_mark_intents(
+        outcome, talent_id=talent_id, project_id=project_id, project_label=project_label,
+        source_chat_name=sources[0][1] if sources else "", worker_id="default",
     )
     return outcome, None
 
@@ -8634,6 +8695,21 @@ async def _preview_send_marks(
         sources=sources,
     )
     if outcome is None:
+        # Phase 7 (2026-09-20) — a pure timeout (error is None here; a real
+        # infra error still returns its own specific message unchanged)
+        # must never read the same as "media cannot be found". If a Mark
+        # Intent already exists for this talent/project and hasn't
+        # exhausted its retry ceiling, the honest state is "still
+        # verifying" — the background resolution this preview itself just
+        # fed (mark_intent.enrich_outcome_with_mark_intents, inside
+        # _scan_and_validate_multi_source) keeps making progress across
+        # calls even though THIS one timed out.
+        if error is None and await mark_intent.has_retryable_intents(talent_id, project_id):
+            return None, (
+                f"Still verifying marked media for {talent_label} / {project_label} — "
+                "WhatsApp Web is taking longer than usual to confirm it. This is not a "
+                "failure; wait a moment and try again."
+            )
         return None, error
     if outcome.batch_failures:
         names = "; ".join((b.get("mark_text") or "").strip() for b in outcome.batch_failures)
@@ -8649,9 +8725,19 @@ async def _preview_send_marks(
             f"different source items — please resolve the duplicate mark before sending."
         )
     if outcome.unresolved:
+        # Phase 7 (2026-09-20) — same distinction: only once a Mark
+        # Intent has genuinely exhausted its retry ceiling is this a real,
+        # actionable failure. Otherwise the resolver (fed by this exact
+        # preview call, via enrich_outcome_with_mark_intents) is still
+        # working and will pick it up on a later attempt.
+        if await mark_intent.any_permanently_failed(talent_id, project_id):
+            return None, (
+                "Some marked media could not be located after repeated attempts — "
+                "please re-send the MARK reply on the original media, then retry."
+            )
         return None, (
-            "Some marked media could not be matched to an exact WhatsApp source "
-            "message — please re-check the mark."
+            f"Still verifying some marked media for {talent_label} / {project_label} — "
+            "WhatsApp Web hasn't confirmed it yet. This is not a failure; try again shortly."
         )
     return outcome.assignments or [], None
 

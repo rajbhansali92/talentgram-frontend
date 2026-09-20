@@ -664,6 +664,8 @@ async def on_startup():
         await _media_assignment.ensure_indexes()
         from agents.modules import media_send as _media_send
         await _media_send.ensure_indexes()
+        from agents.modules import mark_intent as _mark_intent
+        await _mark_intent.ensure_indexes()
         start_media_assignment_worker()
 
         # Production Reminder Worker (Phase G, 2026-09-07) — see

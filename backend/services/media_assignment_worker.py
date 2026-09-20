@@ -32,6 +32,7 @@ from core import db, SubmissionDecisionIn
 from agents import registry
 from agents.modules import media_assignment
 from agents.modules import media_send
+from agents.modules import mark_intent
 from agents.modules.whatsapp_campaign_agent import _service_admin
 from routers.submissions import set_decision
 from routers.whatsapp import BatchIn, ManualContact, SourceParams, create_batch
@@ -568,10 +569,28 @@ async def _finish_multi_source_scan_sibling(doc: Dict[str, Any]) -> None:
         return
 
     projects = await _fetch_ongoing_projects_raw()
+    # Mark Intent layer (2026-09-20 correctness audit) — observed on the
+    # RAW candidates, BEFORE validate_candidates, deliberately independent
+    # of its own control flow (a batch_failures early-return there must
+    # never suppress MarkIntent creation for an unrelated, ordinary
+    # candidate in the same scan — see observe_candidates' own docstring).
+    await mark_intent.observe_candidates(
+        merged, talent_id=talent_id, project_id=project_id, project_label=project_label,
+        projects=projects, source_chat_name=primary.get("group_name") or "", worker_id=primary_worker_id,
+    )
     outcome = media_assignment.validate_candidates(
         merged, gunwanti_lid=identity["lid"],
         requested_project_id=project_id, requested_project_label=project_label,
         projects=projects, talent_id=talent_id,
+    )
+    # Never modifies validate_candidates' own decisions (project-mismatch/
+    # ambiguous/batch-failure/dedup all stay exactly as it decided); locks
+    # each resolved candidate's source identity durably and, when an
+    # already-locked intent exists for a candidate this scan couldn't
+    # relocate, reuses that lock instead of reporting a fresh failure.
+    outcome = await mark_intent.enrich_outcome_with_mark_intents(
+        outcome, talent_id=talent_id, project_id=project_id, project_label=project_label,
+        source_chat_name=primary.get("group_name") or "", worker_id=primary_worker_id,
     )
 
     if outcome.batch_failures:
@@ -686,7 +705,20 @@ async def _process_scan_done() -> bool:
         # `candidates` on success, `scan_error` on failure) untouched —
         # never runs validate_candidates here; the caller
         # (casting_pipeline._scan_and_validate_multi_source) merges
-        # every source's own raw scan and validates once itself.
+        # every source's own raw scan and validates once itself, calling
+        # mark_intent.observe_candidates/enrich_outcome_with_mark_intents
+        # on the merged result. (2026-09-20: an earlier version of this
+        # branch also called observe_candidates here directly, paired
+        # with leaving abandoned scan_requests documents undeleted on a
+        # preview timeout — reverted the same day: leaving those documents
+        # alive broke the "no stale scan_requests doc for this talent/
+        # project" invariant several other call sites silently rely on
+        # (a real regression, caught by test_media_send.py's own approval-
+        # lifecycle suite). The late-worker-result race this was meant to
+        # close is now handled entirely in routers/agents_whatsapp.py's
+        # report_scan_result — see its own "late preview result" section
+        # — which never touches this collection's normal query surface at
+        # all.)
         await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
             {"id": doc["id"]},
             {"$set": {"status": media_assignment.STATUS_FINISHED, "completed_at": _now()}},
@@ -718,13 +750,34 @@ async def _process_scan_done() -> bool:
         return True
 
     projects = await _fetch_ongoing_projects_raw()
+    raw_candidates = doc.get("candidates") or []
+    # Mark Intent layer (2026-09-20 correctness audit) — observed on the
+    # RAW candidates, BEFORE validate_candidates, independent of its own
+    # control flow (see observe_candidates' own docstring for exactly why
+    # this must not be folded into reading validate_candidates' output).
+    await mark_intent.observe_candidates(
+        raw_candidates, talent_id=talent_id, project_id=project_id, project_label=project_label,
+        projects=projects, source_chat_name=group_name, worker_id=doc_worker_id,
+    )
     outcome = media_assignment.validate_candidates(
-        doc.get("candidates") or [],
+        raw_candidates,
         gunwanti_lid=identity["lid"],
         requested_project_id=project_id,
         requested_project_label=project_label,
         projects=projects,
         talent_id=talent_id,
+    )
+    # Mark Intent layer (2026-09-20) — applies to BOTH real UPLOAD/SEND
+    # scans and preview_only scans alike: a preview that successfully
+    # resolves a candidate locks it durably, so a LATER real UPLOAD/SEND
+    # execution for the same mark reuses that lock instead of needing its
+    # own scan to relocate the source again (Phase 8 — UPLOAD and SEND
+    # must consume the SAME locked resolution). Never modifies
+    # validate_candidates' own decisions. See mark_intent.py's module
+    # docstring for the full rationale.
+    outcome = await mark_intent.enrich_outcome_with_mark_intents(
+        outcome, talent_id=talent_id, project_id=project_id, project_label=project_label,
+        source_chat_name=group_name, worker_id=doc_worker_id,
     )
 
     if doc.get("preview_only"):

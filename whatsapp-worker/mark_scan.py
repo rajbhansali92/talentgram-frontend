@@ -3622,7 +3622,7 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
         return {"results": [{"ok": False, "error": f"Could not open WhatsApp group {group_name!r} (status={status})"}]}
 
     probe_type = req.get("probe_type") or ("tile_viewer" if req.get("tile_index") is not None else "album_menu")
-    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic", "scan_reliability_diagnostic", "open_group_chat_diagnostic", "attachment_toolbar_survey_diagnostic", "attach_resolver_live_check"}
+    _no_message_id_needed = {"album_discovery", "raw_tail_ids", "session_sync_check", "full_message_inventory", "group_participants_check", "attach_button_diagnostic", "attach_menu_after_click_diagnostic", "plus_rounded_locations_diagnostic", "attach_mechanism_full_diagnostic", "attach_photos_videos_filechooser_diagnostic", "attach_real_file_diagnostic", "attach_interceptor_diagnostic", "destination_media_inventory_diagnostic", "caption_field_diagnostic", "destination_deep_investigation_diagnostic", "session_identity_and_sync_boundary_diagnostic", "destination_incoming_message_diagnostic", "send_button_preview_diagnostic", "video_tile_stability_diagnostic", "video_tile_reresolution_live_diagnostic", "forward_readiness_diagnostic", "scan_reliability_diagnostic", "open_group_chat_diagnostic", "attachment_toolbar_survey_diagnostic", "attach_resolver_live_check", "attach_click_interaction_test"}
     data_id = req.get("probe_message_id") if probe_type in _no_message_id_needed else req["probe_message_id"]
 
     session_identity = {
@@ -6344,6 +6344,128 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
             "chat_ready_error": ready_error,
             "attach_resolver_result": attach_result,
             "click_performed": False,
+        }], "session_identity": session_identity}
+
+    if probe_type == "attach_click_interaction_test":
+        # Diagnostic-only (2026-09-20, fifth production incident) — the
+        # ONE UI mutation this specific probe is authorized to perform: a
+        # single real click on the ACTUAL deployed
+        # sender._resolve_attach_control's own resolved element (never a
+        # reimplementation, never a different selector), to prove the
+        # click itself completes and the "Photos & videos" menu item
+        # becomes observable — closing the one remaining unproven link
+        # after attach_resolver_live_check's own pure-survey pass.
+        # Explicitly does NOT: select a file, click "Photos & videos",
+        # open a file chooser, or send anything. Presses Escape at the
+        # end to close whatever menu opened.
+        try:
+            header_state = await sender._destination_header_authoritative(page)
+        except Exception as exc:
+            header_state = {"error": str(exc)}
+        header_ok = bool(
+            header_state.get("found") and header_state.get("visible")
+            and sender._norm_title(header_state.get("title") or "") == sender._norm_title(group_name)
+        )
+        if not header_ok:
+            logger.warning(
+                "sender: SEND_ATTACH_CLICK_TEST_START aborted — authoritative header mismatch actual=%r expected=%r",
+                header_state.get("title"), group_name,
+            )
+            return {"results": [{
+                "ok": False, "group_name": group_name, "authoritative_header": header_state,
+                "aborted_reason": "authoritative_header_mismatch",
+            }], "session_identity": session_identity}
+
+        try:
+            await sender._wait_for_chat_ready(page)
+        except Exception as exc:
+            logger.info("sender: SEND_ATTACH_CLICK_TEST_START chat_ready_error=%s", exc)
+
+        attach_result = await sender._resolve_attach_control(page)
+        if not attach_result.get("found"):
+            logger.warning(
+                "sender: SEND_ATTACH_CLICK_TEST_START aborted — attach resolver found nothing candidates_seen=%s reason=%r",
+                attach_result.get("candidates_seen"), attach_result.get("reason"),
+            )
+            return {"results": [{
+                "ok": False, "group_name": group_name, "authoritative_header": header_state,
+                "attach_resolver_result": attach_result, "aborted_reason": "attach_control_not_found",
+            }], "session_identity": session_identity}
+
+        attach_selector = attach_result["selector"]
+        scoped_attach_selector = f'[data-testid="compose-box"] {attach_selector}'
+        logger.info("sender: SEND_ATTACH_CLICK_TEST_START selector=%r scoped=%r", attach_selector, scoped_attach_selector)
+
+        click_ok, click_error = False, None
+        try:
+            await page.click(scoped_attach_selector, timeout=5_000)
+            click_ok = True
+        except Exception as exc:
+            click_error = str(exc)
+            # Reuses the EXISTING, already-proven diagnostic capture
+            # mechanism (never a new one) — never clicks anything else,
+            # never retried.
+            await sender._capture_attach_click_failure_diagnostics(
+                page, exc, {"probe": "attach_click_interaction_test"},
+            )
+        logger.info(
+            "sender: SEND_ATTACH_CLICK_TEST_RESULT selector=%r click_ok=%s error=%r",
+            scoped_attach_selector, click_ok, click_error,
+        )
+
+        if not click_ok:
+            return {"results": [{
+                "ok": False, "group_name": group_name, "authoritative_header": header_state,
+                "attach_resolver_result": attach_result, "click_ok": False, "click_error": click_error,
+                "aborted_reason": "attach_click_failed",
+            }], "session_identity": session_identity}
+
+        # Give WhatsApp's own menu-open animation/render a moment — mirrors
+        # the exact same delay send_whatsapp_message's real code uses
+        # between the attach click and checking for "Photos & videos"
+        # (see sender.py, unchanged by this fix).
+        await asyncio.sleep(0.5)
+
+        menu_selector = 'button[aria-label="Photos & videos"]'  # the EXACT existing selector sender.py already uses
+        menu_found, menu_visible, menu_text = False, False, None
+        try:
+            menu_loc = page.locator(menu_selector).first
+            menu_found = bool(await menu_loc.count())
+            menu_visible = menu_found and await menu_loc.is_visible()
+            menu_text = (await menu_loc.inner_text()) if menu_visible else None
+        except Exception as exc:
+            logger.info("sender: SEND_MEDIA_MENU_CHECK inspect_failed error=%s", exc)
+        logger.info(
+            "sender: SEND_MEDIA_MENU_CHECK found=%s visible=%s text=%r",
+            menu_found, menu_visible, menu_text,
+        )
+
+        # Close whatever opened — never select a file, never click
+        # "Photos & videos" itself.
+        menu_closed = False
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+            after_escape = page.locator(menu_selector).first
+            still_visible = bool(await after_escape.count()) and await after_escape.is_visible()
+            menu_closed = not still_visible
+        except Exception as exc:
+            logger.info("sender: SEND_ATTACH_CLICK_TEST_COMPLETE escape_error=%s", exc)
+
+        logger.info(
+            "sender: SEND_ATTACH_CLICK_TEST_COMPLETE click_ok=%s menu_found=%s menu_visible=%s menu_closed=%s "
+            "file_chooser_triggered=False message_sent=False",
+            click_ok, menu_found, menu_visible, menu_closed,
+        )
+
+        return {"results": [{
+            "ok": True, "group_name": group_name,
+            "authoritative_header": header_state,
+            "attach_resolver_result": attach_result,
+            "click_ok": click_ok, "click_error": click_error,
+            "menu_found": menu_found, "menu_visible": menu_visible, "menu_text": menu_text,
+            "menu_closed_after_escape": menu_closed,
+            "file_chooser_triggered": False, "message_sent": False,
         }], "session_identity": session_identity}
 
     if probe_type == "attach_menu_after_click_diagnostic":

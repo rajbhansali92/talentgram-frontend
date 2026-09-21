@@ -278,15 +278,26 @@ async def sync_from_finished_request(request_doc: Dict[str, Any]) -> None:
         return
     ok = bool(request_doc.get("operation_ok"))
     report = request_doc.get("report")
+    # Production fix, 2026-09-21 (Akarsh Kumar Gowda / Snapdragon Computer)
+    # — a send-but-unverified item no longer blocks COMPLETED (see
+    # mark_scan.py's all_media_ok fix), but that nuance must not become
+    # invisible just because the action now shows green. This flag lets
+    # the frontend still surface "delivery unconfirmed for N item(s)" on
+    # an otherwise-successful action, instead of silently dropping it.
+    has_unverified = any(
+        (r or {}).get("send_state") == "MESSAGE_SENT_BUT_NOT_VERIFIED"
+        for r in (request_doc.get("download_results") or [])
+    )
     if ok:
         await db[ACTIONS_COLLECTION].update_one(
             {"id": action_id},
             {"$set": {
                 "state": STATE_COMPLETED, "report": report, "error_code": None,
-                "error_message": None, "retryable": False, "updated_at": _now(),
+                "error_message": None, "retryable": False,
+                "has_unverified_media": has_unverified, "updated_at": _now(),
             }},
         )
-        logger.info("SUBMISSION_ACTION_COMPLETED action_id=%s", action_id)
+        logger.info("SUBMISSION_ACTION_COMPLETED action_id=%s has_unverified_media=%s", action_id, has_unverified)
     else:
         await db[ACTIONS_COLLECTION].update_one(
             {"id": action_id},

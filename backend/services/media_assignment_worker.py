@@ -135,7 +135,7 @@ async def _finish(request_id: str, report_text: str, worker_id: str = "default")
     # block BEFORE it calls this function) — re-read the fresh doc rather
     # than guessing from this function's own arguments.
     finished_doc = await db[media_assignment.SCAN_REQUESTS_COLLECTION].find_one(
-        {"id": request_id}, {"_id": 0, "action_id": 1, "operation_ok": 1, "report": 1},
+        {"id": request_id}, {"_id": 0, "action_id": 1, "operation_ok": 1, "report": 1, "download_results": 1},
     )
     if finished_doc and finished_doc.get("action_id"):
         from agents.modules import submission_action_queue
@@ -444,7 +444,8 @@ def _humanize_media_send_error(raw_error: str) -> str:
 def _report_send_result(
     talent_label: str, project_label: str, destination_group: str,
     sent_labels: List[str], failed_items: List[Dict[str, str]], already: List[Dict[str, Any]],
-    *, form_status_line: Optional[str] = None, marker_status_line: Optional[str] = None,
+    *, unverified_items: Optional[List[Dict[str, str]]] = None,
+    form_status_line: Optional[str] = None, marker_status_line: Optional[str] = None,
 ) -> str:
     """SEND ATTENTION REQUIRED (Production fix, 2026-09-09 — SEND
     self-healing/reliability master prompt, item 14) — a genuinely
@@ -464,18 +465,30 @@ def _report_send_result(
     be empty, or every media item could have succeeded) — those keep the
     existing "SEND PARTIAL" header and wording exactly as before; only a
     real, exhausted, actionable MEDIA failure gets the stronger header,
-    the explicit "no duplicate media were sent" reassurance (true by
-    construction — media_send's own idempotency, unchanged, means a
-    later RETRY re-dispatch — literally just re-running the same SEND
-    command — naturally excludes every already-SENT item via
-    prepare_send_targets' existing already_sent() filtering; nothing new
-    was built for this), and the RETRY hint."""
+    the explicit "no duplicate media were sent" reassurance, and the
+    RETRY hint.
+
+    unverified_items (Production fix, 2026-09-21 — real incident: Akarsh
+    Kumar Gowda's Take 2 was sent three times because a send-but-
+    unverified outcome was previously indistinguishable from a genuine
+    failure) — these items DID send for real (mark_scan.py no longer
+    retries them, and media_send.already_sent() now excludes them from
+    any future dispatch too), so they are counted in the "N/total sent"
+    line and NEVER get the "Reply RETRY" invitation — retrying one would
+    now be correctly refused by already_sent() anyway, but the copy
+    itself must not tell an admin to do something pointless/misleading."""
+    unverified_items = unverified_items or []
     already_labels = [
         media_assignment.simple_role_label(a["media_role"], a.get("take_number"))
         for a in already
     ]
-    total = len(already_labels) + len(sent_labels) + len(failed_items)
+    total = len(already_labels) + len(sent_labels) + len(unverified_items) + len(failed_items)
     body_lines = ([form_status_line] if form_status_line else []) + [f"✓ {l}" for l in already_labels + sent_labels]
+    body_lines += [
+        f"~ {i['label']} was sent, but WhatsApp Web could not confirm it arrived in the destination "
+        f"group. Please check the group — this will NOT be sent again automatically."
+        for i in unverified_items
+    ]
     body_lines += [f"✗ {i['label']} {_humanize_media_send_error(i['error'])}" for i in failed_items]
     if marker_status_line:
         body_lines.append(marker_status_line)
@@ -483,7 +496,7 @@ def _report_send_result(
     form_failed = bool(form_status_line and form_status_line.startswith("✗"))
     marker_failed = bool(marker_status_line and marker_status_line.startswith("✗"))
     if not (failed_items or form_failed or marker_failed):
-        header = "SEND COMPLETE ✓"
+        header = "SEND COMPLETE ✓" if not unverified_items else "SEND COMPLETE — DELIVERY UNCONFIRMED FOR SOME ITEMS"
         footer = "Pipeline stage was NOT changed."
     elif failed_items:
         header = "SEND ATTENTION REQUIRED"
@@ -496,10 +509,11 @@ def _report_send_result(
     else:
         header = "SEND PARTIAL"
         footer = "Pipeline stage was NOT changed."
+    sent_count = len(already_labels) + len(sent_labels) + len(unverified_items)
     return (
         f"{header}\n\nTalent: {talent_label}\nProject: {project_label}\n"
         f"Destination: {destination_group}\n\n"
-        f"{len(already_labels) + len(sent_labels)}/{total} media sent"
+        f"{sent_count}/{total} media sent"
         + (f", {len(failed_items)} failed" if failed_items else "")
         + f"\n\n{body}\n\n{footer}"
     )
@@ -1050,6 +1064,7 @@ async def _process_download_done() -> bool:
 
         sent_labels: List[str] = []
         failed_items: List[Dict[str, str]] = []
+        unverified_items: List[Dict[str, str]] = []
         for i, target in enumerate(send_targets):
             # simple_role_label (Production fix — issue 7's own example
             # shows "✓ Audition Take" / "✓ Introduction Take", not
@@ -1058,14 +1073,38 @@ async def _process_download_done() -> bool:
             label = media_assignment.simple_role_label(target["media_role"], target.get("take_number"))
             result = results[i] if i < len(results) else None
             ok = bool(result and result.get("ok"))
-            status = media_send.SEND_STATUS_SENT if ok else media_send.SEND_STATUS_FAILED
-            extra = {"sent_at": _now()} if ok else {"error": (result or {}).get("error") or "no result reported"}
+            # Real production incident, 2026-09-21 (Akarsh Kumar Gowda /
+            # Snapdragon Computer): a send whose state is MESSAGE_SENT_BUT_
+            # NOT_VERIFIED has genuine evidence of a real WhatsApp send
+            # (mark_scan.py no longer retries it either — see
+            # _send_one_target_via_download's own no-retry handling) but
+            # couldn't be confirmed delivered. Recording it as SENT_
+            # UNVERIFIED (never FAILED) is what makes media_send.
+            # already_sent() correctly exclude it from any later
+            # re-dispatch — the actual fix for "the same take got sent
+            # multiple times because the app kept thinking it still needed
+            # to go out."
+            unverified = bool(result) and not ok and result.get("send_state") == "MESSAGE_SENT_BUT_NOT_VERIFIED"
+            if ok:
+                status = media_send.SEND_STATUS_SENT
+            elif unverified:
+                status = media_send.SEND_STATUS_SENT_UNVERIFIED
+            else:
+                status = media_send.SEND_STATUS_FAILED
+            if ok:
+                extra = {"sent_at": _now()}
+            elif unverified:
+                extra = {"sent_at": _now(), "verification_note": (result or {}).get("error") or "delivery not confirmed"}
+            else:
+                extra = {"error": (result or {}).get("error") or "no result reported"}
             await media_send.mark_send_status(
                 talent_id, project_id, target["source_message_id"], target.get("source_thumbnail_hash"),
                 destination_group, status, **extra,
             )
             if ok:
                 sent_labels.append(label)
+            elif unverified:
+                unverified_items.append({"label": label, "error": (result or {}).get("error") or "delivery not confirmed"})
             else:
                 failed_items.append({"label": label, "error": (result or {}).get("error") or "no result reported"})
 
@@ -1149,6 +1188,7 @@ async def _process_download_done() -> bool:
 
         report = _report_send_result(
             talent_label, project_label, destination_group, sent_labels, failed_items, ctx.get("already") or [],
+            unverified_items=unverified_items,
             form_status_line=form_status_line, marker_status_line=marker_status_line,
         )
         await _finish(doc["id"], report, worker_id=doc.get("worker_id", "default"))

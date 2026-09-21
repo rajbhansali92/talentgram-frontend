@@ -7176,6 +7176,111 @@ def main():
     assert cands_192[0].get("resolution_failure_state") is None, cands_192
     print("192. regression safety: a genuine whole-album 'N videos' summary quote (which legitimately has no hash, even live) is still correctly classified and routed through the existing batch-mark path, never through the NEW single-media live-requote path")
 
+    # ------------------------------------------------------------------
+    # 193-194: REAL PRODUCTION INCIDENT (2026-09-21) — "Akarsh Kumar Gowda
+    # / Snapdragon Computer (Genz Male User)". Take 2 was physically sent
+    # to WhatsApp three separate times within a single SEND dispatch.
+    # Root cause: _send_one_target_via_download's own bounded automatic-
+    # recovery loop treated ANY non-ok _send_local_file result the same
+    # way, including sender.MESSAGE_SENT_BUT_NOT_VERIFIED — a state
+    # sender.py's own constant explicitly documents as "left composer, no
+    # bubble -> DO NOT retry" (the composer clearing IS real evidence a
+    # send just happened; only the destination-chat bubble scan couldn't
+    # confirm it). The loop never honored that distinction and kept
+    # calling _send_local_file again — up to MAX_SEND_ITEM_ATTEMPTS=3 real
+    # physical re-sends of the identical downloaded file. Fix: stop
+    # immediately on this exact state, never attempting a second real
+    # send for an item that already has send evidence.
+    # ------------------------------------------------------------------
+
+    class _FakePage193:
+        async def wait_for_timeout(self, ms):
+            pass
+
+    def _send_target_193(mid, role, take=None):
+        return {
+            "source_message_id": mid, "media_role": role, "take_number": take,
+            "source_media_type": "video", "album_tile_index": None, "destination_group": "Dest Group",
+            "caption": mid,
+        }
+
+    send_local_file_calls_193 = []
+
+    async def _fake_download_193(page, group_name, target, *, job_id="job", source_type="group"):
+        return {
+            "ok": True, "source_message_id": target["source_message_id"],
+            "local_file_path": "/tmp/fake-take2-193.mp4", "byte_length": 9453842,
+        }
+
+    async def _fake_send_local_file_unverified_193(page, target, local_file_path):
+        send_local_file_calls_193.append(local_file_path)
+        return {
+            "ok": False, "source_message_id": target["source_message_id"],
+            "error": "send unverified: no NEW matching outgoing message found in the destination chat after send",
+            "send_state": sender.MESSAGE_SENT_BUT_NOT_VERIFIED,
+        }
+
+    orig_download_193 = mark_scan._download_source_media
+    orig_send_local_193 = mark_scan._send_local_file
+    mark_scan._download_source_media = _fake_download_193
+    mark_scan._send_local_file = _fake_send_local_file_unverified_193
+    try:
+        target_193 = _send_target_193("take2-msg-id", "take", 2)
+        result_193 = asyncio.run(mark_scan._send_one_target_via_download(_FakePage193(), "Source Group", target_193))
+    finally:
+        mark_scan._download_source_media = orig_download_193
+        mark_scan._send_local_file = orig_send_local_193
+
+    assert len(send_local_file_calls_193) == 1, (
+        f"_send_local_file must be called exactly ONCE for a send-but-unverified result, never retried "
+        f"(this exact bug sent Take 2 three times in production) — got {len(send_local_file_calls_193)} calls"
+    )
+    assert result_193["ok"] is False, result_193
+    assert result_193.get("send_state") == sender.MESSAGE_SENT_BUT_NOT_VERIFIED, result_193
+    print("193. SEND no-retry-on-unverified: a MESSAGE_SENT_BUT_NOT_VERIFIED result stops the automatic-recovery loop after exactly ONE physical send attempt, never a second/third real resend of the same file")
+
+    # 194: contrast case — a GENUINE failure (never left the composer at
+    # all) must still get the full MAX_SEND_ITEM_ATTEMPTS worth of real
+    # automatic recovery, proving 193's fix is scoped to the unverified
+    # state specifically, not a blanket "never retry" regression.
+
+    class _FakePage194:
+        async def wait_for_timeout(self, ms):
+            pass
+
+    send_local_file_calls_194 = []
+
+    async def _fake_download_194(page, group_name, target, *, job_id="job", source_type="group"):
+        return {
+            "ok": True, "source_message_id": target["source_message_id"],
+            "local_file_path": "/tmp/fake-take2-194.mp4", "byte_length": 123,
+        }
+
+    async def _fake_send_local_file_genuine_failure_194(page, target, local_file_path):
+        send_local_file_calls_194.append(local_file_path)
+        return {
+            "ok": False, "source_message_id": target["source_message_id"],
+            "error": "send state 'MESSAGE_NOT_SENT'", "send_state": "MESSAGE_NOT_SENT",
+        }
+
+    orig_download_194 = mark_scan._download_source_media
+    orig_send_local_194 = mark_scan._send_local_file
+    mark_scan._download_source_media = _fake_download_194
+    mark_scan._send_local_file = _fake_send_local_file_genuine_failure_194
+    try:
+        target_194 = _send_target_193("take2-msg-id", "take", 2)
+        result_194 = asyncio.run(mark_scan._send_one_target_via_download(_FakePage194(), "Source Group", target_194))
+    finally:
+        mark_scan._download_source_media = orig_download_194
+        mark_scan._send_local_file = orig_send_local_194
+
+    assert len(send_local_file_calls_194) == mark_scan.MAX_SEND_ITEM_ATTEMPTS, (
+        f"a genuine (never-sent) failure must still get its full automatic-recovery budget — "
+        f"got {len(send_local_file_calls_194)} calls, expected {mark_scan.MAX_SEND_ITEM_ATTEMPTS}"
+    )
+    assert result_194["ok"] is False, result_194
+    print("194. contrast case: a genuine send failure (never left the composer) still retries the full MAX_SEND_ITEM_ATTEMPTS budget — 193's no-retry fix is scoped to MESSAGE_SENT_BUT_NOT_VERIFIED only")
+
 
 if __name__ == "__main__":
     main()

@@ -35,6 +35,7 @@ from agents.models import ExecContext  # noqa: E402
 from agents.modules import casting_pipeline as cp  # noqa: E402
 from agents.modules import media_assignment as ma  # noqa: E402
 from agents.modules import media_send as ms  # noqa: E402
+from agents.modules import submission_action_queue as queue  # noqa: E402
 from services import media_assignment_worker as orch  # noqa: E402
 from core import ProjectIn  # noqa: E402
 from routers.projects import create_project, update_project  # noqa: E402
@@ -2818,6 +2819,138 @@ async def test_send_orchestrator_dispatches_form_even_when_all_media_already_sen
         await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
 
 
+async def test_send_orchestrator_never_redispatches_sent_but_unverified_media():
+    """Regression test for the real production incident (2026-09-21,
+    Akarsh Kumar Gowda / Snapdragon Computer): a media item recorded as
+    SEND_STATUS_SENT_UNVERIFIED (genuine send evidence, delivery just
+    couldn't be confirmed) must be excluded from a later dispatch's
+    send_targets exactly like a fully-verified SEND_STATUS_SENT item —
+    mirrors test_send_orchestrator_dispatches_form_even_when_all_media_
+    already_sent's own already-sent pattern, just for the new status.
+    Before this fix, only SEND_STATUS_SENT was excluded — a send-but-
+    unverified item was persisted as SEND_STATUS_FAILED and stayed
+    eligible for re-selection forever, which is the actual mechanism that
+    let the same take be physically sent again on any later re-dispatch."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Snapdragon {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Akarsh {tag}"
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    await db[ms.MEDIA_SENDS_COLLECTION].insert_one({
+        "send_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
+        "destination_group": DESTINATION_GROUP,
+        "source_message_id": "src-take2", "source_thumbnail_hash": "hash-src-take2",
+        "media_role": "take", "take_number": 2,
+        "send_status": ms.SEND_STATUS_SENT_UNVERIFIED, "created_at": _now(), "created_by": "test",
+    })
+    req_id = await _insert_send_scan_done(
+        talent_id=talent_id, talent_label=talent_label, project_id=project_id, project_label=project_label,
+        group_name=f"{talent_label} x Talentgram", destination_group=DESTINATION_GROUP,
+        candidates=[_mark(mention_lid=GUNWANTI_LID, mark_text=f"mark {project_label} take 2", source_message_id="src-take2")],
+    )
+    await db.projects.insert_one({"id": project_id, "brand_name": project_label, "status": "ongoing"})
+    try:
+        assert await orch._process_scan_done()
+        mid = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert mid["mode"] == "send"
+        assert mid["send_targets"] == [], (
+            "a send-but-unverified item must never be re-included in a later dispatch's "
+            "send_targets — doing so is exactly what caused the real triple-send incident"
+        )
+    finally:
+        await db.projects.delete_one({"id": project_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+async def test_process_scan_done_records_unverified_send_not_failed_and_completes_action():
+    """End-to-end regression test reproducing the exact Akarsh Kumar Gowda
+    incident shape: a scan_request finishes with ONE media target whose
+    worker result is {"ok": False, "send_state": "MESSAGE_SENT_BUT_NOT_
+    VERIFIED", ...} (mark_scan.py's own real return shape for this case).
+    Required outcomes: (1) media_sends records SEND_STATUS_SENT_
+    UNVERIFIED, never SEND_STATUS_FAILED; (2) the report never invites
+    "Reply RETRY" for this item; (3) when an action_id is present (the
+    Submission Action Queue path), the linked action becomes COMPLETED —
+    not FAILED with error_code="execution_failed", which is the exact
+    wrong state the real production Action Queue showed."""
+    tag = uuid.uuid4().hex[:6]
+    project_id, project_label = f"p-{tag}", f"Snapdragon {tag}"
+    talent_id, talent_label = f"t-{tag}", f"Akarsh {tag}"
+    destination_group = DESTINATION_GROUP
+    action_id = f"action-{tag}"
+    req_id = str(uuid.uuid4())
+    await db[queue.ACTIONS_COLLECTION].insert_one({
+        "id": action_id, "action_type": "send", "project_id": project_id, "talent_id": talent_id,
+        "talent_label": talent_label, "project_label": project_label, "submission_id": f"sub-{tag}",
+        "destination_group": destination_group, "source_group_name": f"{talent_label} x Talentgram",
+        "worker_id": "default", "state": queue.STATE_MEDIA_RESOLVED, "mark_intent_ids": ["mi-1"],
+        "attempt_count": 1, "retryable": True, "created_at": _now(), "updated_at": _now(),
+        "created_by": "test",
+    })
+    # Mirrors what media_send.record_send() would already have written at
+    # dispatch time — mark_send_status only UPDATES an existing row (see
+    # its own docstring), so this fixture step is required for the
+    # media_sends assertion below to be meaningful.
+    await db[ms.MEDIA_SENDS_COLLECTION].insert_one({
+        "send_id": str(uuid.uuid4()), "talent_id": talent_id, "project_id": project_id,
+        "destination_group": destination_group,
+        "source_message_id": "src-take2", "source_thumbnail_hash": "hash-src-take2",
+        "media_role": "take", "take_number": 2,
+        "send_status": ms.SEND_STATUS_MARKED, "created_at": _now(), "created_by": "test",
+    })
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "send", "status": ma.DOWNLOAD_STATUS_DONE, "worker_id": "default",
+        "group_name": f"{talent_label} x Talentgram", "source_type": "group",
+        "destination_group": destination_group, "talent_id": talent_id, "project_id": project_id,
+        "send_targets": [{
+            "source_message_id": "src-take2", "media_role": "take", "take_number": 2,
+            "source_media_type": "video", "source_thumbnail_hash": "hash-src-take2",
+            "album_tile_index": None, "destination_group": destination_group,
+            "caption": "Audition Take 2", "talent_id": talent_id, "project_id": project_id,
+            "source_type": "group", "source_group_name": f"{talent_label} x Talentgram",
+        }],
+        "download_results": [{
+            "ok": False, "source_message_id": "src-take2",
+            "error": "send unverified: no NEW matching outgoing message found in the destination chat after send",
+            "send_state": "MESSAGE_SENT_BUT_NOT_VERIFIED",
+        }],
+        "form_insert_index": 1, "send_marker_on_success": True,
+        # marker_attempted=True + a successful marker_result mirrors what
+        # the FIXED worker now does for this exact scenario — its own
+        # all_media_ok gate (mark_scan.py's _run_send) now counts a
+        # send-but-unverified item as "ok enough" to attempt the
+        # completion marker, which is what makes the backend set
+        # operation_ok=True below and complete the action correctly.
+        "pending_report_context": {
+            "talent_label": talent_label, "project_label": project_label,
+            "destination_group": destination_group, "already": [], "form_message_included": False,
+            "marker_attempted": True, "submission_id": f"sub-{tag}",
+        },
+        "marker_result": {"ok": True},
+        "action_id": action_id, "created_at": _now(), "updated_at": _now(),
+    })
+    try:
+        assert await orch._process_download_done()
+        media_row = await db[ms.MEDIA_SENDS_COLLECTION].find_one(
+            {"talent_id": talent_id, "project_id": project_id, "source_message_id": "src-take2"},
+        )
+        assert media_row["send_status"] == ms.SEND_STATUS_SENT_UNVERIFIED, media_row
+        assert media_row["send_status"] != ms.SEND_STATUS_FAILED, media_row
+
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert "Reply RETRY" not in req["report"], req["report"]
+        assert "SEND ATTENTION REQUIRED" not in req["report"], req["report"]
+
+        action = await queue.get_action(action_id)
+        assert action["state"] == queue.STATE_COMPLETED, action
+        assert action["error_code"] is None, action
+        assert action["has_unverified_media"] is True, action
+    finally:
+        await db[queue.ACTIONS_COLLECTION].delete_one({"id": action_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_one({"id": req_id})
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
 # ---------------------------------------------------------------------------
 # destination_group_override (2026-08-26) — a pre-existing, deliberately
 # test-only seam on _send_executor (never reachable from the real chat-
@@ -4101,3 +4234,49 @@ def test_report_send_result_form_only_failure_stays_send_partial():
     assert "SEND PARTIAL" in report, report
     assert "SEND ATTENTION REQUIRED" not in report, report
     assert "Reply RETRY" not in report, report
+
+
+def test_report_send_result_unverified_only_never_invites_retry():
+    """Regression test for the real production incident (2026-09-21,
+    Akarsh Kumar Gowda / Snapdragon Computer): a send-but-unverified item
+    with NO genuine failures must be counted as sent, never get the
+    "SEND ATTENTION REQUIRED"/"Reply RETRY" treatment (which previously
+    caused mark_scan.py's own internal automatic-recovery loop to
+    physically re-send the same video three times), and the false "no
+    duplicate media were sent" reassurance must not be shown for an
+    outcome that was never actually a hard failure to begin with."""
+    report = orch._report_send_result(
+        "Akarsh Kumar Gowda", "Snapdragon Computer (Genz Male User)", "Snapdragon x Talentgram Agency",
+        sent_labels=[], failed_items=[], already=[],
+        unverified_items=[{
+            "label": "Audition Take 2",
+            "error": "send unverified: no NEW matching outgoing message found in the destination chat after send",
+        }],
+        form_status_line="✓ Submission details",
+    )
+    assert "SEND ATTENTION REQUIRED" not in report, report
+    assert "Reply RETRY" not in report, report
+    assert "No duplicate media were sent" not in report, report
+    assert "1/1 media sent" in report, report
+    assert "Audition Take 2" in report, report
+    assert "could not confirm it arrived" in report, report
+
+
+def test_report_send_result_unverified_plus_genuine_failure_only_retries_the_real_failure():
+    """When there's a genuine failure ALONGSIDE an unverified-but-sent
+    item, the RETRY hint must still appear (there IS real retryable
+    work), but the unverified item must be reported distinctly from the
+    failed one — never lumped in with "1 failed", since it already sent."""
+    report = orch._report_send_result(
+        "Test Talent", "Test Project", "Test Casting Group",
+        sent_labels=[],
+        failed_items=[{"label": "Introduction", "error": "tile click failed after 3 attempts"}],
+        already=[],
+        unverified_items=[{"label": "Audition Take 2", "error": "send unverified: ..."}],
+    )
+    assert "SEND ATTENTION REQUIRED" in report, report
+    assert "Reply RETRY" in report, report
+    assert "1 failed" in report, report  # only the genuine failure counts as "failed"
+    assert "1/2 media sent" in report, report  # unverified item counts toward "sent", not "failed"
+    assert "Introduction" in report, report
+    assert "Audition Take 2" in report, report

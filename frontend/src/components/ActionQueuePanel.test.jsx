@@ -49,6 +49,16 @@ const COMPLETED_ACTION = {
     error_message: null, retryable: false, created_at: "2026-09-21T00:00:02Z",
 };
 
+// Regression fixture for the real production incident (2026-09-21, Akarsh
+// Kumar Gowda / Snapdragon Computer): a send that genuinely completed but
+// had one item WhatsApp couldn't confirm delivery for must still surface
+// that nuance — a bare "Completed" badge would silently hide it.
+const COMPLETED_ACTION_UNVERIFIED = {
+    id: "action-4", action_type: "send", talent_label: "Akarsh Kumar Gowda", project_label: "Snapdragon Computer",
+    project_id: "proj-4", submission_id: "sub-4", state: "COMPLETED", display_state: "COMPLETED",
+    error_message: null, retryable: false, has_unverified_media: true, created_at: "2026-09-21T00:00:03Z",
+};
+
 function mockActions(actions) {
     adminApi.get.mockResolvedValue({ data: { actions } });
 }
@@ -95,6 +105,15 @@ describe("ActionQueuePanel", () => {
         await waitFor(() => expect(screen.queryByText("Aman")).not.toBeNull());
         fireEvent.click(screen.getByTestId("action-queue-toggle"));
         await waitFor(() => expect(screen.queryByText("Aman")).toBeNull());
+    });
+
+    it("shows a delivery-unconfirmed notice only on the completed action with has_unverified_media", async () => {
+        mockActions([ACTIVE_ACTION, COMPLETED_ACTION, COMPLETED_ACTION_UNVERIFIED]);
+        render(<ActionQueuePanel />);
+        await waitFor(() => expect(screen.queryByText("Akarsh Kumar Gowda")).not.toBeNull());
+        expect(screen.queryByText("Aman")).not.toBeNull(); // plain completed action still renders normally
+        // Exactly one notice — the plain COMPLETED_ACTION (Aman) never gets it.
+        expect(screen.queryAllByText(/delivery unconfirmed/i)).toHaveLength(1);
     });
 
     it("Retry posts to the action's own endpoint and refetches immediately", async () => {

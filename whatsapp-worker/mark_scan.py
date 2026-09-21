@@ -9605,6 +9605,28 @@ async def _send_one_target_via_download(
             last_result["local_file_path"] = local_path
             last_result["byte_length"] = dl.get("byte_length")
             return last_result
+        if last_result.get("send_state") == sender.MESSAGE_SENT_BUT_NOT_VERIFIED:
+            # Real production incident, 2026-09-21 (Akarsh Kumar Gowda /
+            # Snapdragon Computer): this state means the composer cleared
+            # with no error — genuine evidence a real WhatsApp send just
+            # happened — but the destination-chat bubble scan couldn't
+            # confirm it (sender.py's own MESSAGE_SENT_BUT_NOT_VERIFIED
+            # constant is commented "DO NOT retry" for exactly this
+            # reason). Retrying here means re-attaching and re-clicking
+            # Send on the SAME file — a brand new, real, physical WhatsApp
+            # message — not a safe no-op. Before this fix, this loop kept
+            # going regardless and sent Take 2 three separate times to the
+            # same group. Stop immediately; the caller (media_assignment_
+            # worker._process_scan_done) records this as sent-but-
+            # unverified, never as failed, so no later automatic or manual
+            # retry re-selects it either.
+            logger.info(
+                "SEND_MEDIA_SENT_UNVERIFIED_NO_RETRY " + log_fields + " attempt=%d/%d elapsed_ms=%d",
+                *log_args, attempt_num, MAX_SEND_ITEM_ATTEMPTS, elapsed_ms,
+            )
+            last_result["local_file_path"] = local_path
+            last_result["byte_length"] = dl.get("byte_length")
+            return last_result
         if attempt_num < MAX_SEND_ITEM_ATTEMPTS:
             logger.info(
                 "SEND_MEDIA_REOPEN_RETRY " + log_fields + " attempt=%d/%d elapsed_ms=%d reason=%r",
@@ -9827,7 +9849,14 @@ async def _run_send(page, req: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:
             form_send_result = {"ok": False, "error": f"form send failed: {exc}"}
 
-    all_media_ok = all(r.get("ok") for r in results)
+    # A sent-but-unverified item (see _send_one_target_via_download's own
+    # no-retry handling above) has real evidence of a genuine send — it
+    # must count as "ok enough" here too, or the talent acknowledgement,
+    # the internal completion marker, and (one level up, in
+    # media_assignment_worker.py) the auto-approval/COMPLETED action state
+    # would all incorrectly stay withheld/FAILED for a run that actually
+    # succeeded, purely because delivery could not be confirmed.
+    all_media_ok = all(r.get("ok") or r.get("send_state") == sender.MESSAGE_SENT_BUT_NOT_VERIFIED for r in results)
     form_ok = form_send_result is None or bool(form_send_result.get("ok"))
 
     # Talent acknowledgement (Production feature) — ONLY after the casting

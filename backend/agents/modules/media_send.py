@@ -49,6 +49,17 @@ SEND_APPROVALS_COLLECTION = "send_form_approvals"
 SEND_STATUS_MARKED = "marked"
 SEND_STATUS_SENT = "sent"
 SEND_STATUS_FAILED = "failed"
+# Real production incident, 2026-09-21 (Akarsh Kumar Gowda / Snapdragon
+# Computer): a media item whose WhatsApp send left the composer with no
+# confirmed bubble (sender.MESSAGE_SENT_BUT_NOT_VERIFIED) was being
+# recorded as SEND_STATUS_FAILED — indistinguishable from "never sent at
+# all" — so a later re-dispatch (this same already_sent() filter finding
+# nothing) treated it as still needing to be sent, physically re-sending
+# already-delivered media. This status captures the real, positive
+# evidence a send occurred while being honest that delivery could not be
+# confirmed — see already_sent()'s own docstring for why it is treated as
+# "already done" for idempotency purposes, exactly like SEND_STATUS_SENT.
+SEND_STATUS_SENT_UNVERIFIED = "sent_unverified"
 
 # The final "everything for this talent/project has gone out" marker (Phase
 # 5/7, 2026-08-26) — sent last, once takes/intro/form/pictures have ALL
@@ -266,10 +277,18 @@ async def create_send_scan_request(
 
 
 async def already_sent(talent_id: str, project_id: str, destination_group: str) -> List[Dict[str, Any]]:
+    """Both SEND_STATUS_SENT (verified) and SEND_STATUS_SENT_UNVERIFIED
+    (real send evidence, delivery just couldn't be confirmed) count as
+    "already done" here — the required invariant, proven necessary by a
+    real incident (2026-09-21), is that a media item must never be
+    re-selected for another physical send merely because verification was
+    inconclusive. A genuinely FAILED item (never sent at all) is
+    correctly excluded from this set and remains eligible for retry."""
     return await db[MEDIA_SENDS_COLLECTION].find(
         {
             "talent_id": talent_id, "project_id": project_id,
-            "destination_group": destination_group, "send_status": SEND_STATUS_SENT,
+            "destination_group": destination_group,
+            "send_status": {"$in": [SEND_STATUS_SENT, SEND_STATUS_SENT_UNVERIFIED]},
         },
         {"_id": 0},
     ).to_list(200)

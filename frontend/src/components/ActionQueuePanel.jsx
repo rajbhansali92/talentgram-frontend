@@ -132,6 +132,11 @@ function ActionRow({ action, onRetry, retryingId }) {
                     <div className={`text-[12px] mt-1 ${isFailed ? "text-red-600" : isCompleted ? "text-emerald-700" : "text-black/60"}`}>
                         {isFailed ? (action.error_message || STATE_LABEL[displayState] || displayState) : (STATE_LABEL[displayState] || displayState)}
                     </div>
+                    {isCompleted && action.has_unverified_media && (
+                        <div className="text-[12px] mt-1 text-amber-600">
+                            Delivery unconfirmed for one or more items — check the destination group.
+                        </div>
+                    )}
                 </div>
                 {isFailed && action.retryable && (
                     <button

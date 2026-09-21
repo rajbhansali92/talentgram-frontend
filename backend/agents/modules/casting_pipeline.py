@@ -8572,7 +8572,7 @@ async def _scan_raw_candidates_for_source(
 
 async def _scan_and_validate_multi_source(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str, destination_group: str,
-    sources: List[Tuple[str, str]],
+    sources: List[Tuple[str, str]], total_budget_s: Optional[float] = None,
 ) -> Tuple[Optional["media_assignment.ValidationOutcome"], Optional[str]]:
     """The full mixed-source resolution pass (Production fix, 2026-09-08):
     scans EVERY configured source for this talent (group AND phone, when
@@ -8588,7 +8588,31 @@ async def _scan_and_validate_multi_source(
     or phone configured at all) or when every configured source's scan
     itself hard-failed, (None, None) on a pure timeout (mirrors
     _scan_raw_candidates_for_source's own timeout contract — the caller
-    degrades to its existing "couldn't verify in time" handling)."""
+    degrades to its existing "couldn't verify in time" handling).
+
+    `total_budget_s` (root-cause fix, 2026-09-21 — real production
+    incident: Juhi Vyas / Dettol Film 1 SEND, 15 straight verification
+    attempts, every one a pure timeout). Defaults to None, which keeps
+    the EXACT existing behavior (_SEND_PREVIEW_TOTAL_MAX_WAIT_SEC/
+    _SEND_PREVIEW_MAX_WAIT_SEC, unchanged) for every caller that doesn't
+    pass it — in particular _preview_send_marks, which runs inside the
+    synchronous /inbound HTTP handler and, per this function's own
+    "ONE shared budget across ALL sources" comment below, must stay
+    capped well under the worker's ~35s dispatch-claim ceiling. The ONE
+    caller that DOES pass a wider value is submission_action_queue.
+    advance_send_action's background verification loop, which has no
+    such HTTP/claim-timeout constraint. Real worker logs for the Juhi
+    incident proved the worker was doing genuine, correct work this
+    whole time — it opened the right chat and live-verified both marked
+    items via the jump-fallback path — but that full round trip
+    (chat-open + per-candidate jump-fallback, ~5-7s each, up to 2 tries
+    per mark) took ~39s end to end, well past the 20-22s budget designed
+    for the synchronous preview path. Every one of the 15 attempts was
+    therefore aborted by the BACKEND before the worker's own (unchanged,
+    correctly-functioning) scan/resolution logic ever got to report its
+    real result — never a MarkIntent/project-matching problem, never a
+    worker crash, never evidence any media was sent (this SEND action
+    never even reached MEDIA_RESOLVED/dispatch)."""
     if not sources:
         return None, (
             f"{talent_label} has no WhatsApp group or phone number configured — "
@@ -8607,14 +8631,16 @@ async def _scan_and_validate_multi_source(
     # the TOTAL keeps /inbound comfortably under that ceiling; a genuine
     # timeout just degrades the "Marked media" preview line to "couldn't
     # verify in time" (the real execution-time scan re-verifies anyway).
-    _total_deadline = time.monotonic() + _SEND_PREVIEW_TOTAL_MAX_WAIT_SEC
+    _effective_total_budget = total_budget_s if total_budget_s is not None else _SEND_PREVIEW_TOTAL_MAX_WAIT_SEC
+    _effective_per_source_budget = total_budget_s if total_budget_s is not None else _SEND_PREVIEW_MAX_WAIT_SEC
+    _total_deadline = time.monotonic() + _effective_total_budget
     for source_type, group_name in sources:
         _remaining = max(1.0, _total_deadline - time.monotonic())
         candidates, err = await _scan_raw_candidates_for_source(
             talent_id=talent_id, talent_label=talent_label,
             project_id=project_id, project_label=project_label,
             source_type=source_type, group_name=group_name, destination_group=destination_group,
-            budget_s=min(_SEND_PREVIEW_MAX_WAIT_SEC, _remaining),
+            budget_s=min(_effective_per_source_budget, _remaining),
         )
         if candidates is not None:
             merged.extend(candidates)

@@ -26,6 +26,15 @@ import os
 os.environ.setdefault("SEND_PREVIEW_POLL_INTERVAL_SEC", "0.05")
 os.environ.setdefault("SEND_PREVIEW_MAX_WAIT_SEC", "1.0")
 os.environ.setdefault("SEND_PREVIEW_TOTAL_MAX_WAIT_SEC", "1.2")
+# advance_send_action's own per-attempt scan budget (root-cause fix,
+# 2026-09-21 — Juhi Vyas SEND incident: the background loop now passes
+# this wider budget instead of relying on SEND_PREVIEW_TOTAL_MAX_WAIT_SEC
+# above, precisely so a slow-but-real worker scan isn't cut off before it
+# can report back). Shrunk here to match the shrunk SEND_PREVIEW_TOTAL_
+# MAX_WAIT_SEC for the same reason as that constant — a real production
+# default (55s) would make every "never resolves" test above take 55s
+# per attempt instead of ~1s.
+os.environ.setdefault("SEND_ACTION_VERIFY_SCAN_BUDGET_SEC", "1.2")
 os.environ.setdefault("SEND_ACTION_RETRY_BACKOFF_SEC", "0.05")
 os.environ.setdefault("SEND_ACTION_MAX_VERIFY_ATTEMPTS", "3")
 # Shrunk to match the shrunk SEND_PREVIEW_TOTAL_MAX_WAIT_SEC above (1.2s) —
@@ -1013,6 +1022,89 @@ async def test_late_tombstone_recovery_ignores_stale_resolution_outside_window()
             "a stale resolution outside the recency window must never be silently reused"
         )
     finally:
+        await _cleanup_full(project_id, talent_id, submission_id)
+
+
+async def test_send_action_slow_but_real_worker_scan_completes_within_widened_budget():
+    """Root-cause regression test — real production incident, 2026-09-21
+    (Juhi Vyas / Dettol Film 1 SEND, action_id 00d12a74-7322-431d-b6cb-
+    dfd2e07eef9c): worker logs proved the worker was doing genuine,
+    correct scan/resolution work every single time — it opened the right
+    chat and live-verified the marked media via the jump-fallback path —
+    but that real round trip (chat-open + per-candidate jump-fallback)
+    took ~39s end to end for this specific chat, well past casting_
+    pipeline._scan_and_validate_multi_source's shared default budget
+    (sized for the synchronous /inbound preview handler, ~20-22s in
+    production / 1.2s in this test env). So all 15 straight verification
+    attempts were aborted by the BACKEND before the worker could ever
+    report back — never a MarkIntent/project-matching problem, a worker
+    crash, or a claim race. This proves advance_send_action's own wider
+    SEND_VERIFY_SCAN_BUDGET_SEC now gives a slow-but-real scan enough
+    room to actually finish and resolve within the SAME first attempt,
+    instead of a guaranteed, repeated, misleading 'verification_timeout'."""
+    project_id, talent_id, submission_id, tag = await _seed_full()
+    project_label = f"SWA Project {tag}"
+    original_budget = queue.SEND_VERIFY_SCAN_BUDGET_SEC
+    # Wider than the shared SEND_PREVIEW_TOTAL_MAX_WAIT_SEC (1.2s in this
+    # test env) but still small enough to keep the test fast — this
+    # proves the WIDENED budget specifically, not merely an infinitely
+    # patient one.
+    queue.SEND_VERIFY_SCAN_BUDGET_SEC = 2.5
+    try:
+        action = await swa.dispatch_approve_send(project_id, submission_id)
+        real_candidate = _mark(
+            mention_lid=GUNWANTI_LID, mark_text=f"mark audition take 1 for {project_label}",
+            source_message_id="MEDIA-SLOW-BUT-REAL", media_type="video",
+        )
+
+        async def _slow_worker():
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while asyncio.get_event_loop().time() < deadline:
+                doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({
+                    "talent_id": talent_id, "project_id": project_id,
+                    "preview_only": True, "status": ma.SCAN_STATUS_PENDING,
+                })
+                if doc:
+                    # Simulates the real, slower-than-the-shared-default
+                    # worker round trip proven in production logs — scaled
+                    # down to stay well inside this test's own budget while
+                    # still exceeding the shrunk shared
+                    # SEND_PREVIEW_TOTAL_MAX_WAIT_SEC (1.2s).
+                    await asyncio.sleep(1.6)
+                    await db[ma.SCAN_REQUESTS_COLLECTION].update_one(
+                        {"id": doc["id"]}, {"$set": {"candidates": [real_candidate], "status": ma.SCAN_STATUS_DONE}},
+                    )
+                    processed = await orch._process_scan_done()
+                    assert processed, "orchestrator did not pick up the simulated slow preview scan request"
+                    return
+                await asyncio.sleep(0.02)
+            raise AssertionError("no pending preview scan request appeared for the slow-worker simulation")
+
+        worker_task = asyncio.create_task(_slow_worker())
+        try:
+            result = await queue.advance_send_action(action)
+            assert result is True
+        finally:
+            if not worker_task.done():
+                worker_task.cancel()
+                try:
+                    await worker_task
+                except (asyncio.CancelledError, AssertionError):
+                    pass
+            else:
+                await worker_task
+
+        mid = await queue.get_action(action["id"])
+        assert mid["state"] == queue.STATE_MEDIA_RESOLVED, mid
+        assert mid["attempt_count"] == 1, (
+            "the widened per-attempt budget must catch this within the SAME "
+            "first attempt — a second attempt would mean advance_send_action "
+            "isn't actually using its own wider budget"
+        )
+        doc = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": mid["dispatch_scan_request_id"]}, {"_id": 0})
+        assert doc["send_targets"][0]["source_message_id"] == "MEDIA-SLOW-BUT-REAL"
+    finally:
+        queue.SEND_VERIFY_SCAN_BUDGET_SEC = original_budget
         await _cleanup_full(project_id, talent_id, submission_id)
 
 

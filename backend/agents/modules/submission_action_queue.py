@@ -119,6 +119,23 @@ SEND_VERIFY_RETRY_BACKOFF_SEC = float(os.environ.get("SEND_ACTION_RETRY_BACKOFF_
 # at THIS one just-completed attempt's own timing, never reaching back
 # into an earlier attempt's stale resolution.
 SEND_LATE_RESOLUTION_WINDOW_SEC = float(os.environ.get("SEND_ACTION_LATE_RESOLUTION_WINDOW_SEC", "35"))
+# Per-attempt live-scan wait budget for THIS background verification loop
+# specifically (root-cause fix, 2026-09-21 — real production incident:
+# Juhi Vyas / Dettol Film 1 SEND, 15/15 attempts a pure timeout with no
+# MarkIntent/project-matching problem whatsoever). casting_pipeline._
+# scan_and_validate_multi_source's own default budget (~20-22s total) is
+# sized for the SYNCHRONOUS /inbound preview-card handler, which must stay
+# well under the worker's ~35s dispatch-claim ceiling — see that
+# function's own "ONE shared budget across ALL sources" comment. This
+# background loop has no such HTTP-request-lifetime constraint (it's
+# already an async poll loop scheduled via next_attempt_at), so it can
+# safely wait long enough for the worker's REAL, unchanged scan/jump-
+# fallback resolution work to actually finish and report back, instead of
+# the backend giving up first every time. Real worker logs for the Juhi
+# incident showed a genuine, correct chat-open + 2-candidate jump-fallback
+# round trip taking ~39s end to end — comfortably under this budget, with
+# margin for a third marked item or a slower render.
+SEND_VERIFY_SCAN_BUDGET_SEC = float(os.environ.get("SEND_ACTION_VERIFY_SCAN_BUDGET_SEC", "55"))
 
 
 def _now() -> datetime:
@@ -368,6 +385,7 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
         talent_id=action["talent_id"], talent_label=action["talent_label"],
         project_id=action["project_id"], project_label=action["project_label"],
         destination_group=action["destination_group"], sources=sources,
+        total_budget_s=SEND_VERIFY_SCAN_BUDGET_SEC,
     )
     attempt_count = action.get("attempt_count", 0) + 1
 

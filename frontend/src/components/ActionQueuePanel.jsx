@@ -158,27 +158,52 @@ function ActionRow({ action, onRetry, retryingId }) {
     );
 }
 
+// Panel presentation modes (2026-09-21 side-panel redesign). "open" shows
+// the header + scrollable action list; "collapsed" shows just the header
+// bar (click it, or the chevron, to re-expand); "closed" hides the panel
+// completely and replaces it with a small, unobtrusive reopen icon — NOT
+// a third variant of the same big box, and never re-entered automatically
+// (see the auto-expand effect below, which is gated on userInteractedRef
+// exactly like "collapsed" always was, so a close is respected exactly as
+// durably as a manual collapse always has been).
+const MODE_OPEN = "open";
+const MODE_COLLAPSED = "collapsed";
+const MODE_CLOSED = "closed";
+
 export default function ActionQueuePanel() {
     const [actions, setActions] = useState(sharedActions);
-    const [collapsed, setCollapsed] = useState(true);
+    const [mode, setMode] = useState(MODE_COLLAPSED);
     const [retryingId, setRetryingId] = useState(null);
-    const userToggledRef = useRef(false);
+    const userInteractedRef = useRef(false);
 
     useEffect(() => subscribeToSharedActions(setActions), []);
 
     // Auto-expand the FIRST time an active action appears, so the
-    // recruiter notices it started — never re-force it open again after
-    // they've deliberately collapsed it once.
+    // recruiter notices it started — never re-force it open again once
+    // the admin has deliberately collapsed OR closed it even once (a
+    // close is a stronger, equally durable preference as a collapse —
+    // new actions, completions, talent switches, and ordinary polling
+    // must never override either one).
     useEffect(() => {
-        if (userToggledRef.current) return;
+        if (userInteractedRef.current) return;
         if (actions.some((a) => ACTIVE_STATES.has(a.state))) {
-            setCollapsed(false);
+            setMode(MODE_OPEN);
         }
     }, [actions]);
 
-    const toggle = useCallback(() => {
-        userToggledRef.current = true;
-        setCollapsed((c) => !c);
+    const openPanel = useCallback(() => {
+        userInteractedRef.current = true;
+        setMode(MODE_OPEN);
+    }, []);
+
+    const toggleCollapse = useCallback(() => {
+        userInteractedRef.current = true;
+        setMode((m) => (m === MODE_OPEN ? MODE_COLLAPSED : MODE_OPEN));
+    }, []);
+
+    const closePanel = useCallback(() => {
+        userInteractedRef.current = true;
+        setMode(MODE_CLOSED);
     }, []);
 
     const handleRetry = useCallback(async (action) => {
@@ -198,41 +223,75 @@ export default function ActionQueuePanel() {
     if (actions.length === 0) return null;
 
     const activeCount = actions.filter((a) => ACTIVE_STATES.has(a.state)).length;
+
+    // Closed: nothing but a small, unobtrusive reopen affordance — never
+    // a large permanent floating button, never leftover collapsed-bar
+    // chrome, never an overlay. Anchored top-right on every breakpoint
+    // (never bottom) so it can never sit over the mobile Decision Making
+    // footer regardless of that footer's own expand/collapse state.
+    if (mode === MODE_CLOSED) {
+        return (
+            <button
+                onClick={openPanel}
+                aria-label={activeCount > 0 ? `Open Action Queue (${activeCount} active)` : "Open Action Queue"}
+                data-testid="action-queue-reopen"
+                className="fixed top-16 right-4 z-30 w-10 h-10 rounded-full bg-white hover:bg-black/[0.04] border border-black/[0.08] shadow-[0_4px_16px_rgba(0,0,0,0.12)] flex items-center justify-center transition-colors"
+            >
+                <ListTodo className="w-4 h-4 text-black/60" />
+                {activeCount > 0 && (
+                    <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full bg-black text-white text-[9px] font-bold">
+                        {activeCount}
+                    </span>
+                )}
+            </button>
+        );
+    }
+
     const sorted = [...actions].sort((a, b) => {
         const aActive = ACTIVE_STATES.has(a.state) ? 0 : 1;
         const bActive = ACTIVE_STATES.has(b.state) ? 0 : 1;
         if (aActive !== bActive) return aActive - bActive;
         return new Date(b.created_at) - new Date(a.created_at);
     });
+    const isOpen = mode === MODE_OPEN;
 
     return (
         <div
-            className="fixed bottom-4 right-4 z-50 w-[320px] max-w-[calc(100vw-2rem)] bg-white rounded-xl shadow-[0_8px_30px_rgba(0,0,0,0.12)] border border-black/[0.08] overflow-hidden"
+            className="fixed top-16 right-4 z-30 w-[320px] max-w-[calc(100vw-2rem)] max-h-[min(70vh,32rem)] bg-white rounded-xl shadow-[0_8px_30px_rgba(0,0,0,0.14)] border border-black/[0.08] overflow-hidden flex flex-col transition-[max-height] duration-200"
             data-testid="action-queue-panel"
         >
-            <button
-                onClick={toggle}
-                className="w-full flex items-center justify-between gap-2 px-3.5 py-2.5 bg-black/[0.02] hover:bg-black/[0.04] transition-colors"
-                aria-expanded={!collapsed}
-                data-testid="action-queue-toggle"
-            >
-                <div className="flex items-center gap-2">
-                    <ListTodo className="w-4 h-4 text-black/60" />
-                    <span className="text-[13px] font-semibold text-black/80">Action Queue</span>
+            <div className="flex items-center gap-1 pl-3.5 pr-2 py-2.5 bg-black/[0.02] shrink-0">
+                <button
+                    onClick={toggleCollapse}
+                    className="flex-1 min-w-0 flex items-center gap-2 text-left"
+                    aria-expanded={isOpen}
+                    aria-controls="action-queue-list"
+                    data-testid="action-queue-toggle"
+                >
+                    <ListTodo className="w-4 h-4 text-black/60 shrink-0" />
+                    <span className="text-[13px] font-semibold text-black/80 truncate">Action Queue</span>
                     {activeCount > 0 && (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-black text-white text-[10px] font-bold">
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-black text-white text-[10px] font-bold shrink-0">
                             {activeCount}
                         </span>
                     )}
-                </div>
-                {collapsed ? (
-                    <ChevronUp className="w-4 h-4 text-black/40" />
-                ) : (
-                    <ChevronDown className="w-4 h-4 text-black/40" />
-                )}
-            </button>
-            {!collapsed && (
-                <div className="max-h-[360px] overflow-y-auto">
+                    {isOpen ? (
+                        <ChevronUp className="w-4 h-4 text-black/40 shrink-0 ml-auto" />
+                    ) : (
+                        <ChevronDown className="w-4 h-4 text-black/40 shrink-0 ml-auto" />
+                    )}
+                </button>
+                <button
+                    onClick={closePanel}
+                    aria-label="Close Action Queue"
+                    data-testid="action-queue-close"
+                    className="shrink-0 w-6 h-6 flex items-center justify-center rounded-md text-black/40 hover:text-black/70 hover:bg-black/[0.06] transition-colors"
+                >
+                    <X className="w-3.5 h-3.5" />
+                </button>
+            </div>
+            {isOpen && (
+                <div id="action-queue-list" className="overflow-y-auto min-h-0">
                     {sorted.map((action) => (
                         <ActionRow key={action.id} action={action} onRetry={handleRetry} retryingId={retryingId} />
                     ))}

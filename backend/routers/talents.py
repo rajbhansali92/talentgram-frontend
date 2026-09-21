@@ -1106,6 +1106,67 @@ async def merge_talents(
     return result
 
 
+class MergeEmailsPreviewIn(BaseModel):
+    talent_a_id: str = Field(..., min_length=1)
+    talent_b_id: str = Field(..., min_length=1)
+    canonical_id: Optional[str] = None
+
+
+class MergeEmailsExecuteIn(BaseModel):
+    canonical_talent_id: str = Field(..., min_length=1)
+    duplicate_talent_id: str = Field(..., min_length=1)
+
+
+@router.post("/talents/merge-emails/preview")
+async def preview_email_merge(
+    payload: MergeEmailsPreviewIn,
+    admin: dict = Depends(current_admin),
+):
+    """Read-only preview for "Merge Different Emails" -- a SEPARATE
+    user-facing workflow from /talents/merge/preview above (that route's
+    behavior is completely untouched by this one). Solves a distinct
+    problem: the same real person submitted under two different, non-empty
+    emails, creating two Talent records. Never writes anything."""
+    from talent_merge_service import build_email_merge_preview, MergeError
+    try:
+        return await build_email_merge_preview(payload.talent_a_id, payload.talent_b_id, payload.canonical_id)
+    except MergeError as e:
+        raise HTTPException(e.status_code, e.message)
+
+
+@router.post("/talents/merge-emails")
+async def merge_talent_emails(
+    payload: MergeEmailsExecuteIn,
+    admin: dict = Depends(current_admin),
+):
+    """Admin-only "Merge Different Emails" -- folds the duplicate's email
+    into the canonical talent's `alternate_emails` (both stay linked to one
+    surviving profile) instead of adopting/discarding one, unlike
+    /talents/merge above. Same double-click/retry/concurrent-admin safety
+    as /talents/merge (see talent_merge_service.execute_email_merge)."""
+    from talent_merge_service import execute_email_merge, MergeError
+    logger.info(
+        "MERGE /talents/merge-emails requested by admin=%s canonical=%s duplicate=%s",
+        admin.get("email"), payload.canonical_talent_id, payload.duplicate_talent_id,
+    )
+    try:
+        result = await execute_email_merge(
+            payload.canonical_talent_id, payload.duplicate_talent_id,
+            operator=admin.get("email") or admin.get("id") or "unknown-admin",
+        )
+    except MergeError as e:
+        logger.warning(
+            "MERGE /talents/merge-emails rejected by admin=%s canonical=%s duplicate=%s: %s",
+            admin.get("email"), payload.canonical_talent_id, payload.duplicate_talent_id, e.message,
+        )
+        raise HTTPException(e.status_code, e.message)
+    logger.info(
+        "MERGE /talents/merge-emails completed by admin=%s canonical=%s duplicate=%s operation_id=%s",
+        admin.get("email"), payload.canonical_talent_id, payload.duplicate_talent_id, result.get("operation_id"),
+    )
+    return result
+
+
 @router.post("/talents/{tid}/media", response_model=TalentOut)
 async def add_media(
     tid: str,

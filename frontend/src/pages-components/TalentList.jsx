@@ -13,6 +13,7 @@ import BulkTagDialog from "@/components/BulkTagDialog";
 import AddToProjectModal from "@/components/AddToProjectModal";
 import { getBatch, getJobs } from "@/lib/whatsappApi";
 import MergeTalentsModal from "@/components/MergeTalentsModal";
+import MergeEmailsModal from "@/components/MergeEmailsModal";
 // Quick View reuses Browse Roster's existing drawer + breakpoint hook
 // verbatim (same pattern PipelineCard.jsx already established) — no
 // parallel preview system, no duplicated rendering.
@@ -789,6 +790,7 @@ export default function TalentList() {
     const [bulkTagAction, setBulkTagAction] = useState(null); // 'assign' | 'remove' | null
     const [showAddToProject, setShowAddToProject] = useState(false);
     const [showMergeModal, setShowMergeModal] = useState(false);
+    const [showMergeEmailsModal, setShowMergeEmailsModal] = useState(false);
     // Casting-call send groups queued from AddToProjectModal, still being
     // watched for the final "sent to N talents" toast. Grouped by action so
     // two separate "Send Casting Call" clicks never get merged into one
@@ -1258,6 +1260,7 @@ export default function TalentList() {
                     onExport={handleExport}
                     onAddToProject={() => setShowAddToProject(true)}
                     onMerge={() => setShowMergeModal(true)}
+                    onMergeEmails={() => setShowMergeEmailsModal(true)}
                     labelSingular="talent"
                     labelPlural="talents"
                     testid="talents-bulk-bar"
@@ -1280,6 +1283,20 @@ export default function TalentList() {
                     talentAId={Array.from(selected)[0]}
                     talentBId={Array.from(selected)[1]}
                     onClose={() => setShowMergeModal(false)}
+                    onSuccess={() => {
+                        Array.from(selected).forEach((id) => talentPreviewCache.invalidateTalent(id));
+                        clear();
+                        refetch();
+                    }}
+                />
+            )}
+
+            {showMergeEmailsModal && selected.size === 2 && (
+                <MergeEmailsModal
+                    open={showMergeEmailsModal}
+                    talentAId={Array.from(selected)[0]}
+                    talentBId={Array.from(selected)[1]}
+                    onClose={() => setShowMergeEmailsModal(false)}
                     onSuccess={() => {
                         Array.from(selected).forEach((id) => talentPreviewCache.invalidateTalent(id));
                         clear();

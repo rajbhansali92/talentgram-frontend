@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional
 
 from core import (
     db, _now, compute_age, update_talent_cover_cache,
-    REVIEW_FIELDS, PRESERVE_FIELDS,
+    REVIEW_FIELDS, PRESERVE_FIELDS, normalize_email,
 )
 from migrations.talent_dedup_scan import (
     _SCALAR_TALENT_REF_COLLECTIONS, _ARRAY_TALENT_REF_COLLECTIONS,
@@ -244,6 +244,129 @@ async def build_merge_preview(talent_a_id: str, talent_b_id: str, canonical_id: 
 
 
 # --------------------------------------------------------------------------
+# Merge Different Emails — a SEPARATE user-facing workflow from the Merge
+# Talents flow above (build_merge_preview / execute_merge are never called
+# by it, and vice versa). Solves a distinct problem: the same real person
+# submitted under two different email addresses, creating two Talent
+# records that regular Merge Talents would otherwise silently keep only one
+# email for. Shares only the low-level primitives already used above
+# (_field_changes, _media_plan, _identity_conflicts, _relationship_counts,
+# _apply_merge_steps) per this module's own stated convention for
+# low-level-only sharing.
+# --------------------------------------------------------------------------
+def _validate_different_emails(talent_a: dict, talent_b: dict) -> None:
+    email_a = normalize_email(talent_a.get("email"))
+    email_b = normalize_email(talent_b.get("email"))
+    if not email_a or not email_b:
+        raise MergeError(400, "Both profiles must have an email address to use Merge Different Emails.")
+    if email_a == email_b:
+        raise MergeError(400, "These profiles already share the same email — use Merge Talents instead.")
+
+
+def _alternate_emails_change(canonical: dict, other: dict) -> Dict[str, Dict[str, Any]]:
+    """Additive counterpart to `_field_changes`'s email handling: instead of
+    discarding the OTHER profile's email (which is what happens today
+    whenever canonical already has one of its own — see the module's
+    `_field_changes` docstring note), folds it into canonical's
+    `alternate_emails` so BOTH addresses keep resolving to this one
+    profile. This key is never populated by `_field_changes` itself, so it
+    is completely inert for the regular Merge Talents flow."""
+    other_norm = normalize_email(other.get("email")) or other.get("normalized_email")
+    if not other_norm:
+        return {}
+    canonical_norm = normalize_email(canonical.get("email"))
+    existing = list(canonical.get("alternate_emails") or [])
+    # Fold in the other profile's OWN alternate_emails too, in case it was
+    # itself the canonical of an earlier chained email-merge.
+    incoming = [other_norm] + [normalize_email(e) or e for e in (other.get("alternate_emails") or []) if e]
+    proposed = list(existing)
+    for e in incoming:
+        if e and e != canonical_norm and e not in proposed:
+            proposed.append(e)
+    if proposed == existing:
+        return {}
+    return {"alternate_emails": {"canonical": existing, "other": incoming, "proposed": proposed}}
+
+
+async def _build_email_merge_plan(canonical: dict, other: dict) -> Dict[str, Any]:
+    field_changes = _field_changes(canonical, other)
+    field_changes.update(_alternate_emails_change(canonical, other))
+    media = _media_plan(canonical, other)
+    # "email" is excluded from displayed conflicts here — two different
+    # emails are the expected, central case for this workflow, not a
+    # problem to flag (unlike Merge Talents, where differing identity
+    # fields are a genuine warning).
+    conflicts = [c for c in _identity_conflicts(canonical, other) if c["field"] != "email"]
+    rel_canonical = await _relationship_counts(canonical["id"])
+    rel_other = await _relationship_counts(other["id"])
+    proposed_submissions = rel_canonical["submissions"] + rel_other["submissions"]
+    tags_merged = len(field_changes.get("tags", {}).get("proposed", [])) - len(canonical.get("tags") or [])
+    return {
+        "field_changes": field_changes,
+        "media": media,
+        "conflicts": conflicts,
+        "relationship_counts": {"canonical": rel_canonical, "other": rel_other},
+        "proposed_submissions_total": proposed_submissions,
+        "tags_merged_count": max(tags_merged, 0),
+    }
+
+
+async def build_email_merge_preview(talent_a_id: str, talent_b_id: str, canonical_id: Optional[str] = None) -> Dict[str, Any]:
+    if talent_a_id == talent_b_id:
+        raise MergeError(400, "Cannot merge a talent with itself")
+
+    talent_a = await db.talents.find_one({"id": talent_a_id}, {"_id": 0})
+    talent_b = await db.talents.find_one({"id": talent_b_id}, {"_id": 0})
+    if not talent_a:
+        raise MergeError(404, f"Talent {talent_a_id} not found")
+    if not talent_b:
+        raise MergeError(404, f"Talent {talent_b_id} not found")
+
+    _validate_different_emails(talent_a, talent_b)
+
+    rel_a = await _relationship_counts(talent_a_id)
+    rel_b = await _relationship_counts(talent_b_id)
+
+    # Recommendation: prefer the OLDER/original record (explicit
+    # requirement for this workflow) — unlike Merge Talents' completeness-
+    # score recommendation above. The admin still makes the final choice
+    # either way; this only seeds the default selection.
+    created_a = _parse_iso(talent_a.get("created_at"))
+    created_b = _parse_iso(talent_b.get("created_at"))
+    if created_a and created_b:
+        recommended_id = talent_a_id if created_a <= created_b else talent_b_id
+        recommendation_reason = "older profile"
+    else:
+        recommended_id = talent_a_id
+        recommendation_reason = "creation date unavailable — defaulting to the first-selected profile"
+
+    result: Dict[str, Any] = {
+        "talent_a": {**talent_a, "relationship_counts": rel_a, "media_count": len(talent_a.get("media") or [])},
+        "talent_b": {**talent_b, "relationship_counts": rel_b, "media_count": len(talent_b.get("media") or [])},
+        "recommended_canonical_id": recommended_id,
+        "recommendation_reason": recommendation_reason,
+        "either_already_merged": {
+            talent_a_id: talent_a.get("status") == "MERGED",
+            talent_b_id: talent_b.get("status") == "MERGED",
+        },
+    }
+
+    if canonical_id:
+        if canonical_id not in (talent_a_id, talent_b_id):
+            raise MergeError(400, "canonical_id must be one of the two selected talents")
+        canonical = talent_a if canonical_id == talent_a_id else talent_b
+        other = talent_b if canonical_id == talent_a_id else talent_a
+        plan = await _build_email_merge_plan(canonical, other)
+        result["merge_plan"] = {
+            "canonical_talent_id": canonical["id"],
+            "duplicate_talent_id": other["id"],
+            **plan,
+        }
+
+    return result
+
+
+# --------------------------------------------------------------------------
 # Execute — the write path.
 # --------------------------------------------------------------------------
 def _operation_summary(op_doc: dict, *, resumed: bool, already_done: bool) -> Dict[str, Any]:
@@ -272,16 +395,21 @@ async def _apply_merge_steps(op_doc: dict) -> None:
     field_set["media"] = op_doc["media"]["proposed_media"]
     field_set["updated_at"] = _now()
 
-    if "email" in field_set:
-        # Canonical is adopting the duplicate's email (Part 17 identity
-        # linking, its own value was empty). `email`/`normalized_email`
-        # carry a partial UNIQUE index -- if the duplicate still holds this
-        # exact value when canonical's write lands, that write fails with
-        # E11000, even though the duplicate is destined to lose the field
-        # anyway. Clear it off the duplicate FIRST (excluding it from the
+    if "email" in field_set or "alternate_emails" in field_set:
+        # Canonical is adopting the duplicate's email -- either because its
+        # own value was empty ("email" in field_set, Part 17 identity
+        # linking), or because this is a "Merge Different Emails" operation
+        # folding the duplicate's (different, non-empty) email into
+        # canonical's `alternate_emails` ("alternate_emails" in field_set,
+        # see execute_email_merge below). Either way the duplicate must not
+        # keep matching on its old email afterwards: `email`/`normalized_email`
+        # carry a partial UNIQUE index, and leaving the value on the
+        # duplicate would let it (a MERGED, archived record) still win a
+        # future resolve_canonical_talent() lookup race against the
+        # canonical. Clear it off the duplicate FIRST (excluding it from the
         # partial index, since the index only applies where the field is a
-        # string), then apply it to canonical. Idempotent: on a resumed
-        # retry the duplicate's email is already cleared, so this is a no-op.
+        # string). Idempotent: on a resumed retry the duplicate's email is
+        # already cleared, so this is a no-op.
         await db.talents.update_one(
             {"id": duplicate_id}, {"$unset": {"email": "", "normalized_email": ""}}
         )
@@ -494,4 +622,150 @@ async def execute_merge(canonical_id: str, duplicate_id: str, *, operator: str) 
     await db.talent_merges.update_one({"id": op_id}, {"$set": {"status": "completed", "completed_at": _now()}})
     op_doc["status"] = "completed"
     logger.info("execute_merge: completed operation_id=%s canonical=%s duplicate=%s", op_id, canonical_id, duplicate_id)
+    return _operation_summary(op_doc, resumed=False, already_done=False)
+
+
+async def execute_email_merge(canonical_id: str, duplicate_id: str, *, operator: str) -> Dict[str, Any]:
+    """"Merge Different Emails" — a separate user-facing workflow from
+    execute_merge() above; never call one from the other's route, and this
+    function must never change execute_merge's behavior. The orchestration
+    (atomic claim, talent_merges audit trail, idempotent resume) is
+    deliberately a full standalone copy of execute_merge's, not a shared
+    helper with a branch — the two user-facing workflows must stay
+    completely separate. The one real behavioral difference: the
+    duplicate's email is folded into canonical's `alternate_emails` array
+    (via _build_email_merge_plan) instead of being adopted/discarded, so
+    BOTH emails keep resolving to the one surviving canonical talent
+    (see core.resolve_canonical_talent)."""
+    if canonical_id == duplicate_id:
+        raise MergeError(400, "canonical_talent_id and duplicate_talent_id must be different")
+
+    canonical = await db.talents.find_one({"id": canonical_id}, {"_id": 0})
+    if not canonical:
+        raise MergeError(404, f"Talent {canonical_id} not found")
+    if canonical.get("status") == "MERGED":
+        raise MergeError(409, "The chosen canonical talent is itself already MERGED into another record")
+
+    duplicate = await db.talents.find_one({"id": duplicate_id}, {"_id": 0})
+    if not duplicate:
+        raise MergeError(404, f"Talent {duplicate_id} not found")
+
+    if duplicate.get("status") == "MERGED":
+        if duplicate.get("merged_into") != canonical_id:
+            raise MergeError(
+                409,
+                f"Talent {duplicate_id} is already merged into a different talent "
+                f"({duplicate.get('merged_into')}) -- cannot also merge it into {canonical_id}",
+            )
+        op_id = duplicate.get("merge_operation_id")
+        existing_op = await db.talent_merges.find_one({"id": op_id}, {"_id": 0}) if op_id else None
+        if not existing_op:
+            # Same narrow race-window handling as execute_merge (see its own
+            # comment) — the atomic claim and the audit insert are two
+            # separate writes with no transaction covering both.
+            for _ in range(10):
+                await asyncio.sleep(0.05)
+                existing_op = await db.talent_merges.find_one({"id": op_id}, {"_id": 0}) if op_id else None
+                if existing_op:
+                    break
+        if not existing_op:
+            raise MergeError(500, "Talent is marked MERGED but its merge operation record is missing -- manual reconciliation required")
+        if existing_op.get("status") == "completed":
+            return _operation_summary(existing_op, resumed=False, already_done=True)
+        if existing_op.get("status") == "in_progress":
+            started = _parse_iso(existing_op.get("timestamp")) or datetime.now(timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - started).total_seconds()
+            if age_seconds < _MERGE_STALE_IN_PROGRESS_SECONDS:
+                raise MergeError(409, "A merge for this pair is already in progress -- try again shortly")
+        logger.warning(
+            "execute_email_merge: resuming operation %s (status=%s) canonical=%s duplicate=%s",
+            existing_op["id"], existing_op.get("status"), canonical_id, duplicate_id,
+        )
+        try:
+            await _apply_merge_steps(existing_op)
+        except Exception as e:
+            await db.talent_merges.update_one(
+                {"id": existing_op["id"]}, {"$set": {"status": "failed", "error": str(e), "failed_at": _now()}}
+            )
+            raise MergeError(500, f"Merge resume failed: {e}") from e
+        await db.talent_merges.update_one(
+            {"id": existing_op["id"]}, {"$set": {"status": "completed", "completed_at": _now()}}
+        )
+        existing_op["status"] = "completed"
+        return _operation_summary(existing_op, resumed=True, already_done=False)
+
+    # First attempt -- this is the operation this whole workflow exists for,
+    # so validate the two profiles genuinely have different, non-empty
+    # emails BEFORE claiming anything.
+    _validate_different_emails(canonical, duplicate)
+
+    # Guard against an incoming email that's already linked to some OTHER
+    # (unrelated) canonical talent's alternate_emails, e.g. from a prior
+    # chained merge — every email must resolve to at most one canonical
+    # talent. (The duplicate's own email/normalized_email are already
+    # guaranteed unique collection-wide by the existing partial unique
+    # index, so no separate check is needed for those.)
+    other_norm = normalize_email(duplicate.get("email"))
+    collision = await db.talents.find_one(
+        {"id": {"$ne": canonical_id}, "alternate_emails": other_norm}, {"_id": 0, "id": 1}
+    )
+    if collision:
+        raise MergeError(409, "That email is already linked to a different talent profile.")
+
+    # Atomically claim the duplicate -- sole point of no return, identical
+    # pattern to execute_merge.
+    op_id = str(uuid.uuid4())
+    now = _now()
+    claim = await db.talents.find_one_and_update(
+        {"id": duplicate_id, "status": {"$ne": "MERGED"}},
+        {"$set": {
+            "status": "MERGED", "merged_into": canonical_id, "merged_at": now,
+            "merge_operation_id": op_id, "updated_at": now,
+        }},
+    )
+    if not claim:
+        # Lost a race to a concurrent request for the exact same pair --
+        # re-enter through the "already MERGED" branch above.
+        return await execute_email_merge(canonical_id, duplicate_id, operator=operator)
+
+    plan = await _build_email_merge_plan(canonical, duplicate)
+    op_doc = {
+        "id": op_id,
+        "source_talent_id": duplicate_id,
+        "canonical_talent_id": canonical_id,
+        "merge_reason": "manual_admin_email_merge",
+        "matched_by": ["manual_admin_merge_different_emails"],
+        "field_changes": plan["field_changes"],
+        "relationship_counts": plan["relationship_counts"],
+        "media": plan["media"],
+        "conflicts": plan["conflicts"],
+        "tags_merged_count": plan["tags_merged_count"],
+        "operator": operator,
+        "status": "in_progress",
+        "timestamp": now,
+        "migration_version": "manual_email_merge_v1",
+    }
+    await db.talent_merges.insert_one(op_doc)
+    logger.info(
+        "execute_email_merge: claimed duplicate=%s -> canonical=%s operator=%s operation_id=%s",
+        duplicate_id, canonical_id, operator, op_id,
+    )
+
+    try:
+        await _apply_merge_steps(op_doc)
+    except Exception as e:
+        logger.error(
+            "execute_email_merge: FAILED mid-merge -- operation_id=%s canonical=%s duplicate=%s error=%s. "
+            "Duplicate is already claimed (status=MERGED); retrying this exact request will safely "
+            "resume the remaining steps (every step is idempotent).",
+            op_id, canonical_id, duplicate_id, e,
+        )
+        await db.talent_merges.update_one(
+            {"id": op_id}, {"$set": {"status": "failed", "error": str(e), "failed_at": _now()}}
+        )
+        raise MergeError(500, f"Merge failed partway through and has been recorded for resume/reconciliation: {e}") from e
+
+    await db.talent_merges.update_one({"id": op_id}, {"$set": {"status": "completed", "completed_at": _now()}})
+    op_doc["status"] = "completed"
+    logger.info("execute_email_merge: completed operation_id=%s canonical=%s duplicate=%s", op_id, canonical_id, duplicate_id)
     return _operation_summary(op_doc, resumed=False, already_done=False)

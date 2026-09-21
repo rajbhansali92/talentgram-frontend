@@ -1,5 +1,5 @@
 import React from "react";
-import { Trash2, X, Check, FolderKanban, GitMerge } from "lucide-react";
+import { Trash2, X, Check, FolderKanban, GitMerge, Mail } from "lucide-react";
 
 /**
  * Floating action bar rendered at the bottom of the viewport when the user
@@ -28,6 +28,7 @@ export default function BulkSelectBar({
     onExport,
     onAddToProject,
     onMerge,
+    onMergeEmails,
     labelSingular = "item",
     labelPlural = "items",
     testid = "bulk-select-bar",
@@ -113,6 +114,20 @@ export default function BulkSelectBar({
                 >
                     <GitMerge className="w-3.5 h-3.5" />
                     {count === 2 ? "Merge Talents" : "Select exactly 2 to merge"}
+                </button>
+            )}
+
+            {onMergeEmails && (
+                <button
+                    type="button"
+                    onClick={count === 2 ? onMergeEmails : undefined}
+                    disabled={count !== 2}
+                    title={count === 2 ? undefined : "Select exactly 2 talents to merge different emails"}
+                    className="text-xs px-3 py-2 border border-border hover:border-foreground/60 rounded-sm text-foreground inline-flex items-center gap-1.5 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
+                    data-testid={`${testid}-merge-emails`}
+                >
+                    <Mail className="w-3.5 h-3.5" />
+                    {count === 2 ? "Merge Different Emails" : "Select exactly 2 to merge emails"}
                 </button>
             )}
 

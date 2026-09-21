@@ -1768,6 +1768,20 @@ async def seed_admin() -> None:
     except Exception as e:
         logger.warning(f"talents normalized_email unique index: {e}")
 
+    # Talents: `alternate_emails` — additive identity-linking array populated
+    # ONLY by the "Merge Different Emails" admin action (talent_merge_service
+    # .execute_email_merge). Deliberately NOT a unique index: Mongo cannot
+    # express "unique across this array AND the separate `email`/
+    # `normalized_email` fields" as one index, and the merge write path
+    # itself already guards against collisions (it clears the absorbed
+    # talent's own email/normalized_email so it can never re-match, and
+    # refuses the merge if the incoming email is already linked elsewhere).
+    # Non-unique, multikey, for resolve_canonical_talent()'s lookup speed.
+    try:
+        await db.talents.create_index("alternate_emails", name="talents_alternate_emails_idx")
+    except Exception as e:
+        logger.warning(f"talents alternate_emails index: {e}")
+
     # Talents: `phone` uniqueness is SCOPED to the admin-created population
     # (source.type == "admin"), not global. The standalone
     # migrations/data_hub_indexes.py script previously made this a
@@ -2412,6 +2426,12 @@ class TalentOut(TalentIn):
     # client can round-trip it as expected_updated_at on its next PUT
     # /talents/{tid} — additive only, no existing consumer reads this today.
     updated_at: Optional[str] = None
+    # "Merge Different Emails" admin action: other email addresses this
+    # canonical talent absorbed from a merged-in duplicate profile. Read-only
+    # — deliberately absent from TalentIn/TalentUpdateIn so the normal
+    # talent-edit PUT can never set it; only talent_merge_service populates
+    # it.
+    alternate_emails: List[str] = Field(default_factory=list)
 
 
 class TalentUpdateIn(TalentIn):
@@ -3803,7 +3823,7 @@ IGNORE_FIELDS = {
     "id", "email", "normalized_email", "created_at", "updated_at", "source",
     "image_url", "cover_thumbnail_url", "cover_url", "media_count",
     "first_submission_at", "last_submission_at", "total_submissions",
-    "age"
+    "age", "alternate_emails"
 }
 
 
@@ -3841,6 +3861,12 @@ async def resolve_canonical_talent(*, email: Optional[str] = None) -> Optional[d
     future identifier (e.g. `phone`) can be added as a new keyword-only
     parameter that appends its own `$or` clauses, without touching any
     existing call site that doesn't pass it.
+
+    Also matches `alternate_emails` — emails linked to this canonical talent
+    via the "Merge Different Emails" admin action (talent_merge_service
+    .execute_email_merge), so a future submission/apply/portal lookup using
+    either linked email resolves to the same profile instead of creating a
+    new one.
     """
     ors: List[Dict[str, Any]] = []
     norm_email = normalize_email(email) if email else None
@@ -3849,6 +3875,7 @@ async def resolve_canonical_talent(*, email: Optional[str] = None) -> Optional[d
             {"normalized_email": norm_email},
             {"email": norm_email},
             {"source.talent_email": norm_email},
+            {"alternate_emails": norm_email},
         ])
     if not ors:
         return None

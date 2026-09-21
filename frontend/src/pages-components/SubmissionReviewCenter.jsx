@@ -7,6 +7,7 @@ import {
     ArrowLeft,
     ChevronLeft,
     ChevronRight,
+    ChevronDown,
     Check,
     XCircle,
     PauseCircle,
@@ -756,6 +757,15 @@ export default function SubmissionReviewCenter() {
         return () => clearTimeout(handler);
     }, [searchQuery]);
     const [isMobileDetailOpen, setIsMobileDetailOpen] = useState(false);
+    // Mobile Decision Making collapse (2026-09-21) — collapsed by default so
+    // the review content gets the viewport, not the button block. Desktop
+    // (lg+) never reads this state at all — see the footer JSX below, which
+    // hard-codes `lg:flex` regardless. Resets to collapsed on every talent
+    // switch (never persisted globally, never stale across submissions).
+    const [isDecisionExpanded, setIsDecisionExpanded] = useState(false);
+    useEffect(() => {
+        setIsDecisionExpanded(false);
+    }, [selectedId]);
     const [isEndOfList, setIsEndOfList] = useState(false);
     const [visibleCount, setVisibleCount] = useState(50);
     
@@ -3016,9 +3026,29 @@ export default function SubmissionReviewCenter() {
                         )}
                     </div>
 
-                    {/* Sticky Decision Footer — hidden in read-only Original view */}
+                    {/* Sticky Decision Footer — hidden in read-only Original view.
+                        Mobile (below lg): collapsed by default behind a "Decision
+                        Making" toggle, so the review content above gets the
+                        viewport instead of a persistent 5-button block. Desktop
+                        (lg+): the toggle is hidden and the panel is force-shown via
+                        `lg:flex`, completely ignoring isDecisionExpanded — the
+                        existing desktop layout/behavior is unchanged. */}
                     {detail && !isPreviewMode && !isOriginalMode && (
-                        <footer className="px-6 py-5 bg-white border-t-2 border-black/[0.08] shrink-0 flex flex-col gap-4 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] z-20">
+                        <footer className="bg-white border-t-2 border-black/[0.08] shrink-0 shadow-[0_-10px_40px_-15px_rgba(0,0,0,0.1)] z-20">
+                            <button
+                                type="button"
+                                onClick={() => setIsDecisionExpanded((v) => !v)}
+                                aria-expanded={isDecisionExpanded}
+                                aria-controls="decision-making-panel"
+                                className="lg:hidden w-full flex items-center justify-between px-6 py-3.5 text-left"
+                            >
+                                <span className="text-[10px] uppercase font-mono tracking-widest text-black/60 font-semibold">Decision Making</span>
+                                <ChevronDown className={`w-4 h-4 text-black/50 transition-transform ${isDecisionExpanded ? "rotate-180" : ""}`} />
+                            </button>
+                            <div
+                                id="decision-making-panel"
+                                className={`${isDecisionExpanded ? "flex" : "hidden"} lg:flex flex-col gap-4 px-6 pb-5 pt-0 lg:pt-5 border-t border-black/[0.06] lg:border-t-0`}
+                            >
                             {whatsappActionError && (
                                 <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl px-4 py-2.5 whitespace-pre-wrap">
                                     {whatsappActionError}
@@ -3041,18 +3071,18 @@ export default function SubmissionReviewCenter() {
                                         className="w-full text-sm px-4 py-3 border border-black/[0.12] focus:border-black/50 rounded-xl outline-none bg-[#fafaf9] focus:bg-white transition-all text-black/90 shadow-sm"
                                     />
                                 </div>
-                                <div className="flex items-center gap-3 shrink-0 mt-2 lg:mt-0 flex-wrap">
+                                <div className="flex flex-col gap-3 lg:flex-row lg:items-center shrink-0 mt-2 lg:mt-0 lg:flex-wrap">
                                     <button
                                         onClick={() => handleDecision("rejected")}
                                         disabled={saving || !!whatsappAction}
-                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-rose-200 text-rose-700 hover:bg-rose-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
+                                        className="w-full lg:w-auto lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-rose-200 text-rose-700 hover:bg-rose-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
                                     >
                                         <XCircle className="w-4 h-4" /> Reject
                                     </button>
                                     <button
                                         onClick={() => handleDecision("hold")}
                                         disabled={saving || !!whatsappAction}
-                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
+                                        className="w-full lg:w-auto lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
                                     >
                                         <PauseCircle className="w-4 h-4" /> Hold
                                     </button>
@@ -3064,7 +3094,7 @@ export default function SubmissionReviewCenter() {
                                         onClick={() => runWhatsappAction("upload")}
                                         disabled={saving || !!whatsappAction}
                                         title="Download the marked WhatsApp media and attach it to this submission, then approve"
-                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-sky-200 text-sky-700 hover:bg-sky-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
+                                        className="w-full lg:w-auto lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-sky-200 text-sky-700 hover:bg-sky-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
                                     >
                                         {whatsappAction?.submissionId === selectedId && whatsappAction.action === "upload" ? (
                                             <><Loader2 className="w-4 h-4 animate-spin" /> Uploading…</>
@@ -3076,7 +3106,7 @@ export default function SubmissionReviewCenter() {
                                         onClick={() => runWhatsappAction("send")}
                                         disabled={saving || !!whatsappAction}
                                         title="Download the marked WhatsApp media and send it to the project's casting group, then approve"
-                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-indigo-200 text-indigo-700 hover:bg-indigo-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
+                                        className="w-full lg:w-auto lg:flex-none inline-flex items-center justify-center gap-2 px-5 py-3 border border-indigo-200 text-indigo-700 hover:bg-indigo-50 rounded-xl text-sm font-bold transition-all bg-white shadow-sm disabled:opacity-60"
                                     >
                                         {whatsappAction?.submissionId === selectedId && whatsappAction.action === "send" ? (
                                             <><Loader2 className="w-4 h-4 animate-spin" /> Sending…</>
@@ -3087,11 +3117,12 @@ export default function SubmissionReviewCenter() {
                                     <button
                                         onClick={() => handleDecision("approved")}
                                         disabled={saving || !!whatsappAction}
-                                        className="flex-1 lg:flex-none inline-flex items-center justify-center gap-2 px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition-all shadow-md hover:shadow-lg disabled:opacity-60"
+                                        className="w-full lg:w-auto lg:flex-none inline-flex items-center justify-center gap-2 px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition-all shadow-md hover:shadow-lg disabled:opacity-60"
                                     >
                                         <Check className="w-4 h-4" /> Approve
                                     </button>
                                 </div>
+                            </div>
                             </div>
                         </footer>
                     )}

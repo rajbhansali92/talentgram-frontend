@@ -798,6 +798,16 @@ export default function TalentEdit() {
                         placeholder="optional"
                         disabled={!isEditing}
                     />
+                    {Array.isArray(talent.alternate_emails) && talent.alternate_emails.length > 0 && (
+                        <div className="block" data-testid="talent-alternate-emails">
+                            <span className="text-[11px] text-neutral-600 font-semibold tracking-widest uppercase">
+                                Alternate Emails
+                            </span>
+                            <p className="mt-2 py-2.5 text-sm text-black/85">
+                                {talent.alternate_emails.join(", ")}
+                            </p>
+                        </div>
+                    )}
                     <Field
                         label="Phone (WhatsApp)"
                         type="tel"

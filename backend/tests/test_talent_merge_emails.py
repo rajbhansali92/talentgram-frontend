@@ -78,6 +78,7 @@ async def _cleanup(ids):
     await _real_db.talents.delete_many({"id": {"$in": ids}})
     await _real_db.submissions.delete_many({"talent_id": {"$in": ids}})
     await _real_db.talent_merges.delete_many({"canonical_talent_id": {"$in": ids}})
+    await _real_db.casting_pipeline.delete_many({"talent_id": {"$in": ids}})
 
 
 class _Resp:
@@ -428,3 +429,209 @@ async def test_email_already_linked_elsewhere_refused():
         assert resp.status_code == 409, resp.text
     finally:
         await _cleanup([a["id"], b["id"], other["id"]])
+
+
+# ============================================================================
+# Casting-pipeline collision reconciliation (2026-09-21 production incident:
+# _apply_merge_steps blanket-reassigned casting_pipeline BEFORE its own
+# dedicated collision-aware block could run, hitting the real unique index
+# pipeline_project_talent_unique and aborting mid-merge -- see the forensic
+# report for the real Juhi Vyas incident this reproduces). Fix: exclude
+# casting_pipeline from the blanket reassignment loop so the dedicated block
+# (now actually reconciling instead of just skipping) is reachable.
+# ============================================================================
+def _pipe(project_id, talent_id, stage, updated_at, created_at=None):
+    return {
+        "id": f"{_MTAG}pipe_{_uuid.uuid4().hex[:8]}",
+        "project_id": project_id, "talent_id": talent_id, "stage": stage,
+        "created_at": created_at or updated_at, "updated_at": updated_at,
+    }
+
+
+async def test_case_c_single_pipeline_collision_no_e11000_one_row_survives():
+    a = _talent("pc1a", name="Pipeline Collision A", email="pc1-a@example.com", normalized_email="pc1-a@example.com")
+    b = _talent("pc1b", name="Pipeline Collision B", email="pc1-b@example.com", normalized_email="pc1-b@example.com")
+    await _real_db.talents.insert_many([a, b])
+    proj = f"{_MTAG}proj-collide"
+    canon_pipe = _pipe(proj, a["id"], "follow_up", "2026-09-08T00:00:00+00:00")
+    dup_pipe = _pipe(proj, b["id"], "approved", "2026-09-15T00:00:00+00:00")
+    await _real_db.casting_pipeline.insert_many([canon_pipe, dup_pipe])
+    try:
+        resp = await _merge(a["id"], b["id"])
+        assert resp.status_code == 200, resp.text  # must NOT be a 500 E11000 failure
+
+        rows = [r async for r in _real_db.casting_pipeline.find({"project_id": proj}, {"_id": 0})]
+        assert len(rows) == 1, "exactly one pipeline row must survive per project"
+        assert rows[0]["talent_id"] == a["id"]
+        assert rows[0]["stage"] == "approved", "duplicate's row was more recently updated, so its stage must win"
+
+        dup_refs = await _real_db.casting_pipeline.count_documents({"talent_id": b["id"]})
+        assert dup_refs == 0, "no pipeline row may remain pointing at the absorbed talent"
+    finally:
+        await _cleanup([a["id"], b["id"]])
+
+
+async def test_case_d_multiple_pipeline_collisions_all_reconciled():
+    a = _talent("pc2a", name="Multi Collision A", email="pc2-a@example.com", normalized_email="pc2-a@example.com")
+    b = _talent("pc2b", name="Multi Collision B", email="pc2-b@example.com", normalized_email="pc2-b@example.com")
+    await _real_db.talents.insert_many([a, b])
+    proj1, proj2, proj3 = f"{_MTAG}p1", f"{_MTAG}p2", f"{_MTAG}p3"
+    rows_in = [
+        _pipe(proj1, a["id"], "follow_up", "2026-09-08T00:00:00+00:00"),
+        _pipe(proj1, b["id"], "approved", "2026-09-15T00:00:00+00:00"),  # dup newer -> "approved" wins
+        _pipe(proj2, a["id"], "follow_up", "2026-09-13T00:00:00+00:00"),
+        _pipe(proj2, b["id"], "ask_to_test", "2026-09-11T00:00:00+00:00"),  # canon newer -> "follow_up" wins
+        _pipe(proj3, a["id"], "hold", "2026-09-20T00:00:00+00:00"),
+        _pipe(proj3, b["id"], "rejected", "2026-09-21T00:00:00+00:00"),  # dup newer -> "rejected" wins
+    ]
+    await _real_db.casting_pipeline.insert_many(rows_in)
+    try:
+        resp = await _merge(a["id"], b["id"])
+        assert resp.status_code == 200, resp.text
+
+        for proj, expected_stage in [(proj1, "approved"), (proj2, "follow_up"), (proj3, "rejected")]:
+            rows = [r async for r in _real_db.casting_pipeline.find({"project_id": proj}, {"_id": 0})]
+            assert len(rows) == 1, f"{proj}: exactly one row must survive"
+            assert rows[0]["talent_id"] == a["id"]
+            assert rows[0]["stage"] == expected_stage, f"{proj}: wrong deterministic winner"
+
+        assert await _real_db.casting_pipeline.count_documents({"talent_id": b["id"]}) == 0
+        # No unique-key duplicates: exactly one row per (project, canonical) pair.
+        for proj in (proj1, proj2, proj3):
+            assert await _real_db.casting_pipeline.count_documents({"project_id": proj, "talent_id": a["id"]}) == 1
+    finally:
+        await _cleanup([a["id"], b["id"]])
+
+
+async def test_case_e_deterministic_rule_is_newer_updated_at():
+    # Covered by both directions inside test_case_d above (proj1: duplicate
+    # newer; proj2: canonical newer) -- this test isolates the "canonical
+    # already newer, nothing overwritten" branch on its own.
+    a = _talent("pc3a", name="Rule A", email="pc3-a@example.com", normalized_email="pc3-a@example.com")
+    b = _talent("pc3b", name="Rule B", email="pc3-b@example.com", normalized_email="pc3-b@example.com")
+    await _real_db.talents.insert_many([a, b])
+    proj = f"{_MTAG}proj-rule"
+    canon_pipe = _pipe(proj, a["id"], "locked", "2026-09-20T00:00:00+00:00")
+    dup_pipe = _pipe(proj, b["id"], "not_available", "2026-09-05T00:00:00+00:00")
+    await _real_db.casting_pipeline.insert_many([canon_pipe, dup_pipe])
+    try:
+        resp = await _merge(a["id"], b["id"])
+        assert resp.status_code == 200, resp.text
+        rows = [r async for r in _real_db.casting_pipeline.find({"project_id": proj}, {"_id": 0})]
+        assert len(rows) == 1
+        assert rows[0]["stage"] == "locked", "canonical's row was newer, its stage must be kept, not overwritten"
+        assert rows[0]["id"] == canon_pipe["id"], "the surviving row must be the canonical's own document"
+    finally:
+        await _cleanup([a["id"], b["id"]])
+
+
+async def test_case_f_audit_records_collision_and_retained_state():
+    a = _talent("pc4a", name="Audit A", email="pc4-a@example.com", normalized_email="pc4-a@example.com")
+    b = _talent("pc4b", name="Audit B", email="pc4-b@example.com", normalized_email="pc4-b@example.com")
+    await _real_db.talents.insert_many([a, b])
+    proj = f"{_MTAG}proj-audit"
+    canon_pipe = _pipe(proj, a["id"], "follow_up", "2026-09-08T00:00:00+00:00")
+    dup_pipe = _pipe(proj, b["id"], "approved", "2026-09-15T00:00:00+00:00")
+    await _real_db.casting_pipeline.insert_many([canon_pipe, dup_pipe])
+    try:
+        resp = await _merge(a["id"], b["id"])
+        assert resp.status_code == 200, resp.text
+
+        op_doc = await _real_db.talent_merges.find_one({"id": resp.json()["operation_id"]}, {"_id": 0})
+        resolved = op_doc.get("pipeline_collisions_resolved")
+        assert resolved and len(resolved) == 1
+        entry = resolved[0]
+        assert entry["project_id"] == proj
+        assert entry["canonical_pipeline_id"] == canon_pipe["id"]
+        assert entry["duplicate_pipeline_id"] == dup_pipe["id"]
+        assert entry["canonical_stage"] == "follow_up"
+        assert entry["duplicate_stage"] == "approved"
+        assert entry["retained_stage"] == "approved"
+        assert entry["rule"] == "newer_updated_at"
+    finally:
+        await _cleanup([a["id"], b["id"]])
+
+
+async def test_case_g_repair_of_partially_merged_state_is_idempotent():
+    """Reproduces the exact partially-merged shape the real Juhi record was
+    left in: atomic claim done, canonical fields set, submissions already
+    reassigned, but a casting_pipeline collision still unresolved and the
+    talent_merges op recorded as 'failed'. Calling execute_email_merge again
+    on the same pair (the resume path) must safely finish the job -- and
+    calling it a THIRD time must be a pure no-op, never re-applying or
+    duplicating anything."""
+    a = _talent("pc5a", name="Repair A", email="pc5-a@example.com", normalized_email="pc5-a@example.com",
+                alternate_emails=["pc5-b@example.com"])
+    b = _talent("pc5b", name="Repair B", status="MERGED", merged_into=None)  # merged_into set below once we know a['id']
+    b["merged_into"] = a["id"]
+    op_id = f"{_MTAG}op_{_uuid.uuid4().hex[:8]}"
+    b["merge_operation_id"] = op_id
+    b["merged_at"] = "2026-09-21T16:28:57+00:00"
+    await _real_db.talents.insert_many([a, b])
+    sub_id = f"{_MTAG}sub_{_uuid.uuid4().hex[:6]}"
+    await _real_db.submissions.insert_one({"id": sub_id, "talent_id": a["id"], "project_id": f"{_MTAG}proj-repair-sub", "status": "submitted"})
+    proj = f"{_MTAG}proj-repair"
+    canon_pipe = _pipe(proj, a["id"], "follow_up", "2026-09-08T00:00:00+00:00")
+    dup_pipe = _pipe(proj, b["id"], "approved", "2026-09-15T00:00:00+00:00")
+    await _real_db.casting_pipeline.insert_many([canon_pipe, dup_pipe])
+    await _real_db.talent_merges.insert_one({
+        "id": op_id, "source_talent_id": b["id"], "canonical_talent_id": a["id"],
+        "merge_reason": "manual_admin_email_merge", "matched_by": ["manual_admin_merge_different_emails"],
+        "field_changes": {"alternate_emails": {"canonical": [], "other": ["pc5-b@example.com"], "proposed": ["pc5-b@example.com"]}},
+        "relationship_counts": {"canonical": {"submissions": 1}, "other": {"submissions": 0}},
+        "media": {"canonical_count": 0, "other_count": 0, "overlap_count": 0, "proposed_count": 0, "proposed_media": []},
+        "conflicts": [], "tags_merged_count": 0, "operator": "admin@talentgram.co",
+        "status": "failed", "error": "E11000 simulated", "timestamp": "2026-09-21T16:28:57+00:00",
+        "migration_version": "manual_email_merge_v1",
+    })
+    try:
+        first = await _merge(a["id"], b["id"])
+        assert first.status_code == 200, first.text
+        assert first.json()["resumed"] is True
+
+        rows = [r async for r in _real_db.casting_pipeline.find({"project_id": proj}, {"_id": 0})]
+        assert len(rows) == 1
+        assert rows[0]["talent_id"] == a["id"]
+        assert rows[0]["stage"] == "approved"
+        assert await _real_db.casting_pipeline.count_documents({"talent_id": b["id"]}) == 0
+
+        op_after = await _real_db.talent_merges.find_one({"id": op_id}, {"_id": 0})
+        assert op_after["status"] == "completed"
+
+        # Second resume call: pure no-op, no duplication, no error.
+        second = await _merge(a["id"], b["id"])
+        assert second.status_code == 200, second.text
+        assert second.json()["already_merged"] is True
+        rows_again = [r async for r in _real_db.casting_pipeline.find({"project_id": proj}, {"_id": 0})]
+        assert len(rows_again) == 1, "a second resume must never duplicate the reconciled row"
+    finally:
+        await _cleanup([a["id"], b["id"]])
+        await _real_db.submissions.delete_many({"id": sub_id})
+
+
+async def test_case_j_existing_merge_talents_pipeline_collision_also_fixed():
+    """The bug was in the SHARED _apply_merge_steps, so regular Merge
+    Talents (execute_merge, not execute_email_merge) had the exact same
+    latent crash risk. Confirms the fix applies there too, without changing
+    any of execute_merge's own logic."""
+    from talent_merge_service import execute_merge
+
+    a = _talent("pc6a", name="Regular Merge Collision A", email=None, normalized_email=None)
+    b = _talent("pc6b", name="Regular Merge Collision B", email="pc6-b@example.com", normalized_email="pc6-b@example.com")
+    await _real_db.talents.insert_many([a, b])
+    proj = f"{_MTAG}proj-regular-collide"
+    canon_pipe = _pipe(proj, a["id"], "follow_up", "2026-09-08T00:00:00+00:00")
+    dup_pipe = _pipe(proj, b["id"], "locked", "2026-09-19T00:00:00+00:00")
+    await _real_db.casting_pipeline.insert_many([canon_pipe, dup_pipe])
+    try:
+        result = await execute_merge(a["id"], b["id"], operator="admin@talentgram.co")
+        assert result["ok"] is True
+        rows = [r async for r in _real_db.casting_pipeline.find({"project_id": proj}, {"_id": 0})]
+        assert len(rows) == 1
+        assert rows[0]["talent_id"] == a["id"]
+        assert rows[0]["stage"] == "locked"
+        # Regular Merge Talents must still never touch alternate_emails.
+        canonical_after = await _real_db.talents.find_one({"id": a["id"]}, {"_id": 0})
+        assert canonical_after.get("alternate_emails") in (None, [])
+    finally:
+        await _cleanup([a["id"], b["id"]])

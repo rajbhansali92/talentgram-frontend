@@ -418,8 +418,17 @@ async def _apply_merge_steps(op_doc: dict) -> None:
 
     # Plain scalar reassignment -- safe blanket update, these are all either
     # append-only event logs or single-owner references with no compound
-    # natural key that could collide.
+    # natural key that could collide. EXCEPT casting_pipeline: it carries a
+    # real unique index on (project_id, talent_id) -- see the dedicated,
+    # collision-aware casting_pipeline block further below, which is the
+    # only safe place to touch that collection. Blanket-reassigning it here
+    # too would hit that unique index (E11000) the moment both talents
+    # already had a row for the same project, and abort THIS ENTIRE
+    # function before the dedicated block ever runs (2026-09-21 production
+    # incident: exactly this, on a live "Merge Different Emails" merge).
     for coll, field in _SCALAR_TALENT_REF_COLLECTIONS:
+        if coll == "casting_pipeline":
+            continue
         await db[coll].update_many({field: duplicate_id}, {"$set": {field: canonical_id}})
     await db.feedback.update_many({"talent_id": duplicate_id}, {"$set": {"talent_id": canonical_id}})
     await db.whatsapp_jobs.update_many(
@@ -471,30 +480,52 @@ async def _apply_merge_steps(op_doc: dict) -> None:
         )
         await db.link_actions.delete_one({"id": dup_action["id"]})
 
-    # casting_pipeline -- natural key is (project_id, talent_id), "inserted
-    # at most once" per pair. If canonical already has a row for the same
+    # casting_pipeline -- natural key is (project_id, talent_id), enforced by
+    # a real unique index (pipeline_project_talent_unique), "inserted at
+    # most once" per pair. If canonical already has a row for the same
     # project (both talents were submitted to it before being recognized as
-    # the same person), there is no safe way to auto-decide which `stage`
-    # should win -- skip and record the collision for manual follow-up
-    # rather than guess (Part 19: preserve or flag, never guess).
-    skipped_pipeline_collisions = []
+    # the same person), only one row may survive. PIPELINE_STAGE_ORDER
+    # (routers/casting_pipeline.py) is documented as a kanban RENDER order,
+    # not a progression/priority order, so it cannot determine which side's
+    # stage is more current -- deterministic fallback: the more recently
+    # updated row wins (2026-09-21 incident resolution). Its stage becomes
+    # the canonical row's stage (the winning side's own true value, never
+    # guessed), then the now-redundant duplicate row is deleted so exactly
+    # one row per project remains and none point at the duplicate.
+    # Idempotent: once a collision is resolved, dup_pipe's document is gone,
+    # so a resumed retry naturally stops finding it.
+    pipeline_collisions_resolved = []
     async for dup_pipe in db.casting_pipeline.find({"talent_id": duplicate_id}, {"_id": 0}):
         canon_pipe = await db.casting_pipeline.find_one(
             {"project_id": dup_pipe["project_id"], "talent_id": canonical_id}, {"_id": 0}
         )
         if canon_pipe:
-            skipped_pipeline_collisions.append({
+            dup_updated = _parse_iso(dup_pipe.get("updated_at"))
+            canon_updated = _parse_iso(canon_pipe.get("updated_at"))
+            duplicate_is_newer = bool(dup_updated and (not canon_updated or dup_updated > canon_updated))
+            retained_stage = dup_pipe.get("stage") if duplicate_is_newer else canon_pipe.get("stage")
+            if duplicate_is_newer and retained_stage != canon_pipe.get("stage"):
+                await db.casting_pipeline.update_one(
+                    {"id": canon_pipe["id"]},
+                    {"$set": {"stage": retained_stage, "updated_at": dup_pipe.get("updated_at") or _now()}},
+                )
+            await db.casting_pipeline.delete_one({"id": dup_pipe["id"]})
+            pipeline_collisions_resolved.append({
                 "project_id": dup_pipe["project_id"],
+                "canonical_pipeline_id": canon_pipe["id"],
+                "duplicate_pipeline_id": dup_pipe["id"],
                 "canonical_stage": canon_pipe.get("stage"),
                 "duplicate_stage": dup_pipe.get("stage"),
+                "retained_stage": retained_stage,
+                "rule": "newer_updated_at",
             })
             continue
         await db.casting_pipeline.update_one(
             {"id": dup_pipe["id"]}, {"$set": {"talent_id": canonical_id}}
         )
-    if skipped_pipeline_collisions:
+    if pipeline_collisions_resolved:
         await db.talent_merges.update_one(
-            {"id": op_doc["id"]}, {"$set": {"skipped_pipeline_collisions": skipped_pipeline_collisions}}
+            {"id": op_doc["id"]}, {"$set": {"pipeline_collisions_resolved": pipeline_collisions_resolved}}
         )
 
 

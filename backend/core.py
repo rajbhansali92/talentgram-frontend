@@ -518,6 +518,27 @@ async def _find_valid_trusted_device_row(raw_token: Optional[str]) -> Optional[D
     return row
 
 
+async def _canonicalize_merged_talent(talent: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A credential bound to a raw talent_id (e.g. a trusted-device cookie)
+    can outlive that talent being absorbed by a later merge -- `email`/
+    `normalized_email` get correctly cleared on the absorbed record, so
+    returning it as-is produces a talent with no email (2026-09-21 Juhi
+    incident: this broke the silent-recognition -> submission-form flow).
+    Follows `merged_into` (bounded, so a pathological cycle can't loop
+    forever) to the surviving canonical Talent instead. Read-only -- no DB
+    writes here, callers own their own persistence."""
+    seen = set()
+    while talent and talent.get("status") == "MERGED" and talent.get("merged_into"):
+        if talent["id"] in seen or len(seen) >= 5:
+            break
+        seen.add(talent["id"])
+        nxt = await db.talents.find_one({"id": talent["merged_into"]})
+        if not nxt:
+            break
+        talent = nxt
+    return talent
+
+
 async def peek_trusted_device_talent(raw_token: Optional[str]) -> Optional[Dict[str, Any]]:
     """Read-only trusted-device validation — resolves the cookie to its
     talent without rotating or touching the row. Used by
@@ -528,24 +549,32 @@ async def peek_trusted_device_talent(raw_token: Optional[str]) -> Optional[Dict[
     row = await _find_valid_trusted_device_row(raw_token)
     if not row:
         return None
-    return await db.talents.find_one({"id": row["talent_id"]})
+    talent = await db.talents.find_one({"id": row["talent_id"]})
+    return await _canonicalize_merged_talent(talent)
 
 
 async def resolve_trusted_device(raw_token: Optional[str]) -> Optional[Dict[str, Any]]:
     """Validate a trusted-device cookie value. On success, ROTATES it
-    (sliding-window: the matched row is revoked and a fresh one minted for
-    the same talent) and returns {"talent": <doc>, "new_raw_token": <str>}.
-    Returns None if the cookie is missing, unknown, expired, or revoked."""
+    (sliding-window: the matched row is revoked and a fresh one minted) and
+    returns {"talent": <doc>, "new_raw_token": <str>}. Returns None if the
+    cookie is missing, unknown, expired, or revoked.
+
+    If the bound talent has since been absorbed by a merge, resolves to the
+    canonical Talent (see _canonicalize_merged_talent) and, critically, mints
+    the fresh cookie for the CANONICAL id — so a stale device self-heals on
+    its very next recognition instead of perpetually re-minting a credential
+    for the absorbed talent forever."""
     row = await _find_valid_trusted_device_row(raw_token)
     if not row:
         return None
     talent = await db.talents.find_one({"id": row["talent_id"]})
+    talent = await _canonicalize_merged_talent(talent)
     if not talent:
         return None
     await db.trusted_devices.update_one(
         {"id": row["id"]}, {"$set": {"revoked": True, "last_used_at": datetime.now(timezone.utc)}}
     )
-    new_raw = await mint_trusted_device(row["talent_id"])
+    new_raw = await mint_trusted_device(talent["id"])
     return {"talent": talent, "new_raw_token": new_raw}
 
 

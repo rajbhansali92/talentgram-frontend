@@ -373,14 +373,10 @@ async def prefill_for_email(
             return {"exists": True}
         return {}
 
-    talent = await db.talents.find_one(
-        {"$or": [
-            {"normalized_email": email},
-            {"email": email},
-            {"source.talent_email": email}
-        ]},
-        _PREFILL_TALENT_PROJECTION,
-    )
+    # Canonical resolver (not the hand-rolled $or) so a proven alternate
+    # email ("Merge Different Emails") still returns the linked profile's
+    # real prefill data instead of an empty response.
+    talent = await resolve_canonical_talent(email=email)
     if not talent:
         return {}
     return await _build_prefill_response(talent, email)
@@ -482,15 +478,12 @@ async def start_submission(
         "talent_email": email,
     })
 
-    # P0-2: gate when pre-existing data exists for this email.
-    talent_exists = await db.talents.find_one(
-        {"$or": [
-            {"normalized_email": email},
-            {"email": email},
-            {"source.talent_email": email},
-        ]},
-        {"_id": 1},
-    )
+    # P0-2: gate when pre-existing data exists for this email. Uses the
+    # canonical resolver (not a hand-rolled email-only lookup) so a known
+    # talent's alternate email ("Merge Different Emails") still requires
+    # ownership proof instead of silently taking the friction-free
+    # brand-new-person path.
+    talent_exists = await resolve_canonical_talent(email=email)
     if existing or talent_exists:
         owns = await verify_email_ownership(authorization, email, request)
         if not owns:
@@ -2263,25 +2256,21 @@ async def submission_finalize(sid: str, response: Response, authorization: Optio
     # ------------------------------------------------------------------
     # Auto-link to global Talent DB (dedupe by email).
     # First-time finalize only — retest never overwrites global talent data.
-    # Uses the SAME broad $or lookup as /apply approval so the merge logic
-    # is consistent across all entry points (Phase 0).
-    # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # Auto-link/update to global Talent DB (dedupe by email).
+    # Uses the single canonical resolver (core.resolve_canonical_talent) so
+    # a submission from a "Merge Different Emails" talent's alternate email
+    # attaches to the existing canonical Talent instead of silently creating
+    # a third duplicate record (2026-09-21 incident: this used to be its own
+    # hand-rolled email/normalized_email/source.talent_email $or, which
+    # never checked alternate_emails).
     # ------------------------------------------------------------------
     email = normalize_email(sub.get("talent_email"))
     talent_doc = None
     if sub.get("talent_id"):
         talent_doc = await db.talents.find_one({"id": sub["talent_id"]}, {"_id": 0})
     if not talent_doc and email:
-        talent_doc = await db.talents.find_one(
-            {"$or": [
-                {"normalized_email": email},
-                {"email": email},
-                {"source.talent_email": email},
-            ]},
-            {"_id": 0},
-        )
+        talent_doc = await resolve_canonical_talent(email=email)
+        if talent_doc:
+            talent_doc.pop("_id", None)
 
     if is_retest:
         # Resubmission / edit finalize (status was already submitted/updated).
@@ -2971,20 +2960,19 @@ async def set_decision(
     if sub.get("decision") == payload.decision and sub.get("talent_id"):
         return {"ok": True}
 
-    # Resolve talent_id if it is missing/null (fallback matching/creation logic)
+    # Resolve talent_id if it is missing/null (fallback matching/creation logic).
+    # Same identity-resolution concern as submission_finalize's auto-link
+    # above: this decides whether to attach to an EXISTING talent or create
+    # a new one, so it must use the canonical resolver too (an alternate
+    # email must not spawn a duplicate talent here either).
     resolved_talent_id = sub.get("talent_id")
     if not resolved_talent_id:
         email = normalize_email(sub.get("talent_email"))
         talent_doc = None
         if email:
-            talent_doc = await db.talents.find_one(
-                {"$or": [
-                    {"normalized_email": email},
-                    {"email": email},
-                    {"source.talent_email": email},
-                ]},
-                {"_id": 0},
-            )
+            talent_doc = await resolve_canonical_talent(email=email)
+            if talent_doc:
+                talent_doc.pop("_id", None)
         if not talent_doc:
             # Build a minimal talent record from the submission's form_data.
             form = sub.get("form_data") or {}

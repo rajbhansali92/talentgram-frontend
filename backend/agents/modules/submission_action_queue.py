@@ -477,6 +477,52 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
 
     # outcome.ok — fully resolved, by THIS scan's own fresh output only.
     if not outcome.assignments:
+        # Real production incident, 2026-09-21 (Kushagre Dua / Snapdragon
+        # Computer (Male Start up founder) — the WhatsApp group shares its
+        # casting group with THREE other "Snapdragon Computer (...)"
+        # sibling projects). The marks genuinely existed and were scanned,
+        # but media_assignment.validate_candidates correctly and safely
+        # excluded them as project_ambiguous/project_mismatch (a real tie
+        # among several sibling projects, or a confident match to a
+        # DIFFERENT one — see that function's own "SAFETY RULES" for why
+        # this must never be guessed, proven necessary by the real Limca
+        # Film1/Film2 and Tapti AI App (Ananya)/(Neelam) cross-
+        # contamination incidents). The correct, safe fix is NOT to loosen
+        # that matching — it's to stop telling the admin "nothing was
+        # marked" when something WAS marked and deliberately, correctly
+        # rejected. Surfacing the true reason (and exactly how to fix the
+        # mark text) is the fix: the admin re-marks with a specific enough
+        # project reference, which then resolves uniquely and safely.
+        if outcome.project_ambiguous:
+            all_candidate_labels = sorted({
+                p["label"] for item in outcome.project_ambiguous for p in (item.get("ambiguous_projects") or [])
+            })
+            await fail_action(
+                action_id, code="marked_media_project_ambiguous",
+                message=(
+                    f"Marked WhatsApp media WAS found for {action['talent_label']}, but its project "
+                    f"reference could not be safely narrowed to {action['project_label']} — it matches "
+                    f"{len(all_candidate_labels)} similarly-named projects equally well: "
+                    f"{'; '.join(all_candidate_labels)}. Please re-send the MARK reply on WhatsApp with a "
+                    f"more specific project name (e.g. include the part in parentheses, like "
+                    f"\"{action['project_label']}\"), then retry."
+                ),
+                retryable=True,
+            )
+            return True
+        if outcome.project_mismatch:
+            other_labels = sorted({item.get("matched_project_label") for item in outcome.project_mismatch if item.get("matched_project_label")})
+            await fail_action(
+                action_id, code="marked_media_wrong_project",
+                message=(
+                    f"Marked WhatsApp media WAS found for {action['talent_label']}, but it was marked for "
+                    f"a different project ({'; '.join(other_labels)}), not {action['project_label']} — it was "
+                    "correctly not assigned here. Mark the audition takes/introduction for "
+                    f"{action['project_label']} specifically, then retry."
+                ),
+                retryable=True,
+            )
+            return True
         await fail_action(
             action_id, code="no_marked_media",
             message=(

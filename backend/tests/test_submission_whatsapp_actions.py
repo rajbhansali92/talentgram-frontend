@@ -382,6 +382,103 @@ async def test_approve_send_no_marked_media_eventually_reports_honestly():
 
 
 # ---------------------------------------------------------------------------
+# Real production incident (2026-09-21) — Kushagre Dua / "Snapdragon
+# Computer (Male Start up founder)". FOUR real sibling projects shared one
+# casting group, all named "Snapdragon Computer (...)". Both of Kushagre's
+# WhatsApp marks ("Mark audition take for Snapdragon computers" /
+# "...introduction...") genuinely existed and were scanned, but
+# media_assignment.validate_candidates CORRECTLY and safely excluded them
+# (a real tie among sibling projects — proven necessary by the earlier,
+# separately-fixed Limca Film1/Film2 and Tapti AI App (Ananya)/(Neelam)
+# cross-contamination incidents; loosening that matching was explicitly
+# investigated and rejected — see the forensic report). The actual, safe
+# bug was that the Action Queue then told the admin "No marked WhatsApp
+# media found... mark it first" — false; the media WAS marked. These tests
+# prove the fix: an accurate, actionable message that names the real
+# ambiguity/mismatch instead.
+# ---------------------------------------------------------------------------
+async def test_ambiguous_sibling_project_mark_reports_accurately_not_as_missing():
+    """Two real sibling projects (both containing "Snapdragon" and
+    "Computer") share one casting group — mirrors the real 4-sibling
+    incident shape with the minimum needed to prove it. A mark generic
+    enough to tie between them must surface as marked_media_project_
+    ambiguous, naming both projects, never the misleading "mark the media
+    first" message — the media WAS marked."""
+    tag = uuid.uuid4().hex[:6]
+    group = f"Snapdragon Casting {tag}"
+    project_id = await _seed_project(f"Snapdragon Computer (Alpha) {tag}", whatsapp_casting_group_name=group)
+    sibling_id = await _seed_project(f"Snapdragon Computer (Beta) {tag}", whatsapp_casting_group_name=group)
+    talent_id = await _seed_talent(f"Kushagre {tag}", whatsapp_group_name=f"Kushagre {tag} x Talentgram", email=f"kushagre.{tag}@example.com")
+    submission_id = await _seed_submission(project_id, talent_id, f"kushagre.{tag}@example.com", decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        action = await swa.dispatch_approve_send(project_id, submission_id)
+        worker_task = _with_simulated_send_preview(talent_id, project_id, [
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"Mark Snapdragon Computer {tag} take", source_message_id="MEDIA-AMBIG-TAKE", media_type="video"),
+        ])
+        final = await _drive_send_action_to_terminal(action["id"], timeout=15.0)
+        if not worker_task.done():
+            worker_task.cancel()
+            try:
+                await worker_task
+            except (asyncio.CancelledError, AssertionError):
+                pass
+        else:
+            await worker_task
+
+        assert final["state"] == queue.STATE_FAILED, final
+        assert final["error_code"] == "marked_media_project_ambiguous", final
+        assert "mark the audition takes/introduction on WhatsApp first" not in final["error_message"], final
+        assert f"Snapdragon Computer (Alpha) {tag}" in final["error_message"], final
+        assert f"Snapdragon Computer (Beta) {tag}" in final["error_message"], final
+        assert final["retryable"] is True, final
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"project_id": {"$in": [project_id, sibling_id]}})
+        await _cleanup_full(project_id, talent_id, submission_id)
+        await db.projects.delete_one({"id": sibling_id})
+
+
+async def test_mismatched_other_project_mark_reports_accurately_not_as_missing():
+    """A mark that confidently and uniquely names a DIFFERENT, unrelated
+    project (never a sibling — no shared-word ambiguity at all) must
+    surface as marked_media_wrong_project, naming that other project, and
+    must NEVER be assigned to the requested action's own project."""
+    tag = uuid.uuid4().hex[:6]
+    group = f"Shared Casting {tag}"
+    project_id = await _seed_project(f"Snapdragon Computer (Alpha) {tag}", whatsapp_casting_group_name=group)
+    other_id = await _seed_project(f"Pepsi Diwali Campaign {tag}", whatsapp_casting_group_name=group)
+    talent_id = await _seed_talent(f"Kushagre {tag}", whatsapp_group_name=f"Kushagre {tag} x Talentgram", email=f"kushagre.{tag}@example.com")
+    submission_id = await _seed_submission(project_id, talent_id, f"kushagre.{tag}@example.com", decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+    try:
+        action = await swa.dispatch_approve_send(project_id, submission_id)
+        worker_task = _with_simulated_send_preview(talent_id, project_id, [
+            _mark(mention_lid=GUNWANTI_LID, mark_text=f"Mark take 1 for Pepsi Diwali Campaign {tag}", source_message_id="MEDIA-WRONG-PROJECT", media_type="video"),
+        ])
+        final = await _drive_send_action_to_terminal(action["id"], timeout=15.0)
+        if not worker_task.done():
+            worker_task.cancel()
+            try:
+                await worker_task
+            except (asyncio.CancelledError, AssertionError):
+                pass
+        else:
+            await worker_task
+
+        assert final["state"] == queue.STATE_FAILED, final
+        assert final["error_code"] == "marked_media_wrong_project", final
+        assert "mark the audition takes/introduction on WhatsApp first" not in final["error_message"], final
+        assert f"Pepsi Diwali Campaign {tag}" in final["error_message"], final
+        # Never actually assigned/dispatched to the requested project.
+        assert final.get("mark_intent_ids") in (None, []), final
+        assert await db[ma.SCAN_REQUESTS_COLLECTION].count_documents({"project_id": project_id, "mode": "send"}) == 0
+    finally:
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"project_id": {"$in": [project_id, other_id]}})
+        await _cleanup_full(project_id, talent_id, submission_id)
+        await db.projects.delete_one({"id": other_id})
+
+
+# ---------------------------------------------------------------------------
 # Worker-affinity — a dispatched SEND/UPLOAD request must always carry
 # the resolved worker_id, exactly as before this redesign.
 # ---------------------------------------------------------------------------

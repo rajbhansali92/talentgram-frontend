@@ -729,3 +729,222 @@ def test_prefilter_matches_real_spec_examples():
     negatives = ["good morning", "thanks!", "ok", "😂😂", "call me later", "video please"]
     for n in negatives:
         assert not gci._looks_like_possible_command(n), f"expected prefilter to reject {n!r}"
+
+
+# ---------------------------------------------------------------------------
+# PART 4 (2026-09-22 prefilter fix) — the exact phrase lists from the
+# follow-up brief. Real production gap this closes: "Kimaya Kadam is
+# realdy for Folow Up" was silently rejected by the OLD prefilter before
+# ever reaching Gemini — see casting_command_interpreter.py's own
+# _TYPO_TOLERANT_COMMAND_WORDS docstring for the exact root cause and the
+# false-positive collisions ("add"~"and", "lock"~"luck", "send"~"sent")
+# that ruled out a naive "just widen the regex" fix.
+# ---------------------------------------------------------------------------
+_PART4_MUST_REACH_GEMINI = [
+    "Kimaya Kadam is realdy for Folow Up",
+    "Kimaya should be addedd to Flyng Machine",
+    "Kimaya needs to be shifted along to FU",
+    "The casting call should go out to Kimaya",
+    "Please put Sushmita into Snapdragon",
+    "Can we move her to Approved?",
+    "Can you send it to her?",
+]
+
+_PART4_MUST_NOT_REACH_GEMINI = [
+    "Hi",
+    "Good morning",
+    "Thanks",
+    "Okay",
+    "Done",
+    "Any update?",
+    "Please check this",
+    "What is happening with the project?",
+]
+
+
+def test_part4_prefilter_unit_must_reach_gemini():
+    for p in _PART4_MUST_REACH_GEMINI:
+        assert gci._looks_like_possible_command(p), f"expected prefilter to accept {p!r}"
+
+
+def test_part4_prefilter_unit_must_not_reach_gemini():
+    for n in _PART4_MUST_NOT_REACH_GEMINI:
+        assert not gci._looks_like_possible_command(n), f"expected prefilter to reject {n!r}"
+
+
+async def test_part4_prefilter_integration_must_reach_gemini_spy():
+    """Integration-level proof (not just the unit-level prefilter check
+    above) — drives the REAL dispatch path and uses a call-counting SPY
+    on the fake Gemini client to prove the network call actually fires,
+    exactly as the brief requires ('use mocks/spies ... do not rely only
+    on returned interpretation').
+
+    Two phrases in this list are deliberately asserted DIFFERENTLY from
+    the rest: after dispatcher.py's own filler-word stripping ("Please"/
+    "Can you" are recognized filler), "Please put Sushmita into
+    Snapdragon" becomes "put Sushmita into Snapdragon" and "Can you send
+    it to her?" becomes "send it to her?" — "put" and "send" are
+    themselves real, pre-existing MOVE/SHARE trigger words (agents/
+    modules/casting_pipeline_nlu.MOVE_TRIGGERS/SHARE_OR_SEND_TRIGGERS), so
+    BOTH already match deterministically and (correctly, per "existing
+    successful commands must continue bypassing Gemini") never reach the
+    interpreter at all. Forcing either through Gemini would mean
+    weakening working deterministic routing, which is out of scope and
+    explicitly disallowed — so these two prove the OPPOSITE spy assertion
+    (never called) instead, and are exactly why PART 4's own brief says
+    to use a spy rather than trust the returned interpretation: the spy
+    is what reveals this distinction an interpretation-only view would
+    have hidden."""
+    _ALREADY_DETERMINISTIC = {"Please put Sushmita into Snapdragon", "Can you send it to her?"}
+    group = f"Test Gemini {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    calls = []
+    _install_canned([_cmd("ADD", talent_name="Kimaya Kadam", project_name="Flying Machine")], calls=calls)
+    try:
+        for text in _PART4_MUST_REACH_GEMINI:
+            phone = _phone()
+            before = len(calls)
+            await handle_inbound_message(
+                group_name=group, sender_phone=phone, text=text,
+                sender_name="Raj", sender_is_group_member=True,
+            )
+            if text in _ALREADY_DETERMINISTIC:
+                assert len(calls) == before, (
+                    f"{text!r} matches a pre-existing trigger word after filler-stripping — "
+                    "it should bypass Gemini entirely, same as any other already-working command"
+                )
+            else:
+                assert len(calls) == before + 1, f"expected Gemini to be called (spy) for {text!r}"
+            await _cleanup(phone)
+    finally:
+        await _restore_share_config(original)
+        await _cleanup_gemini_cache()
+
+
+async def test_part4_prefilter_integration_must_not_reach_gemini_spy():
+    """Per the brief's own instruction ('use mocks/spies ... do not rely
+    only on returned interpretation'), this asserts ONLY that the spy was
+    never invoked — not that the turn produced no reply at all. Some of
+    these phrases (e.g. "What is happening with the project?", which
+    matches the pre-existing, Gemini-unrelated QUERY intent's own trigger
+    word "what" and gets ITS OWN generic "I didn't understand that" reply)
+    are legitimately handled by an existing, unrelated deterministic
+    heuristic without ever reaching Gemini — asserting handled=False for
+    those would be wrong; the spy (which raises from inside the fake
+    client if ever called) is the actual, correct proof this brief asks
+    for, and it already fully covers every phrase in this list."""
+    group = f"Test Gemini {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    _install_never_called()
+    try:
+        for text in _PART4_MUST_NOT_REACH_GEMINI:
+            phone = _phone()
+            await handle_inbound_message(
+                group_name=group, sender_phone=phone, text=text,
+                sender_name="Raj", sender_is_group_member=True,
+            )  # the fake client's own AssertionError (see _install_never_called) is the real proof
+            await _cleanup(phone)
+    finally:
+        await _restore_share_config(original)
+        await _cleanup_gemini_cache()
+
+
+def test_part4_typo_regression_the_exact_reported_gap_now_passes():
+    """The exact message from the Phase 1 report that started this fix —
+    a dedicated, never-to-regress test for this one specific gap."""
+    assert gci._looks_like_possible_command("Kimaya Kadam is realdy for Folow Up")
+
+
+def test_part4_prefilter_stress_no_new_false_positives_from_fuzzy_tier():
+    """Broader ordinary-chatter stress test than the spec's own 8-phrase
+    list — proves the fuzzy typo-tolerance tier added for PART 2 doesn't
+    reintroduce false positives on common English words that happen to be
+    one edit away from a vocabulary word (real collisions found and fixed
+    during development: 'and'~'add', 'luck'~'lock', 'sent'~'send' — this
+    is why those three short words were deliberately excluded from
+    _TYPO_TOLERANT_COMMAND_WORDS rather than included for broader typo
+    coverage)."""
+    ordinary_chatter = [
+        "lol", "haha", "nice", "cool", "sure", "yes", "no", "maybe", "later",
+        "see you soon", "talk tomorrow", "good night", "good evening",
+        "is she free today", "can we talk", "call me", "video call please",
+        "she looks great", "lovely shot", "nice photos", "awesome work",
+        "congrats team", "well done everyone", "busy right now",
+        "will check and revert", "noted", "sounds good", "perfect",
+        "are you there", "ping me", "sent", "received", "got it", "sure thing",
+        "happy diwali", "good luck", "take care", "bye", "see ya",
+        "is this confirmed", "confirmed", "not yet", "still pending",
+        "waiting on client", "meeting at 5", "call at 3pm", "office closed today",
+    ]
+    false_positives = [c for c in ordinary_chatter if gci._looks_like_possible_command(c)]
+    assert false_positives == [], f"unexpected false positives: {false_positives}"
+
+
+# ---------------------------------------------------------------------------
+# PART 5 (2026-09-22) — hard requirement: the exact existing successful
+# commands from the brief must keep matching deterministically, Gemini
+# must NEVER be called for them (proven by a spy that raises if invoked),
+# and their result must be unchanged.
+# ---------------------------------------------------------------------------
+async def test_part5_exact_existing_add_command_bypasses_gemini():
+    group = f"Test Gemini {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name="Flying Machine")
+    talent_id = await _seed_talent("Kimaya Kadam")
+    _install_never_called()
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="Add Kimaya Kadam to Flying Machine",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Kimaya Kadam" in r.reply
+        assert "Flying Machine" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+        await _cleanup_gemini_cache()
+
+
+async def test_part5_exact_existing_move_command_bypasses_gemini():
+    group = f"Test Gemini {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name="Flying Machine")
+    talent_id = await _seed_talent("Kimaya Kadam")
+    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
+    _install_never_called()
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text="Move Kimaya Kadam to Approved in Flying Machine",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+        assert "Kimaya Kadam" in r.reply
+        assert "Approved" in r.reply
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+        await _cleanup_gemini_cache()
+
+
+async def test_part5_exact_existing_share_command_bypasses_gemini():
+    group = f"Test Gemini {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    project_id = await _seed_project(brand_name="Flying Machine")
+    talent_id = await _seed_talent("Kimaya Kadam")
+    _install_never_called()
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text="Share casting call for Flying Machine with Kimaya Kadam",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled
+    finally:
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+        await _cleanup_gemini_cache()

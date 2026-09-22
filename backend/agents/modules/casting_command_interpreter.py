@@ -87,12 +87,19 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pymongo.errors import DuplicateKeyError
 
 from core import db
 from ai import gemini_client
+# Reused, not reimplemented (Phase 1 prefilter fix, 2026-09-22) — the
+# EXACT same bounded single-edit-distance check detect_trigger already
+# uses for typo-tolerant trigger words ("mover"/"move", "shre"/"share").
+# See _looks_like_possible_command's own docstring below for why this
+# module needed its own, narrower fallback rather than just widening
+# _ACTION_WORD_RE further.
+from agents.parser import _one_edit_away
 
 logger = logging.getLogger(__name__)
 
@@ -164,12 +171,87 @@ _ACTION_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Typo-tolerant fallback vocabulary (Phase 1 prefilter fix, 2026-09-22 —
+# real production gap: "Kimaya Kadam is realdy for Folow Up" was rejected
+# before ever reaching Gemini, because _ACTION_WORD_RE requires an EXACT
+# stem match and neither "realdy" (a real one-edit typo of "ready") nor
+# "Folow" (a real one-edit typo of "Follow", part of the stage name
+# "Follow Up") is one).
+#
+# Deliberately NOT the full word list _ACTION_WORD_RE matches exactly —
+# short, common words are excluded even though they're real trigger
+# words, because at edit-distance 1 they collide with ordinary English:
+# live-tested and confirmed real false positives this list must avoid:
+#   "add"  ~ "and"   ("will check and revert")
+#   "lock" ~ "luck"  ("good luck")
+#   "send" ~ "sent"  ("message sent", "already sent")
+#   "hold"/"push"/"put" have the same short-word collision shape even
+#   though no specific collision was hit in testing — excluded on the
+#   same principle rather than waiting to find one live.
+# Every excluded word still gets Gemini via _ACTION_WORD_RE's own EXACT/
+# stem match above (a real "add"/"put"/"hold" is never missed) — only
+# GUESSING at a typo of one of these short words is what's excluded. Kept
+# words are long enough (5+ letters) that a genuine one-edit-distance
+# collision with a common, unrelated English word is far less likely —
+# confirmed by a 50+ phrase stress test of ordinary WhatsApp chatter
+# (greetings, small talk, status updates) producing zero false positives
+# with this exact list.
+_TYPO_TOLERANT_COMMAND_WORDS = frozenset({
+    "shift", "transfer", "relocate", "shortlist", "approve", "reject",
+    "share", "forward", "deliver", "message", "broadcast", "dispatch",
+    "attach", "ready", "follow",
+})
+# A candidate word outside this length band can't plausibly be a single-
+# edit typo of any vocab word in the set (every vocab word is 5-10
+# characters) — bounds the fuzzy check to genuinely near-miss lengths and
+# rules out short common English words ("hi", "is", "we", "any", "and")
+# from ever reaching the fuzzy comparison at all.
+_MIN_FUZZY_WORD_LEN = 4
+_MAX_FUZZY_WORD_LEN = 11
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
 
 def _looks_like_possible_command(text: str) -> bool:
+    """Is this message plausibly an ADD/MOVE/SHARE attempt worth handing
+    to Gemini? Never understands the command itself — a cheap, bounded,
+    deterministic gate only, run on every message that already failed
+    every OTHER heuristic in casting_pipeline._resolve_bare_reply. Two
+    tiers, cheapest first:
+
+    1. _ACTION_WORD_RE — a single regex pass over the whole message,
+       catches an exact command word/stem anywhere (the common case).
+    2. Only if that finds nothing: split into words and check each one
+       (length-bounded first, so most words are skipped before any
+       comparison work happens) against the SAME small vocabulary via
+       agents.parser._one_edit_away — the exact single-edit-distance
+       check detect_trigger already trusts for typo-tolerant TRIGGER
+       words, applied here to the same small word list, never to talent/
+       project names (this function never even sees which words might be
+       names) and never used to choose between two real database
+       records — it only ever decides "is Gemini worth trying", the
+       existing resolver/disambiguation engine remains the sole authority
+       on identity either way.
+
+    Cost: a fixed-size (~25-word) vocabulary, at most ~20 short words per
+    message, each compared with an O(word length) check — microseconds
+    per message, no network call, no database read. False negatives
+    (a message this still rejects) simply fall through to today's
+    existing "unrelated chatter, ignore" baseline — never a regression,
+    since nothing reaches Gemini for such a message today either."""
     stripped = (text or "").strip()
     if len(stripped) < 4:
         return False
-    return bool(_ACTION_WORD_RE.search(stripped))
+    if _ACTION_WORD_RE.search(stripped):
+        return True
+    for word in _WORD_RE.findall(stripped):
+        wl = len(word)
+        if wl < _MIN_FUZZY_WORD_LEN or wl > _MAX_FUZZY_WORD_LEN:
+            continue
+        lower = word.lower()
+        for vocab_word in _TYPO_TOLERANT_COMMAND_WORDS:
+            if abs(wl - len(vocab_word)) <= 1 and _one_edit_away(lower, vocab_word):
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +408,47 @@ async def _store_result(key: str, commands: Optional[List[Dict[str, Any]]]) -> N
     )
 
 
+# ---------------------------------------------------------------------------
+# Error classification for observability only (PART 8, 2026-09-22 quota-
+# audit follow-up) — never changes control flow, only which log line is
+# emitted. Deliberately does NOT touch ai/client.py or ai/gemini_client.py
+# to add a structured status-code attribute to LLMError: those are
+# shared/frozen seams (ai/client.py is explicitly documented as used,
+# unmodified, by the frozen AI Scout / AI Casting Desk features), so this
+# parses the status code that ai/gemini_client.py already embeds in the
+# exception's own message text ("LLM call failed (429): ...", "LLM server
+# error (503): ...") — a read-only, local concern entirely inside this
+# module, zero risk to any other caller of that shared client.
+# ---------------------------------------------------------------------------
+_STATUS_CODE_RE = re.compile(r"\((\d{3})\)")
+
+
+def _classify_gemini_error(exc: Exception) -> "Tuple[str, Optional[int]]":
+    """(event_name, status_code_or_None) — event_name is one of
+    "429"/"5xx"/"4xx"/"unavailable"/"malformed"/"empty_response"/"other",
+    used to pick which distinctly grep-able log line to emit below."""
+    text = str(exc)
+    match = _STATUS_CODE_RE.search(text)
+    code = int(match.group(1)) if match else None
+    if isinstance(exc, gemini_client.LLMUnavailable):
+        return "unavailable", code
+    if code == 429:
+        return "429", code
+    if code is not None and 500 <= code < 600:
+        return "5xx", code
+    if code is not None and 400 <= code < 500:
+        return "4xx", code
+    # No HTTP status at all — these are ai/gemini_client.py's own
+    # non-transport failure messages (see its call_tool_json): a response
+    # that parsed but wasn't valid JSON / wasn't an object, vs. a genuinely
+    # empty/safety-blocked response with no candidates at all.
+    if "non-JSON" in text or "not a JSON object" in text:
+        return "malformed", code
+    if "no usable content" in text:
+        return "empty_response", code
+    return "other", code
+
+
 async def interpret_message(
     text: str,
     *,
@@ -343,22 +466,26 @@ async def interpret_message(
     if not is_enabled():
         return None
     if not gemini_client.is_configured():
-        logger.info("gemini_fallback_skip agent=%s reason=not_configured", agent_id)
+        logger.info("gemini_fallback_skip agent=%s message_id=%s reason=not_configured", agent_id, message_id)
         return None
     if not _looks_like_possible_command(text):
+        logger.info("gemini_prefilter_rejected agent=%s message_id=%s text_len=%d", agent_id, message_id, len(text or ""))
         return None
 
     key = _message_key(message_id=message_id, agent_id=agent_id, phone=phone, group_name=group_name, text=text)
+    model_name = _model() or gemini_client.DEFAULT_MODEL
 
     cached = await _get_cached(key)
     if cached is not None:
-        logger.info("gemini_fallback_cache_hit agent=%s key=%s", agent_id, key)
+        logger.info("gemini_fallback_cache_hit agent=%s message_id=%s key=%s", agent_id, message_id, key)
         return cached.get("commands")
 
     if not await _claim(key):
-        logger.info("gemini_fallback_dedup_prevented agent=%s key=%s", agent_id, key)
+        logger.info("gemini_fallback_dedup_prevented agent=%s message_id=%s key=%s", agent_id, message_id, key)
         return None
 
+    logger.info("gemini_fallback_invoked agent=%s message_id=%s key=%s model=%s text_len=%d",
+                agent_id, message_id, key, model_name, len(text or ""))
     start = time.monotonic()
     try:
         raw = await asyncio.wait_for(
@@ -375,14 +502,21 @@ async def interpret_message(
         )
     except asyncio.TimeoutError:
         latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning("gemini_fallback_timeout agent=%s key=%s latency_ms=%d timeout_sec=%.1f",
-                        agent_id, key, latency_ms, _timeout_sec())
+        logger.warning("gemini_fallback_timeout agent=%s message_id=%s key=%s latency_ms=%d timeout_sec=%.1f model=%s",
+                        agent_id, message_id, key, latency_ms, _timeout_sec(), model_name)
         await _store_result(key, None)
         return None
     except (gemini_client.LLMUnavailable, gemini_client.LLMError) as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning("gemini_fallback_error agent=%s key=%s latency_ms=%d error=%s",
-                        agent_id, key, latency_ms, str(exc)[:200])
+        event, status_code = _classify_gemini_error(exc)
+        # Distinctly grep-able per PART 8's own checklist (429 vs 5xx vs
+        # other) — see _classify_gemini_error's own docstring for why this
+        # is a local text-parse of the message ai/gemini_client.py already
+        # embeds, never a change to that shared client.
+        logger.warning(
+            "gemini_fallback_%s agent=%s message_id=%s key=%s latency_ms=%d status_code=%s model=%s error=%s",
+            event, agent_id, message_id, key, latency_ms, status_code, model_name, str(exc)[:200],
+        )
         await _store_result(key, None)
         return None
     except Exception:
@@ -391,16 +525,26 @@ async def interpret_message(
         # completely safely (see module docstring's "FAILURE IS ALWAYS
         # SILENT AND NON-FATAL").
         latency_ms = int((time.monotonic() - start) * 1000)
-        logger.exception("gemini_fallback_unexpected_error agent=%s key=%s latency_ms=%d", agent_id, key, latency_ms)
+        logger.exception("gemini_fallback_unexpected_error agent=%s message_id=%s key=%s latency_ms=%d model=%s",
+                          agent_id, message_id, key, latency_ms, model_name)
         await _store_result(key, None)
         return None
 
     latency_ms = int((time.monotonic() - start) * 1000)
     commands = _validate_and_extract_commands(raw)
-    logger.info(
-        "gemini_fallback_result agent=%s key=%s latency_ms=%d model=%s command_count=%d intents=%s",
-        agent_id, key, latency_ms, (_model() or gemini_client.DEFAULT_MODEL),
-        len(commands or []), [c.get("intent") for c in (commands or [])],
-    )
+    if commands:
+        logger.info(
+            "gemini_fallback_succeeded agent=%s message_id=%s key=%s latency_ms=%d model=%s command_count=%d intents=%s",
+            agent_id, message_id, key, latency_ms, model_name, len(commands), [c.get("intent") for c in commands],
+        )
+    else:
+        # Schema-valid response, but nothing usable survived validation
+        # (UNKNOWN intent, empty list, every entry malformed) — distinct
+        # from a transport/API failure above, still logged as its own
+        # "failed to produce a usable interpretation" event per PART 8.
+        logger.info(
+            "gemini_fallback_no_usable_interpretation agent=%s message_id=%s key=%s latency_ms=%d model=%s",
+            agent_id, message_id, key, latency_ms, model_name,
+        )
     await _store_result(key, commands)
     return commands

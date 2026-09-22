@@ -40,6 +40,7 @@ from routers import (
     whatsapp,
     whatsapp_workers,
     workflow,
+    workflow_calls,
     cloudflare_stream,
     imports,
 )
@@ -154,6 +155,7 @@ app.include_router(marketing_router.router)
 app.include_router(feedback.router)
 app.include_router(casting_pipeline.router)
 app.include_router(workflow.router)
+app.include_router(workflow_calls.router)
 app.include_router(portal.router)
 app.include_router(cloudinary_admin.router)
 app.include_router(whatsapp.router)
@@ -605,10 +607,24 @@ async def on_startup():
             except Exception as _e:
                 logger.warning("workflow indexes: %s", _e)
 
+        async def _workflow_calls_indexes():
+            try:
+                await db.talent_project_calls.create_index([("id", 1)], unique=True)
+                await db.talent_project_calls.create_index([("talent_id", 1), ("project_id", 1), ("called_at", -1)])
+                await db.talent_project_calls.create_index([("project_id", 1)])
+                await db.talent_project_calls.create_index([("called_at", -1)])
+                await db.talent_project_call_assignments.create_index(
+                    [("talent_id", 1), ("project_id", 1)], unique=True,
+                )
+                await db.talent_project_call_assignments.create_index([("assigned_to_id", 1)])
+            except Exception as _e:
+                logger.warning("workflow_calls indexes: %s", _e)
+
         await asyncio.gather(
             _client_states_index(), _otp_indexes(), _trusted_device_indexes(),
             _feedback_indexes(), _submission_diagnostics_indexes(), _clients_indexes(),
             _casting_pipeline_index(), _workflow_indexes(), _casting_desk_indexes(),
+            _workflow_calls_indexes(),
         )
 
         logger.info("Mongo indexes ready")

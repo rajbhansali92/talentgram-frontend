@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import ScoutCaptureModal from "./ScoutCaptureModal";
+import CallsTab from "./CallsTab";
 
 // Predefined Operational Subtask Checklist Templates Library
 const SUBTASK_TEMPLATES = {
@@ -57,6 +58,11 @@ export default function WorkflowPage() {
     const admin = getAdmin();
     const isAdmin = admin?.role === "admin";
     const currentUserId = admin?.id;
+
+    // Tab switcher — "tasks" is the existing, unchanged Workflow content;
+    // "calls" is the new Calls tab. Nothing under "tasks" is touched by
+    // adding this switcher.
+    const [activeTab, setActiveTab] = useState("tasks");
 
     // List states
     const [tasks, setTasks] = useState([]);
@@ -564,6 +570,29 @@ export default function WorkflowPage() {
                     New Task
                 </button>
             </div>
+
+            {/* Tab Switcher — Ongoing Project Talents (existing content) | Calls (new) */}
+            <div className="flex items-center gap-1.5 border-b border-black/[0.06] pb-0">
+                {[
+                    { id: "tasks", label: "Ongoing Project Talents" },
+                    { id: "calls", label: "Calls" },
+                ].map((tab) => (
+                    <button
+                        key={tab.id}
+                        onClick={() => setActiveTab(tab.id)}
+                        className={`px-3.5 py-2 text-xs font-semibold uppercase tracking-wider rounded-t-sm border-b-2 -mb-px focus:outline-none ${
+                            activeTab === tab.id
+                                ? "border-black text-black"
+                                : "border-transparent text-black/40 hover:text-black/70"
+                        }`}
+                    >
+                        {tab.label}
+                    </button>
+                ))}
+            </div>
+
+            {activeTab === "tasks" && (
+            <>
 
             {/* New Task Inline Form Card (Operational Quick-Actions Look) */}
             {showNewTaskForm && (
@@ -1294,6 +1323,13 @@ export default function WorkflowPage() {
                 </div>
 
             </div>
+
+            </>
+            )}
+
+            {activeTab === "calls" && (
+                <CallsTab isAdmin={isAdmin} currentUserId={currentUserId} users={users} />
+            )}
 
             {showAiCapture && (
                 <ScoutCaptureModal

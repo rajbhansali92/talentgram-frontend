@@ -78,6 +78,7 @@ from agents.registry import register_agent
 from agents import conversation, request_scope, session_context, undo_store
 from agents.parser import parse_confirmation_reply, parse_edit_instructions
 from agents.modules import casting_pipeline_nlu as nlu
+from agents.modules import casting_command_interpreter as gemini_interpreter
 from agents.modules import media_assignment
 from agents.modules import media_send
 from agents.modules import mark_intent
@@ -10631,7 +10632,161 @@ async def _resolve_bare_reply(text: str, ctx: ExecContext) -> Optional[Tuple[Int
             "recipient_query": _SHARE_NEAR_MISS_MARKER,
         }
 
+    # Gemini Command Interpreter (Phase 1, 2026-09-22) — the ABSOLUTE LAST
+    # resort, reached only once every deterministic heuristic above has
+    # already failed to claim this message. See casting_command_
+    # interpreter.py's own module docstring for the full architecture,
+    # safety rationale, and why resolve_bare_reply (this exact function)
+    # is the correct, already-existing integration point. Returns
+    # (intent, {free-text field values}) — the SAME shape a native regex
+    # extractor produces for a message it understood — or None on ANY
+    # failure (flag off, not configured, filtered out, timeout, API
+    # error, malformed output, unsupported intent), which this function's
+    # own `return None` immediately below then handles exactly as it
+    # always has: "unrelated chatter, ignore".
+    gemini_commands = await gemini_interpreter.interpret_message(
+        stripped, agent_id=ctx.agent_id, phone=ctx.sender_phone,
+        group_name=ctx.group_name, message_id=ctx.inbound_message_id, session=session,
+    )
+    if gemini_commands:
+        gemini_result = _build_gemini_bare_reply(gemini_commands)
+        if gemini_result is not None:
+            return gemini_result
+
     return None
+
+
+def _command_to_trigger_text(cmd: Dict[str, Any]) -> Optional[str]:
+    """One Gemini-interpreted command -> a single canonical, trigger-word-
+    anchored imperative line, built ENTIRELY from this module's own literal
+    trigger words + Gemini's extracted free-text PHRASES — never Gemini's
+    own prose. This is what re-enters the existing, unmodified compound-
+    plan splitter (preprocess_command_grouped/split_actions_grouped,
+    called from inside _extract_add_fields/_extract_move_fields) for a
+    multi-command result — see _combined_command_text. Returns None when a
+    command is missing the field(s) it needs to be safely represented as
+    one complete line (never a half-formed one that could confuse the
+    splitter)."""
+    intent_label = cmd["intent"]
+    if intent_label == "ADD":
+        talent, project = cmd.get("talent_name"), cmd.get("project_name")
+        if not talent or not project:
+            return None
+        return f"Add {talent} to {project}"
+    if intent_label == "MOVE":
+        talent, stage = cmd.get("talent_name"), cmd.get("stage_name")
+        if not talent or not stage:
+            return None
+        return f"Move {talent} to {stage}"
+    if intent_label == "SHARE":
+        recipient = cmd.get("recipient_description")
+        if not recipient:
+            return None
+        project = cmd.get("project_name")
+        if project:
+            return f"Share casting call for {project} with {recipient}"
+        return f"Share casting call with {recipient}"
+    return None
+
+
+def _combined_command_text(commands: List[Dict[str, Any]]) -> Optional[str]:
+    """ALL commands must reconstruct cleanly, or none are chained — a
+    partially-reconstructed compound line (silently dropping whichever
+    step was missing a field) would silently discard part of what the
+    user actually asked for, which _build_gemini_bare_reply's own
+    single-command fallback avoids by claiming only the first command
+    instead."""
+    parts: List[str] = []
+    for cmd in commands:
+        piece = _command_to_trigger_text(cmd)
+        if piece is None:
+            return None
+        parts.append(piece)
+    if len(parts) < 2:
+        return None
+    return " and ".join(parts)
+
+
+def _single_gemini_command_to_intent_fields(
+    cmd: Dict[str, Any],
+) -> Optional[Tuple[IntentDefinition, Dict[str, str]]]:
+    """One Gemini-interpreted command -> the SAME {field_key: raw_text}
+    shape _extract_add_fields/_extract_move_fields/_extract_share_or_send_
+    fields already produce for a message they understood — free-text
+    phrases only, exactly as the user (or Gemini's linguistic
+    interpretation of them) said it. Every downstream step (missing-field
+    questions, syntax validation, DB resolution, ambiguity, confirmation,
+    execution) is the SAME existing code every other path already uses;
+    nothing here resolves a name to a record or invents an id. Returns
+    None when there isn't even enough to anchor a conversation on (no
+    identifiable talent for ADD/MOVE, no identifiable recipient for
+    SHARE) — claiming an empty-ish command would start a confusing,
+    likely-wrong conversation rather than safely falling through to no
+    reply, today's existing baseline for a message nothing understands."""
+    intent_label = cmd["intent"]
+    if intent_label == "ADD":
+        fields: Dict[str, str] = {}
+        if cmd.get("talent_name"):
+            fields["talent_selector"] = cmd["talent_name"]
+        if cmd.get("project_name"):
+            fields["project_query"] = cmd["project_name"]
+        if "talent_selector" not in fields:
+            return None
+        return ADD_INTENT, fields
+    if intent_label == "MOVE":
+        fields = {}
+        if cmd.get("talent_name"):
+            fields["talent_selector"] = cmd["talent_name"]
+        if cmd.get("stage_name"):
+            fields["target_stage"] = cmd["stage_name"]
+        if cmd.get("project_name"):
+            fields["project_query"] = cmd["project_name"]
+        if "talent_selector" not in fields:
+            return None
+        return MOVE_INTENT, fields
+    if intent_label == "SHARE":
+        fields = {}
+        if cmd.get("recipient_description"):
+            fields["recipient_query"] = cmd["recipient_description"]
+        if cmd.get("project_name"):
+            fields["project_query"] = cmd["project_name"]
+        if cmd.get("template_or_message"):
+            fields["template_query"] = cmd["template_or_message"]
+        if "recipient_query" not in fields:
+            return None
+        return SHARE_INTENT, fields
+    return None
+
+
+def _build_gemini_bare_reply(
+    commands: List[Dict[str, Any]],
+) -> Optional[Tuple[IntentDefinition, Dict[str, str]]]:
+    """commands is Gemini's own validated, ordered list (see casting_
+    command_interpreter._validate_and_extract_commands) — never empty,
+    never containing an unsupported intent. One command -> handled
+    directly. Multiple commands -> reuses the EXISTING compound-plan
+    machinery via a reconstructed canonical string (see
+    _combined_command_text/_command_to_trigger_text), never a
+    hand-built "_plan" field. SHARE cannot lead a compound plan in the
+    existing deterministic system (its own extractor never calls
+    preprocess_command_grouped — see casting_pipeline_nlu's own split
+    mechanics), so a SHARE-first (or reconstruction-unsafe) multi-command
+    result conservatively claims only its first command, exactly like
+    _combined_command_text's own None case."""
+    if not commands:
+        return None
+    first = commands[0]
+    if len(commands) == 1:
+        return _single_gemini_command_to_intent_fields(first)
+    if first["intent"] in ("ADD", "MOVE"):
+        combined = _combined_command_text(commands)
+        if combined is not None:
+            extractor = _extract_add_fields if first["intent"] == "ADD" else _extract_move_fields
+            extracted = extractor(combined)
+            if extracted:
+                plan_intent = ADD_INTENT if first["intent"] == "ADD" else MOVE_INTENT
+                return plan_intent, extracted
+    return _single_gemini_command_to_intent_fields(first)
 
 
 _SHARE_NEAR_MISS_WORD_RE = re.compile(r"\bshare\b", re.IGNORECASE)

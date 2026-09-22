@@ -60,6 +60,7 @@ os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 import pytest
 
 import ai.client as ai_client                      # the UNCHANGED Anthropic seam
+import ai.gemini_client as G_impl                   # real implementation (2026-09-22 extraction) — _client lives here now
 import simple_assistant.ai_gemini_client as G
 import simple_assistant.ai_response as A
 import simple_assistant.ai_selfcheck as SC
@@ -73,7 +74,7 @@ _REAL_KEY = bool(os.environ.get("GEMINI_API_KEY")) and \
     os.environ.get("GEMINI_API_KEY") not in ("test-gemini-key", "x", "")
 _LIVE = os.environ.get("SA_AI_SELFCHECK_LIVE", "").strip().lower() in ("1", "true", "yes", "on") and _REAL_KEY
 
-_ORIG_CLIENT_FACTORY = G._client
+_ORIG_CLIENT_FACTORY = G_impl._client
 
 
 def run(c):
@@ -112,7 +113,7 @@ def _restore():
     os.environ["SA_AI_PROVIDER"] = "gemini"
     os.environ["GEMINI_API_KEY"] = "test-gemini-key"
     yield
-    G._client = _ORIG_CLIENT_FACTORY
+    G_impl._client = _ORIG_CLIENT_FACTORY
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +142,7 @@ def _install_fake_client(fn):
     class _Client:
         aio = _Aio()
 
-    G._client = lambda: _Client()
+    G_impl._client = lambda: _Client()
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +655,7 @@ def test_approval_path_unchanged_stubbed():
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(not _LIVE, reason="real Gemini battery is opt-in (SA_AI_SELFCHECK_LIVE=1 + genuine GEMINI_API_KEY)")
 def test_real_gemini_battery():  # pragma: no cover
-    G._client = _ORIG_CLIENT_FACTORY
+    G_impl._client = _ORIG_CLIENT_FACTORY
     assert G.is_configured()
     rep = run(SC.run_selfcheck(live=True))
     s = rep["summary"]
@@ -673,7 +674,7 @@ if __name__ == "__main__":
         except TypeError:
             pass
         finally:
-            G._client = _ORIG_CLIENT_FACTORY
+            G_impl._client = _ORIG_CLIENT_FACTORY
     if _LIVE:
         test_real_gemini_battery()
     else:

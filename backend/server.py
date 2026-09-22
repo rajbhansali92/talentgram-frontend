@@ -670,6 +670,11 @@ async def on_startup():
         await _submission_action_queue.ensure_indexes()
         start_media_assignment_worker()
 
+        # Gemini Command Interpreter (Phase 1, 2026-09-22) — see
+        # agents/modules/casting_command_interpreter.py's module docstring.
+        from agents.modules import casting_command_interpreter as _gemini_interpreter
+        await _gemini_interpreter.ensure_indexes()
+
         # Production Reminder Worker (Phase G, 2026-09-07) — see
         # services/production_reminder_worker.py's module docstring for
         # the full architecture. Non-fatal: a failure to start it must

@@ -174,6 +174,7 @@ async def inbound_message(
         replied_to_message_id=payload.replied_to_message_id,
         replied_quoted_text=payload.replied_quoted_text,
         worker_id=payload.worker_id or registry.DEFAULT_WORKER_ID,
+        message_id=payload.message_id,
     )
     t_dispatch_done = time.monotonic()
 

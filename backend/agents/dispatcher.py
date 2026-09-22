@@ -500,6 +500,16 @@ async def handle_inbound_message(
     # why this is what makes two workers' identically-named groups route
     # independently instead of colliding.
     worker_id: str = registry.DEFAULT_WORKER_ID,
+    # Gemini Command Interpreter dedup (2026-09-22) — the real WhatsApp
+    # message id of THIS inbound message, if the transport can supply one
+    # (routers/agents_whatsapp.py's /inbound already receives this as
+    # payload.message_id for inbound_messages.capture_inbound, but never
+    # threaded it into this function until now). None (the default, and
+    # what every existing caller/test that doesn't pass it gets) preserves
+    # prior behavior exactly — threaded only into ExecContext.
+    # inbound_message_id (see agents/models.py), read only by
+    # casting_command_interpreter.interpret_message as its dedup key.
+    message_id: Optional[str] = None,
 ) -> DispatchResult:
     phone = _normalize_sender(sender_phone)
     raw_message = text or ""
@@ -783,6 +793,7 @@ async def handle_inbound_message(
                 bare_ctx = ExecContext(
                     agent_id=agent.agent_id, group_name=group_name,
                     sender_phone=phone, sender_name=sender_name, worker_id=worker_id,
+                    inbound_message_id=message_id,
                 )
                 bare_reply_resolution = await agent.resolve_bare_reply(working_message, bare_ctx)
                 if bare_reply_resolution is not None:

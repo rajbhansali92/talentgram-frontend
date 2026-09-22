@@ -40,6 +40,17 @@ class ExecContext:
     # completion report must be sent from the SAME worker the command
     # arrived on) should read this field rather than assume "default".
     worker_id: str = "default"
+    # Gemini Command Interpreter dedup (2026-09-22) — the real WhatsApp
+    # message id of the inbound message THIS turn is processing, if the
+    # transport supplied one (dispatcher.handle_inbound_message's own new
+    # `message_id` parameter, threaded through every ExecContext
+    # construction site). None (the default, and what every existing
+    # caller/test that doesn't pass it gets) preserves prior behavior
+    # exactly — only casting_command_interpreter.interpret_message reads
+    # this, as its preferred per-message dedup key (falling back to a
+    # deterministic hash of agent/phone/group/text when absent), mirroring
+    # inbound_messages._message_key's own real-id-preferred pattern.
+    inbound_message_id: Optional[str] = None
 
 
 @dataclass

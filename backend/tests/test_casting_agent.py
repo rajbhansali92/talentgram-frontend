@@ -7008,6 +7008,52 @@ async def test_share_pipeline_check_option_1_adds_moves_then_shares():
         await _restore_share_config(original)
 
 
+async def test_share_pipeline_check_option_1_and_confirm_skips_third_reply():
+    """2026-09-23 business rule: "Share ... and confirm" (single message)
+    must resolve, after the admin's explicit "1" reply to the PIPELINE
+    CHECK gate, straight to ADD -> MOVE(Follow Up) -> SHARE with no THIRD
+    reply needed — the original "and confirm" already pre-authorized the
+    send itself. The pipeline-membership gate is NOT skipped ("1" is still
+    a real, separate, explicit approval for the mutation); only the
+    otherwise-redundant second SHARE approval is skipped. Contrast with
+    test_share_pipeline_check_option_1_adds_moves_then_shares (no "and
+    confirm"), which still needs that third reply."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project_with_details(f"AutoGateP {tag}", shoot_dates="5 May 2029", budget="Rs 5/day")
+    t1 = await _seed_talent(f"AutoGateT {tag}", phone="917000700113")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Casting Call for AutoGateP {tag} with AutoGateT {tag} and confirm",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "PIPELINE CHECK" in r.reply, r.reply
+        assert "1 → Add the missing talent(s), move them to Follow Up, then share" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert "Added 1 talent to the pipeline and moved to Follow Up." in r2.reply, r2.reply
+        # Straight to the executed result — no intermediate "You are about
+        # to SHARE" preview waiting on a third reply.
+        assert "You are about to SHARE:" not in r2.reply, r2.reply
+        assert "1 WhatsApp message queued." in r2.reply, r2.reply
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": t1}).to_list(10)
+        assert len(jobs) == 1
+        row = await db.casting_pipeline.find_one({"project_id": p1, "talent_id": t1})
+        assert row["stage"] == "follow_up"
+    finally:
+        await _cleanup_jobs_for_talents([t1])
+        await _cleanup(phone, project_ids=[p1], talent_ids=[t1])
+        await _restore_share_config(original)
+
+
 async def test_share_pipeline_check_option_2_mixed_pairs_sends_only_valid():
     """Option 2 (renumbered from Option 1, 2026-09-07 — see
     _format_share_pipeline_check) on a true 2x2 mixed cross-product:

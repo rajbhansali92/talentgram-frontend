@@ -7093,6 +7093,20 @@ async def _share_handle_confirming_reply(
         if not full.ok:
             await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
             return action_line + full.error
+        # A trailing "and confirm" on the ORIGINAL SHARE message already
+        # pre-authorized the send itself (2026-09-23 business rule: SHARE +
+        # confirmed -> Add -> Move to Follow Up -> Share). The admin has
+        # now ALSO explicitly replied "1" here — a real, separate approval
+        # for the Add+Move mutation (the pipeline-membership gate itself is
+        # never skipped by "and confirm", see _share_try_auto_execute) — so
+        # asking a THIRD time for content they already said "and confirm"
+        # about would be redundant, not safer. Reuses the EXACT SAME
+        # _share_executor the ordinary "1 -> Approve" path already calls,
+        # never a second send implementation.
+        if collected.get(AUTO_CONFIRM_FIELD.key):
+            await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
+            result = await _share_executor(collected, ctx)
+            return action_line + result.message
         await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="confirming")
         return action_line + await _build_share_confirmation_preview(full)
 

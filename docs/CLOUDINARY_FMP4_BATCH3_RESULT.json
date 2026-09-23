@@ -1,0 +1,553 @@
+{
+  "generated_at": "2026-08-31T07:43:55.182125+00:00",
+  "aborted": null,
+  "approved_candidate_hash": "b0740832807542535084d2c5afd4b2160a4d5b02adb5c2245e574788f2660727",
+  "approved_ids": [
+    "43cb35ba043fa3b695e548e2ecbb22f8",
+    "58b9fc6e1f17ff68b20c0c9b6d107080",
+    "7c4cfbe0a50de34608fe978c1ebdab31",
+    "1e50a8101c9aa42486476f14323467dc",
+    "824d30c9de9ddd12c42c894639cc6722",
+    "7741c306abfcfc743dcc40e69b0c5e2a",
+    "078452c33ab95f551b340e2921ac0d6b",
+    "dd4d98f1c56cc6217114a463293aaa82"
+  ],
+  "manifest_id": "pm_727c8e218ba81ee8e42d",
+  "execution_candidate_hash": "b0740832807542535084d2c5afd4b2160a4d5b02adb5c2245e574788f2660727",
+  "passed_count": 8,
+  "approval_id": "ap_e0c022e9e0c08dfeb5bc",
+  "batch_id": "b_9ce0185df7a5ed571a5d",
+  "final_revalidation": [
+    {
+      "derived_id": "43cb35ba043fa3b695e548e2ecbb22f8",
+      "_diag": {
+        "parent_codec": "h264",
+        "parent_format": "mp4",
+        "talent_name": "Srishti Rajput",
+        "manifest_bytes": 16869871,
+        "cloudinary_bytes": 16869871,
+        "parent_live_refs": 1
+      },
+      "01_id_matches_approved": true,
+      "02_classification_delete_candidate": true,
+      "03_xf_exactly_bare_f_mp4": true,
+      "04_historical_purpose_retired_download": true,
+      "05_parent_codec_h264": true,
+      "06_video_needs_compat_delivery_false": true,
+      "07_parent_exists": true,
+      "08_parent_active": true,
+      "09_p3_owner_type_talent": true,
+      "10_talent_exists_not_archived": true,
+      "11_no_persisted_derived_url": true,
+      "12_mongo_derivative_reference_zero": true,
+      "13_no_active_review_link_dependency": true,
+      "14_no_application_dependency": true,
+      "15_no_historical_lineage_dependency": true,
+      "16_no_ledger_dependency": true,
+      "17_no_softdeleted_container_dependency": true,
+      "18_retention_satisfied": true,
+      "19_cloudinary_identity_matches": true,
+      "20_bytes_match_approved": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "58b9fc6e1f17ff68b20c0c9b6d107080",
+      "_diag": {
+        "parent_codec": "h264",
+        "parent_format": "mov",
+        "talent_name": "Rajnandini Sharma",
+        "manifest_bytes": 18001880,
+        "cloudinary_bytes": 18001880,
+        "parent_live_refs": 1
+      },
+      "01_id_matches_approved": true,
+      "02_classification_delete_candidate": true,
+      "03_xf_exactly_bare_f_mp4": true,
+      "04_historical_purpose_retired_download": true,
+      "05_parent_codec_h264": true,
+      "06_video_needs_compat_delivery_false": true,
+      "07_parent_exists": true,
+      "08_parent_active": true,
+      "09_p3_owner_type_talent": true,
+      "10_talent_exists_not_archived": true,
+      "11_no_persisted_derived_url": true,
+      "12_mongo_derivative_reference_zero": true,
+      "13_no_active_review_link_dependency": true,
+      "14_no_application_dependency": true,
+      "15_no_historical_lineage_dependency": true,
+      "16_no_ledger_dependency": true,
+      "17_no_softdeleted_container_dependency": true,
+      "18_retention_satisfied": true,
+      "19_cloudinary_identity_matches": true,
+      "20_bytes_match_approved": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "7c4cfbe0a50de34608fe978c1ebdab31",
+      "_diag": {
+        "parent_codec": "h264",
+        "parent_format": "mp4",
+        "talent_name": "Janavi Mahajan",
+        "manifest_bytes": 22082541,
+        "cloudinary_bytes": 22082541,
+        "parent_live_refs": 1
+      },
+      "01_id_matches_approved": true,
+      "02_classification_delete_candidate": true,
+      "03_xf_exactly_bare_f_mp4": true,
+      "04_historical_purpose_retired_download": true,
+      "05_parent_codec_h264": true,
+      "06_video_needs_compat_delivery_false": true,
+      "07_parent_exists": true,
+      "08_parent_active": true,
+      "09_p3_owner_type_talent": true,
+      "10_talent_exists_not_archived": true,
+      "11_no_persisted_derived_url": true,
+      "12_mongo_derivative_reference_zero": true,
+      "13_no_active_review_link_dependency": true,
+      "14_no_application_dependency": true,
+      "15_no_historical_lineage_dependency": true,
+      "16_no_ledger_dependency": true,
+      "17_no_softdeleted_container_dependency": true,
+      "18_retention_satisfied": true,
+      "19_cloudinary_identity_matches": true,
+      "20_bytes_match_approved": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "1e50a8101c9aa42486476f14323467dc",
+      "_diag": {
+        "parent_codec": "h264",
+        "parent_format": "mov",
+        "talent_name": "Shrutika Gavhane",
+        "manifest_bytes": 22120672,
+        "cloudinary_bytes": 22120672,
+        "parent_live_refs": 2
+      },
+      "01_id_matches_approved": true,
+      "02_classification_delete_candidate": true,
+      "03_xf_exactly_bare_f_mp4": true,
+      "04_historical_purpose_retired_download": true,
+      "05_parent_codec_h264": true,
+      "06_video_needs_compat_delivery_false": true,
+      "07_parent_exists": true,
+      "08_parent_active": true,
+      "09_p3_owner_type_talent": true,
+      "10_talent_exists_not_archived": true,
+      "11_no_persisted_derived_url": true,
+      "12_mongo_derivative_reference_zero": true,
+      "13_no_active_review_link_dependency": true,
+      "14_no_application_dependency": true,
+      "15_no_historical_lineage_dependency": true,
+      "16_no_ledger_dependency": true,
+      "17_no_softdeleted_container_dependency": true,
+      "18_retention_satisfied": true,
+      "19_cloudinary_identity_matches": true,
+      "20_bytes_match_approved": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "824d30c9de9ddd12c42c894639cc6722",
+      "_diag": {
+        "parent_codec": "h264",
+        "parent_format": "mov",
+        "talent_name": "Paakhi Baranwal",
+        "manifest_bytes": 23729733,
+        "cloudinary_bytes": 23729733,
+        "parent_live_refs": 3
+      },
+      "01_id_matches_approved": true,
+      "02_classification_delete_candidate": true,
+      "03_xf_exactly_bare_f_mp4": true,
+      "04_historical_purpose_retired_download": true,
+      "05_parent_codec_h264": true,
+      "06_video_needs_compat_delivery_false": true,
+      "07_parent_exists": true,
+      "08_parent_active": true,
+      "09_p3_owner_type_talent": true,
+      "10_talent_exists_not_archived": true,
+      "11_no_persisted_derived_url": true,
+      "12_mongo_derivative_reference_zero": true,
+      "13_no_active_review_link_dependency": true,
+      "14_no_application_dependency": true,
+      "15_no_historical_lineage_dependency": true,
+      "16_no_ledger_dependency": true,
+      "17_no_softdeleted_container_dependency": true,
+      "18_retention_satisfied": true,
+      "19_cloudinary_identity_matches": true,
+      "20_bytes_match_approved": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "7741c306abfcfc743dcc40e69b0c5e2a",
+      "_diag": {
+        "parent_codec": "h264",
+        "parent_format": "mp4",
+        "talent_name": "Aman Desai",
+        "manifest_bytes": 24937206,
+        "cloudinary_bytes": 24937206,
+        "parent_live_refs": 1
+      },
+      "01_id_matches_approved": true,
+      "02_classification_delete_candidate": true,
+      "03_xf_exactly_bare_f_mp4": true,
+      "04_historical_purpose_retired_download": true,
+      "05_parent_codec_h264": true,
+      "06_video_needs_compat_delivery_false": true,
+      "07_parent_exists": true,
+      "08_parent_active": true,
+      "09_p3_owner_type_talent": true,
+      "10_talent_exists_not_archived": true,
+      "11_no_persisted_derived_url": true,
+      "12_mongo_derivative_reference_zero": true,
+      "13_no_active_review_link_dependency": true,
+      "14_no_application_dependency": true,
+      "15_no_historical_lineage_dependency": true,
+      "16_no_ledger_dependency": true,
+      "17_no_softdeleted_container_dependency": true,
+      "18_retention_satisfied": true,
+      "19_cloudinary_identity_matches": true,
+      "20_bytes_match_approved": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "078452c33ab95f551b340e2921ac0d6b",
+      "_diag": {
+        "parent_codec": "h264",
+        "parent_format": "mov",
+        "talent_name": "Ritika Ochani",
+        "manifest_bytes": 26071903,
+        "cloudinary_bytes": 26071903,
+        "parent_live_refs": 2
+      },
+      "01_id_matches_approved": true,
+      "02_classification_delete_candidate": true,
+      "03_xf_exactly_bare_f_mp4": true,
+      "04_historical_purpose_retired_download": true,
+      "05_parent_codec_h264": true,
+      "06_video_needs_compat_delivery_false": true,
+      "07_parent_exists": true,
+      "08_parent_active": true,
+      "09_p3_owner_type_talent": true,
+      "10_talent_exists_not_archived": true,
+      "11_no_persisted_derived_url": true,
+      "12_mongo_derivative_reference_zero": true,
+      "13_no_active_review_link_dependency": true,
+      "14_no_application_dependency": true,
+      "15_no_historical_lineage_dependency": true,
+      "16_no_ledger_dependency": true,
+      "17_no_softdeleted_container_dependency": true,
+      "18_retention_satisfied": true,
+      "19_cloudinary_identity_matches": true,
+      "20_bytes_match_approved": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "dd4d98f1c56cc6217114a463293aaa82",
+      "_diag": {
+        "parent_codec": "h264",
+        "parent_format": "mov",
+        "talent_name": "Harshita K Chundawat",
+        "manifest_bytes": 88817141,
+        "cloudinary_bytes": 88817141,
+        "parent_live_refs": 2
+      },
+      "01_id_matches_approved": true,
+      "02_classification_delete_candidate": true,
+      "03_xf_exactly_bare_f_mp4": true,
+      "04_historical_purpose_retired_download": true,
+      "05_parent_codec_h264": true,
+      "06_video_needs_compat_delivery_false": true,
+      "07_parent_exists": true,
+      "08_parent_active": true,
+      "09_p3_owner_type_talent": true,
+      "10_talent_exists_not_archived": true,
+      "11_no_persisted_derived_url": true,
+      "12_mongo_derivative_reference_zero": true,
+      "13_no_active_review_link_dependency": true,
+      "14_no_application_dependency": true,
+      "15_no_historical_lineage_dependency": true,
+      "16_no_ledger_dependency": true,
+      "17_no_softdeleted_container_dependency": true,
+      "18_retention_satisfied": true,
+      "19_cloudinary_identity_matches": true,
+      "20_bytes_match_approved": true,
+      "ALL_PASS": true
+    }
+  ],
+  "p9_manifest_rows": [
+    {
+      "derived_id": "43cb35ba043fa3b695e548e2ecbb22f8",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f973d131-406f-46f9-b951-4c12ff392e94/auditions/unknown_talent_srishti-rajput/submission_31ad3a2a-0a17-479a-ba1f-b7599e373c4a/intro_video",
+        "cloudinary_derived": {
+          "id": "43cb35ba043fa3b695e548e2ecbb22f8",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 16869871
+        }
+      }
+    },
+    {
+      "derived_id": "58b9fc6e1f17ff68b20c0c9b6d107080",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent_rajnandini-sharma/submission_1656c52f-31ea-494a-9d24-4a5bbdc10e13/intro_video",
+        "cloudinary_derived": {
+          "id": "58b9fc6e1f17ff68b20c0c9b6d107080",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 18001880
+        }
+      }
+    },
+    {
+      "derived_id": "7c4cfbe0a50de34608fe978c1ebdab31",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f973d131-406f-46f9-b951-4c12ff392e94/auditions/unknown_talent_janavi-mahajan/submission_546c1e64-cb84-4a06-91d1-d70c6d1738fe/intro_video",
+        "cloudinary_derived": {
+          "id": "7c4cfbe0a50de34608fe978c1ebdab31",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 22082541
+        }
+      }
+    },
+    {
+      "derived_id": "1e50a8101c9aa42486476f14323467dc",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent/submission_a80c0541-add4-444d-86f4-03a692c06373/intro_video",
+        "cloudinary_derived": {
+          "id": "1e50a8101c9aa42486476f14323467dc",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 22120672
+        }
+      }
+    },
+    {
+      "derived_id": "824d30c9de9ddd12c42c894639cc6722",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 3,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 3,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f973d131-406f-46f9-b951-4c12ff392e94/auditions/unknown_talent_paakhi-baranwal/submission_0a072e9f-4416-487e-bf8d-fffb534ff498/intro_video",
+        "cloudinary_derived": {
+          "id": "824d30c9de9ddd12c42c894639cc6722",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 23729733
+        }
+      }
+    },
+    {
+      "derived_id": "7741c306abfcfc743dcc40e69b0c5e2a",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/aafee923-5ba7-48f2-8a99-3da91bd54abb/auditions/unknown_talent_aman-desai/submission_20c9483a-7ff5-4448-a269-4fa0187a40e0/intro_video",
+        "cloudinary_derived": {
+          "id": "7741c306abfcfc743dcc40e69b0c5e2a",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 24937206
+        }
+      }
+    },
+    {
+      "derived_id": "078452c33ab95f551b340e2921ac0d6b",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f1f25731-5d71-4b53-8213-f40dc39bbd01/auditions/unknown_talent_ritika-ochani/submission_0ac79754-2c32-4807-b4a8-502f88f2459f/intro_video",
+        "cloudinary_derived": {
+          "id": "078452c33ab95f551b340e2921ac0d6b",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 26071903
+        }
+      }
+    },
+    {
+      "derived_id": "dd4d98f1c56cc6217114a463293aaa82",
+      "verdict": "PASS",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/aaa3e712-b288-41e3-935b-831d6d1b6bac/auditions/1e342b65-e6dd-442a-866d-345713cd484d_harshita-k-chundawat/submission_7ddffd83-e3fe-49f4-a941-16e8b44cd36d/intro_video",
+        "cloudinary_derived": {
+          "id": "dd4d98f1c56cc6217114a463293aaa82",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 88817141
+        }
+      }
+    }
+  ],
+  "execution": {
+    "batch_id": "b_9ce0185df7a5ed571a5d",
+    "dry_run": false,
+    "attempted": 8,
+    "deleted": 8,
+    "skipped": 0,
+    "blocked": 0,
+    "stopped": false,
+    "stop_reason": null,
+    "per_asset": [
+      {
+        "derived_id": "078452c33ab95f551b340e2921ac0d6b",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "1e50a8101c9aa42486476f14323467dc",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "43cb35ba043fa3b695e548e2ecbb22f8",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "58b9fc6e1f17ff68b20c0c9b6d107080",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "7741c306abfcfc743dcc40e69b0c5e2a",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "7c4cfbe0a50de34608fe978c1ebdab31",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "824d30c9de9ddd12c42c894639cc6722",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "dd4d98f1c56cc6217114a463293aaa82",
+        "result": "deleted"
+      }
+    ]
+  },
+  "delete_calls_made": [
+    [
+      "078452c33ab95f551b340e2921ac0d6b"
+    ],
+    [
+      "1e50a8101c9aa42486476f14323467dc"
+    ],
+    [
+      "43cb35ba043fa3b695e548e2ecbb22f8"
+    ],
+    [
+      "58b9fc6e1f17ff68b20c0c9b6d107080"
+    ],
+    [
+      "7741c306abfcfc743dcc40e69b0c5e2a"
+    ],
+    [
+      "7c4cfbe0a50de34608fe978c1ebdab31"
+    ],
+    [
+      "824d30c9de9ddd12c42c894639cc6722"
+    ],
+    [
+      "dd4d98f1c56cc6217114a463293aaa82"
+    ]
+  ],
+  "post_delete_checks": [
+    {
+      "derived_id": "43cb35ba043fa3b695e548e2ecbb22f8",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "58b9fc6e1f17ff68b20c0c9b6d107080",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "7c4cfbe0a50de34608fe978c1ebdab31",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "1e50a8101c9aa42486476f14323467dc",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "824d30c9de9ddd12c42c894639cc6722",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "7741c306abfcfc743dcc40e69b0c5e2a",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "078452c33ab95f551b340e2921ac0d6b",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "dd4d98f1c56cc6217114a463293aaa82",
+      "derived_gone": true,
+      "parent_exists": true
+    }
+  ],
+  "protected_group_check": {
+    "CURRENT_COMPATIBLE": "4/4",
+    "UNKNOWN": "6/6",
+    "REVIEW_LINKED_CANDIDATE": "35/35",
+    "PROJECT_SUBMISSION_RETENTION_BLOCKED": "25/25"
+  },
+  "usage_before": {
+    "storage": 19604077694,
+    "derived": 8416,
+    "transformations": 71252
+  },
+  "usage_after": {
+    "storage": 19604077694,
+    "derived": 8416,
+    "transformations": 71252
+  },
+  "expected_bytes": 242630947
+}

@@ -1,0 +1,657 @@
+{
+  "generated_at": "2026-08-31T05:35:42.666571+00:00",
+  "aborted": null,
+  "manifest_id": "pm_ca2356226719a2d825fe",
+  "candidate_hash_of_passed": "79097bc3fbd2685c3e6cf8d2e84fe1067ecc5516cb6f073079ba7455df25ed65",
+  "passed_count": 10,
+  "proposed_ids": [
+    "2bb90e52863f0a6939b341afbe184384",
+    "75b476c6574fae7106174c46d71eebf4",
+    "59cf4c8c203bdeec0f54d957d6656c0b",
+    "8cd6782abfc9b47c26a5f712ae367a0d",
+    "e360e3e103911a4ffab016da266bed4d",
+    "03976a5df0a43dd1ed7f33af0b7a11a9",
+    "cf32101eb125a9f49070f870bc8910c3",
+    "43139c6c57c6e72edc691745f5de59d2",
+    "58e808fadb97bdd2dcece4cefc6efa08",
+    "9c4dc8503b1390ad18f6523e0ebde78e"
+  ],
+  "approval_id": "ap_5c6f1a244614b55e5929",
+  "batch_id": "b_e40294922c32097b2296",
+  "canary_family": "f_mp4",
+  "explicit_precheck": [
+    {
+      "derived_id": "2bb90e52863f0a6939b341afbe184384",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 1353340,
+      "cloudinary_bytes": 1353340,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "75b476c6574fae7106174c46d71eebf4",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mov",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 1880293,
+      "cloudinary_bytes": 1880293,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "59cf4c8c203bdeec0f54d957d6656c0b",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 2025267,
+      "cloudinary_bytes": 2025267,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "8cd6782abfc9b47c26a5f712ae367a0d",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 2450511,
+      "cloudinary_bytes": 2450511,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "e360e3e103911a4ffab016da266bed4d",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 2829095,
+      "cloudinary_bytes": 2829095,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "03976a5df0a43dd1ed7f33af0b7a11a9",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 2840444,
+      "cloudinary_bytes": 2840444,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "cf32101eb125a9f49070f870bc8910c3",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 2848677,
+      "cloudinary_bytes": 2848677,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "43139c6c57c6e72edc691745f5de59d2",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 2916326,
+      "cloudinary_bytes": 2916326,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "58e808fadb97bdd2dcece4cefc6efa08",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 2,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 2978572,
+      "cloudinary_bytes": 2978572,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    },
+    {
+      "derived_id": "9c4dc8503b1390ad18f6523e0ebde78e",
+      "parent_exists": true,
+      "derived_present": true,
+      "cld_public_id_match": true,
+      "parent_codec": "h264",
+      "parent_format": "mp4",
+      "current_P4_compat": false,
+      "P3_owner_type": "talent",
+      "P3_conflict": null,
+      "parent_active": true,
+      "parent_live_refs": 1,
+      "persisted": false,
+      "mongo_ref_count": 0,
+      "review_link_talent": false,
+      "review_link_submission": false,
+      "source_lineage": false,
+      "ledger": false,
+      "submission_soft_deleted": false,
+      "project_soft_deleted": false,
+      "retention_ok": true,
+      "xf_ok": true,
+      "fmt_ok": true,
+      "bytes_ok": true,
+      "manifest_bytes": 3054770,
+      "cloudinary_bytes": 3054770,
+      "transformation_retired": true,
+      "ALL_PASS": true
+    }
+  ],
+  "p9_manifest_rows": [
+    {
+      "derived_id": "2bb90e52863f0a6939b341afbe184384",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/f1f25731-5d71-4b53-8213-f40dc39bbd01/auditions/unknown_talent_twinkle-dhaifule/submission_57e07ca6-da68-468f-b76f-d950a010d6c2/intro_video",
+        "cloudinary_derived": {
+          "id": "2bb90e52863f0a6939b341afbe184384",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 1353340
+        }
+      }
+    },
+    {
+      "derived_id": "75b476c6574fae7106174c46d71eebf4",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/8779dfca-886a-43a0-8993-34555713383b/auditions/unknown_talent_ishani-bhola/submission_2e18ba63-8ea3-42a5-9823-a01e9ef3f178/intro_video",
+        "cloudinary_derived": {
+          "id": "75b476c6574fae7106174c46d71eebf4",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 1880293
+        }
+      }
+    },
+    {
+      "derived_id": "59cf4c8c203bdeec0f54d957d6656c0b",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/applications/6f005ea2-c46f-4813-b9a8-37a74b4b1e1c/intro_video",
+        "cloudinary_derived": {
+          "id": "59cf4c8c203bdeec0f54d957d6656c0b",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 2025267
+        }
+      }
+    },
+    {
+      "derived_id": "8cd6782abfc9b47c26a5f712ae367a0d",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/cb32a229-9e7a-42e4-8f58-ac71e8447ec6/auditions/unknown_talent/submission_eaff552e-c9cb-4fbb-846b-0ab328219c67/intro_video",
+        "cloudinary_derived": {
+          "id": "8cd6782abfc9b47c26a5f712ae367a0d",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 2450511
+        }
+      }
+    },
+    {
+      "derived_id": "e360e3e103911a4ffab016da266bed4d",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/fecd1329-1b24-4997-8f8f-b805e1a9bdfd/auditions/unknown_talent_bishakha-thapa/submission_ee351d07-59dd-475a-969d-f7ccb2d71439/intro_video",
+        "cloudinary_derived": {
+          "id": "e360e3e103911a4ffab016da266bed4d",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 2829095
+        }
+      }
+    },
+    {
+      "derived_id": "03976a5df0a43dd1ed7f33af0b7a11a9",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/fecd1329-1b24-4997-8f8f-b805e1a9bdfd/auditions/unknown_talent_manya-grover/submission_3877b22d-1696-41a4-a7ee-02d1b1bc5555/intro_video",
+        "cloudinary_derived": {
+          "id": "03976a5df0a43dd1ed7f33af0b7a11a9",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 2840444
+        }
+      }
+    },
+    {
+      "derived_id": "cf32101eb125a9f49070f870bc8910c3",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent_drishita/submission_37c25a5b-2e2d-4b3f-86e5-7d068925a104/intro_video",
+        "cloudinary_derived": {
+          "id": "cf32101eb125a9f49070f870bc8910c3",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 2848677
+        }
+      }
+    },
+    {
+      "derived_id": "43139c6c57c6e72edc691745f5de59d2",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/aafee923-5ba7-48f2-8a99-3da91bd54abb/auditions/85cd23f9-94ea-4625-992d-19a9ba5198cd_padm-rautela/submission_4b9efb59-a2f3-4d20-a5d6-3f6b05967daa/intro_video",
+        "cloudinary_derived": {
+          "id": "43139c6c57c6e72edc691745f5de59d2",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 2916326
+        }
+      }
+    },
+    {
+      "derived_id": "58e808fadb97bdd2dcece4cefc6efa08",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 2,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 2,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/07d25735-40b7-4c71-bb64-44374fa96aa3/auditions/unknown_talent_hasnain-siddique/submission_856a598c-68b2-4a2b-97e2-8e1cb7b51533/intro_video",
+        "cloudinary_derived": {
+          "id": "58e808fadb97bdd2dcece4cefc6efa08",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 2978572
+        }
+      }
+    },
+    {
+      "derived_id": "9c4dc8503b1390ad18f6523e0ebde78e",
+      "verdict": "PASS",
+      "reason": "retired regenerable derivative; parent original active & referenced; no persisted URL; ownership proven (talent); identity matches manifest \u2014 safe subject to immediate pre-delete recheck",
+      "checks": {
+        "parent_owner_docs": 1,
+        "owner_type": "talent",
+        "ownership_conflict": null,
+        "parent_live_refs": 1,
+        "persisted_url_hit": false,
+        "cloudinary_parent_public_id": "talentgram/projects/8779dfca-886a-43a0-8993-34555713383b/auditions/unknown_talent_rishidha-katna/submission_f3899bc6-e72e-44f5-a16a-e106257a646f/intro_video",
+        "cloudinary_derived": {
+          "id": "9c4dc8503b1390ad18f6523e0ebde78e",
+          "transformation": "f_mp4",
+          "format": "mp4",
+          "bytes": 3054770
+        }
+      }
+    }
+  ],
+  "execution": {
+    "batch_id": "b_e40294922c32097b2296",
+    "dry_run": false,
+    "attempted": 10,
+    "deleted": 10,
+    "skipped": 0,
+    "blocked": 0,
+    "stopped": false,
+    "stop_reason": null,
+    "per_asset": [
+      {
+        "derived_id": "03976a5df0a43dd1ed7f33af0b7a11a9",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "2bb90e52863f0a6939b341afbe184384",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "43139c6c57c6e72edc691745f5de59d2",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "58e808fadb97bdd2dcece4cefc6efa08",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "59cf4c8c203bdeec0f54d957d6656c0b",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "75b476c6574fae7106174c46d71eebf4",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "8cd6782abfc9b47c26a5f712ae367a0d",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "9c4dc8503b1390ad18f6523e0ebde78e",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "cf32101eb125a9f49070f870bc8910c3",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "e360e3e103911a4ffab016da266bed4d",
+        "result": "deleted"
+      }
+    ]
+  },
+  "delete_calls_made": [
+    [
+      "03976a5df0a43dd1ed7f33af0b7a11a9"
+    ],
+    [
+      "2bb90e52863f0a6939b341afbe184384"
+    ],
+    [
+      "43139c6c57c6e72edc691745f5de59d2"
+    ],
+    [
+      "58e808fadb97bdd2dcece4cefc6efa08"
+    ],
+    [
+      "59cf4c8c203bdeec0f54d957d6656c0b"
+    ],
+    [
+      "75b476c6574fae7106174c46d71eebf4"
+    ],
+    [
+      "8cd6782abfc9b47c26a5f712ae367a0d"
+    ],
+    [
+      "9c4dc8503b1390ad18f6523e0ebde78e"
+    ],
+    [
+      "cf32101eb125a9f49070f870bc8910c3"
+    ],
+    [
+      "e360e3e103911a4ffab016da266bed4d"
+    ]
+  ],
+  "post_delete_checks": [
+    {
+      "derived_id": "2bb90e52863f0a6939b341afbe184384",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "75b476c6574fae7106174c46d71eebf4",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "59cf4c8c203bdeec0f54d957d6656c0b",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "8cd6782abfc9b47c26a5f712ae367a0d",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "e360e3e103911a4ffab016da266bed4d",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "03976a5df0a43dd1ed7f33af0b7a11a9",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "cf32101eb125a9f49070f870bc8910c3",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "43139c6c57c6e72edc691745f5de59d2",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "58e808fadb97bdd2dcece4cefc6efa08",
+      "derived_gone": true,
+      "parent_exists": true
+    },
+    {
+      "derived_id": "9c4dc8503b1390ad18f6523e0ebde78e",
+      "derived_gone": true,
+      "parent_exists": true
+    }
+  ],
+  "untouched_bucket_spotcheck": {
+    "CURRENT_COMPATIBLE": "4/4 sampled derivatives still present",
+    "UNKNOWN": "5/5 sampled derivatives still present",
+    "REVIEW_LINKED_CANDIDATE": "5/5 sampled derivatives still present"
+  },
+  "usage_before": {
+    "storage": 19629249093,
+    "derived": 8476,
+    "transformations": 71252
+  },
+  "usage_after": {
+    "storage": 19629249093,
+    "derived": 8476,
+    "transformations": 71252
+  }
+}

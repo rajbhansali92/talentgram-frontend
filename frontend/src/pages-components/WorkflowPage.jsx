@@ -24,6 +24,7 @@ import {
     Settings,
     Sparkles,
     X,
+    SlidersHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import ScoutCaptureModal from "./ScoutCaptureModal";
@@ -53,6 +54,15 @@ const SUBTASK_TEMPLATES = {
         "Shoot Completed"
     ]
 };
+
+const SCOUT_STATUS_OPTIONS = [
+    { id: "not_contacted", label: "New" },
+    { id: "reached_out", label: "Contacted" },
+    { id: "replied", label: "Replied" },
+    { id: "added_to_group", label: "Grouped" },
+    { id: "added_to_database", label: "DB Approved" },
+    { id: "ignored", label: "Ignored" },
+];
 
 export default function WorkflowPage() {
     const admin = getAdmin();
@@ -115,6 +125,28 @@ export default function WorkflowPage() {
 
     // AI Scout Capture modal
     const [showAiCapture, setShowAiCapture] = useState(false);
+
+    // UI-only simplification state (2026-09-23 Workflow simplification pass) —
+    // no data/behavior changes, purely presentational: a compact "Filters"
+    // popover on mobile instead of always-wrapped inline pills, a collapsed-
+    // by-default manual scout form (AI Capture stays the obvious primary
+    // action), and collapsible scouting-queue cards (talent identity first,
+    // pipeline controls revealed on expand).
+    const [showMobileFilters, setShowMobileFilters] = useState(false);
+    const [showManualScout, setShowManualScout] = useState(false);
+    const [expandedScoutId, setExpandedScoutId] = useState(null);
+    const mobileFiltersRef = useRef(null);
+
+    useEffect(() => {
+        if (!showMobileFilters) return;
+        const onDocClick = (e) => {
+            if (mobileFiltersRef.current && !mobileFiltersRef.current.contains(e.target)) {
+                setShowMobileFilters(false);
+            }
+        };
+        document.addEventListener("mousedown", onDocClick);
+        return () => document.removeEventListener("mousedown", onDocClick);
+    }, [showMobileFilters]);
 
     // Fetch lists
     const fetchTasks = async () => {
@@ -529,50 +561,48 @@ export default function WorkflowPage() {
     };
 
     return (
-        <div className="space-y-4 max-w-6xl">
+        <div className="space-y-3 max-w-6xl">
             {/* 1. Isolated Notifications Bar */}
             {notifications.length > 0 && (
-                <div className="flex items-center justify-between bg-black text-white px-4 py-2.5 rounded-sm shadow-sm gap-4 text-xs font-mono tracking-tight shrink-0">
+                <div className="flex items-center justify-between bg-black text-white px-4 py-2 rounded-sm shadow-sm gap-4 text-xs shrink-0">
                     <div className="flex items-center gap-2 overflow-hidden">
                         <Bell className="w-3.5 h-3.5 animate-pulse text-emerald-400 shrink-0" />
                         <span className="truncate">
-                            <strong className="uppercase mr-1">Activity Alert:</strong>
+                            <strong className="mr-1">Activity:</strong>
                             {notifications[0].title}
                         </span>
                         {notifications.length > 1 && (
-                            <span className="bg-white/20 px-1 py-0.5 rounded-sm shrink-0">
+                            <span className="bg-white/20 px-1.5 py-0.5 rounded-full text-[10px] shrink-0">
                                 +{notifications.length - 1} more
                             </span>
                         )}
                     </div>
                     <button
                         onClick={handleClearNotifications}
-                        className="underline hover:text-white/80 shrink-0 font-bold focus:outline-none"
+                        className="underline hover:text-white/80 shrink-0 font-medium focus:outline-none"
                     >
                         Clear
                     </button>
                 </div>
             )}
 
-            {/* Title Section */}
-            <div className="flex items-center justify-between gap-4 flex-wrap border-b border-black/[0.06] pb-4">
-                <div>
-                    <p className="eyebrow mb-1">Operations Console</p>
-                    <h1 className="font-display text-2xl md:text-3xl tracking-tight text-black/90">
-                        Workflow & Scouting Queue
-                    </h1>
-                </div>
+            {/* Compact app-style header */}
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+                <h1 className="font-display text-xl md:text-2xl tracking-tight text-black/90">
+                    Workflow
+                </h1>
                 <button
                     onClick={() => setShowNewTaskForm(!showNewTaskForm)}
-                    className="px-3.5 py-2 bg-black text-white hover:bg-black/95 rounded-sm text-xs font-medium inline-flex items-center gap-1.5 focus:outline-none"
+                    className="px-3.5 py-2 bg-black text-white hover:bg-black/95 rounded-full text-xs font-medium inline-flex items-center gap-1.5 focus:outline-none"
                 >
                     <Plus className="w-3.5 h-3.5" />
                     New Task
                 </button>
             </div>
 
-            {/* Tab Switcher — Ongoing Project Talents (existing content) | Calls (new) */}
-            <div className="flex items-center gap-1.5 border-b border-black/[0.06] pb-0">
+            {/* Tab Switcher — Ongoing Project Talents (existing content) | Calls — a
+                calm segmented nav control, not a second heading. */}
+            <div className="flex items-center gap-5 border-b border-black/[0.08]">
                 {[
                     { id: "tasks", label: "Ongoing Project Talents" },
                     { id: "calls", label: "Calls" },
@@ -580,7 +610,7 @@ export default function WorkflowPage() {
                     <button
                         key={tab.id}
                         onClick={() => setActiveTab(tab.id)}
-                        className={`px-3.5 py-2 text-xs font-semibold uppercase tracking-wider rounded-t-sm border-b-2 -mb-px focus:outline-none ${
+                        className={`pb-2.5 text-sm font-medium border-b-2 -mb-px transition-colors focus:outline-none ${
                             activeTab === tab.id
                                 ? "border-black text-black"
                                 : "border-transparent text-black/40 hover:text-black/70"
@@ -797,51 +827,98 @@ export default function WorkflowPage() {
             {/* Split Operations Workspace Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
                 
-                {/* 2. Left Column: Workflow Tasks Feed (7 Columns) */}
-                <div className="lg:col-span-7 space-y-4">
-                    {/* Header toolbar controls */}
-                    <div className="flex items-center justify-between gap-2 border border-black/[0.06] bg-white p-3 rounded-md shadow-sm">
+                {/* 2. Left Column: Workflow Tasks Feed (majority of visual weight) */}
+                <div className="lg:col-span-8 space-y-3">
+                    {/* Filters — inline pills on tablet/desktop, a single compact
+                        "Filters" popover on mobile so the toolbar never has to
+                        wrap into several rows of buttons. */}
+                    <div className="hidden sm:flex items-center justify-between gap-2 flex-wrap">
                         <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="text-[10px] uppercase font-bold text-black/45 mr-1">Category:</span>
                             {["all", "general", "project", "scouting", "finance"].map((cat) => (
                                 <button
                                     key={cat}
                                     onClick={() => setCategoryFilter(cat)}
-                                    className={`px-2.5 py-1 text-[11px] font-medium rounded-sm border uppercase transition-all ${
+                                    className={`px-2.5 py-1 text-xs font-medium rounded-full border capitalize transition-all ${
                                         categoryFilter === cat
                                             ? "bg-black text-white border-black"
-                                            : "text-black/60 hover:text-black hover:bg-black/[0.02] border-black/[0.06]"
+                                            : "text-black/55 hover:text-black hover:bg-black/[0.03] border-black/[0.08]"
                                     }`}
                                 >
                                     {cat}
                                 </button>
                             ))}
                         </div>
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="text-[10px] uppercase font-bold text-black/45 mr-1">Status:</span>
-                            <select
-                                value={statusFilter}
-                                onChange={(e) => setStatusFilter(e.target.value)}
-                                className="text-xs border border-black/[0.06] rounded-sm py-1 px-2 focus:outline-none bg-white"
-                            >
-                                <option value="active">Active Tasks</option>
-                                <option value="completed">Completed Only</option>
-                                <option value="archived">Archived Only</option>
-                                <option value="all">All Tasks</option>
-                            </select>
-                        </div>
+                        <select
+                            value={statusFilter}
+                            onChange={(e) => setStatusFilter(e.target.value)}
+                            className="text-xs border border-black/[0.08] rounded-full py-1.5 px-3 focus:outline-none bg-white text-black/70"
+                        >
+                            <option value="active">Active Tasks</option>
+                            <option value="completed">Completed Only</option>
+                            <option value="archived">Archived Only</option>
+                            <option value="all">All Tasks</option>
+                        </select>
+                    </div>
+
+                    {/* Mobile: single Filters trigger + popover */}
+                    <div className="sm:hidden relative" ref={mobileFiltersRef}>
+                        <button
+                            onClick={() => setShowMobileFilters((v) => !v)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-black/[0.1] rounded-full text-xs font-medium text-black/70"
+                        >
+                            <SlidersHorizontal className="w-3.5 h-3.5" />
+                            Filters
+                            {(categoryFilter !== "all" || statusFilter !== "active") && (
+                                <span className="w-1.5 h-1.5 rounded-full bg-black" />
+                            )}
+                        </button>
+                        {showMobileFilters && (
+                            <div className="absolute z-20 mt-1.5 w-64 bg-white border border-black/[0.1] rounded-md shadow-lg p-3 space-y-3">
+                                <div className="space-y-1.5">
+                                    <p className="text-[10px] uppercase font-semibold text-black/40">Category</p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {["all", "general", "project", "scouting", "finance"].map((cat) => (
+                                            <button
+                                                key={cat}
+                                                onClick={() => setCategoryFilter(cat)}
+                                                className={`px-2.5 py-1 text-xs font-medium rounded-full border capitalize ${
+                                                    categoryFilter === cat
+                                                        ? "bg-black text-white border-black"
+                                                        : "text-black/55 border-black/[0.08]"
+                                                }`}
+                                            >
+                                                {cat}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="space-y-1.5">
+                                    <p className="text-[10px] uppercase font-semibold text-black/40">Status</p>
+                                    <select
+                                        value={statusFilter}
+                                        onChange={(e) => setStatusFilter(e.target.value)}
+                                        className="w-full text-xs border border-black/[0.08] rounded-sm py-1.5 px-2 focus:outline-none bg-white"
+                                    >
+                                        <option value="active">Active Tasks</option>
+                                        <option value="completed">Completed Only</option>
+                                        <option value="archived">Archived Only</option>
+                                        <option value="all">All Tasks</option>
+                                    </select>
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     {/* Tasks Feed Content */}
-                    <div className="space-y-3">
+                    <div className="space-y-2">
                         {loadingTasks ? (
-                            <div className="border border-black/[0.06] bg-white rounded-md p-10 text-center text-xs text-black/40">
+                            <div className="rounded-lg p-10 text-center text-xs text-black/40">
                                 <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
                                 Loading tasks...
                             </div>
                         ) : filteredTasks.length === 0 ? (
-                            <div className="border border-black/[0.06] bg-white rounded-md p-10 text-center text-xs text-black/40">
-                                Nothing logged here yet.
+                            <div className="rounded-lg p-10 text-center text-xs text-black/40">
+                                Nothing here right now.
                             </div>
                         ) : (
                             filteredTasks.map((t) => {
@@ -853,119 +930,117 @@ export default function WorkflowPage() {
                                 return (
                                     <div
                                         key={t.id}
-                                        className={`border border-black/[0.06] rounded-md transition-all duration-200 overflow-hidden ${
-                                            isExpanded ? "bg-white shadow-md border-black/[0.12]" : "bg-white hover:border-black/[0.1] hover:shadow-sm"
+                                        className={`border rounded-lg transition-colors duration-150 overflow-hidden ${
+                                            isExpanded ? "bg-white shadow-sm border-black/[0.14]" : "bg-white border-black/[0.07] hover:border-black/[0.14]"
                                         }`}
                                     >
-                                        {/* Task Primary Header Row */}
+                                        {/* Task Primary Header Row — title / type / assignee / status only;
+                                            everything else is progressive disclosure behind expand. */}
                                         <div
                                             onClick={() => setExpandedTaskId(isExpanded ? null : t.id)}
-                                            className="px-4 py-3 flex items-center justify-between gap-3 cursor-pointer select-none"
+                                            className="px-3.5 py-2.5 flex items-center justify-between gap-3 cursor-pointer select-none"
                                         >
                                             <div className="flex items-center gap-2.5 min-w-0 flex-1">
                                                 <span
-                                                    className={`p-1.5 rounded-sm shrink-0 ${
+                                                    className={`p-1.5 rounded-full shrink-0 ${
                                                         t.status === "completed"
-                                                            ? "bg-black text-white/50"
-                                                            : "bg-black/[0.03] text-black/60"
+                                                            ? "bg-black/[0.06] text-black/35"
+                                                            : "bg-black/[0.04] text-black/55"
                                                     }`}
                                                 >
                                                     {getCategoryIcon(t.category)}
                                                 </span>
                                                 <div className="min-w-0 flex-1">
                                                     <p
-                                                        className={`text-xs font-semibold truncate ${
+                                                        className={`text-sm truncate ${
                                                             t.status === "completed"
-                                                                ? "line-through text-black/40"
-                                                                : "text-black/85"
+                                                                ? "line-through text-black/35"
+                                                                : "text-black/85 font-medium"
                                                         }`}
                                                     >
                                                         {t.title}
                                                     </p>
-                                                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-black/45 tracking-tight flex-wrap font-mono uppercase">
-                                                        <span className="font-semibold tracking-wider bg-black/[0.02] border border-black/[0.04] rounded-sm px-1.5 py-0.5 text-black/50">
-                                                            {t.category}
-                                                        </span>
-                                                        <span>•</span>
-                                                        <span>Assignee: {getAssigneeName(t.assignee_id)}</span>
+                                                    <p className="text-xs text-black/45 truncate mt-0.5">
+                                                        <span className="capitalize">{t.category}</span>
+                                                        <span className="mx-1">·</span>
+                                                        {getAssigneeName(t.assignee_id)}
                                                         {t.project_name && (
                                                             <>
-                                                                <span>•</span>
-                                                                <span className="font-semibold text-black/65">{t.project_name}</span>
+                                                                <span className="mx-1">·</span>
+                                                                {t.project_name}
                                                             </>
                                                         )}
-                                                    </div>
+                                                    </p>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-2.5 shrink-0">
-                                                {/* Mini checklist progress */}
-                                                {subtasksCount > 0 && (
-                                                    <span className="text-[10px] font-mono text-black/40 bg-black/[0.02] px-1.5 py-0.5 rounded-sm border border-black/[0.04]">
-                                                        {subtasksCompleted}/{subtasksCount}
-                                                    </span>
-                                                )}
-                                                {/* Comments count */}
-                                                {commentsCount > 0 && (
-                                                    <span className="text-[10px] text-black/50 inline-flex items-center gap-1">
-                                                        <MessageSquare className="w-3 h-3 text-black/30" />
-                                                        {commentsCount}
+                                            <div className="flex items-center gap-2 shrink-0">
+                                                {/* Mini checklist progress + comments — quiet secondary signals */}
+                                                {(subtasksCount > 0 || commentsCount > 0) && (
+                                                    <span className="hidden sm:inline-flex items-center gap-2 text-[11px] text-black/35">
+                                                        {subtasksCount > 0 && <span>{subtasksCompleted}/{subtasksCount}</span>}
+                                                        {commentsCount > 0 && (
+                                                            <span className="inline-flex items-center gap-0.5">
+                                                                <MessageSquare className="w-3 h-3" />
+                                                                {commentsCount}
+                                                            </span>
+                                                        )}
                                                     </span>
                                                 )}
                                                 {/* Status indicator */}
                                                 <span
-                                                    className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded-sm border ${
+                                                    className={`text-[10px] font-medium px-2 py-0.5 rounded-full capitalize ${
                                                         t.status === "completed"
-                                                            ? "bg-black/[0.02] text-black/40 border-black/[0.06]"
+                                                            ? "bg-black/[0.05] text-black/40"
                                                             : t.status === "in_progress"
-                                                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                                            : "bg-[#c9a961]/10 text-[#9b7b35] border-[#c9a961]/25"
+                                                            ? "bg-emerald-50 text-emerald-700"
+                                                            : "bg-[#c9a961]/15 text-[#9b7b35]"
                                                     }`}
                                                 >
                                                     {t.status?.replace("_", " ")}
                                                 </span>
                                                 {isExpanded ? (
-                                                    <ChevronUp className="w-3.5 h-3.5 text-black/40" />
+                                                    <ChevronUp className="w-3.5 h-3.5 text-black/35" />
                                                 ) : (
-                                                    <ChevronDown className="w-3.5 h-3.5 text-black/40" />
+                                                    <ChevronDown className="w-3.5 h-3.5 text-black/35" />
                                                 )}
                                             </div>
                                         </div>
 
-                                        {/* Expanded Operational Workspace details */}
+                                        {/* Expanded Operational Workspace details — one grouped panel with
+                                            quiet dividers between sections instead of several separate
+                                            bordered boxes. */}
                                         {isExpanded && (
-                                            <div className="px-4 pb-4 border-t border-black/[0.04] pt-3 bg-white space-y-4 text-xs">
+                                            <div className="px-3.5 pb-3.5 pt-1 border-t border-black/[0.06] bg-white divide-y divide-black/[0.06] text-xs">
                                                 {/* Description details */}
                                                 {t.description && (
-                                                    <div className="space-y-1 bg-black/[0.015] border border-black/[0.04] p-2.5 rounded-sm">
-                                                        <p className="text-[9px] uppercase font-bold text-black/45 tracking-wider">Details</p>
-                                                        <p className="text-black/75 whitespace-pre-wrap leading-relaxed">{t.description}</p>
+                                                    <div className="space-y-1 py-3 first:pt-3">
+                                                        <p className="text-[10px] uppercase font-semibold text-black/40">Details</p>
+                                                        <p className="text-black/70 whitespace-pre-wrap leading-relaxed">{t.description}</p>
                                                     </div>
                                                 )}
 
                                                 {/* Quick Action Toolbar */}
-                                                <div className="flex items-center justify-between gap-3 border-b border-black/[0.04] pb-3 flex-wrap">
-                                                    <div className="flex items-center gap-2 flex-wrap">
-                                                        <span className="text-[9px] uppercase font-bold text-black/45">Status:</span>
+                                                <div className="flex items-center justify-between gap-3 py-3 flex-wrap first:pt-3">
+                                                    <div className="flex items-center gap-1.5 flex-wrap">
                                                         {["pending", "in_progress", "completed", "archived"].map((st) => (
                                                             <button
                                                                 key={st}
                                                                 onClick={() => handleUpdateTaskStatus(t.id, st)}
-                                                                className={`px-2 py-0.5 text-[10px] tracking-tight font-medium rounded-sm border uppercase transition-all ${
+                                                                className={`px-2.5 py-1 text-[11px] font-medium rounded-full border capitalize transition-all ${
                                                                     t.status === st
                                                                         ? "bg-black text-white border-black"
-                                                                        : "text-black/60 hover:text-black hover:bg-black/[0.02] border-black/[0.06]"
+                                                                        : "text-black/55 hover:text-black hover:bg-black/[0.02] border-black/[0.08]"
                                                                 }`}
                                                             >
-                                                                {st}
+                                                                {st.replace("_", " ")}
                                                             </button>
                                                         ))}
                                                     </div>
                                                     <div className="flex items-center gap-2 flex-wrap">
-                                                        <span className="text-[9px] uppercase font-bold text-black/45">Owner:</span>
                                                         <select
                                                             value={t.assignee_id || ""}
                                                             onChange={(e) => handleUpdateTaskAssignee(t.id, e.target.value)}
-                                                            className="text-[11px] border border-black/[0.06] rounded-sm py-0.5 px-2 bg-white focus:outline-none"
+                                                            className="text-xs border border-black/[0.08] rounded-full py-1 px-2.5 bg-white focus:outline-none text-black/70"
                                                         >
                                                             <option value="">Unassigned</option>
                                                             {users.map((u) => (
@@ -977,7 +1052,7 @@ export default function WorkflowPage() {
                                                         {isAdmin && (
                                                             <button
                                                                 onClick={() => handleDeleteTask(t.id)}
-                                                                className="p-1 rounded-sm text-black/45 hover:text-red-600 hover:bg-red-50 transition-colors focus:outline-none"
+                                                                className="p-1 rounded-sm text-black/40 hover:text-red-600 hover:bg-red-50 transition-colors focus:outline-none"
                                                                 title="Delete task"
                                                             >
                                                                 <Trash2 className="w-3.5 h-3.5" />
@@ -987,9 +1062,9 @@ export default function WorkflowPage() {
                                                 </div>
 
                                                 {/* Subtasks Checklist */}
-                                                <div className="space-y-2 border-b border-black/[0.04] pb-3">
-                                                    <p className="text-[10px] uppercase font-bold text-black/45 tracking-wider">Subtasks checklist</p>
-                                                    
+                                                <div className="space-y-2 py-3 first:pt-3">
+                                                    <p className="text-[10px] uppercase font-semibold text-black/40">Checklist</p>
+
                                                     {/* Checklist items */}
                                                     {(t.subtasks || []).length > 0 && (
                                                         <div className="space-y-1.5">
@@ -1051,9 +1126,9 @@ export default function WorkflowPage() {
                                                 </div>
 
                                                 {/* WhatsApp-like Comments Rail */}
-                                                <div className="space-y-3 pt-1">
-                                                    <p className="text-[10px] uppercase font-bold text-black/45 tracking-wider">Updates Thread</p>
-                                                    
+                                                <div className="space-y-3 py-3">
+                                                    <p className="text-[10px] uppercase font-semibold text-black/40">Updates</p>
+
                                                     {/* Comments thread list */}
                                                     {(t.comments || []).length > 0 && (
                                                         <div className="space-y-2 max-h-[160px] overflow-y-auto pr-1">
@@ -1142,26 +1217,30 @@ export default function WorkflowPage() {
                     </div>
                 </div>
 
-                {/* 3. Right Column: Scouting Pipeline Roster (5 Columns) */}
-                <div className="lg:col-span-5 space-y-4">
-                    
-                    {/* Fast entry bar */}
-                    <div className="border border-black/[0.06] bg-white rounded-md p-4 space-y-3 shadow-sm">
-                        <p className="text-xs font-semibold uppercase tracking-wider text-black/85">Ultra-Fast Scouting Log</p>
+                {/* 3. Right Column: Scouting utility panel — narrower, secondary */}
+                <div className="lg:col-span-4 space-y-3">
+
+                    {/* Fast entry bar — AI Capture is the obvious primary action;
+                        manual logging is progressive disclosure behind a toggle. */}
+                    <div className="border border-black/[0.06] bg-white rounded-lg p-3.5 space-y-2.5 shadow-sm">
+                        <p className="text-xs font-medium text-black/60">Scouting Log</p>
                         <button
                             type="button"
                             onClick={() => setShowAiCapture(true)}
-                            className="w-full flex items-center justify-center gap-1.5 border border-black/15 bg-black/[0.02] hover:bg-black/[0.04] text-black/80 py-2 rounded-sm text-[11px] font-semibold uppercase tracking-wider focus:outline-none"
+                            className="w-full flex items-center justify-center gap-1.5 bg-black text-white hover:bg-black/90 py-2.5 rounded-full text-xs font-semibold focus:outline-none"
                         >
                             <Sparkles className="w-3.5 h-3.5" />
                             AI Capture
                         </button>
-                        <div className="flex items-center gap-2 my-0.5">
-                            <span className="h-px flex-1 bg-black/[0.06]" />
-                            <span className="text-[9px] uppercase tracking-wider text-black/30">or log manually</span>
-                            <span className="h-px flex-1 bg-black/[0.06]" />
-                        </div>
-                        <form onSubmit={handleCreateScout} className="space-y-2">
+                        <button
+                            type="button"
+                            onClick={() => setShowManualScout((v) => !v)}
+                            className="w-full text-center text-[11px] text-black/40 hover:text-black/65 font-medium focus:outline-none"
+                        >
+                            {showManualScout ? "Hide manual entry" : "or log manually"}
+                        </button>
+                        {showManualScout && (
+                        <form onSubmit={handleCreateScout} className="space-y-2 pt-1">
                             <div className="space-y-1">
                                 <label className="text-[10px] uppercase font-bold text-black/45">Instagram Profile Link</label>
                                 <div className="relative">
@@ -1223,101 +1302,122 @@ export default function WorkflowPage() {
                             </div>
                             <button
                                 type="submit"
-                                className="w-full bg-black text-white hover:bg-black/95 py-2 rounded-sm text-xs font-semibold uppercase tracking-wider mt-1 focus:outline-none"
+                                className="w-full border border-black/15 hover:bg-black/[0.03] text-black/75 py-1.5 rounded-full text-xs font-medium mt-1 focus:outline-none"
                             >
-                                + Log Scout
+                                Log Scout
                             </button>
                         </form>
+                        )}
                     </div>
 
                     {/* Scouting Pipeline Database List */}
                     <div className="space-y-2">
-                        <p className="text-[10px] uppercase font-bold text-black/45 tracking-wider px-1">Active Scouting Queue ({scouts.length})</p>
-                        
+                        <p className="text-[11px] font-medium text-black/45 px-1">Active Scouting Queue ({scouts.length})</p>
+
                         {loadingScouts ? (
-                            <div className="border border-black/[0.06] bg-white rounded-md p-6 text-center text-xs text-black/40">
+                            <div className="rounded-lg p-6 text-center text-xs text-black/40">
                                 <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
                                 Loading queue...
                             </div>
                         ) : scouts.length === 0 ? (
-                            <div className="border border-black/[0.06] bg-white rounded-md p-6 text-center text-xs text-black/40">
+                            <div className="rounded-lg p-6 text-center text-xs text-black/40">
                                 Scouting pipeline is empty.
                             </div>
                         ) : (
-                            scouts.map((s) => (
+                            scouts.map((s) => {
+                                const isScoutExpanded = expandedScoutId === s.id;
+                                const currentStatus = SCOUT_STATUS_OPTIONS.find((st) => st.id === s.status);
+                                return (
                                 <div
                                     key={s.id}
-                                    className="border border-black/[0.06] bg-white rounded-md p-3.5 space-y-2.5 shadow-sm"
+                                    className="border border-black/[0.07] bg-white rounded-lg overflow-hidden"
                                 >
-                                    {/* Scout primary details */}
-                                    <div className="flex items-start justify-between gap-3">
+                                    {/* Scout primary details — talent identity first, pipeline
+                                        controls revealed only on expand. */}
+                                    <div
+                                        onClick={() => setExpandedScoutId(isScoutExpanded ? null : s.id)}
+                                        className="p-3 flex items-start justify-between gap-3 cursor-pointer select-none"
+                                    >
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-1.5">
-                                                {s.name && <span className="text-xs font-semibold text-black/85 truncate">{s.name}</span>}
+                                                {s.name && <span className="text-sm font-medium text-black/85 truncate">{s.name}</span>}
                                                 <a
                                                     href={s.instagram_link}
                                                     target="_blank"
                                                     rel="noreferrer"
-                                                    className="text-[11px] text-blue-600 hover:underline inline-flex items-center gap-0.5 truncate"
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    className="text-xs text-blue-600 hover:underline inline-flex items-center gap-0.5 truncate"
                                                 >
                                                     <Instagram className="w-3 h-3 text-black/40 shrink-0" />
-                                                    Instagram Profile
+                                                    Instagram
                                                 </a>
                                             </div>
-                                            <div className="text-[10px] text-black/50 font-mono mt-0.5">
-                                                Phone: {s.phone}
+                                            <div className="text-xs text-black/45 mt-0.5">
+                                                {s.phone}
                                             </div>
                                         </div>
-                                        {isAdmin && (
-                                            <button
-                                                onClick={() => handleDeleteScout(s.id)}
-                                                className="p-1 text-black/35 hover:text-red-500 hover:bg-red-50 rounded-sm focus:outline-none"
-                                            >
-                                                <Trash2 className="w-3.5 h-3.5" />
-                                            </button>
-                                        )}
-                                    </div>
-
-                                    {/* Notes block editable inline */}
-                                    <div className="space-y-0.5">
-                                        <label className="text-[9px] uppercase font-bold text-black/40">Scouting Notes</label>
-                                        <input
-                                            type="text"
-                                            defaultValue={s.notes || ""}
-                                            onBlur={(e) => handleUpdateScoutNotes(s.id, e.target.value)}
-                                            placeholder="Click to write scout update..."
-                                            className="w-full text-xs border border-transparent hover:border-black/[0.06] focus:border-black/25 focus:bg-white rounded-sm px-1.5 py-0.5 text-black/75 bg-black/[0.015] focus:outline-none"
-                                        />
-                                    </div>
-
-                                    {/* Quick Status pills */}
-                                    <div className="space-y-1">
-                                        <label className="text-[9px] uppercase font-bold text-black/40">Pipeline Status</label>
-                                        <div className="flex flex-wrap gap-1">
-                                            {[
-                                                { id: "not_contacted", label: "New" },
-                                                { id: "reached_out", label: "Contacted" },
-                                                { id: "replied", label: "Replied" },
-                                                { id: "added_to_group", label: "Grouped" },
-                                                { id: "added_to_database", label: "DB Approved" },
-                                                { id: "ignored", label: "Ignored" },
-                                            ].map((st) => (
-                                                <button
-                                                    key={st.id}
-                                                    onClick={() => handleUpdateScoutStatus(s.id, st.id)}
-                                                    className={`px-2 py-0.5 text-[9px] font-medium tracking-tight rounded-sm border uppercase transition-all ${
-                                                        s.status === st.id
-                                                            ? "bg-black text-white border-black"
-                                                            : "bg-black/[0.015] text-black/50 border-black/[0.04] hover:bg-black/[0.03]"
-                                                    }`}
-                                                >
-                                                    {st.label}
-                                                </button>
-                                            ))}
+                                        <div className="flex items-center gap-1.5 shrink-0">
+                                            {currentStatus && (
+                                                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-black/[0.05] text-black/55">
+                                                    {currentStatus.label}
+                                                </span>
+                                            )}
+                                            {isScoutExpanded ? (
+                                                <ChevronUp className="w-3.5 h-3.5 text-black/35" />
+                                            ) : (
+                                                <ChevronDown className="w-3.5 h-3.5 text-black/35" />
+                                            )}
                                         </div>
                                     </div>
+
+                                    {isScoutExpanded && (
+                                        <div className="px-3 pb-3 pt-0.5 space-y-2.5 border-t border-black/[0.06]">
+                                            {/* Notes block editable inline */}
+                                            <div className="space-y-1 pt-2.5">
+                                                <label className="text-[10px] uppercase font-semibold text-black/40">Scouting Notes</label>
+                                                <input
+                                                    type="text"
+                                                    defaultValue={s.notes || ""}
+                                                    onBlur={(e) => handleUpdateScoutNotes(s.id, e.target.value)}
+                                                    placeholder="Click to write scout update..."
+                                                    className="w-full text-xs border border-black/[0.08] focus:border-black/25 rounded-sm px-2 py-1 text-black/75 bg-white focus:outline-none"
+                                                />
+                                            </div>
+
+                                            {/* Quick Status pills */}
+                                            <div className="space-y-1">
+                                                <label className="text-[10px] uppercase font-semibold text-black/40">Pipeline Status</label>
+                                                <div className="flex flex-wrap gap-1">
+                                                    {SCOUT_STATUS_OPTIONS.map((st) => (
+                                                        <button
+                                                            key={st.id}
+                                                            onClick={() => handleUpdateScoutStatus(s.id, st.id)}
+                                                            className={`px-2 py-1 text-[11px] font-medium rounded-full border transition-all ${
+                                                                s.status === st.id
+                                                                    ? "bg-black text-white border-black"
+                                                                    : "bg-white text-black/55 border-black/[0.08] hover:bg-black/[0.03]"
+                                                            }`}
+                                                        >
+                                                            {st.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            {isAdmin && (
+                                                <button
+                                                    onClick={() => handleDeleteScout(s.id)}
+                                                    className="inline-flex items-center gap-1 text-[11px] text-black/40 hover:text-red-600 focus:outline-none"
+                                                >
+                                                    <Trash2 className="w-3 h-3" />
+                                                    Delete
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
-                            ))
+                                );
+                            })
                         )}
                     </div>
                 </div>

@@ -1630,7 +1630,7 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
 # POST /api/whatsapp/casting-call/send
 #
 # Global Talent → select talent(s) → Add to Projects → "Send Casting Call?"
-# (2026-09-03). Sends the existing `casting_call` template to every selected
+# (2026-09-03). Sends an admin-selected WhatsApp template to every selected
 # talent × selected project combination via _create_batch_internal — the
 # SAME function the ordinary POST /batches route and the WhatsApp Scouting
 # Agent's SEND/SHARE commands already call. One batch per project (each
@@ -1643,10 +1643,18 @@ async def create_batch(payload: BatchIn, admin: dict = Depends(current_team_or_a
 # path, no new duplicate-prevention: resolve_recipients_engine already
 # dedupes by recipient_id within a batch, and each (project, talent) pair
 # only ever appears in the one batch this endpoint creates for it.
+#
+# 2026-09-27 — template_id is now caller-supplied (previously always the
+# hardcoded `casting_call` slug) so the admin can pick any existing
+# WhatsApp template from the same picker the WhatsApp Engine campaign
+# launcher already uses (see WECampaignLauncher in WhatsAppEnginePage.jsx).
+# Required, no default — an empty/missing value is rejected below rather
+# than silently falling back to the old fixed template.
 # ---------------------------------------------------------------------------
 class CastingCallSendIn(BaseModel):
     talent_ids: List[str] = Field(default_factory=list)
     project_ids: List[str] = Field(default_factory=list)
+    template_id: str = ""
 
 
 def _clean_id_list(raw: List[str]) -> List[str]:
@@ -1732,20 +1740,22 @@ async def _watch_and_apply_casting_call_move(batch_ids: List[str]) -> None:
 
 @router.post("/casting-call/send", status_code=201)
 async def send_casting_call(payload: CastingCallSendIn, admin: dict = Depends(current_team_or_admin)):
-    """Queue the existing `casting_call` template to every selected
-    talent × project combination. The template is never chosen by the
-    caller — this endpoint exists specifically for the casting-call
-    workflow, so it always resolves the built-in 'casting_call' slug."""
+    """Queue the admin-selected WhatsApp template to every selected
+    talent × project combination. `template_id` is required — this
+    endpoint never falls back to a default template if the caller didn't
+    pick one."""
     talent_ids = _clean_id_list(payload.talent_ids)
     project_ids = _clean_id_list(payload.project_ids)
     if not talent_ids:
         raise HTTPException(400, "Select at least one talent")
     if not project_ids:
         raise HTTPException(400, "Select at least one project")
+    if not (payload.template_id or "").strip():
+        raise HTTPException(400, "Select a WhatsApp template")
 
-    template = await db.whatsapp_templates.find_one({"slug": "casting_call"}, {"_id": 0})
+    template = await db.whatsapp_templates.find_one({"id": payload.template_id}, {"_id": 0})
     if not template:
-        raise HTTPException(404, "Casting Call template not found")
+        raise HTTPException(404, "Template not found")
 
     from routers.casting_pipeline import PIPELINE_STAGE_ORDER
 

@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { X, Search, Check, Loader2, FolderKanban, Send } from "lucide-react";
+import { X, Search, Check, Loader2, FolderKanban, Send, MessageSquare } from "lucide-react";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
-import { sendCastingCall } from "@/lib/whatsappApi";
+import { sendCastingCall, getTemplates } from "@/lib/whatsappApi";
 
 /**
  * AddToProjectModal — bulk "Add to Project" picker launched from the Global
@@ -15,11 +15,15 @@ import { sendCastingCall } from "@/lib/whatsappApi";
  * never duplicated.
  *
  * After a successful add, shows one extra confirmation step — "Send Casting
- * Call?" (2026-09-03) — reusing the existing `casting_call` WhatsApp
- * template via POST /whatsapp/casting-call/send for exactly the selected
- * talent × selected project combinations. "Not Now" leaves everything
- * exactly as it was before this addition: onSuccess/onClose fire immediately
- * with no WhatsApp send and no pipeline movement.
+ * Call?" (2026-09-03) — then, if the admin says yes, a template-picker step
+ * (2026-09-27) before actually sending. Reuses the SAME `whatsapp_templates`
+ * source/API the WhatsApp Engine campaign launcher already uses
+ * (getTemplates() from lib/whatsappApi.js — no new template store/model),
+ * and sends via the SAME POST /whatsapp/casting-call/send endpoint, now
+ * parameterized by the admin's chosen `template_id` instead of a hardcoded
+ * slug. "Not Now"/"Cancel" leave everything exactly as it was before this
+ * addition: onSuccess/onClose fire immediately with no WhatsApp send and no
+ * pipeline movement.
  */
 export default function AddToProjectModal({ open, talentIds, onClose, onSuccess, onCastingCallQueued }) {
     const [projects, setProjects] = useState([]);
@@ -33,10 +37,19 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
     // fire, so "Not Now" can still call them unchanged.
     const [addResult, setAddResult] = useState(null);
     const [sendingCastingCall, setSendingCastingCall] = useState(false);
+    // Template-picker step (2026-09-27) — shown after "Send Casting Call?"
+    // is confirmed with "Yes", before the actual send. null/false = still on
+    // the "Send Casting Call?" confirmation.
+    const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+    const [templates, setTemplates] = useState([]);
+    const [loadingTemplates, setLoadingTemplates] = useState(false);
+    const [templateSearch, setTemplateSearch] = useState("");
+    const [selectedTemplateId, setSelectedTemplateId] = useState("");
     const searchInputRef = useRef(null);
     const listRef = useRef(null);
     const itemRefs = useRef(new Map());
     const sendCastingCallButtonRef = useRef(null);
+    const templateSearchInputRef = useRef(null);
 
     useEffect(() => {
         if (!open) return;
@@ -44,6 +57,9 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
         setChecked(new Set());
         setFocusedIndex(0);
         setAddResult(null);
+        setShowTemplatePicker(false);
+        setTemplateSearch("");
+        setSelectedTemplateId("");
         let isMounted = true;
         setLoadingProjects(true);
         adminApi
@@ -81,8 +97,35 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
     // to not always win the race in every render path, which would leave
     // Enter landing nowhere in particular.
     useEffect(() => {
-        if (open && addResult) sendCastingCallButtonRef.current?.focus();
-    }, [open, addResult]);
+        if (open && addResult && !showTemplatePicker) sendCastingCallButtonRef.current?.focus();
+    }, [open, addResult, showTemplatePicker]);
+
+    // Fetch the existing WhatsApp templates on demand — only once the admin
+    // actually opens the picker, not eagerly on every modal open. Same
+    // GET /whatsapp/templates call the WhatsApp Engine campaign launcher uses.
+    useEffect(() => {
+        if (!showTemplatePicker) return;
+        let isMounted = true;
+        setLoadingTemplates(true);
+        getTemplates()
+            .then((data) => {
+                if (isMounted) setTemplates(Array.isArray(data) ? data : []);
+            })
+            .catch(() => {
+                if (isMounted) toast.error("Failed to load WhatsApp templates");
+            })
+            .finally(() => {
+                if (isMounted) setLoadingTemplates(false);
+            });
+        setTimeout(() => templateSearchInputRef.current?.focus(), 50);
+        return () => { isMounted = false; };
+    }, [showTemplatePicker]);
+
+    const filteredTemplates = useMemo(() => {
+        const q = templateSearch.trim().toLowerCase();
+        if (!q) return templates;
+        return templates.filter((t) => (t.name || "").toLowerCase().includes(q));
+    }, [templates, templateSearch]);
 
     const filtered = useMemo(() => {
         const q = search.trim().toLowerCase();
@@ -168,12 +211,16 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
     };
 
     const handleSendCastingCall = async () => {
-        if (sendingCastingCall) return;
+        // Required, no silent fallback: the Send button is already disabled
+        // until a template is picked, but this guard keeps the invariant
+        // true even if this function is ever called some other way.
+        if (sendingCastingCall || !selectedTemplateId) return;
         setSendingCastingCall(true);
         try {
             const result = await sendCastingCall({
                 talent_ids: talentIds,
                 project_ids: Array.from(checked),
+                template_id: selectedTemplateId,
             });
             if (result.errors?.length) {
                 toast.error(
@@ -201,6 +248,100 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
     if (!open) return null;
 
     const talentCount = talentIds.length;
+
+    if (addResult && showTemplatePicker) {
+        return (
+            <div
+                className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+                onClick={sendingCastingCall ? undefined : finishNotNow}
+            >
+                <div
+                    className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border border-black/[0.08] text-black relative flex flex-col max-h-[80vh]"
+                    onClick={(e) => e.stopPropagation()}
+                    data-testid="template-picker-modal"
+                >
+                    <div className="flex items-center gap-2 mb-4 shrink-0">
+                        <MessageSquare className="w-4 h-4 text-black/50" />
+                        <h3 className="font-semibold text-sm text-neutral-800">Choose WhatsApp Template</h3>
+                    </div>
+
+                    <div className="relative mb-3 shrink-0">
+                        <Search className="absolute left-0 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-black/30" />
+                        <input
+                            ref={templateSearchInputRef}
+                            type="text"
+                            value={templateSearch}
+                            onChange={(e) => setTemplateSearch(e.target.value)}
+                            placeholder="Search templates..."
+                            data-testid="template-picker-search"
+                            className="w-full bg-transparent border-b border-black/[0.08] focus:border-black/40 outline-none py-2 pl-5 text-sm text-black/85 placeholder:text-black/30"
+                        />
+                    </div>
+
+                    <div
+                        className="flex-1 overflow-y-auto mb-4 border border-black/[0.04] rounded-lg divide-y divide-black/[0.04] min-h-[120px]"
+                        data-testid="template-picker-list"
+                    >
+                        {loadingTemplates ? (
+                            <div className="flex items-center justify-center py-8">
+                                <Loader2 className="w-4 h-4 animate-spin text-black/40" />
+                            </div>
+                        ) : filteredTemplates.length === 0 ? (
+                            <div className="p-4 text-xs text-black/30 italic text-center">
+                                {templates.length === 0 ? "No WhatsApp templates found" : "No templates match your search"}
+                            </div>
+                        ) : (
+                            filteredTemplates.map((t) => {
+                                const isSelected = selectedTemplateId === t.id;
+                                return (
+                                    <button
+                                        key={t.id}
+                                        type="button"
+                                        onClick={() => setSelectedTemplateId(t.id)}
+                                        data-testid={`template-picker-option-${t.id}`}
+                                        className={[
+                                            "w-full text-left px-3.5 py-2.5 text-xs flex items-center gap-2.5 transition-colors",
+                                            isSelected ? "bg-black/[0.03]" : "hover:bg-black/[0.02]",
+                                        ].join(" ")}
+                                    >
+                                        <span
+                                            className={[
+                                                "w-4 h-4 rounded-full border flex items-center justify-center shrink-0",
+                                                isSelected ? "bg-black border-black text-white" : "border-black/25 text-transparent",
+                                            ].join(" ")}
+                                        >
+                                            {isSelected && <Check className="w-3 h-3" strokeWidth={2.5} />}
+                                        </span>
+                                        <span className="font-medium text-neutral-800 truncate">{t.name || "Untitled template"}</span>
+                                    </button>
+                                );
+                            })
+                        )}
+                    </div>
+
+                    <div className="flex gap-2 shrink-0">
+                        <button
+                            onClick={finishNotNow}
+                            disabled={sendingCastingCall}
+                            data-testid="template-picker-cancel"
+                            className="flex-1 py-2.5 border border-black/[0.08] hover:bg-black/[0.02] text-black/60 hover:text-black text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={handleSendCastingCall}
+                            disabled={sendingCastingCall || !selectedTemplateId}
+                            data-testid="template-picker-send"
+                            className="flex-1 py-2.5 bg-black text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-40 hover:bg-black/85 flex items-center justify-center gap-1.5"
+                        >
+                            {sendingCastingCall && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                            Send
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     if (addResult) {
         const projectCount = addResult.project_count || checked.size;
@@ -233,13 +374,12 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
                         </button>
                         <button
                             ref={sendCastingCallButtonRef}
-                            onClick={handleSendCastingCall}
+                            onClick={() => setShowTemplatePicker(true)}
                             disabled={sendingCastingCall}
                             autoFocus
                             data-testid="send-casting-call-confirm"
                             className="flex-1 py-2.5 bg-black text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-40 hover:bg-black/85 flex items-center justify-center gap-1.5"
                         >
-                            {sendingCastingCall && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                             Send Casting Call
                         </button>
                     </div>

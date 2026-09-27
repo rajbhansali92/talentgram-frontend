@@ -95,6 +95,34 @@ async def _evaluate(page, js: str, arg: Any = None, timeout: float = 10.0) -> An
 # any) outerHTML, truncated. All interpretation happens in Python below —
 # never guessing selectors, matching this codebase's existing "read the
 # real DOM, don't assume its shape" discipline.
+#
+# `ownHtml` (2026-09-27, Divija Gambhir / L'Oreal production incident fix)
+# — root cause, proven from real production evidence: `messageHtml` above
+# is a SINGLE `outerHTML.slice(0, HTML_TRUNCATE)` over the ENTIRE reply
+# element, which includes the nested `[data-testid="quoted-message"]`
+# subtree — and that subtree can embed a large base64 thumbnail (a
+# replied-to video's preview image). WhatsApp renders the quoted preview
+# BEFORE the employee's own typed text in DOM order, so when the quoted
+# block's own HTML alone approaches or exceeds HTML_TRUNCATE, the actual
+# "Mark introduction video for X" text after it is silently truncated
+# away before `_mark_text`/`_mention_lid` (both simple regex scans over
+# whatever string they're given) ever see it — with zero error, zero log
+# signal, and no trace anywhere downstream (proven exactly this way for
+# a real Introduction mark: `initial_html_len` hit the cap at precisely
+# 60000 while the sibling Take reply, whose quoted video had a smaller
+# embedded thumbnail, stayed under it at 57537 and resolved normally).
+#
+# The fix is structural, not a higher ceiling: `ownHtml` is captured from
+# a CLONE of the message element with the quoted-message subtree (and any
+# other large embedded-media nodes) already removed, so the employee's
+# own typed text and @mention are read from a small, quoted-media-size-
+# independent string — regardless of how large the replied-to preview is.
+# `messageHtml`/`quotedHtml` are UNCHANGED (still the full/quoted-only
+# captures) — every existing consumer of them (source-media hash/type/
+# album detection, reply data-id extraction, which all read from the
+# START of the string or from `quotedHtml` directly, neither affected by
+# this bug) keeps working exactly as before; only mark-TEXT/mention
+# extraction moves onto the new, isolated field.
 # ---------------------------------------------------------------------------
 _DOM_DUMP_JS = """
 ([sel, idx]) => {
@@ -102,8 +130,20 @@ _DOM_DUMP_JS = """
   if (idx >= els.length) return null;
   const el = els[idx];
   const quoted = el.querySelector('[data-testid="quoted-message"]');
+
+  const clone = el.cloneNode(true);
+  const stripSelectors = [
+    '[data-testid="quoted-message"]',
+    '[data-testid="video-thumb"]', '[data-testid="video-content"]',
+    '[data-testid="image-thumb"]', '[data-testid="image-content"]',
+  ];
+  for (const stripSel of stripSelectors) {
+    clone.querySelectorAll(stripSel).forEach((node) => node.remove());
+  }
+
   return {
     messageHtml: el.outerHTML.slice(0, _TRUNC),
+    ownHtml: clone.outerHTML.slice(0, _TRUNC),
     quotedHtml: quoted ? quoted.outerHTML.slice(0, _TRUNC) : null,
   };
 }
@@ -676,8 +716,17 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
         if not quoted_html:
             continue
         html = item.get("messageHtml") or ""
-        lid = _mention_lid(html)
-        mark_text = _mark_text(html)
+        # Divija Gambhir production-incident fix (2026-09-27) — mark text
+        # and mention detection read from `ownHtml` (the message with its
+        # quoted-media subtree already stripped before capture, see
+        # _DOM_DUMP_JS's own docstring), never from the full `messageHtml`
+        # whose truncation budget a large quoted thumbnail can consume
+        # entirely. `html` itself is untouched and still used below for
+        # `_own_data_id` (reads the `data-id` attribute, which sits at the
+        # very start of the element and is never affected by this bug).
+        own_html = item.get("ownHtml") or html
+        lid = _mention_lid(own_html)
+        mark_text = _mark_text(own_html)
         if not mark_text:
             continue
         quoted_hash = _smallest_hash(quoted_html)
@@ -982,16 +1031,29 @@ async def _run_scan(page, req: Dict[str, Any], session=None) -> Dict[str, Any]:
         if not quoted_html:
             continue
         html = item.get("messageHtml") or ""
+        # Divija Gambhir production-incident fix (2026-09-27) — same
+        # own-text/mention isolation as Pass 2's real candidate loop
+        # above, so this debug capture reports the SAME (correct)
+        # has_real_mention/mark_text_best_effort a real scan would now
+        # produce, not the old messageHtml-truncation-prone values.
+        own_html = item.get("ownHtml") or html
         quoted_hash = _smallest_hash(quoted_html)
         all_replies_debug.append({
             "reply_data_id": _own_data_id(html),
-            "has_real_mention": bool(_mention_lid(html)),
-            "mark_text_best_effort": _mark_text(html),
+            "has_real_mention": bool(_mention_lid(own_html)),
+            "mark_text_best_effort": _mark_text(own_html),
             "quoted_is_album": _is_album(quoted_html),
             "quoted_album_tile_hashes": _album_tile_hashes(quoted_html) if _is_album(quoted_html) else None,
             "quoted_smallest_hash": quoted_hash,
             "quoted_html_snippet": quoted_html[:3000],
             "message_html_snippet": html[:1500],
+            # Observability (2026-09-27, Divija fix requirement 5) — a
+            # pure diagnostic signal, never a functional gate: True means
+            # the LEGACY full-message capture hit HTML_TRUNCATE and may
+            # have lost content, but mark_text_best_effort above is read
+            # from the independently-captured, quoted-media-stripped
+            # `ownHtml` and is unaffected by this regardless.
+            "html_truncated": len(html) >= HTML_TRUNCATE,
             # Diagnostic-only, read-only (2026-08-24): investigating why a
             # bounded quoted-message re-hydration retry sometimes still
             # fails. Structural fact worth recording precisely: this loop
@@ -4907,10 +4969,11 @@ async def _run_download_probe(session, page, req: Dict[str, Any]) -> Dict[str, A
                 if not item.get("quotedHtml"):
                     continue
                 html = item.get("messageHtml") or ""
-                mark_text = _mark_text(html)
+                own_html = item.get("ownHtml") or html
+                mark_text = _mark_text(own_html)
                 if not mark_text:
                     continue
-                marks.append({"mark_text": mark_text, "mention_lid": _mention_lid(html)})
+                marks.append({"mark_text": mark_text, "mention_lid": _mention_lid(own_html)})
             return marks
 
         def _summarize(window):

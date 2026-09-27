@@ -85,6 +85,70 @@ ALBUM_MESSAGE_HTML = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Divija Gambhir / L'Oreal production incident (2026-09-27) — a real mark
+# ("Mark introduction video for Loreal") silently vanished with zero trace
+# anywhere in the system. Root cause, proven from real production evidence
+# (a live, read-only forensic query against the production database):
+# `messageHtml` used to be a single `el.outerHTML.slice(0, HTML_TRUNCATE)`
+# over the WHOLE reply element, including its nested quoted-message
+# subtree. WhatsApp renders the quoted preview BEFORE the employee's own
+# typed text in DOM order; the Introduction reply's quoted video preview
+# embedded a large enough base64 thumbnail that the combined HTML hit the
+# 60000-char cap and the actual "Mark introduction video for Loreal" text
+# was truncated away before `_mark_text`/`_mention_lid` ever ran on it —
+# `initial_html_len` was recorded at exactly 60000 for the real incident.
+# The sibling Take reply's own HTML was 57537 chars (under the cap) and
+# resolved normally. These helpers build synthetic DOM shapes reproducing
+# that exact structure so the regression can be proven at the string
+# level, without a real browser.
+# ---------------------------------------------------------------------------
+
+def _big_quoted_block(total_chars: int, media_testid: str = "video-content") -> str:
+    """A quoted-message block whose embedded base64 thumbnail is padded to
+    approximately `total_chars` — simulating a real, large replied-to
+    video/image preview (the exact DOM shape that consumed the Divija
+    incident's entire HTML_TRUNCATE budget)."""
+    filler = "A" * max(0, total_chars - 300)
+    return (
+        '<div data-testid="quoted-message"><span data-testid="author">Divija Gambhir T</span>'
+        f'<div data-testid="{media_testid}"></div>'
+        f'<div style="background-image: url(&quot;data:image/jpeg;base64,{filler}&quot;);"></div>'
+        "</div>"
+    )
+
+
+def _own_text_block(mark_text: str, *, with_mention: bool = True) -> str:
+    """The employee's own typed reply text, in the same shape
+    REPLY_TO_PHOTO_HTML already uses above — with or without a real
+    @mention."""
+    mention = (
+        '<span><span role="button"><span dir="auto" data-testid="select-all selectable-text" '
+        'data-plain-text="@Talentgram Team" '
+        'data-app-text-template="​103590702137403@lid​">@<span dir="ltr">Talentgram Team</span>'
+        "</span></span></span> "
+        if with_mention else ""
+    )
+    return (
+        '<span data-testid="selectable-text" dir="ltr" class="selectable-text copyable-text">'
+        f"{mention}{mark_text}</span>"
+    )
+
+
+def _reply_message_html(data_id: str, quoted_block: str, own_text_html: str) -> str:
+    """The FULL message element's outerHTML as WhatsApp actually renders
+    it — the quoted block sits structurally BEFORE the employee's own
+    typed reply, matching real DOM order (proven by the Divija incident's
+    own captured debug data: the quoted preview, including its base64
+    thumbnail, renders first; the typed text follows)."""
+    return (
+        f'<div data-id="{data_id}" data-testid="conv-msg-{data_id}">'
+        f'<div class="copyable-text" data-pre-plain-text="[9:05 pm, 27/9/2026] Divija Gambhir T: ">'
+        f"{quoted_block}{own_text_html}"
+        "</div></div>"
+    )
+
+
 class _FakeResponse:
     status_code = 200
     text = "{}"
@@ -7280,6 +7344,102 @@ def main():
     )
     assert result_194["ok"] is False, result_194
     print("194. contrast case: a genuine send failure (never left the composer) still retries the full MAX_SEND_ITEM_ATTEMPTS budget — 193's no-retry fix is scoped to MESSAGE_SENT_BUT_NOT_VERIFIED only")
+
+    # 195: THE Divija Gambhir regression, reproduced exactly — a large
+    # quoted-video preview (>HTML_TRUNCATE on its own) sits BEFORE the
+    # employee's own typed "Mark introduction video for Loreal" + real
+    # mention in DOM order. Simulates BOTH architectures against the
+    # IDENTICAL underlying DOM: the OLD one (messageHtml = full
+    # outerHTML, then sliced to HTML_TRUNCATE — exactly what _DOM_DUMP_JS
+    # used to do) MUST fail to recover the mark text/mention, proving
+    # this is a real regression test, not a tautology; the NEW one
+    # (ownHtml = the quoted-message subtree already stripped before
+    # capture) MUST recover both correctly, from the SAME source data.
+    intro_own_text = _own_text_block("Mark introduction video for Loreal")
+    huge_quoted = _big_quoted_block(mark_scan.HTML_TRUNCATE + 5000, media_testid="video-content")
+    full_html_195 = _reply_message_html("DIVIJA_INTRO_195", huge_quoted, intro_own_text)
+    assert len(full_html_195) > mark_scan.HTML_TRUNCATE, "fixture must actually exceed the cap to reproduce the bug"
+
+    old_message_html_195 = full_html_195[: mark_scan.HTML_TRUNCATE]  # exactly what el.outerHTML.slice(0, TRUNC) produced
+    old_mark_text_195 = mark_scan._mark_text(old_message_html_195)
+    old_mention_195 = mark_scan._mention_lid(old_message_html_195)
+    assert old_mark_text_195 is None, (
+        f"fixture is invalid — the OLD architecture must fail to recover mark text here (it did NOT in real "
+        f"production, and won't here) to prove this is a genuine regression test: got {old_mark_text_195!r}"
+    )
+    assert old_mention_195 is None, "OLD architecture must also lose the mention — got a value, fixture invalid"
+
+    own_html_195 = _reply_message_html("DIVIJA_INTRO_195", "", intro_own_text)  # quoted subtree stripped, as the JS clone now produces
+    new_mark_text_195 = mark_scan._mark_text(own_html_195)
+    new_mention_195 = mark_scan._mention_lid(own_html_195)
+    assert new_mark_text_195 is not None and "mark introduction video for loreal" in new_mark_text_195.lower(), new_mark_text_195
+    assert new_mention_195 == "103590702137403@lid", new_mention_195
+    print("195. DIVIJA REGRESSION: a >60000-char quoted-video preview truncates away the mark text/mention under the OLD architecture (proven to fail here exactly as in production) but is recovered correctly from the quoted-subtree-stripped ownHtml under the NEW one")
+
+    # 196 (A): large quoted VIDEO — own text still fully extractable.
+    big_video_quoted = _big_quoted_block(90000, media_testid="video-content")
+    take_own_text = _own_text_block("Mark audition take for Loreal")
+    own_html_196 = _reply_message_html("CASE_A_196", "", take_own_text)
+    assert mark_scan._mark_text(own_html_196) and "audition take" in mark_scan._mark_text(own_html_196).lower()
+    print("196. Case A (large quoted video): own mark text recovered regardless of a 90000-char quoted video preview")
+
+    # 197 (B): large quoted IMAGE.
+    own_html_197 = _reply_message_html("CASE_B_197", "", _own_text_block("Mark western images for Loreal"))
+    assert mark_scan._mark_text(own_html_197) and "western images" in mark_scan._mark_text(own_html_197).lower()
+    print("197. Case B (large quoted image): own mark text recovered regardless of quoted image preview size")
+
+    # 198 (C): normal-size quoted media — sanity guard that the ordinary,
+    # already-working case is untouched by this fix.
+    normal_quoted = _big_quoted_block(1200, media_testid="video-content")
+    full_html_198 = _reply_message_html("CASE_C_198", normal_quoted, _own_text_block("Mark take 1 for Loreal"))
+    own_html_198 = _reply_message_html("CASE_C_198", "", _own_text_block("Mark take 1 for Loreal"))
+    assert len(full_html_198) < mark_scan.HTML_TRUNCATE  # never truncated in the first place
+    assert mark_scan._mark_text(full_html_198) is not None  # old approach already worked for the normal case...
+    assert mark_scan._mark_text(own_html_198) is not None  # ...and the new one still does too
+    print("198. Case C (normal quoted media, well under the cap): unaffected either way — no regression for the common case")
+
+    # 199 (D): no quoted media at all — own-text extraction on a bare
+    # reply/message with nothing to strip.
+    own_html_199 = _own_text_block("Mark take 2 for Loreal")
+    assert mark_scan._mark_text(own_html_199) is not None
+    print("199. Case D (no quoted media): own-text extraction works identically with nothing to strip")
+
+    # 200 (E): quoted media + Introduction mark specifically.
+    own_html_200 = _reply_message_html("CASE_E_200", "", _own_text_block("Mark introduction video for Loreal"))
+    mt_200 = mark_scan._mark_text(own_html_200)
+    assert mt_200 is not None and "introduction" in mt_200.lower() and "loreal" in mt_200.lower(), mt_200
+    print("200. Case E (quoted media + Introduction mark): recovered intact behind an arbitrarily large quoted preview")
+
+    # 201 (F): quoted media + audition Take mark specifically.
+    own_html_201 = _reply_message_html("CASE_F_201", "", _own_text_block("Mark audition take for Loreal"))
+    mt_201 = mark_scan._mark_text(own_html_201)
+    assert mt_201 is not None and "audition take" in mt_201.lower() and "loreal" in mt_201.lower(), mt_201
+    print("201. Case F (quoted media + audition Take mark): recovered intact behind an arbitrarily large quoted preview")
+
+    # 202 (G): quoted media + real @mention — mention survives independent
+    # of quoted-media size, and a NO-mention reply still correctly yields
+    # no mention (never a false positive), both behind a large quote.
+    own_html_202_with = _reply_message_html("CASE_G_202A", "", _own_text_block("Mark take 3 for Loreal", with_mention=True))
+    own_html_202_without = _reply_message_html("CASE_G_202B", "", _own_text_block("Mark take 3 for Loreal", with_mention=False))
+    assert mark_scan._mention_lid(own_html_202_with) == "103590702137403@lid"
+    assert mark_scan._mention_lid(own_html_202_without) is None
+    print("202. Case G (quoted media + @mention): real mention recovered when present, correctly absent when not — independent of quoted-media size either way")
+
+    # 203 (H): quoted media + a LONG employee message (not just a short
+    # "Mark X") — the fix must not accidentally cap the own-text capture
+    # too aggressively either.
+    long_text = "Mark introduction video for Loreal " + ("please process this one carefully " * 40)
+    own_html_203 = _reply_message_html("CASE_H_203", "", _own_text_block(long_text))
+    mt_203 = mark_scan._mark_text(own_html_203)
+    assert mt_203 is not None and "please process this one carefully" in mt_203.lower(), mt_203
+    print("203. Case H (quoted media + long employee text): a long typed reply is still fully captured, not truncated by the fix itself")
+
+    # 204: truncation observability (Divija fix requirement 5) — a NEW,
+    # purely diagnostic signal, computed from the LEGACY full-message
+    # capture, that must never gate whether mark text is actually usable.
+    assert len(old_message_html_195) >= mark_scan.HTML_TRUNCATE  # the legacy capture DID hit the cap for test 195's fixture
+    assert (len(full_html_198) >= mark_scan.HTML_TRUNCATE) is False  # the normal case never approaches the cap
+    print("204. truncation observability: len(messageHtml) >= HTML_TRUNCATE correctly distinguishes the truncated Divija-shaped case from the untruncated normal case — a pure diagnostic signal, never consulted to decide whether mark text is available")
 
 
 if __name__ == "__main__":

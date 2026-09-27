@@ -253,9 +253,17 @@ async def _remember_task(ctx: ExecContext, task_id: str, title: str) -> None:
 
 
 def _ambiguous_project_message(candidates: List[Dict[str, str]]) -> str:
+    # 2026-09-27 clarity fix — the numbered list was already shown, but the
+    # closing line told the user to "resend with the exact project name"
+    # without saying THIS agent doesn't (yet) accept a bare digit reply
+    # against it (unlike Scouting's own numbered-pick continuation via
+    # agents/disambiguation.py) — misleading, since a reply of "1" here
+    # would just fall through to "I couldn't find a project matching '1'."
+    # No behavior change: still text-only, still requires resending the
+    # command with the project name from the list below.
     lines = ["Which project do you mean?", ""]
     lines += [f"{i}. {c['label']}" for i, c in enumerate(candidates, start=1)]
-    lines.append("\nPlease resend your command with the exact project name.")
+    lines.append("\nPlease resend your command with the project name exactly as shown above.")
     return "\n".join(lines)
 
 

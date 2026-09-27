@@ -66,6 +66,25 @@ def clean_voice_transcript(text: str) -> str:
 _TYPO_TOLERANT_TRIGGERS = {"add", "move", "share", "send", "upload", "undo", "tested", "show", "help"}
 _FIRST_WORD_RE = re.compile(r"^[A-Za-z]+")
 
+# 2026-09-27 — shared-platform hardening (previously this exact class of
+# false positive was only fixed LOCALLY inside
+# agents/modules/casting_command_interpreter.py's own Gemini-adjacent
+# prefilter, never in detect_trigger itself, so every agent going
+# through the shared dispatcher still inherited the risk). A handful of
+# ordinary English words are exactly one edit away from a trigger word
+# above and plausible as the first word of everyday WhatsApp chatter —
+# "And, can you also check..." (-> "add"), "Sent the deck already" (->
+# "send"). Keyed by the TRIGGER they'd otherwise match, so this only
+# ever narrows an existing fuzzy match, never blocks a genuine typo of
+# the trigger itself ("ad"/"mve"/"shre" etc. are unaffected — none of
+# them appear here). Deliberately small and curated, not a length
+# cutoff: a blanket length floor would also exclude "add" (3 chars) and
+# break the spec's own required "ad Kimaya to Flying Machine" example.
+_TRIGGER_FALSE_POSITIVES = {
+    "add": {"and"},
+    "send": {"sent"},
+}
+
 
 def _one_edit_away(a: str, b: str) -> bool:
     """True iff a and b differ by exactly ONE single-character edit
@@ -151,7 +170,11 @@ def detect_trigger(agent: AgentDefinition, text: str) -> Optional[IntentDefiniti
     for intent in agent.intents:
         for trig in intent.triggers:
             t = trig.lower().strip()
-            if t in _TYPO_TOLERANT_TRIGGERS and _one_edit_away(candidate, t):
+            if (
+                t in _TYPO_TOLERANT_TRIGGERS
+                and candidate not in _TRIGGER_FALSE_POSITIVES.get(t, ())
+                and _one_edit_away(candidate, t)
+            ):
                 typo_matches.append(intent)
                 break
     return typo_matches[0] if len(typo_matches) == 1 else None

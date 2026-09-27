@@ -98,6 +98,11 @@ const DOCUMENT_CATEGORIES = [
 ];
 const DOC_LABEL = Object.fromEntries(DOCUMENT_CATEGORIES.map((c) => [c.value, c.label]));
 
+// Fallback ONLY (2026-09-27) — the real source is CRM's own admin-managed
+// Contact Type lookup list (crm_contact_types via GET /marketing/contact-
+// types, the same source Marketing Hub's own pickers use), fetched into
+// `crewRoles` state below. This hardcoded list is used only if that fetch
+// fails, so the Add Crew Member form never has zero role options.
 const CREW_ROLES = [
     "Director", "Producer", "DOP", "Photographer", "Stylist", "Makeup",
     "Hair", "Production Manager", "Line Producer", "Client", "Casting",
@@ -372,84 +377,138 @@ function OverviewDashboard({ project: p, summary, needsAttention, today, upcomin
     completed?.tranches?.forEach((t) => completedItems.push({ key: `t-${t.id}`, label: `Tranche received — ${t.name} — ${formatCurrency(t.amount)}` }));
     completed?.tasks?.forEach((t) => completedItems.push({ key: `task-${t.id}`, label: `Task completed — ${t.title}` }));
 
+    const productionMetrics = [
+        { label: "Locked Talents", value: summary.locked_count },
+        { label: "Shoot Days", value: summary.shoot_days ?? "—" },
+    ];
+    const financialMetrics = [
+        { label: "Talent Budget", value: formatCurrency(summary.talent_budget_total) },
+        { label: "Talent Cost", value: formatCurrency(summary.total_talent_and_overtime_and_reimbursements) },
+        { label: "Extra Hours", value: formatCurrency(summary.extra_hours_total), tone: summary.extra_hours_total > 0 ? "warn" : "neutral" },
+        { label: "Reimbursements", value: formatCurrency(summary.reimbursements_total) },
+        { label: "TG Commission (Net)", value: formatCurrency(summary.commission_net) },
+    ];
+    const paymentMetrics = [
+        {
+            label: "Client Payment",
+            value: p.pd_payment_in_received ? "Received" : "Pending",
+            tone: p.pd_payment_in_received ? "good" : "warn",
+        },
+        {
+            label: "Talent Payment Out",
+            value: `${summary.payments_cleared}/${summary.payments_total} Cleared`,
+            tone: summary.payments_cleared === summary.payments_total && summary.payments_total > 0 ? "good" : "warn",
+        },
+        ...(summary.payments_pending_amount > 0
+            ? [{ label: "Pending Amount", value: formatCurrency(summary.payments_pending_amount), tone: "warn" }]
+            : []),
+    ];
+
     return (
         <Card className="border-black/[0.08] shadow-none" data-testid="pd-overview">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 py-3.5 px-4 border-b border-black/[0.06]">
-                <div>
+                <div className="min-w-0">
                     <CardTitle className="text-[13px] font-semibold text-black/80 flex items-center gap-2">
-                        <ClipboardList className="h-3.5 w-3.5 text-black/40" /> Production Overview
+                        <ClipboardList className="h-3.5 w-3.5 text-black/40" /> Production Desk
                     </CardTitle>
                     <div className="text-[11px] text-black/40 mt-0.5 flex flex-wrap items-center gap-x-2">
-                        <span className="font-medium text-black/60">{p.brand_name}</span>
+                        <span className="font-medium text-black/60 truncate">{p.brand_name}</span>
                         {p.status && <Badge variant="outline" className="text-[10px] capitalize">{p.status}</Badge>}
-                        {p.production_house && <span>· Client: {p.production_house}</span>}
                         <Badge variant="outline" className="text-[10px] capitalize">{(p.pd_production_status || "not_started").replace("_", " ")}</Badge>
+                        {p.production_house && <span className="truncate">· {p.production_house}</span>}
                     </div>
                 </div>
-                <button onClick={toggle} className="text-black/40 hover:text-black/70 p-1" data-testid="pd-overview-toggle">
+                <button onClick={toggle} className="text-black/40 hover:text-black/70 p-1 shrink-0" data-testid="pd-overview-toggle">
                     {collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
                 </button>
             </CardHeader>
             {!collapsed && (
-                <CardContent className="p-4" data-testid="pd-overview-content">
-                    <div className="flex flex-wrap gap-x-8 gap-y-4">
-                        <StatPill label="Locked Talents" value={summary.locked_count} />
-                        <StatPill label="Shoot Days" value={summary.shoot_days ?? "—"} />
-                        <StatPill label="Talent Budget" value={formatCurrency(summary.talent_budget_total)} />
-                        <StatPill label="Extra Hours" value={formatCurrency(summary.extra_hours_total)} tone={summary.extra_hours_total > 0 ? "warn" : "neutral"} />
-                        <StatPill label="Reimbursements" value={formatCurrency(summary.reimbursements_total)} />
-                        <StatPill label="Talent Cost" value={formatCurrency(summary.total_talent_and_overtime_and_reimbursements)} />
-                        <StatPill label="TG Commission (Net)" value={formatCurrency(summary.commission_net)} />
-                        <StatPill
-                            label="Client Payment"
-                            value={p.pd_payment_in_received ? "Received" : "Pending"}
-                            tone={p.pd_payment_in_received ? "good" : "warn"}
-                        />
-                        <StatPill
-                            label="Talent Payment Out"
-                            value={`${summary.payments_cleared}/${summary.payments_total} Cleared`}
-                            tone={summary.payments_cleared === summary.payments_total && summary.payments_total > 0 ? "good" : "warn"}
-                        />
-                        {summary.payments_pending_amount > 0 && (
-                            <StatPill label="Pending Amount" value={formatCurrency(summary.payments_pending_amount)} tone="warn" />
-                        )}
-                    </div>
-
-                    {needsAttention.length > 0 && (
-                        <div className="mt-4 flex items-start gap-2 rounded-md bg-amber-50 border border-amber-200 px-3 py-2.5" data-testid="pd-needs-attention">
-                            <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-amber-800">
-                                {needsAttention.map((item, i) => <span key={i}>{item}</span>)}
+                <CardContent className="p-4 space-y-4" data-testid="pd-overview-content">
+                    {/* Needs Attention — the first thing an admin should see. */}
+                    {needsAttention.length > 0 ? (
+                        <div className="flex flex-col gap-1.5 rounded-lg bg-amber-50 border border-amber-200 px-3.5 py-3" data-testid="pd-needs-attention">
+                            <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-800">
+                                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                Needs Attention · {needsAttention.length}
                             </div>
+                            <div className="flex flex-wrap gap-1.5">
+                                {needsAttention.map((item, i) => (
+                                    <span key={i} className="inline-flex items-center rounded-md bg-white/70 border border-amber-200/80 px-2 py-1 text-[11px] text-amber-800">
+                                        {item}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="flex items-center gap-1.5 rounded-lg border border-black/[0.06] px-3.5 py-2.5 text-xs text-black/40" data-testid="pd-needs-attention-clear">
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600/70" />
+                            All production checks are clear.
                         </div>
                     )}
 
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
-                        <div className="rounded-md border border-black/[0.06] p-3" data-testid="pd-today">
-                            <div className="text-[11px] font-medium text-black/50 uppercase tracking-wide mb-2 flex items-center gap-1"><Sun className="h-3 w-3" /> Today</div>
-                            <div className="space-y-1 text-xs">
-                                {todayItems.map((it) => <div key={it.key} className={it.warn ? "text-amber-700" : "text-black/80"}>{it.icon} {it.label}</div>)}
-                                {todayItems.length === 0 && <div className="text-black/40 py-2 text-center">Nothing scheduled today.</div>}
-                            </div>
-                        </div>
-                        <div className="rounded-md border border-black/[0.06] p-3" data-testid="pd-upcoming">
-                            <div className="text-[11px] font-medium text-black/50 uppercase tracking-wide mb-2 flex items-center gap-1"><CalendarClock className="h-3 w-3" /> Upcoming</div>
-                            <div className="space-y-1 text-xs">
-                                {upcomingItems.map((it) => <div key={it.key} className="text-black/70">{it.label}</div>)}
-                                {upcomingItems.length === 0 && <div className="text-black/40 py-2 text-center">Nothing upcoming.</div>}
-                            </div>
-                        </div>
-                        <div className="rounded-md border border-black/[0.06] p-3" data-testid="pd-completed">
-                            <div className="text-[11px] font-medium text-black/50 uppercase tracking-wide mb-2 flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> Completed</div>
-                            <div className="space-y-1 text-xs">
-                                {completedItems.map((it) => <div key={it.key} className="text-black/60">{it.label}</div>)}
-                                {completedItems.length === 0 && <div className="text-black/40 py-2 text-center">Nothing completed yet.</div>}
-                            </div>
-                        </div>
+                    {/* Key numbers — grouped by what decision they inform, not a
+                        flat wall of equally-weighted metrics. */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
+                        <MetricGroup title="Production" items={productionMetrics} />
+                        <MetricGroup title="Financials" items={financialMetrics} />
+                        <MetricGroup title="Payments" items={paymentMetrics} />
+                    </div>
+
+                    {/* Schedule — one compact block; empty rows stay a single
+                        muted line each instead of three large equal boxes. */}
+                    <div className="rounded-lg border border-black/[0.06] divide-y divide-black/[0.05]">
+                        <ScheduleRow testId="pd-today" icon={Sun} label="Today" items={todayItems} emptyText="Nothing scheduled" />
+                        <ScheduleRow testId="pd-upcoming" icon={CalendarClock} label="Upcoming" items={upcomingItems} emptyText="Nothing upcoming" />
+                        <ScheduleRow testId="pd-completed" icon={CheckCircle2} label="Completed" items={completedItems} emptyText="Nothing completed" />
                     </div>
                 </CardContent>
             )}
         </Card>
+    );
+}
+
+function MetricGroup({ title, items }) {
+    const toneClass = {
+        neutral: "text-black/80",
+        warn: "text-amber-700",
+        good: "text-emerald-700",
+    };
+    return (
+        <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-black/35 mb-1.5">{title}</div>
+            <div className="space-y-1">
+                {items.map((it) => (
+                    <div key={it.label} className="flex items-baseline justify-between gap-3 text-xs">
+                        <span className="text-black/45">{it.label}</span>
+                        <span className={`font-semibold ${toneClass[it.tone || "neutral"]}`}>{it.value}</span>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+// Compact schedule line — a label + inline items when there's content, a
+// single muted line when there's nothing, never a large empty box.
+function ScheduleRow({ testId, icon: Icon, label, items, emptyText }) {
+    return (
+        <div className="px-3.5 py-2.5" data-testid={testId}>
+            <div className="flex items-baseline gap-2">
+                <span className="text-[11px] font-medium text-black/50 uppercase tracking-wide flex items-center gap-1 shrink-0">
+                    <Icon className="h-3 w-3" /> {label}
+                </span>
+                {items.length === 0 && <span className="text-xs text-black/35">{emptyText}</span>}
+            </div>
+            {items.length > 0 && (
+                <div className="mt-1.5 space-y-1 text-xs">
+                    {items.map((it) => (
+                        <div key={it.key} className={it.warn ? "text-amber-700" : "text-black/75"}>
+                            {it.icon ? `${it.icon} ` : ""}{it.label}
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
     );
 }
 
@@ -571,6 +630,7 @@ export default function ProductionDesk({ projectId, project }) {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [clients, setClients] = useState([]);
+    const [crewRoles, setCrewRoles] = useState([]);
     const [knownLocations, setKnownLocations] = useState([]);
     const isMobile = useMediaQuery("(max-width: 767px)");
     const [quickViewTalent, setQuickViewTalent] = useState(null);
@@ -600,6 +660,19 @@ export default function ProductionDesk({ projectId, project }) {
         adminApi.get("/marketing/clients").then(({ data }) => {
             setClients(Array.isArray(data) ? data : (data.items || []));
         }).catch(() => {});
+    }, []);
+
+    // Crew role options (2026-09-27) — the SAME admin-managed CRM Contact
+    // Type lookup list used by Marketing Hub's own pickers
+    // (crm_contact_types via GET /marketing/contact-types), so Crew role
+    // selection here is never a second, hardcoded role list. Falls back to
+    // the previous hardcoded CREW_ROLES only if this call fails, so the
+    // form never renders with zero options.
+    useEffect(() => {
+        adminApi.get("/marketing/contact-types").then(({ data }) => {
+            const labels = Array.isArray(data) ? data.map((t) => t.label).filter(Boolean) : [];
+            setCrewRoles(labels.length > 0 ? labels : CREW_ROLES);
+        }).catch(() => setCrewRoles(CREW_ROLES));
     }, []);
 
     // V2 — Known Locations (spec section 2): real, previously-used location
@@ -874,8 +947,9 @@ export default function ProductionDesk({ projectId, project }) {
             {/* Locked Talents */}
             <SectionCard title={`Locked Talents (${talents.length})`} icon={Users} testId="pd-locked-talents">
                 {talents.length === 0 ? (
-                    <div className="text-xs text-black/40 py-6 text-center">
-                        No talents are locked on this project yet. Move a talent to <strong>Locked</strong> in Casting Pipeline for it to appear here.
+                    <div className="text-xs text-black/40 py-4 text-center">
+                        <div>No locked talents yet.</div>
+                        <div className="mt-0.5">Move a talent to <strong className="text-black/50">Locked</strong> in Casting Pipeline to add them here.</div>
                     </div>
                 ) : (
                     <>
@@ -1037,7 +1111,7 @@ export default function ProductionDesk({ projectId, project }) {
                 testId="pd-tasks"
             >
                 {tasks.pending.length === 0 ? (
-                    <div className="text-xs text-black/40 py-4 text-center">No open tasks.</div>
+                    <div className="text-xs text-black/40 py-3 text-center">No open tasks</div>
                 ) : (
                     <div className="space-y-1.5">
                         {tasks.pending.map((t) => {
@@ -1459,6 +1533,7 @@ export default function ProductionDesk({ projectId, project }) {
                     <DialogHeader><DialogTitle className="text-sm">Add Crew Member</DialogTitle></DialogHeader>
                     <CrewForm
                         clients={clients}
+                        roles={crewRoles}
                         onContactCreated={(c) => setClients((prev) => [c, ...prev])}
                         onSubmit={async ({ contact, role }) => {
                             try {
@@ -2503,9 +2578,17 @@ function ReimbursementForm({ talents, onSubmit }) {
     );
 }
 
-function CrewForm({ clients, onContactCreated, onSubmit }) {
+function CrewForm({ clients, roles, onContactCreated, onSubmit }) {
     const [contact, setContact] = useState(null);
-    const [role, setRole] = useState(CREW_ROLES[0]);
+    const roleOptions = roles && roles.length > 0 ? roles : CREW_ROLES;
+    const [role, setRole] = useState(roleOptions[0]);
+    // The contact-types fetch is async — if it resolves after this form's
+    // first render, adopt its first option instead of staying on the
+    // fallback list's default (only while the admin hasn't picked yet).
+    useEffect(() => {
+        if (roles && roles.length > 0 && !roles.includes(role)) setRole(roles[0]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [roles]);
     const [saving, setSaving] = useState(false);
     return (
         <div className="space-y-3">
@@ -2516,9 +2599,9 @@ function CrewForm({ clients, onContactCreated, onSubmit }) {
             <div>
                 <Label className="text-xs">Role</Label>
                 <Select value={role} onValueChange={setRole}>
-                    <SelectTrigger className="h-8 text-xs mt-1"><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="h-8 text-xs mt-1" data-testid="pd-crew-role-select"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                        {CREW_ROLES.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+                        {roleOptions.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
                     </SelectContent>
                 </Select>
             </div>

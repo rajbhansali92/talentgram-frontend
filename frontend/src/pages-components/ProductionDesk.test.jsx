@@ -593,6 +593,79 @@ describe("ProductionDesk V2 final polish", () => {
             expect(peek.textContent).toMatch(/mudita@example.com/);
             expect(peek.textContent).toMatch(/Open CRM/);
         });
+
+        // 2026-09-27 redesign — Crew role selection must use the SAME CRM
+        // Contact Type lookup list Marketing Hub's own pickers use
+        // (crm_contact_types via GET /marketing/contact-types), never a
+        // second hardcoded role list.
+        it("Add Crew Member's role picker is sourced from CRM's contact-types API, not the hardcoded fallback", async () => {
+            const CONTACT_TYPES = [
+                { id: "ct1", value: "line_producer", label: "Line Producer", group: "Production" },
+                { id: "ct2", value: "dop", label: "DOP", group: "Production" },
+            ];
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: BASE_DATA });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [{ id: "c1", name: "Rahul Mehta", phone_number: "+919876500000" }] });
+                    if (url === "/marketing/contact-types") return Promise.resolve({ data: CONTACT_TYPES });
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-crew")).toBeTruthy());
+            expect(globalThis.__mockAdminApi.get.mock.calls.some(([url]) => url === "/marketing/contact-types")).toBe(true);
+
+            fireEvent.click(screen.getByText("Add from CRM"));
+            const roleSelect = await screen.findByTestId("pd-crew-role-select");
+            // The trigger's displayed value is the CRM list's first label —
+            // proof roleOptions came from the fetch, not CREW_ROLES's
+            // "Director" (Candidate C, the old hardcoded fallback).
+            expect(roleSelect.textContent).toMatch(/Line Producer/);
+            expect(roleSelect.textContent).not.toMatch(/Director/);
+        });
+
+        it("falls back to the hardcoded role list only if the CRM contact-types fetch fails", async () => {
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: BASE_DATA });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    if (url === "/marketing/contact-types") return Promise.reject(new Error("network error"));
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-crew")).toBeTruthy());
+            fireEvent.click(screen.getByText("Add from CRM"));
+            const roleSelect = await screen.findByTestId("pd-crew-role-select");
+            expect(roleSelect.textContent).toMatch(/Director/);
+        });
+
+        it("existing crew save behaviour still works: picking a CRM contact and submitting posts the chosen CRM-sourced role", async () => {
+            const CONTACT_TYPES = [{ id: "ct1", value: "line_producer", label: "Line Producer", group: "Production" }];
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: BASE_DATA });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [{ id: "c1", name: "Rahul Mehta", phone_number: "+919876500000" }] });
+                    if (url === "/marketing/contact-types") return Promise.resolve({ data: CONTACT_TYPES });
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-crew")).toBeTruthy());
+            fireEvent.click(screen.getByText("Add from CRM"));
+
+            fireEvent.click(await screen.findByText("Search CRM contacts…"));
+            fireEvent.click(await screen.findByText("Rahul Mehta"));
+
+            fireEvent.click(screen.getByRole("button", { name: "Add Crew Member" }));
+            await waitFor(() => expect(globalThis.__mockAdminApi.post).toHaveBeenCalledWith(
+                "/projects/proj-1/production-desk/crew",
+                { client_id: "c1", role: "Line Producer" },
+            ));
+        });
     });
 
     // ---- Talent Invoice WhatsApp message (backend-computed; frontend wiring only) ----
@@ -821,6 +894,80 @@ describe("ProductionDesk V2 final polish", () => {
             fireEvent.click(screen.getByTestId("pd-overview-toggle"));
             expect(screen.queryByTestId("pd-overview-content")).toBeNull();
             expect(window.localStorage.getItem("pd_overview_collapsed")).toBe("1");
+        });
+
+        // 2026-09-27 redesign tests below.
+        it("Needs Attention shows only the outstanding items the backend returned, nothing more", async () => {
+            const data = { ...BASE_DATA, needs_attention: ["Invoice not raised", "Call sheet missing"] };
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-needs-attention")).toBeTruthy());
+            const strip = screen.getByTestId("pd-needs-attention");
+            expect(strip.textContent).toMatch(/Needs Attention · 2/);
+            expect(strip.textContent).toMatch(/Invoice not raised/);
+            expect(strip.textContent).toMatch(/Call sheet missing/);
+            expect(screen.queryByTestId("pd-needs-attention-clear")).toBeNull();
+        });
+
+        it("shows a calm 'all clear' state when there is nothing outstanding", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />); // BASE_DATA.needs_attention is []
+            await waitFor(() => expect(screen.getByTestId("pd-needs-attention-clear")).toBeTruthy());
+            expect(screen.getByTestId("pd-needs-attention-clear").textContent).toMatch(/All production checks are clear/);
+            expect(screen.queryByTestId("pd-needs-attention")).toBeNull();
+        });
+
+        it("groups the key numbers into Production / Financials / Payments instead of one flat list", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-overview-content")).toBeTruthy());
+            const content = screen.getByTestId("pd-overview-content");
+            expect(content.textContent).toMatch(/Production/);
+            expect(content.textContent).toMatch(/Financials/);
+            expect(content.textContent).toMatch(/Payments/);
+            expect(content.textContent).toMatch(/Locked Talents/);
+            expect(content.textContent).toMatch(/Talent Budget/);
+            expect(content.textContent).toMatch(/Client Payment/);
+        });
+
+        it("the Schedule section stays compact (a single muted line) for an empty Today/Upcoming/Completed", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />); // BASE_DATA's today/upcoming/completed are all empty
+            await waitFor(() => expect(screen.getByTestId("pd-today")).toBeTruthy());
+            expect(screen.getByTestId("pd-today").textContent).toMatch(/Nothing scheduled/);
+            expect(screen.getByTestId("pd-upcoming").textContent).toMatch(/Nothing upcoming/);
+            expect(screen.getByTestId("pd-completed").textContent).toMatch(/Nothing completed/);
+        });
+    });
+
+    describe("Locked Talents and Tasks empty states (2026-09-27 redesign)", () => {
+        it("Locked Talents shows a compact, informative empty state", async () => {
+            const data = { ...BASE_DATA, locked_talents: [], summary: { ...BASE_DATA.summary, locked_count: 0 } };
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-locked-talents")).toBeTruthy());
+            const section = screen.getByTestId("pd-locked-talents");
+            expect(section.textContent).toMatch(/No locked talents yet/);
+            expect(section.textContent).toMatch(/Move a talent to.*Locked.*in Casting Pipeline/);
+        });
+
+        it("Tasks shows a compact empty state and keeps Add Task visible", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />); // BASE_DATA.tasks.pending is []
+            await waitFor(() => expect(screen.getByTestId("pd-tasks")).toBeTruthy());
+            const section = screen.getByTestId("pd-tasks");
+            expect(section.textContent).toMatch(/No open tasks/);
+            expect(within(section).getByText("Add Task")).toBeTruthy();
         });
     });
 

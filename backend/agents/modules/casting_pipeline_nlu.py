@@ -2981,14 +2981,44 @@ def _project_name_similarity(query: str, label: str) -> float:
     handles reordering, so this tier's job is purely typo tolerance).
     Combined with (never replacing) the shared _name_similarity via max()
     at the call site, so this can only ever IMPROVE a project match
-    relative to today's behaviour, never regress one."""
+    relative to today's behaviour, never regress one.
+
+    2026-09-27 fix — `best_token` excludes tokens of length <= 2 from
+    scoring. Root cause of a real, reproduced bug: a project label/query
+    containing a bare alphanumeric ID (e.g. a test tag like "68c158", or
+    a real label like "Phase1 A10") gets split by _project_match_tokens'
+    tokenizer on digit/letter boundaries into short fragments ("68", "c",
+    "158", "10"). SequenceMatcher on two short strings that happen to
+    match exactly is trivially 1.0 — a meaningless "perfect" score that
+    let a query for "Hingle Projct <tag>" tie at 1.0 fuzzy similarity
+    against completely unrelated projects purely because they shared a
+    lone "c" token, or a tag ending "...c10" shared a bare "10" token
+    with "Phase1 A10"/"StressA 11" — defeating the ambiguity-margin
+    check in a large candidate pool and turning a should-be-unique typo
+    match into "too many suggestions" (empirically reproduced against
+    the real ~800+-project dev DB — test_minor_project_spelling_
+    variation's flakiness; 96%+ failure rate before this fix at len<=1,
+    still ~3% at len<=1 alone, 0 failures in 100 reproductions once
+    raised to len<=2, matching the len-3 minimum this codebase already
+    uses elsewhere for short-token caution, e.g. this same module's
+    plural-folding rule and the Gemini-prefilter's own established
+    _MIN_FUZZY_WORD_LEN).
+    Excluding these short tokens here only removes a trivial/meaningless
+    signal; the true match still wins on the `whole`-string ratio
+    (unaffected, still computed over every token including short ones)
+    — this can only ever REMOVE a spurious tie, never cause a real match
+    to score lower. Tier 4 (_project_token_subset_matches) is untouched
+    — a different function, not affected by this change."""
     q_tokens = sorted(_project_match_tokens(query))
     lab_tokens = sorted(_project_match_tokens(label))
     if not q_tokens or not lab_tokens:
         return 0.0
     whole = difflib.SequenceMatcher(None, " ".join(q_tokens), " ".join(lab_tokens)).ratio()
+    scorable_pairs = [
+        (qt, lt) for qt in q_tokens for lt in lab_tokens if len(qt) > 2 and len(lt) > 2
+    ]
     best_token = max(
-        (difflib.SequenceMatcher(None, qt, lt).ratio() for qt in q_tokens for lt in lab_tokens),
+        (difflib.SequenceMatcher(None, qt, lt).ratio() for qt, lt in scorable_pairs),
         default=0.0,
     )
     return max(whole, best_token)

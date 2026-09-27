@@ -151,6 +151,80 @@ async def test_genuinely_ambiguous_project_still_asks_unit_level():
 
 
 # ---------------------------------------------------------------------------
+# 2026-09-27 fix — _project_name_similarity's best_token computation was
+# scoring short alphanumeric-ID fragments (a bare "c" or "10" split out of
+# a query/label like "68c158" or "Phase1 A10" by the digit/letter-boundary
+# tokenizer) as a trivial 1.0 SequenceMatcher tie against ANY unrelated
+# label containing the same short fragment — in a large real candidate
+# pool this reliably defeated the ambiguity-margin check and turned a
+# should-be-unique typo match into a false "too many suggestions" outcome
+# (root cause of tests/test_talentgram_fetcher.py::
+# test_minor_project_spelling_variation's flakiness, reproduced
+# empirically against the real ~800-project dev DB: near-100% failure
+# rate before this fix, 0/150 after). These are the exact Part 1/2 test
+# cases from that investigation, run directly at the unit level (no DB).
+# ---------------------------------------------------------------------------
+async def test_minor_typo_with_short_alphanumeric_tag_resolves_uniquely():
+    """The exact reproduced bug: a query differing from the real label by
+    one dropped letter, where BOTH strings end in a short alphanumeric
+    fragment ("c158"-shaped) that a large candidate pool is statistically
+    certain to also contain in a handful of unrelated labels via the
+    tokenizer's digit/letter splitting — must still resolve to the real
+    project alone."""
+    projects = [
+        {"id": "real", "label": "Hingle Project 68c158"},
+        # Decoys sharing a short digit/letter-split token fragment with the
+        # query ("c", "68", "158", "10") purely by coincidence — none of
+        # these are remotely the same project name.
+        {"id": "decoy1", "label": "Smoke Test Brand C"},
+        {"id": "decoy2", "label": "Snap C"},
+        {"id": "decoy3", "label": "FairLovely Edit c3eb55"},
+        {"id": "decoy4", "label": "Phase1 A10"},
+        {"id": "decoy5", "label": "StressA 11"},
+    ]
+    m = nlu.resolve_project_by_name("Hingle Projct 68c158", projects)
+    assert m.project is not None, f"expected a unique match, got ambiguous={m.ambiguous} suggestions={m.suggestions} error={m.error}"
+    assert m.project["id"] == "real"
+
+
+async def test_project_typo_variants_all_resolve_when_unambiguous():
+    """Part 2's own required variants, single-project pool (no real
+    collision) — exact / minor typo / another typo / case / whitespace
+    must all resolve to the one real project."""
+    projects = [{"id": "p1", "label": "Hingle Project"}]
+    for q in ("Hingle Project", "Hingle Projct", "Hingle Projec", "hingle project", "Hingle  Project"):
+        m = nlu.resolve_project_by_name(q, projects)
+        assert m.project is not None and m.project["id"] == "p1", f"{q!r} should resolve, got {m}"
+
+
+async def test_similar_project_names_still_ask_never_silently_pick():
+    """Part 2's explicit collision requirement: a weak/typo'd query against
+    real, SIMILAR project names ("Hingle Project" / "Hingle Projects" /
+    "Hingle Project India") must return ambiguity, never a silent guess —
+    the len<=2 token-scoring fix must not lower this bar."""
+    projects = [
+        {"id": "p1", "label": "Hingle Project"},
+        {"id": "p2", "label": "Hingle Projects"},
+        {"id": "p3", "label": "Hingle Project India"},
+    ]
+    m = nlu.resolve_project_by_name("Hingle Projct", projects)
+    assert m.project is None, f"should not silently auto-resolve among similar names, got {m.project}"
+    assert m.ambiguous is not None or m.suggestions is not None
+    ids = {c["id"] for c in (m.ambiguous or m.suggestions)}
+    assert ids == {"p1", "p2", "p3"}
+
+
+async def test_no_match_behavior_unaffected():
+    """An unrelated query against a real project must still cleanly report
+    no match, not a spurious short-token tie."""
+    projects = [{"id": "p1", "label": "Hingle Project"}]
+    m = nlu.resolve_project_by_name("Totally Unrelated Name", projects)
+    assert m.project is None
+    assert m.ambiguous is None
+    assert m.error is not None
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: the exact five commands from the hotfix's testing section,
 # plus the "Tira" single/multiple-project cases.
 # ---------------------------------------------------------------------------

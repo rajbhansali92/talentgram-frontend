@@ -6430,27 +6430,20 @@ async def test_share_casting_call_single_project_single_talent():
     # already-shortlisted talent to confirm" use.
     await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
     try:
+        # 2026-09-27 business rule: a clear, unambiguous SHARE now executes
+        # immediately — no "You are about to SHARE:" preview, no second
+        # "1" reply.
         r = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=f"share casting call for ShareProj {tag} to ShareTalent {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert "Casting Call" in r.reply, r.reply
         assert f"ShareProj {tag}" in r.reply, r.reply
-        assert f"ShareTalent {tag}" in r.reply, r.reply
-        assert "NOT SENT" not in r.reply  # not part of this preview's wording, just confirming no false claim
-        assert "Recipients (1):" in r.reply, r.reply
-        assert f"1. ShareTalent {tag} — Phone Number" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r2.handled, r2.reply
-        assert "Shared." in r2.reply, r2.reply
-        assert "1 WhatsApp message queued." in r2.reply, r2.reply
+        assert f"ShareTalent {tag} — sent" in r.reply, r.reply
+        assert "1 WhatsApp message queued." in r.reply, r.reply
 
         jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
         assert len(jobs) == 1
@@ -6717,22 +6710,13 @@ async def test_share_custom_message_with_internal_comma_preserved():
             ),
             sender_name="Raj", sender_is_group_member=True,
         )
+        # 2026-09-27: a clear, unambiguous SHARE executes immediately —
+        # no preview, no second reply.
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
-        assert "Recipients (2):" in r.reply, r.reply
-        # resolve_recipients_engine's own PROJECT-source resolution — the
-        # SAME one _run_share_sends will use — doesn't guarantee the
-        # originally-typed order, so this checks presence + delivery
-        # method for both, not a specific numbered position.
-        assert f"ShareCustomT1 {tag} — Phone Number" in r.reply, r.reply
-        assert f"ShareCustomT2 {tag} — Phone Number" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r2.handled, r2.reply
-        assert "2 WhatsApp messages queued." in r2.reply, r2.reply
+        assert "Shared." in r.reply, r.reply
+        assert f"ShareCustomT1 {tag} — sent" in r.reply, r.reply
+        assert f"ShareCustomT2 {tag} — sent" in r.reply, r.reply
+        assert "2 WhatsApp messages queued." in r.reply, r.reply
 
         jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2]}}).to_list(10)
         assert len(jobs) == 2
@@ -6799,7 +6783,7 @@ async def test_share_no_project_infers_single_ongoing_pipeline():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert f"ShareInferProj {tag}" in r.reply, r.reply
         assert "Which project should I use?" not in r.reply, r.reply
     finally:
@@ -6835,9 +6819,13 @@ async def test_share_no_project_multiple_pipelines_asks_never_guesses():
 
 
 async def test_share_stage_target_recipients_label_properly_cased():
-    """The single-project stage-target confirmation's "Pipeline:" line
-    must read "Follow Up" — NOT str.capitalize()'s mangled "follow up",
-    which silently lowercases the stage's own proper-cased label."""
+    """Historical regression guard for a str.capitalize() casing bug in
+    the old SHARE preview's "Pipeline:" line ("Follow Up" -> "follow up").
+    2026-09-27: a clear, unambiguous stage-target SHARE now executes
+    immediately and the preview (where that bug lived) is no longer shown
+    on this path — the executed result itself never prints the stage
+    label at all, so there is nothing left to mis-case here. Kept as a
+    plain smoke test of the immediate stage-target execution."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
@@ -6853,21 +6841,21 @@ async def test_share_stage_target_recipients_label_properly_cased():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "Pipeline:\nFollow Up" in r.reply, r.reply
-        assert "follow up" not in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
+        assert label in r.reply, r.reply
+        assert "1 message queued" in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
 
 
-async def test_share_not_in_pipeline_gate_offers_add_move_share():
-    """Part 10, restored to the full 3-option Pipeline Check (SHARE
-    Production Readiness, 2026-09-07 — ADD/MOVE/SHARE all run on the
-    same Talentgram Scouting Agent now) — a talent not yet in the target
-    project's pipeline is never silently shared to; the gate offers
-    Add+Move+Share / Share-only-valid / Cancel, and choosing Option 1
-    actually adds and moves the talent (through the real ADD/MOVE
-    primitives) before showing the SHARE preview."""
+async def test_share_1x1_not_in_pipeline_executes_immediately():
+    """Part 8 Test 1 (2026-09-27 business rule): a clear, unambiguous
+    SHARE for a talent not yet in the target project's pipeline now
+    executes the complete workflow in ONE turn — no PIPELINE CHECK
+    prompt, no "reply 1", no "You are about to SHARE:" preview. Add +
+    Move(Follow Up) run through the exact same ADD/MOVE primitives as
+    before; only the confirmation gate is gone."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
@@ -6883,38 +6871,132 @@ async def test_share_not_in_pipeline_gate_offers_add_move_share():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "PIPELINE CHECK" in r.reply, r.reply
-        assert f"✕ ShareGateTalent {tag} — ShareGateProj {tag}" in r.reply, r.reply
-        assert "is not currently in the" in r.reply, r.reply
-        assert "1 → Add the missing talent(s), move them to Follow Up, then share" in r.reply, r.reply
-        assert "2 → Share only where they are already in the pipeline" in r.reply, r.reply
-        assert "3 → Cancel" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r2.handled, r2.reply
-        assert "Added 1 talent to the pipeline and moved to Follow Up." in r2.reply, r2.reply
-        assert "You are about to SHARE:" in r2.reply, r2.reply
+        assert "PIPELINE CHECK" not in r.reply, r.reply
+        assert "You are about to SHARE:" not in r.reply, r.reply
+        assert "Added 1 talent to the pipeline and moved 1 to Follow Up." in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
+        assert "1 WhatsApp message queued." in r.reply, r.reply
 
         row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
         assert row is not None
         assert row["stage"] == "follow_up"
-        # Nothing sent yet — SHARE still needs its own separate approval.
         jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
-        assert jobs == []
+        assert len(jobs) == 1
+
+        # Part 9: command received -> workflow completed -> no pending
+        # confirmation of any kind left behind.
+        session = await session_context.get_session(SHARE_AGENT_ID, phone)
+        assert not (session or {}).get("pending_disambiguation")
     finally:
         await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
 
 
-async def test_share_pipeline_check_missing_from_multiple_projects():
-    """Production fix (2026-09-04) — a single talent missing from BOTH of
-    2 named projects gets ONE Pipeline Check showing both ❌ pairs (never
-    the old generic "None of the named talent(s) are part of X's
-    pipeline." dead end)."""
+async def test_share_already_in_pipeline_other_stage_moves_to_follow_up():
+    """Part 8 Test 2: a talent already in the pipeline but at a
+    DIFFERENT stage (not Follow Up) must not get a duplicate pipeline
+    row (no add_talents_to_pipeline for this pair), but must still be
+    moved to Follow Up before sharing."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"ShareOtherStageProj {tag}", shoot_dates="11 Nov 2028", budget="Rs 8,000/day",
+    )
+    talent_id = await _seed_talent(f"ShareOtherStageTalent {tag}", phone="917000700071")
+    await _seed_pipeline_row(project_id, talent_id, "shortlisted")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Casting Call for ShareOtherStageProj {tag} with ShareOtherStageTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Moved 1 talent to Follow Up." in r.reply, r.reply
+        assert "Added" not in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
+
+        rows = await db.casting_pipeline.find({"project_id": project_id, "talent_id": talent_id}).to_list(10)
+        assert len(rows) == 1  # never duplicated
+        assert rows[0]["stage"] == "follow_up"
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_share_already_at_follow_up_no_duplicate_move():
+    """Part 8 Test 3: a talent already AT Follow Up must not trigger any
+    add/move mutation at all — straight to Shared. with no action_line
+    prefix."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"ShareAlreadyFUProj {tag}", shoot_dates="12 Dec 2028", budget="Rs 9,000/day",
+    )
+    talent_id = await _seed_talent(f"ShareAlreadyFUTalent {tag}", phone="917000700072")
+    await _seed_pipeline_row(project_id, talent_id, "follow_up")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Casting Call for ShareAlreadyFUProj {tag} with ShareAlreadyFUTalent {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert r.reply.startswith("Shared."), r.reply  # no "Added"/"Moved" action_line at all
+        assert "Added" not in r.reply and "Moved" not in r.reply, r.reply
+
+        row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
+        assert row["stage"] == "follow_up"
+    finally:
+        await _cleanup_jobs_for_talents([talent_id])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
+        await _restore_share_config(original)
+
+
+async def test_share_many_talents_one_project_all_processed():
+    """Part 8 Test 4 — many talents x one project: one missing, one
+    already-shortlisted, must both be added-or-moved to Follow Up and
+    both receive the share, in a single turn."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"ShareManyTalentsProj {tag}", shoot_dates="13 Jan 2029", budget="Rs 1,100/day",
+    )
+    t1 = await _seed_talent(f"ShareManyT1 {tag}", phone="917000700073")
+    t2 = await _seed_talent(f"ShareManyT2 {tag}", phone="917000700074")
+    await _seed_pipeline_row(project_id, t2, "shortlisted")  # t1 missing entirely
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Casting Call for ShareManyTalentsProj {tag} with ShareManyT1 {tag}, ShareManyT2 {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "PIPELINE CHECK" not in r.reply, r.reply
+        assert "Added 1 talent to the pipeline and moved 2 to Follow Up." in r.reply, r.reply
+        assert "2 WhatsApp messages queued." in r.reply, r.reply
+
+        row1 = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t1})
+        row2 = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": t2})
+        assert row1["stage"] == "follow_up"
+        assert row2["stage"] == "follow_up"
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
+        await _restore_share_config(original)
+
+
+async def test_share_many_projects_one_talent_all_processed():
+    """Part 8 Test 5 — one talent x many projects, missing from BOTH:
+    both pairs added+moved+shared in one turn (previously the "Pipeline
+    Check missing from multiple projects" gate)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
@@ -6929,26 +7011,28 @@ async def test_share_pipeline_check_missing_from_multiple_projects():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "PIPELINE CHECK" in r.reply, r.reply
-        assert f"✕ GateMultiTalent {tag} — GateMultiA {tag}" in r.reply, r.reply
-        assert f"✕ GateMultiTalent {tag} — GateMultiB {tag}" in r.reply, r.reply
-        assert "these project pipelines" in r.reply, r.reply
-        assert "None of the named talent" not in r.reply, r.reply
+        assert "PIPELINE CHECK" not in r.reply, r.reply
+        assert "Added 2 talents to the pipeline and moved 2 to Follow Up." in r.reply, r.reply
+        assert "2 WhatsApp messages queued." in r.reply, r.reply
+
+        row1 = await db.casting_pipeline.find_one({"project_id": p1, "talent_id": talent_id})
+        row2 = await db.casting_pipeline.find_one({"project_id": p2, "talent_id": talent_id})
+        assert row1["stage"] == "follow_up"
+        assert row2["stage"] == "follow_up"
     finally:
+        await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[talent_id])
         await _restore_share_config(original)
 
 
-async def test_share_pipeline_check_option_1_adds_moves_then_shares():
-    """Option 1 (SHARE Production Readiness, 2026-09-07 — restored, now
-    that ADD/MOVE/SHARE all run on the same Talentgram Scouting Agent) on
-    a true 2x2 mixed cross-product: talent A is valid only in project 2,
-    talent B is valid only in project 1. "Add the missing talent(s), move
-    them to Follow Up, then share" must add+move ONLY the 2 missing
-    pairs — via the exact same primitives ADD/MOVE use — WITHOUT
-    demoting either already-valid row's real stage (shortlisted), then
-    show a full 4-recipient SHARE preview; approving it must queue all 4
-    sends."""
+async def test_share_many_x_many_matrix_add_move_share_immediately():
+    """Part 8 Test 6 — many talents x many projects, a true 2x2 mixed
+    cross-product (talent A valid only in project 2, talent B valid only
+    in project 1): the existing _share_pipeline_matrix cross-product
+    semantics are unchanged, but the whole workflow (add the 2 missing
+    pairs, move ALL 4 to Follow Up, share to all 4) now completes in ONE
+    turn instead of three. Formerly test_share_pipeline_check_option_1_
+    adds_moves_then_shares."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
@@ -6967,57 +7051,34 @@ async def test_share_pipeline_check_option_1_adds_moves_then_shares():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "PIPELINE CHECK" in r.reply, r.reply
-        assert "1 → Add the missing talent(s), move them to Follow Up, then share" in r.reply, r.reply
-        assert "2 → Share only where they are already in the pipeline" in r.reply, r.reply
-        assert "3 → Cancel" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "Added 2 talents to the pipeline and moved to Follow Up." in r2.reply, r2.reply
-        assert "You are about to SHARE:" in r2.reply, r2.reply
-        assert "4" in r2.reply, r2.reply
-
-        r3 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "4 WhatsApp messages queued." in r3.reply, r3.reply
+        assert "PIPELINE CHECK" not in r.reply, r.reply
+        # 2 pairs missing (added+moved) + 2 pairs already-valid-but-not-
+        # Follow-Up (moved only) = 4 moved total, 2 added.
+        assert "Added 2 talents to the pipeline and moved 4 to Follow Up." in r.reply, r.reply
+        assert "4 WhatsApp messages queued." in r.reply, r.reply
 
         jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [tA, tB]}}).to_list(10)
         assert len(jobs) == 4
         sent_pairs = {(j["talent_id"], j["source_id"]) for j in jobs}
         assert sent_pairs == {(tA, p1), (tA, p2), (tB, p1), (tB, p2)}
 
-        # The 2 previously-missing pairs are now in Follow Up; the 2
-        # ALREADY-valid rows keep their real, pre-existing stage — never
-        # demoted back to Follow Up by this option.
-        rowA_p1 = await db.casting_pipeline.find_one({"project_id": p1, "talent_id": tA})
-        rowA_p2 = await db.casting_pipeline.find_one({"project_id": p2, "talent_id": tA})
-        rowB_p1 = await db.casting_pipeline.find_one({"project_id": p1, "talent_id": tB})
-        rowB_p2 = await db.casting_pipeline.find_one({"project_id": p2, "talent_id": tB})
-        assert rowA_p1["stage"] == "follow_up"
-        assert rowA_p2["stage"] == "shortlisted"
-        assert rowB_p1["stage"] == "shortlisted"
-        assert rowB_p2["stage"] == "follow_up"
+        # 2026-09-27: unlike the old "never touch an already-valid pair's
+        # stage" Option 1, EVERY resolved pair is now moved to Follow Up
+        # (Part 4's explicit "already in pipeline at another stage ->
+        # move to Follow Up" rule) — all 4 rows end at follow_up.
+        for pid, tid in ((p1, tA), (p2, tA), (p1, tB), (p2, tB)):
+            row = await db.casting_pipeline.find_one({"project_id": pid, "talent_id": tid})
+            assert row["stage"] == "follow_up"
     finally:
         await _cleanup_jobs_for_talents([tA, tB])
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[tA, tB])
         await _restore_share_config(original)
 
 
-async def test_share_pipeline_check_option_1_and_confirm_skips_third_reply():
-    """2026-09-23 business rule: "Share ... and confirm" (single message)
-    must resolve, after the admin's explicit "1" reply to the PIPELINE
-    CHECK gate, straight to ADD -> MOVE(Follow Up) -> SHARE with no THIRD
-    reply needed — the original "and confirm" already pre-authorized the
-    send itself. The pipeline-membership gate is NOT skipped ("1" is still
-    a real, separate, explicit approval for the mutation); only the
-    otherwise-redundant second SHARE approval is skipped. Contrast with
-    test_share_pipeline_check_option_1_adds_moves_then_shares (no "and
-    confirm"), which still needs that third reply."""
+async def test_share_and_confirm_no_longer_special_no_extra_step():
+    """Part 8 Test 10 / Part 6: "Share ... and confirm" must produce the
+    SAME immediate execution as the bare command — "confirm" is now inert
+    trailing text, not a required or special modifier."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
@@ -7031,18 +7092,10 @@ async def test_share_pipeline_check_option_1_and_confirm_skips_third_reply():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "PIPELINE CHECK" in r.reply, r.reply
-        assert "1 → Add the missing talent(s), move them to Follow Up, then share" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "Added 1 talent to the pipeline and moved to Follow Up." in r2.reply, r2.reply
-        # Straight to the executed result — no intermediate "You are about
-        # to SHARE" preview waiting on a third reply.
-        assert "You are about to SHARE:" not in r2.reply, r2.reply
-        assert "1 WhatsApp message queued." in r2.reply, r2.reply
+        assert "PIPELINE CHECK" not in r.reply, r.reply
+        assert "You are about to SHARE:" not in r.reply, r.reply
+        assert "Added 1 talent to the pipeline and moved 1 to Follow Up." in r.reply, r.reply
+        assert "1 WhatsApp message queued." in r.reply, r.reply
 
         jobs = await db.whatsapp_jobs.find({"talent_id": t1}).to_list(10)
         assert len(jobs) == 1
@@ -7054,137 +7107,12 @@ async def test_share_pipeline_check_option_1_and_confirm_skips_third_reply():
         await _restore_share_config(original)
 
 
-async def test_share_pipeline_check_option_2_mixed_pairs_sends_only_valid():
-    """Option 2 (renumbered from Option 1, 2026-09-07 — see
-    _format_share_pipeline_check) on a true 2x2 mixed cross-product:
-    talent A is valid only in project 2, talent B is valid only in
-    project 1. "Share only where they are already in the pipeline" must
-    send exactly those 2 valid pairs, skip the 2 missing ones, and —
-    since this option never adds/moves anyone — must never touch any
-    pipeline row at all."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    p1 = await _seed_project_with_details(f"GateMixA {tag}", shoot_dates="3 Mar 2029", budget="Rs 3/day")
-    p2 = await _seed_project_with_details(f"GateMixB {tag}", shoot_dates="4 Apr 2029", budget="Rs 4/day")
-    tA = await _seed_talent(f"GateMixTA {tag}", phone="917000700101")
-    tB = await _seed_talent(f"GateMixTB {tag}", phone="917000700102")
-    await _seed_pipeline_row(p2, tA, "shortlisted")  # A valid in P2 only
-    await _seed_pipeline_row(p1, tB, "shortlisted")  # B valid in P1 only
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for GateMixA {tag}, GateMixB {tag} with GateMixTA {tag}, GateMixTB {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r.handled, r.reply
-        assert "PIPELINE CHECK" in r.reply, r.reply
-        assert f"✕ GateMixTA {tag} — GateMixA {tag}" in r.reply, r.reply
-        assert f"✓ GateMixTA {tag} — GateMixB {tag}" in r.reply, r.reply
-        assert f"✓ GateMixTB {tag} — GateMixA {tag}" in r.reply, r.reply
-        assert f"✕ GateMixTB {tag} — GateMixB {tag}" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="2",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "You are about to SHARE:" in r2.reply, r2.reply
-
-        r3 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "2 WhatsApp messages queued." in r3.reply, r3.reply
-
-        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [tA, tB]}}).to_list(10)
-        assert len(jobs) == 2
-        sent_pairs = {(j["talent_id"], j["source_id"]) for j in jobs}
-        assert sent_pairs == {(tA, p2), (tB, p1)}
-
-        # Option 2 never adds/moves — the pipeline rows are EXACTLY the
-        # 2 pre-seeded ones, untouched, and the 2 missing pairs are still
-        # genuinely missing.
-        rowA_p1 = await db.casting_pipeline.find_one({"project_id": p1, "talent_id": tA})
-        rowA_p2 = await db.casting_pipeline.find_one({"project_id": p2, "talent_id": tA})
-        rowB_p1 = await db.casting_pipeline.find_one({"project_id": p1, "talent_id": tB})
-        rowB_p2 = await db.casting_pipeline.find_one({"project_id": p2, "talent_id": tB})
-        assert rowA_p1 is None
-        assert rowA_p2["stage"] == "shortlisted"
-        assert rowB_p1["stage"] == "shortlisted"
-        assert rowB_p2 is None
-    finally:
-        await _cleanup_jobs_for_talents([tA, tB])
-        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[tA, tB])
-        await _restore_share_config(original)
-
-
-async def test_share_pipeline_check_option_2_zero_valid_pairs():
-    """Option 2 when NOTHING is currently in the pipeline — nothing to
-    send, clean message, never a bare/empty confirmation card."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    project_id = await _seed_project(brand_name=f"GateZeroValid {tag}")
-    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
-    talent_id = await _seed_talent(f"GateZeroValidTalent {tag}", phone="917000700104")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for {label} with GateZeroValidTalent {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "PIPELINE CHECK" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="2",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "nothing to share" in r2.reply, r2.reply
-        assert "You are about to SHARE:" not in r2.reply, r2.reply
-        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
-        assert jobs == []
-    finally:
-        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_share_config(original)
-
-
-async def test_share_pipeline_check_option_3_cancels_cleanly():
-    """Option 3 — CANCELLED, nothing added/moved/shared."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    project_id = await _seed_project(brand_name=f"GateCancel {tag}")
-    label = (await db.projects.find_one({"id": project_id}))["brand_name"]
-    talent_id = await _seed_talent(f"GateCancelTalent {tag}", phone="917000700105")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for {label} with GateCancelTalent {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "PIPELINE CHECK" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="3",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r2.reply == "CANCELLED\n\nNothing from the pending SHARE action was executed or sent."
-
-        row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": talent_id})
-        assert row is None
-        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
-        assert jobs == []
-    finally:
-        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_share_config(original)
-
-
-async def test_share_pipeline_check_no_stale_context():
-    """A cancelled Pipeline Check for one project/talent must never leak
-    into a brand-new, unrelated SHARE command right after."""
+async def test_share_no_stale_confirmation_state_between_unrelated_shares():
+    """Part 9: after a resolvable SHARE executes with no pending
+    confirmation of any kind, a brand-new, unrelated SHARE right after
+    must never see any leaked state from the first one (formerly guarded
+    against a stale PIPELINE CHECK "3=Cancel"; there is no longer a
+    pending gate to leak in the first place, which this proves)."""
     group = f"Test Casting {uuid.uuid4().hex[:6]}"
     original = await _use_share_test_config(group)
     phone = _phone()
@@ -7200,8 +7128,12 @@ async def test_share_pipeline_check_no_stale_context():
             text=f"Share Casting Call for GateStaleA {tag} with GateStaleT1 {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "PIPELINE CHECK" in r.reply, r.reply
-        await handle_inbound_message(group_name=group, sender_phone=phone, text="3", sender_name="Raj", sender_is_group_member=True)
+        assert r.handled, r.reply
+        assert "PIPELINE CHECK" not in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
+
+        session = await session_context.get_session(SHARE_AGENT_ID, phone)
+        assert not (session or {}).get("pending_disambiguation")
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone,
@@ -7209,11 +7141,12 @@ async def test_share_pipeline_check_no_stale_context():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r2.handled, r2.reply
-        assert "You are about to SHARE:" in r2.reply, r2.reply
+        assert "Shared." in r2.reply, r2.reply
         assert f"GateStaleA {tag}" not in r2.reply, r2.reply
         assert f"GateStaleT1 {tag}" not in r2.reply, r2.reply
         assert f"GateStaleB {tag}" in r2.reply, r2.reply
     finally:
+        await _cleanup_jobs_for_talents([t1, t2])
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
         await _restore_share_config(original)
 
@@ -7257,10 +7190,11 @@ async def test_share_never_inherits_session_current_project():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert f"StaleSessB {tag}" in r.reply, r.reply
         assert f"StaleSessA {tag}" not in r.reply, r.reply
     finally:
+        await _cleanup_jobs_for_talents([share_talent])
         await _cleanup(phone, project_ids=[proj_a, proj_b], talent_ids=[other_talent, share_talent])
         await _restore_share_config(original)
 
@@ -7293,13 +7227,16 @@ async def test_share_bare_quote_custom_message_no_prefix_needed():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert "Custom message" in r.reply, r.reply
-        assert f"BareQuoteProj {tag}" in r.reply, r.reply
         # The "for DULUX" text living INSIDE the quote must never be
-        # read as a SECOND, wrong project reference.
-        assert "DULUX" not in [ln for ln in r.reply.split("\n") if ln.startswith("Project")], r.reply
+        # read as a SECOND, wrong project reference — the executed body
+        # only ever lists REAL resolved project names, and DULUX is not
+        # one of them.
+        assert f"BareQuoteProj {tag}" in r.reply, r.reply
+        assert "DULUX" not in r.reply, r.reply
     finally:
+        await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
 
@@ -7331,14 +7268,9 @@ async def test_share_custom_message_line_breaks_preserved_exactly():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert f"LineBreakProj {tag}" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "1 WhatsApp message" in r2.reply, r2.reply
+        assert "1 WhatsApp message" in r.reply, r.reply
 
         jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
         assert len(jobs) == 1
@@ -7371,13 +7303,8 @@ async def test_share_custom_message_rich_punctuation_preserved_exactly():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "1 WhatsApp message" in r2.reply, r2.reply
+        assert "Shared." in r.reply, r.reply
+        assert "1 WhatsApp message" in r.reply, r.reply
         jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
         assert len(jobs) == 1
         assert message in jobs[0]["message_body"], jobs[0]["message_body"]
@@ -7415,16 +7342,11 @@ async def test_share_ux_prompt_dulux_example_verbatim():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         # The comma-filled, multi-line quoted body must never have been
         # mis-split into extra recipients/projects along the way.
-        assert f"DuluxExampleTalent {tag} — Phone Number" in r.reply, r.reply
+        assert f"DuluxExampleTalent {tag} — sent" in r.reply, r.reply
 
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r2.handled, r2.reply
         jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
         assert len(jobs) == 1
         assert message in jobs[0]["message_body"], jobs[0]["message_body"]
@@ -7456,9 +7378,9 @@ async def test_share_stage_in_project_grammar_both_orders():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert f"StageInProj {tag}" in r.reply, r.reply
-        assert "shortlisted" in r.reply.lower() or "everyone" in r.reply.lower(), r.reply
+        assert "message" in r.reply.lower() and "queued" in r.reply.lower(), r.reply
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone,
@@ -7466,9 +7388,10 @@ async def test_share_stage_in_project_grammar_both_orders():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r2.handled, r2.reply
-        assert "You are about to SHARE:" in r2.reply, r2.reply
+        assert "Shared." in r2.reply, r2.reply
         assert f"StageInProj {tag}" in r2.reply, r2.reply
     finally:
+        await _cleanup_jobs_for_talents([in_stage])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[in_stage])
         await _restore_share_config(original)
 
@@ -7501,9 +7424,10 @@ async def test_share_ambiguous_talent_clarification_then_resume():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r2.handled, r2.reply
-        assert "You are about to SHARE:" in r2.reply, r2.reply
-        assert f"Priya Shah {tag} — Phone Number" in r2.reply, r2.reply
+        assert "Shared." in r2.reply, r2.reply
+        assert f"Priya Shah {tag} — sent" in r2.reply, r2.reply
     finally:
+        await _cleanup_jobs_for_talents([a, b])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b])
         await _restore_share_config(original)
 
@@ -7537,186 +7461,28 @@ async def test_share_edit_menu_precedence_over_real_disambiguation():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert "EDITING SHARE" not in r2.reply, r2.reply
-        assert "You are about to SHARE:" in r2.reply, r2.reply
-        assert f"Meera Iyer {tag}" in r2.reply, r2.reply
+        assert "Shared." in r2.reply, r2.reply
+        assert f"Meera Iyer {tag} — sent" in r2.reply, r2.reply
     finally:
+        await _cleanup_jobs_for_talents([a, b])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[a, b])
         await _restore_share_config(original)
 
 
-async def test_share_edit_flow_project_and_message_end_to_end():
-    """The recipient-list edit flow end to end (SHARE Production
-    Readiness, 2026-09-08): "2" (Edit) shows EDITING SHARE with the real
-    recipient list; a bare "Change project" asks for the new project and
-    rebuilds a real preview; a bare "Change template" (bare, no value)
-    asks for the new template — each rebuilding a real preview, nothing
-    sent until final approval."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    p1 = await _seed_project_with_details(f"TwoStageA {tag}", shoot_dates="1 Jan 2029", budget="Rs 1/day")
-    p2 = await _seed_project_with_details(f"TwoStageB {tag}", shoot_dates="2 Feb 2029", budget="Rs 2/day")
-    t1 = await _seed_talent(f"TwoStageT1 {tag}", phone="917000700130")
-    t2 = await _seed_talent(f"TwoStageT2 {tag}", phone="917000700131")
-    await _seed_pipeline_row(p1, t1, "ask_to_test")
-    await _seed_pipeline_row(p2, t1, "ask_to_test")
-    await _seed_pipeline_row(p2, t2, "ask_to_test")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for TwoStageA {tag} with TwoStageT1 {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "You are about to SHARE:" in r.reply, r.reply
-
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="2", sender_name="Raj", sender_is_group_member=True)
-        assert "EDITING SHARE" in r.reply, r.reply
-        assert "Current recipients:" in r.reply and f"1. TwoStageT1 {tag}" in r.reply, r.reply
-        assert "Remove 2" in r.reply and "Change project" in r.reply and "Change template" in r.reply, r.reply
-
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="Change project", sender_name="Raj", sender_is_group_member=True)
-        assert "project" in r.reply.lower(), r.reply
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text=f"TwoStageB {tag}", sender_name="Raj", sender_is_group_member=True)
-        assert "You are about to SHARE:" in r.reply and f"TwoStageB {tag}" in r.reply, r.reply
-
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="2", sender_name="Raj", sender_is_group_member=True)
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="Share it with TwoStageT2", sender_name="Raj", sender_is_group_member=True)
-        assert "You are about to SHARE:" in r.reply and f"TwoStageT2 {tag}" in r.reply, r.reply
-
-        jobs_before = await db.whatsapp_jobs.count_documents({"talent_id": {"$in": [t1, t2]}})
-        assert jobs_before == 0
-    finally:
-        await _cleanup_jobs_for_talents([t1, t2])
-        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
-        await _restore_share_config(original)
-
-
-async def test_share_edit_remove_recipient_by_number():
-    """"Remove 2" removes the SECOND recipient shown in "Current
-    recipients:" — a position, never confused with a talent literally
-    named "2" — rebuilding the preview with only the remaining
-    recipient(s), and nothing sent until approval."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    project_id = await _seed_project_with_details(
-        f"RemoveNumProj {tag}", shoot_dates="1 Jan 2029", budget="Rs 1/day",
-    )
-    t1 = await _seed_talent(f"RemoveNumT1 {tag}", phone="917000700133")
-    t2 = await _seed_talent(f"RemoveNumT2 {tag}", phone="917000700134")
-    t3 = await _seed_talent(f"RemoveNumT3 {tag}", phone="917000700135")
-    for t in (t1, t2, t3):
-        await _seed_pipeline_row(project_id, t, "ask_to_test")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for RemoveNumProj {tag} with "
-                 f"RemoveNumT1 {tag}, RemoveNumT2 {tag}, RemoveNumT3 {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "Recipients (3):" in r.reply, r.reply
-
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="2", sender_name="Raj", sender_is_group_member=True)
-        assert "Current recipients:" in r.reply, r.reply
-
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="Remove 2", sender_name="Raj", sender_is_group_member=True)
-        assert "You are about to SHARE:" in r.reply, r.reply
-        assert "Recipients (2):" in r.reply, r.reply
-        assert f"RemoveNumT1 {tag}" in r.reply, r.reply
-        assert f"RemoveNumT3 {tag}" in r.reply, r.reply
-        assert f"RemoveNumT2 {tag}" not in r.reply, r.reply
-
-        jobs_before = await db.whatsapp_jobs.count_documents({"talent_id": {"$in": [t1, t2, t3]}})
-        assert jobs_before == 0
-    finally:
-        await _cleanup_jobs_for_talents([t1, t2, t3])
-        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2, t3])
-        await _restore_share_config(original)
-
-
-async def test_share_edit_keep_only_recipients_by_number():
-    """"Share only with 1,3" keeps ONLY those two recipients, dropping
-    everyone else — checked as a claims_editing_reply case too, since it
-    starts with SHARE's own trigger word "share"."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    project_id = await _seed_project_with_details(
-        f"KeepOnlyProj {tag}", shoot_dates="1 Jan 2029", budget="Rs 1/day",
-    )
-    t1 = await _seed_talent(f"KeepOnlyT1 {tag}", phone="917000700136")
-    t2 = await _seed_talent(f"KeepOnlyT2 {tag}", phone="917000700137")
-    t3 = await _seed_talent(f"KeepOnlyT3 {tag}", phone="917000700138")
-    for t in (t1, t2, t3):
-        await _seed_pipeline_row(project_id, t, "ask_to_test")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for KeepOnlyProj {tag} with "
-                 f"KeepOnlyT1 {tag}, KeepOnlyT2 {tag}, KeepOnlyT3 {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "Recipients (3):" in r.reply, r.reply
-
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="2", sender_name="Raj", sender_is_group_member=True)
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="Share only with 1,3", sender_name="Raj", sender_is_group_member=True)
-        assert "You are about to SHARE:" in r.reply, r.reply
-        assert "Recipients (2):" in r.reply, r.reply
-        assert f"KeepOnlyT1 {tag}" in r.reply, r.reply
-        assert f"KeepOnlyT3 {tag}" in r.reply, r.reply
-        assert f"KeepOnlyT2 {tag}" not in r.reply, r.reply
-
-        jobs_before = await db.whatsapp_jobs.count_documents({"talent_id": {"$in": [t1, t2, t3]}})
-        assert jobs_before == 0
-    finally:
-        await _cleanup_jobs_for_talents([t1, t2, t3])
-        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2, t3])
-        await _restore_share_config(original)
-
-
-async def test_share_repeated_approval_never_double_sends():
-    """Replaying "1" (Approve) a second time after a SHARE has already
-    executed must never queue a second batch of WhatsApp jobs — the
-    conversation is cleared on success, so a stray duplicate reply lands
-    on a "nothing pending" state, not a re-execution."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    project_id = await _seed_project_with_details(
-        f"DupApproveProj {tag}", shoot_dates="3 Mar 2029", budget="Rs 3/day",
-    )
-    talent_id = await _seed_talent(f"DupApproveTalent {tag}", phone="917000700132")
-    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for DupApproveProj {tag} with DupApproveTalent {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "You are about to SHARE:" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(group_name=group, sender_phone=phone, text="1", sender_name="Raj", sender_is_group_member=True)
-        assert "1 WhatsApp message" in r2.reply, r2.reply
-
-        r3 = await handle_inbound_message(group_name=group, sender_phone=phone, text="1", sender_name="Raj", sender_is_group_member=True)
-        # Nothing pending anymore — a stray duplicate "1" is either
-        # silently unhandled (no conversation left to interpret it
-        # against) or, at worst, echoed back as something that is
-        # explicitly NOT a fresh "You are about to SHARE:" preview.
-        # Either way the real assertion is the one below: no second
-        # batch of jobs was ever queued.
-        assert not r3.reply or "You are about to SHARE:" not in r3.reply, r3.reply
-
-        jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
-        assert len(jobs) == 1, jobs
-    finally:
-        await _cleanup_jobs_for_talents([talent_id])
-        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_share_config(original)
+# ---------------------------------------------------------------------------
+# 2026-09-27: the pre-send recipient EDIT flow ("2" -> EDITING SHARE ->
+# "Remove 2" / "Change project" / "Share only with 1,3") is inherently
+# incompatible with the new "no confirmation, immediate execution"
+# business rule — there is no longer a pending preview to edit before it
+# sends. Removed rather than left red: test_share_edit_flow_project_and_
+# message_end_to_end, test_share_edit_remove_recipient_by_number,
+# test_share_edit_keep_only_recipients_by_number, and
+# test_share_repeated_approval_never_double_sends (which protected a
+# duplicate-"1"-approval-reply scenario that can no longer occur since
+# there is no separate approval reply to replay). This is a deliberate,
+# unavoidable product tradeoff of the new rule, not an oversight — noted
+# explicitly here and in the session's final report.
+# ---------------------------------------------------------------------------
 
 
 async def _await_share_delivery_report(group: str, timeout_sec: float = 3.0) -> Optional[dict]:
@@ -7777,10 +7543,8 @@ async def test_share_delivery_report_all_successful():
             text=f"Share Casting Call for DeliverOkProj {tag} with DeliverOkTalent {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "You are about to SHARE:" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(group_name=group, sender_phone=phone, text="1", sender_name="Raj", sender_is_group_member=True)
-        assert "I'll report back with the delivery result shortly." in r2.reply, r2.reply
+        assert "Shared." in r.reply, r.reply
+        assert "I'll report back with the delivery result shortly." in r.reply, r.reply
 
         # Simulate the real worker's own completion write (worker.py's
         # exact status value for a delivered-but-unverified send).
@@ -7822,10 +7586,8 @@ async def test_share_delivery_report_partial_failure():
             text=f"Share Casting Call for DeliverMixProj {tag} with DeliverMixT1 {tag}, DeliverMixT2 {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "You are about to SHARE:" in r.reply, r.reply
-
-        r2 = await handle_inbound_message(group_name=group, sender_phone=phone, text="1", sender_name="Raj", sender_is_group_member=True)
-        assert r2.handled, r2.reply
+        assert r.handled, r.reply
+        assert "Shared." in r.reply, r.reply
 
         await db.whatsapp_jobs.update_one({"talent_id": t1}, {"$set": {"status": "sent"}})
         await db.whatsapp_jobs.update_one(
@@ -7847,107 +7609,14 @@ async def test_share_delivery_report_partial_failure():
         await _restore_share_config(original)
 
 
-async def test_share_edit_natural_language_talent_and_add_talent():
-    """Part 12 — "Share it with X" and "Add another talent: Y" must be
-    understood as edit instructions DURING an active SHARE edit, even
-    though both start with a trigger word belonging to SHARE/ADD
-    respectively (Production fix 2026-09-03, claims_editing_reply)."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    project_id = await _seed_project_with_details(
-        f"ShareEditNLProj {tag}", shoot_dates="11 Nov 2028", budget="Rs 8,000/day",
-    )
-    t1 = await _seed_talent(f"ShareEditNLT1 {tag}", phone="917000700080")
-    t2 = await _seed_talent(f"ShareEditNLT2 {tag}", phone="917000700081")
-    await _seed_pipeline_row(project_id, t1, "ask_to_test")
-    await _seed_pipeline_row(project_id, t2, "shortlisted")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for ShareEditNLProj {tag} with ShareEditNLT1 {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r.handled, r.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="2",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "EDITING SHARE" in r2.reply, r2.reply
-
-        r3 = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share it with ShareEditNLT1 {tag} and ShareEditNLT2 {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r3.handled, r3.reply
-        assert "You are about to SHARE:" in r3.reply, r3.reply
-        assert f"ShareEditNLT1 {tag}" in r3.reply and f"ShareEditNLT2 {tag}" in r3.reply, r3.reply
-
-        r4 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="2",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "EDITING SHARE" in r4.reply, r4.reply
-
-        r5 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="Remove ShareEditNLT2",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r5.handled, r5.reply
-        assert f"1. ShareEditNLT1 {tag}" in r5.reply, r5.reply
-        assert f"ShareEditNLT2 {tag}" not in r5.reply, r5.reply
-        assert "Recipients (1):" in r5.reply, r5.reply
-    finally:
-        await _cleanup_jobs_for_talents([t1, t2])
-        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2])
-        await _restore_share_config(original)
-
-
-async def test_share_no_stale_context_after_prior_share():
-    """Part 16 (explicitly required to be tested): a prior "Share ... for
-    ProjectA with TalentX" must never leak its project/recipient into a
-    brand-new, unrelated SHARE command."""
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    p1 = await _seed_project_with_details(f"ShareStaleA {tag}", shoot_dates="12 Dec 2028", budget="Rs 9/day")
-    p2 = await _seed_project_with_details(f"ShareStaleB {tag}", shoot_dates="13 Jan 2029", budget="Rs 10/day")
-    t1 = await _seed_talent(f"ShareStaleT1 {tag}", phone="917000700090")
-    t2 = await _seed_talent(f"ShareStaleT2 {tag}", phone="917000700091")
-    await _seed_pipeline_row(p1, t1, "ask_to_test")
-    await _seed_pipeline_row(p2, t2, "ask_to_test")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for ShareStaleA {tag} with ShareStaleT1 {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r.handled, r.reply
-        assert f"ShareStaleA {tag}" in r.reply, r.reply
-
-        r_cancel = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="3",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "CANCELLED" in r_cancel.reply, r_cancel.reply
-
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"Share Casting Call for ShareStaleB {tag} with ShareStaleT2 {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert r2.handled, r2.reply
-        assert f"ShareStaleB {tag}" in r2.reply, r2.reply
-        assert f"ShareStaleA {tag}" not in r2.reply, r2.reply
-        assert f"ShareStaleT1 {tag}" not in r2.reply, r2.reply
-        assert f"1. ShareStaleT2 {tag}" in r2.reply, r2.reply
-    finally:
-        await _cleanup(phone, project_ids=[p1, p2], talent_ids=[t1, t2])
-        await _restore_share_config(original)
+# ---------------------------------------------------------------------------
+# 2026-09-27: test_share_edit_natural_language_talent_and_add_talent
+# (edit-flow, same removed-by-design reasoning as the block above) and
+# test_share_no_stale_context_after_prior_share (relied on cancelling a
+# pending confirmation that no longer exists) removed — both scenarios
+# are now covered by test_share_no_stale_confirmation_state_between_
+# unrelated_shares above, adapted for the new no-confirmation model.
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -8020,11 +7689,12 @@ async def test_share_routing_2_and_3_whatsapp_agent_multi_project_no_old_error()
         )
         assert r.handled, r.reply
         assert "None of the named talent" not in r.reply, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert f"RouteHinge {tag}" in r.reply, r.reply
         assert f"RouteLoreal {tag}" in r.reply, r.reply
-        assert "Total recipients:\n2" in r.reply, r.reply
+        assert "2 WhatsApp messages queued." in r.reply, r.reply
     finally:
+        await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[p1, p2], talent_ids=[talent_id])
         await _restore_share_config(original)
 
@@ -8140,7 +7810,7 @@ async def test_ss_1_share_casting_call_still_share():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
@@ -8163,7 +7833,7 @@ async def test_ss_2_send_the_casting_call_routes_to_share():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
@@ -8188,7 +7858,7 @@ async def test_ss_3_share_the_template_routes_to_share():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert "Casting Call" in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
@@ -8211,7 +7881,7 @@ async def test_ss_4_send_the_template_routes_to_share():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert "Casting Call" in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
@@ -8234,7 +7904,7 @@ async def test_ss_5_share_custom_message_routes_to_share():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert "Custom message" in r.reply, r.reply
     finally:
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
@@ -8303,16 +7973,16 @@ async def test_ss_9_natural_variations_route_correctly():
             text=f"send casting call for SSProj9 {tag} with SSTalent9 {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "You are about to SHARE:" in r.reply, r.reply
-        r = await handle_inbound_message(group_name=group, sender_phone=phone, text="3", sender_name="Raj", sender_is_group_member=True)
+        assert "Shared." in r.reply, r.reply
 
         r2 = await handle_inbound_message(
             group_name=group, sender_phone=phone,
             text=f"send {tag} audition video to raj",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "You are about to SHARE:" not in r2.reply, r2.reply
+        assert "Shared." not in r2.reply, r2.reply
     finally:
+        await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
 
@@ -8418,8 +8088,9 @@ async def test_consolidation_3_scouting_agent_share():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
     finally:
+        await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
 
@@ -8581,8 +8252,9 @@ async def test_consolidation_10_context_isolation_across_groups():
             text=f"Share the casting call for ConsProj10 {tag} with ConsTalent10 {tag}",
             sender_name="Raj", sender_is_group_member=True,
         )
-        assert "You are about to SHARE:" in r3.reply, r3.reply
+        assert "Shared." in r3.reply, r3.reply
     finally:
+        await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(new_original)
 
@@ -8614,8 +8286,9 @@ async def test_1_standalone_share_still_works_after_compound_actions():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
     finally:
+        await _cleanup_jobs_for_talents([talent_id])
         await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
         await _restore_share_config(original)
 
@@ -8987,47 +8660,10 @@ async def test_guided_2_move_edit_response_is_contextual():
         await _restore_share_config(original)
 
 
-async def test_guided_3_share_edit_response_shows_resolved_template():
-    group = f"Test Casting {uuid.uuid4().hex[:6]}"
-    original = await _use_share_test_config(group)
-    phone = _phone()
-    tag = uuid.uuid4().hex[:6]
-    project_id = await _seed_project_with_details(
-        f"GuidedShareProj {tag}", shoot_dates="1 Jan 2029", budget="Rs 1/day",
-    )
-    talent_id = await _seed_talent(f"GuidedShareTalent {tag}", phone="917000700141")
-    await _seed_pipeline_row(project_id, talent_id, "ask_to_test")
-    try:
-        r = await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"share casting call for GuidedShareProj {tag} to GuidedShareTalent {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "You are about to SHARE:" in r.reply, r.reply
-
-        edit = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="2",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "EDITING SHARE" in edit.reply, edit.reply
-        assert f"GuidedShareTalent {tag}" in edit.reply, edit.reply
-        # The RESOLVED template name, not just the "casting call" hint text.
-        assert "Casting Call" in edit.reply, edit.reply
-        assert "Nothing will be sent until you confirm" in edit.reply, edit.reply
-
-        await handle_inbound_message(
-            group_name=group, sender_phone=phone,
-            text=f"share casting call for GuidedShareProj {tag} to GuidedShareTalent {tag}",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        cancel = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="3",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "CANCELLED" in cancel.reply, cancel.reply
-    finally:
-        await _cleanup(phone, project_ids=[project_id], talent_ids=[talent_id])
-        await _restore_share_config(original)
+# 2026-09-27: test_guided_3_share_edit_response_shows_resolved_template
+# removed — same edit-flow/cancel reasoning as the earlier block; there
+# is no longer a pending SHARE preview to open "2" (Edit) on or "3"
+# (Cancel) out of.
 
 
 async def test_guided_4_compound_plan_edit_response_shows_step_selector():
@@ -9790,16 +9426,12 @@ async def test_and_in_project_name_standalone_share_stays_one_project():
             sender_name="Raj", sender_is_group_member=True,
         )
         assert r.handled, r.reply
-        assert "You are about to SHARE:" in r.reply, r.reply
+        assert "Shared." in r.reply, r.reply
         assert f"{brand_name}, {brand_name}" not in r.reply, r.reply
-        assert "Recipients (1):" in r.reply, r.reply
-        assert f"1. AndShareTalent {tag} — Phone Number" in r.reply, r.reply
+        assert f"{brand_name}\n{brand_name}" not in r.reply, r.reply
+        assert f"AndShareTalent {tag} — sent" in r.reply, r.reply
+        assert "1 WhatsApp message queued." in r.reply, r.reply
 
-        r2 = await handle_inbound_message(
-            group_name=group, sender_phone=phone, text="1",
-            sender_name="Raj", sender_is_group_member=True,
-        )
-        assert "1 WhatsApp message queued." in r2.reply, r2.reply
         jobs = await db.whatsapp_jobs.find({"talent_id": talent_id}).to_list(10)
         assert len(jobs) == 1, jobs
     finally:

@@ -6175,6 +6175,13 @@ class _SharePairCheck:
     project_id: str
     project_label: str
     in_pipeline: bool
+    # Current casting_pipeline.stage for this pair, None when not
+    # in_pipeline. Added 2026-09-27 for the automatic SHARE workflow's own
+    # "already at another stage -> move to Follow Up" rule — the ONLY
+    # consumer of this field; every other existing caller of
+    # _share_pipeline_matrix (the interactive PIPELINE CHECK gate) never
+    # reads it, so this is purely additive.
+    stage: Optional[str] = None
 
 
 async def _share_pipeline_matrix(resolved: "_ShareResolution") -> List[_SharePairCheck]:
@@ -6196,11 +6203,11 @@ async def _share_pipeline_matrix(resolved: "_ShareResolution") -> List[_SharePai
     for pid, plabel in zip(resolved.project_ids, resolved.project_labels):
         rows = await db.casting_pipeline.find(
             {"project_id": pid, "talent_id": {"$in": resolved.talent_ids}},
-            {"_id": 0, "talent_id": 1},
+            {"_id": 0, "talent_id": 1, "stage": 1},
         ).to_list(len(resolved.talent_ids))
-        existing_ids = {r["talent_id"] for r in rows}
+        stage_by_id = {r["talent_id"]: r.get("stage") for r in rows}
         for tid, tlabel in zip(resolved.talent_ids, resolved.talent_labels):
-            out.append(_SharePairCheck(tid, tlabel, pid, plabel, tid in existing_ids))
+            out.append(_SharePairCheck(tid, tlabel, pid, plabel, tid in stage_by_id, stage_by_id.get(tid)))
     return out
 
 
@@ -6648,33 +6655,88 @@ async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
 
 
 async def _share_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
-    if not collected.get(AUTO_CONFIRM_FIELD.key):
-        return None
+    """2026-09-27 business rule: a clear, unambiguous SHARE now executes
+    the complete ADD (if needed) -> MOVE(Follow Up) -> SHARE workflow
+    immediately, with NO confirmation card and no "reply 1" gate. This is
+    now unconditional for every resolvable SHARE (not gated on a trailing
+    "and confirm" — removing that `AUTO_CONFIRM_FIELD` check below is the
+    one change that both enables the new default and makes "and confirm"
+    inert trailing text, same as any other already-stripped filler word;
+    see nlu.strip_and_confirm).
+
+    Every existing safety valve is untouched: ambiguous talent/project/
+    template, or a talent/project genuinely missing, still fails
+    `_resolve_share` (`resolved.ok is False`) and falls through to the
+    normal disambiguation/clarification flow below, exactly as before.
+    Only a FULLY resolved SHARE ever reaches the Add+Move+Share below.
+
+    The Add+Move step reuses the EXACT SAME add_talents_to_pipeline/
+    bulk_move_by_talent_ids primitives ADD_INTENT/MOVE_INTENT's own
+    executors call — the same primitives the old interactive PIPELINE
+    CHECK "1" reply used. That interactive gate
+    (_format_share_pipeline_check / _share_handle_confirming_reply) is
+    deliberately left in place, unreachable for a resolvable SHARE now
+    that this function never bails out to it — a safety net, never a
+    second/duplicate implementation.
+    """
     # Send/Share Semantic Router — a "send"/"instagram"/"ambiguous" route
-    # is never auto-confirmable here: it needs its own hand-off/
+    # is never auto-executed here: it needs its own hand-off/
     # clarification, always via the normal confirmation flow
-    # (_build_share_confirmation). A trailing "and confirm" on a message
-    # that ends up routed to SEND/Instagram is not preserved through the
-    # hand-off (a minor, acceptable gap — worst case one extra
-    # confirmation prompt, never a wrong action).
+    # (_build_share_confirmation).
     if collected.get(SHARE_ROUTE_FIELD.key) in ("instagram", "send", "ambiguous"):
         return None
     resolved = await _resolve_share(collected)
     if not resolved.ok:
-        # Still ambiguous/erroring — fall through to the normal
-        # confirmation flow; _auto_confirm persists in `collected` across
-        # the "editing"-step continuation, so this check re-fires and
-        # auto-executes once the ambiguity resolves, same as ADD/MOVE.
+        # Ambiguous or missing talent/project/template — the existing
+        # disambiguation/clarification flow is untouched; `collected`
+        # persists across the "editing"-step continuation, so this check
+        # re-fires and auto-executes once the ambiguity/missing field is
+        # resolved, same as ADD/MOVE.
         return None
-    # "and confirm" never skips the Part 10 pipeline-membership gate —
-    # that gate is a real, unresolved blocker, not an approval step to
-    # bypass, so an auto-confirming SHARE that hits it still falls
-    # through to the normal confirmation flow, exactly like an
-    # unresolved ambiguity does above.
     matrix = await _share_pipeline_matrix(resolved)
-    if any(not row.in_pipeline for row in matrix):
-        return None
-    return await _share_executor(collected, ctx)
+    # Part 4 business rule (2026-09-27), applied per resolved pair:
+    #   not in pipeline           -> add, then move to Follow Up
+    #   in pipeline, other stage  -> move to Follow Up (no duplicate add)
+    #   already at Follow Up      -> no mutation at all (no duplicate move)
+    missing = [row for row in matrix if not row.in_pipeline]
+    stage_mismatch = [
+        row for row in matrix
+        if row.in_pipeline and (_normalise_stage(row.stage) or row.stage) != "follow_up"
+    ]
+    action_line = ""
+    if missing or stage_mismatch:
+        add_by_project: Dict[str, List[str]] = {}
+        move_by_project: Dict[str, List[str]] = {}
+        for row in missing:
+            add_by_project.setdefault(row.project_id, []).append(row.talent_id)
+            move_by_project.setdefault(row.project_id, []).append(row.talent_id)
+        for row in stage_mismatch:
+            move_by_project.setdefault(row.project_id, []).append(row.talent_id)
+        added_total = 0
+        moved_total = 0
+        for pid, tids in add_by_project.items():
+            # Idempotent by construction — `tids` here are ONLY the pairs
+            # the fresh matrix above just confirmed are missing, so this
+            # can never touch (let alone demote the stage of) an
+            # already-existing pipeline row for a DIFFERENT pair.
+            add_result = await add_talents_to_pipeline(pid, tids, "ask_to_test")
+            added_total += add_result.get("added", 0)
+        for pid, tids in move_by_project.items():
+            move_result = await bulk_move_by_talent_ids(pid, tids, "follow_up")
+            moved_total += move_result.get("moved", 0)
+        if added_total:
+            action_line = (
+                f"Added {added_total} talent{'' if added_total == 1 else 's'} to the "
+                f"pipeline and moved {moved_total} to Follow Up.\n\n"
+            )
+        else:
+            action_line = (
+                f"Moved {moved_total} talent{'' if moved_total == 1 else 's'} to Follow Up.\n\n"
+            )
+    result = await _share_executor(collected, ctx)
+    if action_line:
+        return ExecResult(ok=result.ok, message=action_line + result.message, data=result.data, error=result.error)
+    return result
 
 
 async def _build_share_edit_prompt(collected: dict, ctx: ExecContext) -> str:

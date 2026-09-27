@@ -78,7 +78,7 @@ from core import db
 from routers import production_desk as pd
 from routers.marketing import insert_client_doc
 
-from agents import session_context
+from agents import session_context, disambiguation, conversation
 from agents.models import AgentDefinition, ExecContext, ExecResult, FieldSpec, IntentDefinition, ValidationResult
 from agents.registry import register_agent
 from agents.modules import casting_pipeline_nlu as nlu
@@ -265,6 +265,31 @@ def _ambiguous_project_message(candidates: List[Dict[str, str]]) -> str:
     lines += [f"{i}. {c['label']}" for i, c in enumerate(candidates, start=1)]
     lines.append("\nPlease resend your command with the project name exactly as shown above.")
     return "\n".join(lines)
+
+
+async def _disambiguate_project(
+    candidates: List[Dict[str, str]], *, intent_id: str, field_key: str, collected: dict, ctx: ExecContext,
+) -> ExecResult:
+    """Resumable-disambiguation entry point (2026-09-27) — replaces the old
+    dead-end `_ambiguous_project_message` return for the handful of
+    call sites wired up below. Stores the pending pick via the SAME shared
+    engine Scouting's recipient disambiguation already uses
+    (agents/disambiguation.py + dispatcher.py's _advance_disambiguation),
+    so a bare "1"/"2"/name reply resumes THIS intent with `collected[field_key]`
+    substituted for the exact picked label — the caller's own try_auto_execute
+    (re-run from build_confirmation once resolved state is missing, see e.g.
+    _talent_status_build_confirmation) then re-resolves everything else
+    (talent/crew/kickback lookups) from that now-exact project name, exactly
+    as if it had been unambiguous originally. `needs_clarification=True` is
+    the signal dispatcher.py's try_auto_execute call sites use to keep this
+    conversation alive instead of clearing it (see agents/dispatcher.py)."""
+    cands = [disambiguation.Candidate(id=c["id"], label=c["label"]) for c in candidates]
+    await disambiguation.start(
+        agent_id=ctx.agent_id, phone=ctx.sender_phone, entity_type="project",
+        candidates=cands, intent_id=intent_id, field_key=field_key, collected=dict(collected),
+    )
+    await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="disambiguating")
+    return ExecResult(ok=False, needs_clarification=True, message=disambiguation.format_prompt("project", cands))
 
 
 # ---------------------------------------------------------------------------
@@ -1257,11 +1282,13 @@ def _checklist_extract_fields(text: str) -> Dict[str, str]:
     return {"project": _extract_trailing_project(text)}
 
 
-def _make_checklist_try_auto_execute(field_name: str):
+def _make_checklist_try_auto_execute(field_name: str, intent_id: str):
     async def _hook(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
         resolution = await _resolve_project(collected.get("project", ""), ctx)
         if resolution.ambiguous:
-            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+            return await _disambiguate_project(
+                resolution.ambiguous, intent_id=intent_id, field_key="project", collected=collected, ctx=ctx,
+            )
         if resolution.error:
             return ExecResult(ok=False, message=resolution.error)
         collected["_resolved_project_id"] = resolution.project["id"]
@@ -1301,7 +1328,7 @@ MARK_INVOICE_RAISED_INTENT = IntentDefinition(
     triggers=["mark invoice raised", "invoice raised"],
     fields=[_project_field_spec()],
     extract_fields=_checklist_extract_fields,
-    try_auto_execute=_make_checklist_try_auto_execute("invoice_raised"),
+    try_auto_execute=_make_checklist_try_auto_execute("invoice_raised", "management.mark_invoice_raised"),
     build_confirmation=_make_checklist_build_confirmation("Mark invoice raised for"),
     executor=_make_checklist_executor("invoice_raised", "Invoice raised"),
 )
@@ -1311,7 +1338,7 @@ MARK_INVOICE_SENT_INTENT = IntentDefinition(
     triggers=["mark invoice sent", "invoice sent"],
     fields=[_project_field_spec()],
     extract_fields=_checklist_extract_fields,
-    try_auto_execute=_make_checklist_try_auto_execute("invoice_sent"),
+    try_auto_execute=_make_checklist_try_auto_execute("invoice_sent", "management.mark_invoice_sent"),
     build_confirmation=_make_checklist_build_confirmation("Mark invoice sent for"),
     executor=_make_checklist_executor("invoice_sent", "Invoice sent"),
 )
@@ -1321,7 +1348,7 @@ MARK_PAYMENT_IN_INTENT = IntentDefinition(
     triggers=["mark client payment received", "mark client payment", "mark payment received", "mark payment in"],
     fields=[_project_field_spec()],
     extract_fields=_checklist_extract_fields,
-    try_auto_execute=_make_checklist_try_auto_execute("payment_in_received"),
+    try_auto_execute=_make_checklist_try_auto_execute("payment_in_received", "management.mark_payment_in"),
     build_confirmation=_make_checklist_build_confirmation("Mark client payment received for"),
     executor=_make_checklist_executor("payment_in_received", "Client payment marked received"),
 )
@@ -1331,7 +1358,7 @@ MARK_GST_RECEIVED_INTENT = IntentDefinition(
     triggers=["mark gst received", "mark gst component received", "mark gst"],
     fields=[_project_field_spec()],
     extract_fields=_checklist_extract_fields,
-    try_auto_execute=_make_checklist_try_auto_execute("gst_component_received"),
+    try_auto_execute=_make_checklist_try_auto_execute("gst_component_received", "management.mark_gst_received"),
     build_confirmation=_make_checklist_build_confirmation("Mark GST component received for"),
     executor=_make_checklist_executor("gst_component_received", "GST component marked received"),
 )
@@ -1413,7 +1440,10 @@ async def _resolve_talent_for_mark(collected: dict, ctx: ExecContext) -> Optiona
     if project_q:
         resolution = await _resolve_project(project_q, ctx)
         if resolution.ambiguous:
-            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+            return await _disambiguate_project(
+                resolution.ambiguous, intent_id="management.mark_talent_status",
+                field_key="project", collected=collected, ctx=ctx,
+            )
         if resolution.error:
             return ExecResult(ok=False, message=resolution.error)
         project = resolution.project
@@ -1444,7 +1474,10 @@ async def _talent_status_try_auto_execute(collected: dict, ctx: ExecContext) -> 
     if collected.get("_kind") == "lifecycle":
         resolution = await _resolve_project(collected.get("project", ""), ctx)
         if resolution.ambiguous:
-            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+            return await _disambiguate_project(
+                resolution.ambiguous, intent_id="management.mark_talent_status",
+                field_key="project", collected=collected, ctx=ctx,
+            )
         if resolution.error:
             return ExecResult(ok=False, message=resolution.error)
         await _remember_project(ctx, resolution.project)
@@ -1494,7 +1527,31 @@ async def _talent_status_try_auto_execute(collected: dict, ctx: ExecContext) -> 
     return None
 
 
+async def _ensure_talent_status_resolved(collected: dict, ctx: ExecContext) -> Optional[ExecResult]:
+    """Resumable-disambiguation guard (2026-09-27): a "1"/name reply that
+    just resolved a previously-ambiguous project short-circuited
+    try_auto_execute BEFORE it ever set _resolved_project_id/
+    _resolved_talent_id — re-run it now (idempotent, read-only resolution
+    — never the real mutation). Called from BOTH build_confirmation (so the
+    card shows the real resolved state) AND the executor (build_confirmation's
+    own mutation of `collected` is never persisted back to the conversation
+    record — dispatcher.py only ever writes `collected` BEFORE calling it —
+    so the executor, invoked on a LATER turn with the DB's own unmutated
+    copy, needs this same guard independently, not a rerun of the same
+    Python dict)."""
+    kind = collected.get("_kind")
+    if kind == "lifecycle" and not collected.get("_resolved_project_id"):
+        return await _talent_status_try_auto_execute(collected, ctx)
+    if kind not in ("lifecycle", "task_action") and not collected.get("_resolved_talent_id"):
+        return await _talent_status_try_auto_execute(collected, ctx)
+    return None
+
+
 async def _talent_status_build_confirmation(collected: dict, ctx: ExecContext) -> str:
+    err = await _ensure_talent_status_resolved(collected, ctx)
+    if err is not None:
+        return err.message
+
     if collected.get("_kind") == "lifecycle":
         status_label = collected.get("lifecycle_value", "").replace("_", " ")
         return f"Mark {collected.get('_resolved_project_label')} as {status_label}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
@@ -1513,6 +1570,10 @@ async def _talent_status_build_confirmation(collected: dict, ctx: ExecContext) -
 
 
 async def _talent_status_executor(collected: dict, ctx: ExecContext) -> ExecResult:
+    early_err = await _ensure_talent_status_resolved(collected, ctx)
+    if early_err is not None:
+        return early_err
+
     if collected.get("_kind") == "lifecycle":
         pid = collected.get("_resolved_project_id")
         status = collected.get("lifecycle_value")
@@ -1938,7 +1999,9 @@ async def _add_try_auto_execute(collected: dict, ctx: ExecContext) -> Optional[E
 
         resolution = await _resolve_project(collected.get("project", ""), ctx)
         if resolution.ambiguous:
-            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+            return await _disambiguate_project(
+                resolution.ambiguous, intent_id="management.add", field_key="project", collected=collected, ctx=ctx,
+            )
         if resolution.error:
             return ExecResult(ok=False, message=resolution.error)
 
@@ -2006,6 +2069,13 @@ async def _add_build_confirmation(collected: dict, ctx: ExecContext) -> str:
         return f"Remove {collected.get('_crew_name')} ({collected.get('_crew_old_role') or 'crew'}) from {collected.get('_resolved_project_label')}'s crew?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
 
     if collected.get("_kind") == "crew":
+        # Resumable-disambiguation guard (2026-09-27): see
+        # _talent_status_build_confirmation for why this re-run is safe —
+        # try_auto_execute never performs the real write, only resolution.
+        if not collected.get("_resolved_project_id"):
+            err = await _add_try_auto_execute(collected, ctx)
+            if err is not None:
+                return err.message
         role = _match_crew_role(collected.get("role", ""))
         name = collected.get("_client_name") or collected.get("name")
         project_label = collected.get("_resolved_project_label", "")
@@ -2048,6 +2118,14 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
         return ExecResult(ok=True, message=f"✓ Removed {collected.get('_crew_name')} from the crew.")
 
     if collected.get("_kind") == "crew":
+        # Resumable-disambiguation guard (2026-09-27) — see
+        # _ensure_talent_status_resolved's docstring: build_confirmation's
+        # own re-resolution never persists, so this later turn needs its
+        # own independent re-run.
+        if not collected.get("_resolved_project_id"):
+            err = await _add_try_auto_execute(collected, ctx)
+            if err is not None:
+                return err
         pid = collected.get("_resolved_project_id")
         if not pid:
             return ExecResult(ok=False, message="Couldn't resolve the project — please resend the command.")
@@ -2208,7 +2286,10 @@ async def _add_task_try_auto_execute(collected: dict, ctx: ExecContext) -> Optio
     if collected.get("_kind") == "followup_redirect":
         resolution = await _resolve_project(collected.get("project_hint", ""), ctx)
         if resolution.ambiguous:
-            return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+            return await _disambiguate_project(
+                resolution.ambiguous, intent_id="management.add_task",
+                field_key="project_hint", collected=collected, ctx=ctx,
+            )
         if resolution.error:
             return ExecResult(ok=False, message=resolution.error)
         dt = _parse_absolute_datetime(collected.get("_followup_date_raw", ""))
@@ -2240,7 +2321,10 @@ async def _add_task_try_auto_execute(collected: dict, ctx: ExecContext) -> Optio
         else:
             resolution = await _resolve_project(project_hint, ctx)
             if resolution.ambiguous:
-                return ExecResult(ok=False, message=_ambiguous_project_message(resolution.ambiguous))
+                return await _disambiguate_project(
+                    resolution.ambiguous, intent_id="management.add_task",
+                    field_key="project_hint", collected=collected, ctx=ctx,
+                )
             if resolution.project:
                 project = resolution.project
             # A resolution error here is NOT fatal — "follow up" itself may
@@ -2260,6 +2344,21 @@ async def _add_task_try_auto_execute(collected: dict, ctx: ExecContext) -> Optio
 
 
 async def _add_task_build_confirmation(collected: dict, ctx: ExecContext) -> str:
+    # Resumable-disambiguation guard (2026-09-27): see
+    # _talent_status_build_confirmation for why this re-run is safe.
+    if collected.get("_kind") == "followup_redirect" and not collected.get("_resolved_project_id"):
+        err = await _add_task_try_auto_execute(collected, ctx)
+        if err is not None:
+            return err.message
+    elif (
+        collected.get("_kind") != "followup_redirect"
+        and collected.get("project_hint")
+        and "_resolved_project_id" not in collected
+    ):
+        err = await _add_task_try_auto_execute(collected, ctx)
+        if err is not None:
+            return err.message
+
     if collected.get("_kind") == "followup_redirect":
         return f"Set next follow-up for {collected.get('_resolved_project_label')} to {_format_due(collected.get('_followup_date'))}?\n\nReply 1 to confirm, 2 to edit, 3 to cancel."
     title = collected.get("title")
@@ -2272,6 +2371,16 @@ async def _add_task_build_confirmation(collected: dict, ctx: ExecContext) -> str
 
 async def _add_task_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     from routers import workflow as workflow_router
+
+    # Resumable-disambiguation guard (2026-09-27) — see
+    # _ensure_talent_status_resolved's docstring for why the executor needs
+    # its OWN re-run rather than trusting build_confirmation's mutation of
+    # `collected`: that mutation is never persisted back to the conversation
+    # record before this later turn re-reads it fresh from the DB.
+    if not collected.get("_resolved_project_id"):
+        err = await _add_task_try_auto_execute(collected, ctx)
+        if err is not None:
+            return err
 
     if collected.get("_kind") == "followup_redirect":
         pid = collected.get("_resolved_project_id")

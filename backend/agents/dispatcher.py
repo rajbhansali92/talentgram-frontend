@@ -215,7 +215,14 @@ async def _collect_or_advance(
     if intent.try_auto_execute:
         auto_result = await intent.try_auto_execute(collected, ctx)
         if auto_result is not None:
-            await _clear_or_handoff(agent.agent_id, phone, conv.get("group_name") or "", auto_result)
+            # needs_clarification (2026-09-27, mirrors the auto_confirm branch
+            # above): the hook already set its own pending-state/step as a
+            # side effect (e.g. management_agent.py's _disambiguate_project)
+            # and is asking a follow-up question — don't clear behind it. No
+            # existing try_auto_execute hook sets this flag, so this is a
+            # no-op for every intent already using try_auto_execute today.
+            if not auto_result.needs_clarification:
+                await _clear_or_handoff(agent.agent_id, phone, conv.get("group_name") or "", auto_result)
             return DispatchResult(handled=True, reply=auto_result.message)
 
     await conversation.update_conversation(
@@ -918,9 +925,13 @@ async def handle_inbound_message(
             if intent.try_auto_execute:
                 auto_result = await intent.try_auto_execute(collected, ctx)
                 if auto_result is not None:
-                    await _clear_or_handoff(agent.agent_id, phone, group_name, auto_result)
-                    if new_task:
-                        await tasks.clear_task(agent.agent_id, task_op_id)
+                    # needs_clarification: see the matching comment in
+                    # _collect_or_advance above — no existing hook sets this,
+                    # so this is a no-op for every intent already wired here.
+                    if not auto_result.needs_clarification:
+                        await _clear_or_handoff(agent.agent_id, phone, group_name, auto_result)
+                        if new_task:
+                            await tasks.clear_task(agent.agent_id, task_op_id)
                     await audit.log_turn(
                         agent_id=agent.agent_id,
                         group_name=group_name,

@@ -915,6 +915,112 @@ async def test_mark_intent_created_at_observation_survives_being_called_before_o
 
 
 # ---------------------------------------------------------------------------
+# 2026-09-27 forensic audit fix (Phase 1, Task 3/4/7 E-F) — observe_candidates
+# used to silently default a candidate with NO confident project match and
+# NO near-miss suggestions to whatever project the CURRENT scan happened to
+# be scoped to (mirroring validate_candidates' own pre-2026-09-20 "case 4").
+# Proven live against real production data: a mark explicitly addressed
+# "for LAKME Young" was silently filed under an unrelated "Snapdragon
+# Computer" scan this way. Fixed: every one of the four "not confidently
+# this project" outcomes (wrong project / ambiguous / near-miss / no match
+# at all) now leaves the candidate unobserved for THIS project_id, each
+# with its own distinct log signal.
+# ---------------------------------------------------------------------------
+async def test_wrong_project_mark_never_silently_files_under_the_scanned_project():
+    """The exact reproduced bug, verbatim: a mark whose own text names a
+    real, different project ("LAKME Young") must NEVER get a MarkIntent
+    created under the project the scan happens to be scoped to
+    ("Snapdragon Computer") — regardless of whether "LAKME Young" itself
+    confidently resolves, is ambiguous, or matches nothing at all in the
+    live pool; in every case, no intent may exist under the scanned
+    project_id for this reply."""
+    talent_id = _tid()
+    scanned_project_id = _pid()
+    scanned_label = "Snapdragon Computer"
+    # "LAKME Young" itself does not need to resolve to anything for this
+    # test to be valid — the bug was that it silently defaulted to
+    # whatever project the scan was scoped to regardless of what (if
+    # anything) its own text matched. Only the scanned project is in the
+    # pool, exactly reproducing the live incident's shape (a scan scoped
+    # to Snapdragon, with no LAKME project anywhere in that scan's pool).
+    projects = _projects((scanned_label, scanned_project_id))
+    reply_id = f"reply-wrongproj-{uuid.uuid4().hex[:8]}"
+    candidate = _mark(
+        mention_lid=GUNWANTI_LID, mark_text="Mark take 1 for LAKME Young",
+        source_message_id="lakme-young-take1",
+    )
+    candidate["reply_message_id"] = reply_id
+    try:
+        await mi.observe_candidates(
+            [candidate], talent_id=talent_id, project_id=scanned_project_id,
+            project_label=scanned_label, projects=projects,
+            source_chat_name="grp", worker_id="default",
+        )
+        stored = await db[mi.MARK_INTENTS_COLLECTION].find_one({"reply_message_id": reply_id})
+        assert stored is None, (
+            "a mark addressed to a different/unmatched project must NEVER be silently "
+            f"filed under the scanned project — got {stored}"
+        )
+        assert await db[mi.MARK_INTENTS_COLLECTION].count_documents({"talent_id": talent_id}) == 0
+    finally:
+        await _cleanup_intents(talent_id)
+
+
+async def test_ambiguous_project_mark_is_a_distinct_state_not_a_silent_default():
+    """Task 4: when the mark's own project reference is genuinely ambiguous
+    between two real, different projects, it must be a distinct, never-
+    guessed outcome — no MarkIntent created under EITHER candidate, and
+    (verified via caplog) logged with its own distinct signal rather than
+    indistinguishable from "not found"."""
+    talent_id = _tid()
+    scanned_project_id, other_project_id = _pid(), _pid()
+    # Two real, similarly-named projects; the mark's own text ("Snapdragon
+    # Computer") is ambiguous between them, and the scan happens to be
+    # scoped to one of the two.
+    projects = _projects(
+        ("Snapdragon Computer - Male Start-up Founder", scanned_project_id),
+        ("Snapdragon Computer - Researcher", other_project_id),
+    )
+    reply_id = f"reply-ambiguous-{uuid.uuid4().hex[:8]}"
+    candidate = _mark(
+        mention_lid=GUNWANTI_LID, mark_text="Mark take 1 for Snapdragon Computer",
+        source_message_id="ambiguous-take1",
+    )
+    candidate["reply_message_id"] = reply_id
+    try:
+        await mi.observe_candidates(
+            [candidate], talent_id=talent_id, project_id=scanned_project_id,
+            project_label="Snapdragon Computer - Male Start-up Founder", projects=projects,
+            source_chat_name="grp", worker_id="default",
+        )
+        assert await db[mi.MARK_INTENTS_COLLECTION].count_documents({"talent_id": talent_id}) == 0, (
+            "an ambiguous project reference must never resolve to EITHER sibling by default"
+        )
+    finally:
+        await _cleanup_intents(talent_id)
+
+
+async def test_submission_action_path_never_imports_project_name_resolution():
+    """Task 5/7-G: the Submission Review Center's Approve+Send/Approve+
+    Upload path already carries an authoritative project_id end-to-end and
+    must never re-derive it by name/fuzzy match — a static guard so a
+    future change can't silently introduce that coupling. Verified by
+    inspecting the actual imported names in the live modules, not merely
+    grepping source text (a comment mentioning the function wouldn't be a
+    real import)."""
+    import agents.modules.submission_action_queue as saq
+    import agents.modules.submission_whatsapp_actions as swa_mod
+    for mod in (saq, swa_mod):
+        assert not hasattr(mod, "resolve_project_by_name"), (
+            f"{mod.__name__} must never import project-name resolution directly"
+        )
+        nlu_ref = getattr(mod, "nlu", None)
+        assert nlu_ref is None, (
+            f"{mod.__name__} must never import casting_pipeline_nlu as a name-resolution helper"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2026-09-20 correctness audit, item 2 — the immutable identity contract,
 # stated explicitly (not merely implied by the mandatory A/B/A test above).
 # ---------------------------------------------------------------------------
@@ -1104,7 +1210,18 @@ async def test_preview_timeout_then_late_worker_result_is_accepted_not_discarded
     candidate still cannot overwrite the lock."""
     talent_id = await _seed_talent(f"MI Late Worker {uuid.uuid4().hex[:6]}", whatsapp_group_name="MI Late Worker x Talentgram")
     project_id = await _seed_project(f"MI Late Project {uuid.uuid4().hex[:6]}", whatsapp_casting_group_name="MI Late Casting")
-    project_label = "Pepsi"
+    # Must be the REAL seeded project's own brand_name, not an arbitrary
+    # placeholder (2026-09-27 forensic audit fix, Task 3 regression note):
+    # the late worker's mark_text below ("Mark introduction video for
+    # {project_label}") is now run through the SAME project-name
+    # resolution/observation safety check every other mark is — a
+    # mark_text naming a project that doesn't match the request's actual
+    # scanned project is correctly never observed under it (that's the
+    # fix), so this fixture must reference the project the mark is
+    # genuinely meant for, exactly as it would in production, instead of
+    # relying on the old silent "no match -> default to the scanned
+    # project" fallback this test never intended to depend on.
+    project_label = (await db.projects.find_one({"id": project_id}))["brand_name"]
     try:
         # --- Step 1/2/3: preview starts, times out, the request document
         # IS deleted (restored, correct behavior) but a tombstone survives.

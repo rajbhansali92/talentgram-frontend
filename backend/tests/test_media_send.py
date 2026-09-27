@@ -33,6 +33,7 @@ from agents import modules as agent_modules  # noqa: E402
 from agents.dispatcher import handle_inbound_message  # noqa: E402
 from agents.models import ExecContext  # noqa: E402
 from agents.modules import casting_pipeline as cp  # noqa: E402
+from agents.modules import casting_pipeline_nlu as nlu  # noqa: E402
 from agents.modules import media_assignment as ma  # noqa: E402
 from agents.modules import media_send as ms  # noqa: E402
 from agents.modules import submission_action_queue as queue  # noqa: E402
@@ -4280,3 +4281,480 @@ def test_report_send_result_unverified_plus_genuine_failure_only_retries_the_rea
     assert "1/2 media sent" in report, report  # unverified item counts toward "sent", not "failed"
     assert "Introduction" in report, report
     assert "Audition Take 2" in report, report
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (2026-09-27 forensic audit fix) — regression tests 1-10 from the
+# Phase 2 implementation brief. 11 (Snapdragon sibling-family) and 12
+# (LAKME Young vs Snapdragon cross-project) are Phase 1 tests, already
+# covered by tests/test_project_matching_hotfix.py::
+# test_snapdragon_family_never_ties_all_siblings_at_one and
+# tests/test_mark_intent.py::
+# test_wrong_project_mark_never_silently_files_under_the_scanned_project
+# respectively — not duplicated here.
+# ---------------------------------------------------------------------------
+
+# --- 2A/2D: durable project disambiguation for SEND (tests 1-3) -----------
+
+async def test_send_ambiguous_project_offers_numbered_disambiguation_with_durable_id():
+    """Regression tests 1+2: SEND's own ambiguous-project branch offers
+    the same numbered-reply resume MOVE already has, encoding a durable
+    project_id (RESOLVED_PROJECT_MARKER) in each option's value — never
+    just the label."""
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(f"Snapdragon Computer Alpha {tag}")
+    p2 = await _seed_project(f"Snapdragon Computer Beta {tag}")
+    talent_id = await _seed_talent(f"Kushagre Dua {tag}", whatsapp_group_name=f"KD {tag} x Talentgram")
+    try:
+        target, err = await cp._resolve_send_target({
+            "talent_selector": f"Kushagre Dua {tag}", "project_query": f"Snapdragon Computer {tag}",
+        })
+        assert target is None
+        assert err is not None and err.error == "ambiguous_project", err
+        assert "found multiple matching projects" in err.message.lower(), err.message
+        disambiguation = (err.data or {}).get("disambiguation")
+        assert disambiguation is not None, "SEND must offer a numbered-disambiguation resume, not just an error"
+        assert disambiguation["kind"] == "project"
+        assert disambiguation["field_key"] == "project_query"
+        options = disambiguation["options"]
+        assert len(options) == 2
+        seen_ids = set()
+        for o in options:
+            assert o["value"].startswith(nlu.RESOLVED_PROJECT_MARKER), (
+                f"disambiguation option must encode a durable project_id, not just the label: {o}"
+            )
+            pid, _, label = o["value"][len(nlu.RESOLVED_PROJECT_MARKER):].partition("|")
+            assert pid in (p1, p2)
+            assert label == o["label"]
+            seen_ids.add(pid)
+        assert seen_ids == {p1, p2}
+    finally:
+        await _cleanup(talent_ids=[talent_id], project_ids=[p1, p2])
+
+
+async def test_send_disambiguation_pick_locks_project_id_never_re_derived_by_label():
+    """Regression test 3: once a project_id is picked, resolve_project_by_name
+    must resolve it directly by id — never re-deriving/switching the
+    project by name again, even against a completely different or empty
+    candidate pool (a later scan where the original project isn't even in
+    the list, or a confusingly-similar decoy project sharing the exact
+    same label) — proving the id, not the label, is authoritative."""
+    tag = uuid.uuid4().hex[:6]
+    p1 = await _seed_project(f"Snapdragon Computer Alpha {tag}")
+    p2 = await _seed_project(f"Snapdragon Computer Beta {tag}")
+    label = f"Snapdragon Computer Beta {tag}"
+    marker_value = f"{nlu.RESOLVED_PROJECT_MARKER}{p2}|{label}"
+    try:
+        # No candidate pool needed at all for the bypass.
+        m = nlu.resolve_project_by_name(marker_value, [])
+        assert m.project == {"id": p2, "label": label}
+
+        # A pool that doesn't contain p2 anymore, and DOES contain a
+        # confusingly-identical-LABEL decoy under a different id — must
+        # still resolve to the LOCKED id, never re-derive from the label
+        # text against whatever's currently in the pool.
+        decoy_pool = [{"id": "decoy-id", "label": label}]
+        m2 = nlu.resolve_project_by_name(marker_value, decoy_pool)
+        assert m2.project == {"id": p2, "label": label}
+        assert m2.project["id"] != "decoy-id"
+    finally:
+        await _cleanup(project_ids=[p1, p2])
+
+
+async def test_send_ambiguous_project_numbered_reply_resumes_end_to_end():
+    """Regression test 1 (end-to-end): a numbered reply resumes the
+    ORIGINAL SEND request through the real dispatcher/session-state
+    machinery — never requiring the full "Talent - Project" command
+    again — and the review proceeds using the picked project."""
+    from agents import session_context
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_test_config(group, agent_id="whatsapp-campaign-agent")
+    tag = uuid.uuid4().hex[:6]
+    email = f"disamb.{tag}@example.com"
+    p1 = await _seed_project(f"Snapdragon Computer Alpha {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    p2 = await _seed_project(f"Snapdragon Computer Beta {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(f"Kushagre Disamb {tag}", whatsapp_group_name=f"KD {tag} x Talentgram", email=email)
+    submission_id = await _seed_submission(p2, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one(
+        {}, {"$set": {"name": "Gunwanti Talentgram", "phone": "+919321290688", "lid": GUNWANTI_LID}}, upsert=True,
+    )
+    phone = "917000600099"
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"send - Kushagre Disamb {tag} - Snapdragon Computer {tag}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "found multiple matching projects" in r.reply.lower(), r.reply
+        assert "1." in r.reply and "2." in r.reply, r.reply
+
+        session = await session_context.get_session("whatsapp-campaign-agent", phone)
+        pending = (session or {}).get("pending_disambiguation")
+        assert pending is not None and pending["kind"] == "project", session
+        options = pending["options"]
+        idx = next(i for i, o in enumerate(options, start=1) if f"{nlu.RESOLVED_PROJECT_MARKER}{p2}|" in o["value"])
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text=str(idx),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert "found multiple matching projects" not in r2.reply.lower(), r2.reply
+        assert "SEND FORM PREVIEW" in r2.reply, r2.reply
+
+        session_after = await session_context.get_session("whatsapp-campaign-agent", phone)
+        assert (session_after or {}).get("pending_disambiguation") is None
+    finally:
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[p1, p2], submission_ids=[submission_id])
+        await _restore_config(original, agent_id="whatsapp-campaign-agent")
+
+
+# --- 2C: ambiguity must not look like "no media" (test 7) -----------------
+
+async def test_preview_send_marks_ambiguity_distinct_from_no_media():
+    """Regression test 7: a mark whose project reference is itself
+    ambiguous must render as its own distinct state ("Marked... WAS
+    found... project reference could not be safely narrowed"), never as
+    a bare "no marked media found" — the exact confirmed bug from the
+    original forensic screenshot."""
+    outcome = ma.ValidationOutcome(
+        ok=False, assignments=[], unresolved=[], batch_failures=[], project_mismatch=[],
+        project_ambiguous=[{
+            "mark_text": "Mark take 1 for Snapdragon Computer",
+            "ambiguous_projects": [
+                {"id": "p1", "label": "Snapdragon Computer Alpha"},
+                {"id": "p2", "label": "Snapdragon Computer Beta"},
+            ],
+        }],
+    )
+
+    async def _fake_scan(**kwargs):
+        return outcome, None
+
+    original_scan = cp._scan_and_validate_multi_source
+    cp._scan_and_validate_multi_source = _fake_scan
+    try:
+        assignments, error = await cp._preview_send_marks(
+            talent_id="t1", talent_label="Talent", project_id="p1", project_label="Snapdragon Computer Alpha",
+            destination_group="Casting Group", sources=[("group", "Talent x Talentgram")],
+        )
+        assert assignments is None
+        assert error is not None
+        assert "no marked media" not in error.lower(), error
+        assert "was found" in error.lower(), error
+        assert "similarly-named" in error.lower() or "doesn't match" in error.lower(), error
+    finally:
+        cp._scan_and_validate_multi_source = original_scan
+
+
+# --- 2E: stale SEND preview gets revalidated (test 8) ----------------------
+
+async def test_send_stale_preview_gets_revalidated_before_dispatch():
+    """Regression test 8: a preview older than SEND_PREVIEW_CACHE_TTL_SEC
+    must be refreshed before dispatch, never silently sent as-is."""
+    from datetime import datetime, timedelta, timezone
+    tag = uuid.uuid4().hex[:6]
+    email = f"stale.{tag}@example.com"
+    project_id = await _seed_project(f"Stale Preview Project {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    talent_id = await _seed_talent(f"Stale Preview Talent {tag}", whatsapp_group_name=f"Stale {tag} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    await db[ma.IDENTITY_COLLECTION].update_one({}, {"$set": {"lid": GUNWANTI_LID}}, upsert=True)
+
+    stale_time = datetime.now(timezone.utc) - timedelta(seconds=ms.SEND_PREVIEW_CACHE_TTL_SEC + 60)
+    old_stale_assignment = [{
+        "mark_text": "STALE OLD DATA", "reply_message_id": "old-reply", "resolved_source_message_id": "OLD-MEDIA",
+        "media_role": "take", "take_number": 1, "quoted_thumbnail_hash": "old-hash",
+    }]
+    await ms.save_send_preview_cache(talent_id, project_id, DESTINATION_GROUP, assignments=old_stale_assignment, error=None)
+    await db[ms.SEND_APPROVALS_COLLECTION].update_one(
+        {"talent_id": talent_id, "project_id": project_id, "destination_group": DESTINATION_GROUP},
+        {"$set": {"preview_computed_at": stale_time}},
+    )
+
+    fresh_assignment = [{
+        "mark_text": "FRESH NEW DATA", "reply_message_id": "new-reply", "resolved_source_message_id": "NEW-MEDIA",
+        "media_role": "take", "take_number": 1, "quoted_thumbnail_hash": "new-hash", "mark_intent_id": "mi-new",
+    }]
+    call_count = {"n": 0}
+
+    async def _fake_preview(**kwargs):
+        call_count["n"] += 1
+        return fresh_assignment, None
+
+    dispatched_with = {}
+
+    async def _fake_dispatch(**kwargs):
+        dispatched_with.update(kwargs)
+        return "fake-req-id"
+
+    original_preview = cp._preview_send_marks
+    original_dispatch = ms.create_send_dispatch_from_approved_plan
+    cp._preview_send_marks = _fake_preview
+    ms.create_send_dispatch_from_approved_plan = _fake_dispatch
+    try:
+        collected = {
+            "talent_selector": f"Stale Preview Talent {tag}", "project_query": f"Stale Preview Project {tag}",
+        }
+        ctx = ExecContext(agent_id="whatsapp-campaign-agent", group_name="dummy-group", sender_phone="917000600088")
+        result = await cp._send_one_pair(collected, ctx)
+        assert result.ok, result.message
+        assert call_count["n"] == 1, "a stale cached preview must trigger exactly one revalidation scan before dispatch"
+        assert dispatched_with.get("assignments") == fresh_assignment, (
+            f"must dispatch the REFRESHED plan, never the stale cached one: {dispatched_with}"
+        )
+    finally:
+        cp._preview_send_marks = original_preview
+        ms.create_send_dispatch_from_approved_plan = original_dispatch
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+        await db[ms.SEND_APPROVALS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+# --- 2F: App partial success (tests 9-10) ----------------------------------
+
+async def test_partial_app_action_dispatches_resolved_items_reports_unresolved_separately():
+    """Regression test 9: 3 resolved + 1 permanently-unresolved -> the 3
+    resolved items are dispatched, the 4th is reported separately, never
+    silently discarding the whole batch. Never weakens verification: the
+    permanently-unresolved item is never sent, only reported."""
+    from agents.modules import mark_intent as mi
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Partial Project {tag}", whatsapp_casting_group_name=DESTINATION_GROUP)
+    email = f"partial.{tag}@example.com"
+    talent_id = await _seed_talent(f"Partial Talent {tag}", whatsapp_group_name=f"Partial {tag} x Talentgram", email=email)
+    submission_id = await _seed_submission(project_id, talent_id, email, decision="approved")
+    action = await queue.create_action(
+        action_type=queue.ACTION_TYPE_SEND, project_id=project_id, talent_id=talent_id,
+        talent_label=f"Partial Talent {tag}", project_label=f"Partial Project {tag}",
+        submission_id=submission_id, worker_id="default", created_by="test-admin",
+        destination_group=DESTINATION_GROUP, source_group_name=f"Partial {tag} x Talentgram",
+    )
+    stuck_reply_id = f"reply-take3-unresolved-{uuid.uuid4().hex[:8]}"
+    stuck_intent = await mi.get_or_create_mark_intent(
+        reply_message_id=stuck_reply_id, talent_id=talent_id, project_id=project_id,
+        project_label=f"Partial Project {tag}", media_role="take", take_number=3,
+        mark_text=f"Mark take 3 for Partial Project {tag}", quoted_thumbnail_hash="hash-take3",
+        quoted_media_type="video", source_chat_name=f"Partial {tag} x Talentgram", worker_id="default",
+    )
+    await db[mi.MARK_INTENTS_COLLECTION].update_one(
+        {"id": stuck_intent["id"]}, {"$set": {"status": mi.STATUS_FAILED_PERMANENTLY}},
+    )
+
+    resolved_assignments = [
+        {"mark_text": "Mark take 1", "reply_message_id": "r1", "resolved_source_message_id": "M1",
+         "media_role": "take", "take_number": 1, "quoted_thumbnail_hash": "h1", "mark_intent_id": "mi1"},
+        {"mark_text": "Mark take 2", "reply_message_id": "r2", "resolved_source_message_id": "M2",
+         "media_role": "take", "take_number": 2, "quoted_thumbnail_hash": "h2", "mark_intent_id": "mi2"},
+        {"mark_text": "Mark intro", "reply_message_id": "r3", "resolved_source_message_id": "M3",
+         "media_role": "intro", "take_number": None, "quoted_thumbnail_hash": "h3", "mark_intent_id": "mi3"},
+    ]
+    unresolved_items = [{
+        "mark_text": "Mark take 3", "reply_message_id": stuck_reply_id, "media_role": "take", "take_number": 3,
+    }]
+    outcome = ma.ValidationOutcome(
+        ok=False, assignments=resolved_assignments, unresolved=unresolved_items,
+        ambiguous=None, batch_failures=[], project_mismatch=[], project_ambiguous=[],
+    )
+
+    async def _fake_scan(**kwargs):
+        return outcome, None
+
+    dispatched_with = {}
+
+    async def _fake_dispatch_send(action_arg, assignments_arg):
+        dispatched_with["assignments"] = assignments_arg
+        dispatched_with["action_id"] = action_arg["id"]
+
+    original_scan = cp._scan_and_validate_multi_source
+    original_dispatch = queue._dispatch_send
+    cp._scan_and_validate_multi_source = _fake_scan
+    queue._dispatch_send = _fake_dispatch_send
+    try:
+        result = await queue.advance_send_action(action)
+        assert result is True
+        assert dispatched_with.get("assignments") == resolved_assignments, (
+            f"the 3 resolved items must be dispatched, never discarded: {dispatched_with}"
+        )
+        assert dispatched_with.get("action_id") == action["id"]
+        updated_action = await db[queue.ACTIONS_COLLECTION].find_one({"id": action["id"]})
+        assert updated_action.get("unresolved_items") == ["Take 3"], updated_action
+    finally:
+        cp._scan_and_validate_multi_source = original_scan
+        queue._dispatch_send = original_dispatch
+        await db[mi.MARK_INTENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await db[queue.ACTIONS_COLLECTION].delete_many({"id": action["id"]})
+        await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], submission_ids=[submission_id])
+
+
+async def test_partial_dispatch_duplicate_send_protection_remains_intact():
+    """Regression test 10: an already-sent (even SENT_UNVERIFIED) item is
+    still correctly excluded from a subsequent dispatch attempt — proving
+    the Phase 2F partial-success change never weakened
+    prepare_send_targets/already_sent's own existing idempotency."""
+    tag = uuid.uuid4().hex[:6]
+    talent_id, project_id = f"test-dup-talent-{tag}", f"test-dup-proj-{tag}"
+    destination_group = f"Dest {tag}"
+    await ms.record_send(
+        talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+        group_name="grp", group_id=None,
+        mark={"resolved_source_message_id": "M1", "media_role": "take", "take_number": 1},
+        created_by="test",
+    )
+    await ms.mark_send_status(talent_id, project_id, "M1", None, destination_group, ms.SEND_STATUS_SENT_UNVERIFIED)
+    try:
+        already = await ms.already_sent(talent_id, project_id, destination_group)
+        assert len(already) == 1
+        assert already[0]["send_status"] == ms.SEND_STATUS_SENT_UNVERIFIED
+
+        send_targets, _form_idx, _marker, already2 = await ms.prepare_send_targets(
+            talent_id=talent_id, project_id=project_id, destination_group=destination_group,
+            assignments=[{
+                "resolved_source_message_id": "M1", "media_role": "take", "take_number": 1,
+                "quoted_thumbnail_hash": None, "reply_message_id": "r1",
+            }],
+            default_source_type="group", default_group_name="grp", created_by="test",
+        )
+        assert send_targets == [], "an already-sent (even unverified) item must never be re-selected for another physical send"
+        assert already2, already2
+    finally:
+        await db[ms.MEDIA_SENDS_COLLECTION].delete_many({"talent_id": talent_id})
+
+
+# --- 2B: background MarkIntent sweep (tests 4-6) ---------------------------
+
+async def _clear_unrelated_eligible_intents(mi_module, keep_talent_id: str) -> None:
+    """Known pre-existing local-dev-DB test-environment drift (unrelated
+    prior test runs leave orphaned unresolved/resolving mark_intents
+    behind) makes claim_next_sweepable_intent's globally-scoped claim
+    query non-deterministic for a single-intent test — clears anything
+    NOT belonging to this test's own talent so the sweep is guaranteed to
+    claim the intent this test actually seeded. Safe: this is the local
+    test DB only (same isolation every other test in this suite already
+    relies on), and these are genuinely orphaned artifacts from earlier
+    runs, not data this test is responsible for restoring."""
+    await db[mi_module.MARK_INTENTS_COLLECTION].delete_many({
+        "status": {"$in": [mi_module.STATUS_UNRESOLVED, mi_module.STATUS_RESOLVING]},
+        "talent_id": {"$ne": keep_talent_id},
+    })
+
+
+async def test_background_sweep_advances_unresolved_intent_without_human_retry():
+    """Regression test 4: the sweep, called directly (never a human
+    retry), claims an eligible unresolved MarkIntent and dispatches a
+    real scan_request targeted at its own known group only."""
+    from services import mark_intent_sweep as sweep
+    from agents.modules import mark_intent as mi
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Sweep Project {tag}")
+    talent_id = await _seed_talent(f"Sweep Talent {tag}", whatsapp_group_name=f"Sweep Talent {tag} x Talentgram")
+    await _clear_unrelated_eligible_intents(mi, talent_id)
+    intent = await mi.get_or_create_mark_intent(
+        reply_message_id=f"reply-sweep-{uuid.uuid4().hex[:8]}", talent_id=talent_id, project_id=project_id,
+        project_label=f"Sweep Project {tag}", media_role="take", take_number=1,
+        mark_text=f"Mark take 1 for Sweep Project {tag}", quoted_thumbnail_hash="hash-sweep",
+        quoted_media_type="video", source_chat_name=f"Sweep Talent {tag} x Talentgram", worker_id="default",
+    )
+    original_enabled = sweep.MARK_INTENT_SWEEP_ENABLED
+    sweep.MARK_INTENT_SWEEP_ENABLED = True
+    try:
+        did_work = await sweep.run_sweep_cycle()
+        assert did_work is True
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"sweep_target_mark_intent_id": intent["id"]})
+        assert req is not None, "sweep must dispatch a real scan_request targeting this exact intent"
+        assert req["sweep"] is True
+        assert req["talent_id"] == talent_id
+        assert req["project_id"] == project_id
+        assert req["group_name"] == f"Sweep Talent {tag} x Talentgram", (
+            "must scan ONLY the intent's own known chat, never a broader/global scan"
+        )
+        assert req["worker_id"] == "default"
+
+        updated_intent = await db[mi.MARK_INTENTS_COLLECTION].find_one({"id": intent["id"]})
+        assert updated_intent["last_swept_at"] is not None
+    finally:
+        sweep.MARK_INTENT_SWEEP_ENABLED = original_enabled
+        await db[mi.MARK_INTENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await _cleanup(talent_ids=[talent_id], project_ids=[project_id])
+
+
+async def test_background_sweep_does_not_create_duplicate_mark_intents():
+    """Regression test 5: a sweep-triggered scan that resurfaces the SAME
+    reply must correlate into the SAME MarkIntent, never create a second
+    one — get_or_create_mark_intent's existing idempotency, unchanged,
+    still holds when triggered by the sweep's own completion path."""
+    from agents.modules import mark_intent as mi
+    tag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project(f"Sweep Dup Project {tag}")
+    talent_id = await _seed_talent(f"Sweep Dup Talent {tag}", whatsapp_group_name=f"Sweep Dup {tag} x Talentgram")
+    reply_id = f"reply-sweepdup-{uuid.uuid4().hex[:8]}"
+    intent = await mi.get_or_create_mark_intent(
+        reply_message_id=reply_id, talent_id=talent_id, project_id=project_id,
+        project_label=f"Sweep Dup Project {tag}", media_role="intro", take_number=None,
+        mark_text=f"Mark introduction video for Sweep Dup Project {tag}", quoted_thumbnail_hash="hash-sweepdup",
+        quoted_media_type="video", source_chat_name=f"Sweep Dup {tag} x Talentgram", worker_id="default",
+    )
+    try:
+        candidate = _mark(
+            mention_lid=GUNWANTI_LID, mark_text=intent["mark_text"], source_message_id="MEDIA-SWEEP-DUP",
+        )
+        candidate["reply_message_id"] = reply_id
+        candidate["quoted_thumbnail_hash"] = "hash-sweepdup"
+        projects = [{"id": project_id, "label": f"Sweep Dup Project {tag}"}]
+        await mi.observe_candidates(
+            [candidate], talent_id=talent_id, project_id=project_id, project_label=f"Sweep Dup Project {tag}",
+            projects=projects, source_chat_name=f"Sweep Dup {tag} x Talentgram", worker_id="default",
+        )
+        count = await db[mi.MARK_INTENTS_COLLECTION].count_documents({"reply_message_id": reply_id})
+        assert count == 1, "sweep-triggered observation must never create a duplicate MarkIntent"
+        resolved = await db[mi.MARK_INTENTS_COLLECTION].find_one({"reply_message_id": reply_id})
+        assert resolved["id"] == intent["id"]
+        assert resolved["resolved_source_message_id"] == "MEDIA-SWEEP-DUP"
+    finally:
+        await db[mi.MARK_INTENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await _cleanup(talent_ids=[talent_id], project_ids=[project_id])
+
+
+async def test_background_sweep_never_silently_defaults_to_scan_scoped_project():
+    """Regression test 6: the sweep's own silent-completion branch in
+    _process_scan_done must never let a candidate whose OWN mark text
+    names a different project get silently filed under the project the
+    sweep happened to be scoped to — the exact LAKME Young/Snapdragon
+    bug, proven closed for the sweep's own code path specifically (not
+    just observe_candidates in isolation, already covered by
+    test_mark_intent.py's own dedicated test)."""
+    from agents.modules import mark_intent as mi
+    tag = uuid.uuid4().hex[:6]
+    scanned_project_id = await _seed_project(f"Sweep Scanned Project {tag}")
+    other_project_id = await _seed_project(f"Totally Different Project {tag}")
+    talent_id = await _seed_talent(f"Sweep NoDefault {tag}", whatsapp_group_name=f"Sweep NoDefault {tag} x Talentgram")
+    reply_id = f"reply-sweep-nodefault-{uuid.uuid4().hex[:8]}"
+    req_id = str(uuid.uuid4())
+    await db[ma.SCAN_REQUESTS_COLLECTION].insert_one({
+        "id": req_id, "mode": "scan", "status": ma.SCAN_STATUS_DONE, "sweep": True,
+        "sweep_target_mark_intent_id": "does-not-exist-for-this-test",
+        "worker_id": "default", "group_name": f"Sweep NoDefault {tag} x Talentgram",
+        "talent_id": talent_id, "talent_label": f"Sweep NoDefault {tag}",
+        "project_id": scanned_project_id, "project_label": f"Sweep Scanned Project {tag}",
+        "candidates": [{
+            "mention_lid": GUNWANTI_LID,
+            "mark_text": f"Mark take 1 for Totally Different Project {tag}",
+            "reply_message_id": reply_id, "quoted_thumbnail_hash": f"hash-{reply_id}",
+            "resolved_source_message_id": "MEDIA-NODEFAULT", "source_media_type": "video",
+        }],
+        "created_at": _now(), "updated_at": _now(),
+    })
+    try:
+        did_work = await orch._process_scan_done()
+        assert did_work is True
+        stored = await db[mi.MARK_INTENTS_COLLECTION].find_one({"reply_message_id": reply_id})
+        assert stored is None, (
+            "a mark addressed to a different/unmatched project must never be silently filed under "
+            f"the sweep's scanned project — got {stored}"
+        )
+        req = await db[ma.SCAN_REQUESTS_COLLECTION].find_one({"id": req_id})
+        assert req is not None and req["status"] == ma.STATUS_FINISHED
+    finally:
+        await db[mi.MARK_INTENTS_COLLECTION].delete_many({"talent_id": talent_id})
+        await db[ma.SCAN_REQUESTS_COLLECTION].delete_many({"id": req_id})
+        await _cleanup(talent_ids=[talent_id], project_ids=[scanned_project_id, other_project_id])

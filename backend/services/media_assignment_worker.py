@@ -234,10 +234,19 @@ def _project_advisory_note(
         )
     for a in ambiguous:
         candidates = ", ".join(p.get("label", "") for p in (a.get("ambiguous_projects") or []))
-        lines.append(
-            f"- \"{(a.get('mark_text') or '').strip()}\" could be for more than one project "
-            f"({candidates}) — not uploaded here, nothing was guessed."
-        )
+        # 2026-09-27 forensic audit fix — project_ambiguous also carries
+        # the "matches nothing at all" case (empty candidate list) now;
+        # give it its own wording instead of a blank "(...)" .
+        if candidates:
+            lines.append(
+                f"- \"{(a.get('mark_text') or '').strip()}\" could be for more than one project "
+                f"({candidates}) — not uploaded here, nothing was guessed."
+            )
+        else:
+            lines.append(
+                f"- \"{(a.get('mark_text') or '').strip()}\" doesn't match {project_label!r} or any "
+                f"other known project — not uploaded here, nothing was guessed."
+            )
     if not lines:
         return ""
     return "\n\nNote — not included above:\n" + "\n".join(lines)
@@ -760,6 +769,47 @@ async def _process_scan_done() -> bool:
     # report goes out through the same worker, never guessed.
     doc_worker_id = doc.get("worker_id", "default")
 
+    if doc.get("sweep"):
+        # Background MarkIntent sweep (2026-09-27, Phase 2B forensic audit
+        # fix) — a scan_request created by services/mark_intent_sweep.py
+        # for ONE specific stuck MarkIntent, never a real UPLOAD/SEND
+        # command. Finishes SILENTLY: no _finish()/_send_report() call at
+        # all (that sends a real WhatsApp message into the live employee
+        # group — a sweep must never surface an unsolicited "UPLOAD
+        # FAILED"/completion report for something no human asked about
+        # this specific turn) and never falls through into the UPLOAD/SEND
+        # dispatch logic below (which would try to actually upload/send
+        # something — never the sweep's job). Only ever advances MarkIntent
+        # state: observe_candidates locks/creates intents for whatever
+        # this scan DID find (same function, same write-once safety every
+        # other caller already relies on); if the SPECIFIC intent this
+        # sweep was targeting still isn't resolved afterward (the scan may
+        # not have surfaced that exact reply at all — the documented root
+        # cause observe_candidates alone can't fix, since it only ever
+        # touches candidates actually present in a scan's own output), an
+        # explicit record_unresolved_attempt call is what actually
+        # advances that intent's attempt_count/last_attempt_at — without
+        # this, a sweep that fails to find the reply again would leave the
+        # intent exactly as stuck as before, with no evidence a sweep ever
+        # ran at all.
+        target_id = doc.get("sweep_target_mark_intent_id")
+        if not doc.get("scan_error"):
+            projects = await _fetch_ongoing_projects_raw()
+            await mark_intent.observe_candidates(
+                doc.get("candidates") or [], talent_id=talent_id, project_id=project_id,
+                project_label=project_label, projects=projects,
+                source_chat_name=group_name, worker_id=doc_worker_id,
+            )
+        if target_id:
+            current = await db[mark_intent.MARK_INTENTS_COLLECTION].find_one({"id": target_id})
+            if current and not current.get("resolved_source_message_id"):
+                await mark_intent.record_unresolved_attempt(target_id, worker_id=doc_worker_id)
+        await db[media_assignment.SCAN_REQUESTS_COLLECTION].update_one(
+            {"id": doc["id"]},
+            {"$set": {"status": media_assignment.STATUS_FINISHED, "completed_at": _now()}},
+        )
+        return True
+
     if doc.get("scan_error"):
         await _finish(doc["id"], _report_scan_failed(talent_label, project_label, doc["scan_error"]), worker_id=doc_worker_id)
         return True
@@ -851,8 +901,41 @@ async def _process_scan_done() -> bool:
         await _finish(doc["id"], _report_ambiguous(talent_label, project_label, outcome.ambiguous), worker_id=doc_worker_id)
         return True
     if outcome.unresolved:
-        await _finish(doc["id"], _report_unresolved(talent_label, project_label, outcome.unresolved), worker_id=doc_worker_id)
-        return True
+        # Partial success (2026-09-27, Phase 2F forensic audit fix) — this
+        # single-pass path (no retry loop of its own, unlike submission_
+        # action_queue.py's advance_send_action) has exactly one terminal
+        # signal available: has the still-unresolved item's own MarkIntent
+        # already exhausted ITS retry ceiling (STATUS_FAILED_PERMANENTLY)?
+        # Only then, and only if THIS scan's own output also resolved at
+        # least one other item cleanly, is it safe to proceed with that
+        # resolved subset instead of hard-blocking everything — a
+        # currently-unresolved (not yet permanently failed) item may still
+        # resolve on the NEXT scan a human or the background sweep
+        # triggers, so this must never fire early. Never weakens
+        # verification: outcome.assignments here is validate_candidates'
+        # own untouched output, and the permanently-failed item is still
+        # never uploaded/sent — only reported, via the SAME upload_advisory
+        # channel that already threads through to the final report.
+        reply_ids = [u.get("reply_message_id") for u in outcome.unresolved if u.get("reply_message_id")]
+        permanently_failed_unresolved = []
+        if reply_ids:
+            permanently_failed_unresolved = await db[mark_intent.MARK_INTENTS_COLLECTION].find(
+                {"reply_message_id": {"$in": reply_ids}, "status": mark_intent.STATUS_FAILED_PERMANENTLY},
+                {"_id": 0, "reply_message_id": 1},
+            ).to_list(len(reply_ids))
+        permanently_failed_ids = {d["reply_message_id"] for d in permanently_failed_unresolved}
+        still_pending = [u for u in outcome.unresolved if u.get("reply_message_id") not in permanently_failed_ids]
+        if not permanently_failed_ids or still_pending or not outcome.assignments:
+            await _finish(doc["id"], _report_unresolved(talent_label, project_label, outcome.unresolved), worker_id=doc_worker_id)
+            return True
+        excluded = [u for u in outcome.unresolved if u.get("reply_message_id") in permanently_failed_ids]
+        upload_advisory += (
+            "\n\nNote — permanently unresolved, NOT included above:\n"
+            + _report_unresolved(talent_label, project_label, excluded)
+        )
+        # outcome.assignments (the genuinely resolved subset) falls
+        # through unchanged into the normal UPLOAD/SEND-fallback dispatch
+        # below.
 
     if doc.get("workflow") == "send":
         # SEND (2026-08-24) — independent of UPLOAD from this point on:

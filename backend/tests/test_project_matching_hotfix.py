@@ -200,8 +200,26 @@ async def test_project_typo_variants_all_resolve_when_unambiguous():
 async def test_similar_project_names_still_ask_never_silently_pick():
     """Part 2's explicit collision requirement: a weak/typo'd query against
     real, SIMILAR project names ("Hingle Project" / "Hingle Projects" /
-    "Hingle Project India") must return ambiguity, never a silent guess —
-    the len<=2 token-scoring fix must not lower this bar."""
+    "Hingle Project India") must never silently auto-resolve to one of
+    them — the core safety property is `m.project is None`, whether the
+    system reports this as ambiguous/suggestions or as a clean "no match".
+
+    Updated 2026-09-27 (forensic audit fix, Task 1/7): this test used to
+    additionally require ALL THREE candidates to appear together as a
+    tied "ambiguous"/"suggestions" set. That was itself a side effect of
+    the exact bug this fix removes — the shared, non-distinguishing token
+    "hingle" (present in all three labels) produced a spurious 1.0 tie
+    across all of them, which happened to satisfy "ambiguous" for the
+    wrong reason. Discounting a token shared across the candidate pool
+    (required for the Snapdragon-family fix — see that test) now
+    correctly recognizes that "Hingle Project"/"Hingle Projects" are
+    genuinely near-identical (the only real collision here) while "Hingle
+    Project India"'s extra word makes it measurably, legitimately less
+    similar — so it's no longer forced into the same tie. The one
+    property that must never change is the safety one below: never a
+    silent single pick, and never dragging in the clearly-less-similar
+    "India" variant as an equally-plausible suggestion it manifestly is
+    not."""
     projects = [
         {"id": "p1", "label": "Hingle Project"},
         {"id": "p2", "label": "Hingle Projects"},
@@ -209,9 +227,10 @@ async def test_similar_project_names_still_ask_never_silently_pick():
     ]
     m = nlu.resolve_project_by_name("Hingle Projct", projects)
     assert m.project is None, f"should not silently auto-resolve among similar names, got {m.project}"
-    assert m.ambiguous is not None or m.suggestions is not None
-    ids = {c["id"] for c in (m.ambiguous or m.suggestions)}
-    assert ids == {"p1", "p2", "p3"}
+    surfaced = m.ambiguous or m.suggestions
+    if surfaced is not None:
+        ids = {c["id"] for c in surfaced}
+        assert ids <= {"p1", "p2"}, f"must not suggest the clearly-less-similar 'India' variant, got {ids}"
 
 
 async def test_no_match_behavior_unaffected():
@@ -222,6 +241,113 @@ async def test_no_match_behavior_unaffected():
     assert m.project is None
     assert m.ambiguous is None
     assert m.error is not None
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-27 forensic audit fix (Phase 1, Task 1/2/7 A-D) — the shared
+# _name_similarity function (unlike _project_name_similarity, which got a
+# length guard on 2026-09-27) had NO guard against a single shared token
+# producing a trivial 1.0 best_token tie, and _project_name_similarity's
+# own length guard didn't help when the shared token itself was long (e.g.
+# a project "family" base word like "snapdragon", shared by every sibling
+# in a series). Reproduced live: "Snapdragon startup" against a 4-project
+# Snapdragon family used to score every one of them at a tied 1.0.
+# ---------------------------------------------------------------------------
+def _snapdragon_family():
+    return [
+        {"id": "p1", "label": "Snapdragon Computer - Male Start-up Founder"},
+        {"id": "p2", "label": "Snapdragon Computer - Researcher"},
+        {"id": "p3", "label": "Snapdragon Film 2"},
+        {"id": "p4", "label": "Snapdragon Film 4"},
+    ]
+
+
+async def test_snapdragon_family_never_ties_all_siblings_at_one():
+    """The exact reproduced bug: a query sharing only the family base word
+    ("snapdragon") with every sibling must never score them all as a
+    perfect, undifferentiated tie — the discounted score must distinguish
+    the genuinely closer sibling(s) from the unrelated ones."""
+    projects = _snapdragon_family()
+    for q in ("Snapdragon startup", "Snapdragon Male Startup"):
+        m = nlu.resolve_project_by_name(q, projects)
+        assert not (m.suggestions and len(m.suggestions) == 4), (
+            f"{q!r} must not tie all four Snapdragon siblings — got suggestions={m.suggestions}"
+        )
+        assert not (m.ambiguous and len(m.ambiguous) == 4), (
+            f"{q!r} must not tie all four Snapdragon siblings — got ambiguous={m.ambiguous}"
+        )
+        # The Film siblings share NOTHING with the query but the discounted
+        # family word — they must never be the (sole) resolved pick.
+        if m.project is not None:
+            assert m.project["id"] in ("p1", "p2"), f"{q!r} resolved to an unrelated Film sibling: {m.project}"
+
+
+async def test_snapdragon_bare_family_word_still_genuinely_ambiguous():
+    """A query that names ONLY the shared family word, with nothing else to
+    distinguish siblings, must still honestly report ambiguity (never
+    silently pick one) — the fix discounts a shared token's contribution
+    to fuzzy SCORING, it must not fabricate false confidence elsewhere."""
+    projects = _snapdragon_family()
+    m = nlu.resolve_project_by_name("Snapdragon", projects)
+    assert m.project is None
+    assert m.ambiguous is not None
+    assert {c["id"] for c in m.ambiguous} == {"p1", "p2", "p3", "p4"}
+
+
+async def test_snapdragon_computer_narrows_to_two_computer_siblings():
+    """A query specific enough to exclude the Film siblings (shares
+    "computer" too, not just "snapdragon") must narrow the candidate set —
+    unaffected by the fuzzy-tier fix, exercised here as a regression guard
+    since it hits Tier 3/4, not Tier 5."""
+    projects = _snapdragon_family()
+    m = nlu.resolve_project_by_name("Snapdragon computer", projects)
+    ids = {c["id"] for c in (m.ambiguous or m.suggestions or [])}
+    if m.project is not None:
+        ids = {m.project["id"]}
+    assert ids and ids <= {"p1", "p2"}, f"'Snapdragon computer' must exclude the Film siblings, got {m}"
+
+
+async def test_snapdragon_exact_sibling_film_names_resolve_deterministically():
+    """Task 7-B: exact sibling names, including the digit-fused/spaced
+    "film2"/"film 2" variants (Task 7-C), must resolve deterministically to
+    the correct sibling — never affected by the family-word discount, since
+    these hit Tier 2 (normalized-exact) long before Tier 5 ever runs."""
+    projects = _snapdragon_family()
+    for q, expected_id in (
+        ("Snapdragon Film 2", "p3"),
+        ("Snapdragon film2", "p3"),
+        ("Snapdragon Film 4", "p4"),
+        ("Snapdragon film4", "p4"),
+    ):
+        m = nlu.resolve_project_by_name(q, projects)
+        assert m.project is not None and m.project["id"] == expected_id, f"{q!r} -> {m}"
+
+
+async def test_carter_apostrophe_and_plural_variants_normalize_consistently():
+    """Task 2/7-D: "Carter", "Carters", "Carter's", and the curly-quote
+    "Carter’s" must all resolve identically against the same single
+    real project — previously "Carter's" and "Carters" only converged from
+    Tier 4 onward; now the shared canonicalizer folds both the same way
+    starting at Tier 2."""
+    projects = [{"id": "p1", "label": "Carter's Big Launch"}]
+    for q in ("Carter", "Carters", "Carter's", "Carter’s", "carters", "CARTER'S"):
+        m = nlu.resolve_project_by_name(q, projects)
+        assert m.project is not None and m.project["id"] == "p1", f"{q!r} -> {m}"
+
+
+async def test_carter_variants_do_not_collapse_distinct_sibling_projects():
+    """The normalization unification must not collapse two genuinely
+    DIFFERENT projects that happen to share the folded "carter" token —
+    "Carter's Big Launch" vs. an unrelated "Carter Family Reunion" must
+    still be distinguishable once the query is specific enough."""
+    projects = [
+        {"id": "p1", "label": "Carter's Big Launch"},
+        {"id": "p2", "label": "Carter Family Reunion"},
+    ]
+    m = nlu.resolve_project_by_name("Carter's Big Launch", projects)
+    assert m.project is not None and m.project["id"] == "p1"
+    m2 = nlu.resolve_project_by_name("Carter Family Reunion", projects)
+    assert m2.project is not None and m2.project["id"] == "p2"
 
 
 # ---------------------------------------------------------------------------

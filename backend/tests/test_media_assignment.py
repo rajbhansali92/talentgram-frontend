@@ -2047,18 +2047,32 @@ def test_validate_candidates_limca_full_production_scenario():
     assert tile2_hash in film2_hashes and tile2_hash not in film1_hashes
 
 
-def test_validate_candidates_no_project_match_defaults_to_requested_project():
-    """Case 3 — mark text that matches NO real project at all still
-    defaults to the admin-requested project."""
+def test_validate_candidates_no_project_match_never_silently_defaults():
+    """Updated 2026-09-27 (forensic audit fix, case 4): mark text whose
+    own project reference matches NO real project at all — not
+    confidently, not even a near-miss suggestion — used to silently
+    default to the admin-requested project ("genuinely unrelated text,
+    e.g. talent chatter"). But extract_role_and_project guarantees
+    project_fragment is non-empty whenever a candidate reaches this point
+    at all (it returns None, filtered before validate_candidates ever
+    sees it, whenever there's no project text) — so this is NEVER
+    "chatter", it's always an attempted, unmatched project reference.
+    Proven live: this exact silent-default, previously masked for two
+    named production incidents (Sharvari Kashid/Tapti AI App) by a since-
+    fixed scoring bug that happened to tie those cases into `suggestions`
+    instead, is the identical unsafe pattern once that accidental
+    protection is gone. Must now be excluded (project_ambiguous, with an
+    empty candidate list to distinguish "matches nothing" from "tied
+    between several"), never silently accepted."""
     projects = [{"id": "p-a", "label": "Project A"}]
     candidates = [_mark(mention_lid=None, mark_text="mark random unrelated text take 1", source_message_id="src-take1")]
     outcome = ma.validate_candidates(
         candidates, gunwanti_lid=GUNWANTI_LID, requested_project_id="p-a",
         requested_project_label="Project A", projects=projects, talent_id="t1",
     )
-    assert outcome.ok, outcome
-    assert len(outcome.assignments) == 1
-    assert outcome.assignments[0]["resolved_source_message_id"] == "src-take1"
+    assert outcome.assignments == [], outcome
+    assert len(outcome.project_ambiguous) == 1
+    assert outcome.project_ambiguous[0]["ambiguous_projects"] == []
 
 
 def test_validate_candidates_confident_different_project_excluded_not_uploaded():

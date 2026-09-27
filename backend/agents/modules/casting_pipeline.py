@@ -8860,6 +8860,43 @@ async def _preview_send_marks(
             f"Still verifying some marked media for {talent_label} / {project_label} — "
             "WhatsApp Web hasn't confirmed it yet. This is not a failure; try again shortly."
         )
+    if outcome.project_ambiguous:
+        # Phase 2C (2026-09-27 forensic audit fix) — a mark whose own
+        # project reference doesn't confidently and exclusively belong to
+        # the requested project (media_assignment.validate_candidates'
+        # own project_ambiguous bucket — see that function's case-3/case-4
+        # comment) was previously never checked here at all, so
+        # `outcome.assignments` fell through empty with nothing to
+        # explain why: the admin saw a bare "no marked media found"
+        # exactly as if nothing had ever been marked, even though
+        # something WAS marked and deliberately, safely excluded. This is
+        # never a real failure state — "ambiguous" and "matches nothing"
+        # are both distinct, honest states, never conflated with silence.
+        all_candidate_labels = sorted({
+            p["label"] for item in outcome.project_ambiguous for p in (item.get("ambiguous_projects") or [])
+        })
+        if all_candidate_labels:
+            return None, (
+                f"Marked WhatsApp media WAS found for {talent_label}, but its project reference "
+                f"could not be safely narrowed to {project_label} — it matches "
+                f"{len(all_candidate_labels)} similarly-named projects equally well: "
+                f"{'; '.join(all_candidate_labels)}. Please re-send the MARK reply on WhatsApp "
+                f"with a more specific project name, then retry."
+            )
+        return None, (
+            f"Marked WhatsApp media WAS found for {talent_label}, but its mark text's project "
+            f"reference doesn't match {project_label} or any other known project. Please "
+            f"re-send the MARK reply on WhatsApp naming the correct project, then retry."
+        )
+    if outcome.project_mismatch:
+        matched = sorted({
+            m.get("matched_project_label") for m in outcome.project_mismatch if m.get("matched_project_label")
+        })
+        return None, (
+            f"Marked WhatsApp media WAS found for {talent_label}, but it confidently matches "
+            f"{'; '.join(matched) or 'a different project'}, not {project_label} — nothing has "
+            f"been sent here."
+        )
     return outcome.assignments or [], None
 
 
@@ -8956,10 +8993,30 @@ async def _resolve_send_target(
     with request_scope.stage("fuzzy"):
         match = nlu.resolve_project_by_name(project_query, projects)
     if match.ambiguous:
-        options = "\n".join(f"{i + 1}. {o['label']}" for i, o in enumerate(match.ambiguous))
+        # Numbered disambiguation (2026-09-27, Phase 2A/2D forensic audit
+        # fix) — SEND previously just told the admin to retype the whole
+        # command with a more specific name; it now offers the same
+        # numbered-reply resume MOVE already has, via ExecResult.data
+        # rather than changing this function's own (target, err) return
+        # shape (which 5+ call sites destructure) — only
+        # _build_send_confirmation, the one caller that needs to actually
+        # wire up session state, reads `data["disambiguation"]`; every
+        # other caller keeps propagating `err` exactly as before.
+        # Encodes the durable project_id (RESOLVED_PROJECT_MARKER), never
+        # just the label — a later reply/scan can then never re-derive or
+        # switch the project by name again (resolve_project_by_name's own
+        # marker bypass).
+        options_text = "\n".join(f"{i + 1}. {o['label']}" for i, o in enumerate(match.ambiguous))
+        disambiguation_options = [
+            {"label": o["label"], "value": f"{nlu.RESOLVED_PROJECT_MARKER}{o['id']}|{o['label']}"}
+            for o in match.ambiguous
+        ]
         return None, ExecResult(
             ok=False, error="ambiguous_project",
-            message=f"I found multiple projects.\n\n{options}\n\nPlease re-run with the exact project name.",
+            message=f"I found multiple matching projects. Which one do you mean?\n\n{options_text}",
+            data={"disambiguation": {
+                "kind": "project", "field_key": "project_query", "options": disambiguation_options,
+            }},
         )
     if not match.project:
         return None, ExecResult(
@@ -9491,6 +9548,22 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
 
     target, err = await _resolve_send_target(collected)
     if err is not None:
+        # Numbered disambiguation (2026-09-27, Phase 2A/2D forensic audit
+        # fix) — mirrors _build_move_confirmation's own wiring exactly:
+        # persist the options so the next reply can be a bare number, and
+        # flip the conversation to "editing" so THAT number is read as a
+        # disambiguation pick (by _send_parse_edits_async, see its own
+        # pending_disambiguation check) rather than the generic
+        # "confirming"-step 1/2/3 handler treating a bare "2" as
+        # nonsense. Any other failure (talent not found, no submission,
+        # etc.) clears whatever pending state might be left over from an
+        # earlier, unrelated ambiguity — same as MOVE.
+        disambiguation = (err.data or {}).get("disambiguation") if err.data else None
+        await session_context.update_session(
+            ctx.agent_id, ctx.sender_phone, pending_disambiguation=disambiguation,
+        )
+        if disambiguation:
+            await conversation.update_conversation(ctx.agent_id, ctx.sender_phone, step="editing")
         return err.message
 
     talent_id = target["authoritative_talent_id"]
@@ -10218,7 +10291,39 @@ async def _send_parse_edits_async(
     Bulk (2026-08-27, multi-target editing added 2026-09-09 follow-up) —
     2+ pairs now support full numbered per-target editing via
     _send_bulk_parse_edits_async (see its own docstring and the module
-    block comment above _SEND_EDIT_TARGET_KEY)."""
+    block comment above _SEND_EDIT_TARGET_KEY).
+
+    Numbered project disambiguation (2026-09-27, Phase 2A/2D forensic
+    audit fix) — mirrors _move_parse_edits_async's own pending_
+    disambiguation handling, checked FIRST (before the bulk-edit check
+    and before re-resolving the target at all — re-resolving here would
+    just re-trigger the SAME ambiguity, never read the user's numbered
+    reply): a bare number picks that option from the stored ambiguous-
+    project list, writing project_query a RESOLVED_PROJECT_MARKER-
+    encoded value (never a re-derived label), so the picked project_id
+    is authoritative for the rest of this SEND — resolve_project_by_name
+    bypasses all matching tiers for that value from here on."""
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
+    pending = (session or {}).get("pending_disambiguation")
+    stripped = (text or "").strip()
+    if pending and pending.get("kind") == "project" and pending.get("field_key") and pending.get("options"):
+        options = pending["options"]
+        idx = nlu.resolve_option_reply(stripped, options)
+        if idx is not None:
+            await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+            return {pending["field_key"]: options[idx - 1]["value"]}
+        if stripped.isdigit():
+            # Same "invalid number handled locally" posture as MOVE's own
+            # pending-disambiguation handler — an out-of-range digit is
+            # never a project name, so re-show the SAME numbered list
+            # rather than falling through to re-resolving "99" as a
+            # literal (and failing) project query.
+            opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                f"Please choose one of the listed projects:\n\n{opts_text}\n\n"
+                f"Reply with the number, or type the full name."
+            )}
+
     if len(_send_selector_pairs(collected)) > 1:
         return await _send_bulk_parse_edits_async(text, collected, ctx)
 
@@ -10336,6 +10441,59 @@ async def _send_one_pair(
     # through exactly as before.
     preview_assignments = existing.get("preview_assignments") if existing else None
     preview_error = existing.get("preview_error") if existing else None
+    # Staleness check (2026-09-27, Phase 2E forensic audit fix) — the ONLY
+    # existing freshness signal, `preview_computed_at`, was written on
+    # every confirmation-render (save_send_preview_cache) but never
+    # actually checked again here at dispatch time; an admin who reviews
+    # a card and only approves minutes later could otherwise dispatch a
+    # plan older than SEND_PREVIEW_CACHE_TTL_SEC with no revalidation at
+    # all. A locked MarkIntent's own resolved_source_message_id can never
+    # actually change once set (apply_resolution's write-once compare-
+    # and-set — see mark_intent.py), so a stale plan is never WRONG about
+    # what it already found; the real risk this closes is INCOMPLETE — a
+    # mark added after the preview rendered would never be reflected in
+    # a frozen `preview_assignments` list. Smallest safe fix: re-run the
+    # SAME preview scan _build_send_confirmation already uses and refresh
+    # the cache BEFORE dispatch, rather than trusting arbitrarily old
+    # data or redesigning the dispatch/sender pipeline itself. A refresh
+    # that still comes back ambiguous/unresolved/erroring stops the send
+    # here, exactly as approving a freshly-ambiguous confirmation would;
+    # a refresh that merely times out (None, None) falls through to the
+    # existing fallback branch below unchanged, which already handles
+    # "no usable plan yet" safely via a fresh async scan.
+    preview_computed_at = existing.get("preview_computed_at") if existing else None
+    if preview_computed_at is not None and preview_computed_at.tzinfo is None:
+        # Motor/pymongo hand back an offset-NAIVE datetime on read (BSON
+        # carries no tzinfo) even though save_send_preview_cache wrote it
+        # tz-aware — same normalization this codebase already applies at
+        # every other Mongo-datetime comparison site (e.g. mark_intent.py's
+        # get_freshly_resolved_if_complete).
+        preview_computed_at = preview_computed_at.replace(tzinfo=timezone.utc)
+    is_stale = (
+        preview_assignments is not None and not preview_error
+        and (
+            preview_computed_at is None
+            or (datetime.now(timezone.utc) - preview_computed_at).total_seconds() > media_send.SEND_PREVIEW_CACHE_TTL_SEC
+        )
+    )
+    if is_stale:
+        fresh_assignments, fresh_error = await _preview_send_marks(
+            talent_id=talent_id, talent_label=talent_label,
+            project_id=project["id"], project_label=project["label"],
+            destination_group=destination_group, sources=target["all_sources"],
+        )
+        if fresh_assignments is not None or fresh_error is not None:
+            await media_send.save_send_preview_cache(
+                talent_id, project["id"], destination_group, assignments=fresh_assignments, error=fresh_error,
+            )
+            preview_assignments, preview_error = fresh_assignments, fresh_error
+        # else: a bare timeout revalidating — leave preview_assignments/
+        # preview_error as the (now known-stale) cached values; the
+        # `if preview_assignments is not None and not preview_error`
+        # branch below still won't be silently trusted as "fresh" twice
+        # in a row in practice (a second stale dispatch attempt would
+        # re-trigger this same check), and the fallback branch remains
+        # available if this dispatch instead falls through to it.
     if preview_assignments is not None and not preview_error:
         sources = target["all_sources"]
         default_source_type, default_group_name = sources[0] if sources else (target.get("source_type") or "group", target.get("group_name"))

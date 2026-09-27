@@ -270,6 +270,32 @@ async def derive_display_state(action: Dict[str, Any]) -> str:
     return state
 
 
+def _describe_unresolved_item(u: Dict[str, Any]) -> str:
+    role, take = u.get("media_role"), u.get("take_number")
+    if role == "take" and take:
+        return f"Take {take}"
+    if role == "intro":
+        return "Introduction"
+    return (role or "media").capitalize()
+
+
+async def mark_partial_dispatch(action_id: str, *, unresolved_items: List[str]) -> None:
+    """Phase 2F (2026-09-27 forensic audit fix) — records which marks were
+    deliberately excluded from this dispatch because they're still
+    unresolved (permanently failed, or this action's own attempt ceiling
+    was exhausted), so the exclusion stays visible on the action document
+    even after it reaches COMPLETED for the subset that WAS dispatched.
+    Set BEFORE _resolve_and_dispatch — sync_from_finished_request's own
+    completion $set never touches `unresolved_items`, so it survives
+    unchanged once the dispatched subset finishes. Same "keep the nuance
+    visible even though the top-level state shows COMPLETED" pattern this
+    module already established for `has_unverified_media`."""
+    await db[ACTIONS_COLLECTION].update_one(
+        {"id": action_id},
+        {"$set": {"unresolved_items": unresolved_items, "updated_at": _now()}},
+    )
+
+
 async def mark_dispatched(action_id: str, dispatch_scan_request_id: str) -> None:
     """The action's media is resolved and the EXISTING, unchanged
     execution pipeline (media_assignment.create_scan_request /
@@ -471,24 +497,46 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
             permanently_failed = await db[mark_intent.MARK_INTENTS_COLLECTION].count_documents(
                 {"reply_message_id": {"$in": reply_ids}, "status": mark_intent.STATUS_FAILED_PERMANENTLY},
             ) > 0
-        if permanently_failed:
-            await fail_action(
-                action_id, code="media_not_located",
-                message=(
-                    "Some marked media could not be located after repeated attempts — please "
-                    "re-send the MARK reply on the original media, then retry."
-                ),
-                retryable=True,
-            )
-        elif attempt_count >= MAX_SEND_VERIFY_ATTEMPTS:
-            await fail_action(
-                action_id, code="verification_timeout",
-                message=(
-                    f"Still verifying some marked media for {action['talent_label']} / {action['project_label']} "
-                    f"after {attempt_count} attempts. Retry when ready."
-                ),
-                retryable=True,
-            )
+        ceiling_exhausted = attempt_count >= MAX_SEND_VERIFY_ATTEMPTS
+        if permanently_failed or ceiling_exhausted:
+            # Partial success (2026-09-27, Phase 2F forensic audit fix) —
+            # only once the still-unresolved item(s) have genuinely
+            # reached a terminal state (permanently failed, or this
+            # action's own retry ceiling is exhausted — never earlier,
+            # since a currently-unresolved mark may still resolve on the
+            # next attempt) does giving up on JUST those items become
+            # safe. If anything else in THIS scan's own output already
+            # resolved cleanly, dispatch that subset — 3 genuinely
+            # resolved takes must never be silently discarded because a
+            # 4th is stuck. Never weakens verification: every dispatched
+            # item still went through the exact same MarkIntent write-once
+            # lock as a full success would (outcome.assignments here is
+            # validate_candidates' own untouched output), and the still-
+            # unresolved item(s) are never sent/uploaded — only reported.
+            if outcome.assignments:
+                await mark_partial_dispatch(
+                    action_id, unresolved_items=[_describe_unresolved_item(u) for u in outcome.unresolved],
+                )
+                await _resolve_and_dispatch(action_id, outcome.assignments, attempt_count)
+                return True
+            if permanently_failed:
+                await fail_action(
+                    action_id, code="media_not_located",
+                    message=(
+                        "Some marked media could not be located after repeated attempts — please "
+                        "re-send the MARK reply on the original media, then retry."
+                    ),
+                    retryable=True,
+                )
+            else:
+                await fail_action(
+                    action_id, code="verification_timeout",
+                    message=(
+                        f"Still verifying some marked media for {action['talent_label']} / {action['project_label']} "
+                        f"after {attempt_count} attempts. Retry when ready."
+                    ),
+                    retryable=True,
+                )
         else:
             await _retry(mark_intent_ids=mark_intent_ids)
         return True
@@ -515,16 +563,31 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
             all_candidate_labels = sorted({
                 p["label"] for item in outcome.project_ambiguous for p in (item.get("ambiguous_projects") or [])
             })
-            await fail_action(
-                action_id, code="marked_media_project_ambiguous",
-                message=(
+            # 2026-09-27 forensic audit fix — project_ambiguous now also
+            # carries the "matches nothing at all, not even a near-miss"
+            # case (see media_assignment.validate_candidates' own case-4
+            # comment), which has an EMPTY candidate list, not several
+            # tied ones — needs its own wording rather than "matches 0
+            # similarly-named projects equally well: " (empty).
+            if all_candidate_labels:
+                message = (
                     f"Marked WhatsApp media WAS found for {action['talent_label']}, but its project "
                     f"reference could not be safely narrowed to {action['project_label']} — it matches "
                     f"{len(all_candidate_labels)} similarly-named projects equally well: "
                     f"{'; '.join(all_candidate_labels)}. Please re-send the MARK reply on WhatsApp with a "
                     f"more specific project name (e.g. include the part in parentheses, like "
                     f"\"{action['project_label']}\"), then retry."
-                ),
+                )
+            else:
+                message = (
+                    f"Marked WhatsApp media WAS found for {action['talent_label']}, but its mark text's "
+                    f"project reference doesn't match {action['project_label']} or any other known "
+                    f"project. Please re-send the MARK reply on WhatsApp naming the correct project "
+                    f"(e.g. \"{action['project_label']}\"), then retry."
+                )
+            await fail_action(
+                action_id, code="marked_media_project_ambiguous",
+                message=message,
                 retryable=True,
             )
             return True

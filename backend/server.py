@@ -13,6 +13,7 @@ from core import db, mongo_client, seed_admin, update_talent_cover_cache, valida
 from drive_backup import attach_db, drive_enabled, start_drive_worker
 from services.import_worker import start_import_worker
 from services.media_assignment_worker import start_media_assignment_worker
+from services.mark_intent_sweep import start_mark_intent_sweep
 from services.production_reminder_worker import start_production_reminder_worker
 from notifications import ensure_indexes as ensure_notifications_indexes
 from request_context import generate_request_id, reset_request_id, set_request_id
@@ -699,6 +700,15 @@ async def on_startup():
             start_production_reminder_worker()
         except Exception as _e:
             logger.warning("Production Reminder Worker startup failed (non-fatal): %s", _e)
+
+        # MarkIntent Background Sweep (Phase 2B, 2026-09-27 forensic audit
+        # fix) — see services/mark_intent_sweep.py's module docstring.
+        # Feature-flagged (MARK_INTENT_SWEEP_ENABLED, default off) and
+        # non-fatal, same posture as the Production Reminder Worker above.
+        try:
+            start_mark_intent_sweep()
+        except Exception as _e:
+            logger.warning("MarkIntent Background Sweep startup failed (non-fatal): %s", _e)
 
         logger.info("Backend startup completed successfully")
 

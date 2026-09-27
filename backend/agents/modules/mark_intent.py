@@ -128,6 +128,11 @@ async def ensure_indexes() -> None:
         name="correlation_key",
     )
     await db[MARK_INTENTS_COLLECTION].create_index([("status", 1)], name="status_idx")
+    # Background sweep (Phase 2B) — supports claim_next_sweepable_intent's
+    # own status+last_swept_at query/sort.
+    await db[MARK_INTENTS_COLLECTION].create_index(
+        [("status", 1), ("last_swept_at", 1), ("created_at", 1)], name="sweep_eligibility_idx",
+    )
 
 
 async def has_retryable_intents(talent_id: str, project_id: str) -> bool:
@@ -480,6 +485,48 @@ async def record_unresolved_attempt(
     return updated
 
 
+# Background sweep (2026-09-27, Phase 2B forensic audit fix) — the module
+# docstring above has always described retries as "dispatched on ordinary
+# UPLOAD/SEND retries and the background retry pass (once built)"; direct
+# production evidence (18 unresolved intents, several 6+ days old, several
+# frozen at attempt_count=0 since creation) proved that background pass
+# never existed — resolution depended entirely on a human happening to
+# retry a command whose live scan happened to re-surface the exact reply,
+# which the SAME evidence showed isn't even reliable when a human DOES
+# retry. `last_swept_at` (set only by claim_next_sweepable_intent below)
+# both rate-limits how often any one intent is re-scanned (never more
+# than once per MARK_INTENT_SWEEP_MIN_INTERVAL_SEC) and, combined with the
+# atomic claim, prevents two sweep cycles (or a sweep racing a human
+# retry) from dispatching two scans for the same intent at once.
+MARK_INTENT_SWEEP_MIN_INTERVAL_SEC = int(os.environ.get("MARK_INTENT_SWEEP_MIN_INTERVAL_SEC", "900"))
+
+
+async def claim_next_sweepable_intent(*, min_interval_sec: int = MARK_INTENT_SWEEP_MIN_INTERVAL_SEC) -> Optional[Dict[str, Any]]:
+    """Atomic claim of the single most-overdue unresolved/resolving
+    MarkIntent — same find_one_and_update claim pattern already used
+    throughout this codebase (e.g. routers/agents_whatsapp.py's own
+    scan-request claim). Never touches a RESOLVED or FAILED_PERMANENTLY
+    intent (both excluded by the status filter — a sweep must never
+    "unstick" a genuinely terminal intent, only advance one still
+    legitimately retryable). Returns None when nothing is currently
+    eligible (nothing unresolved at all, or every unresolved intent was
+    swept within the last `min_interval_sec`) — the caller's loop simply
+    sleeps and checks again, exactly the same idle-vs-found-work shape as
+    services/media_assignment_worker.py's own loops."""
+    now = _now()
+    cutoff = now - timedelta(seconds=min_interval_sec)
+    doc = await db[MARK_INTENTS_COLLECTION].find_one_and_update(
+        {
+            "status": {"$in": [STATUS_UNRESOLVED, STATUS_RESOLVING]},
+            "$or": [{"last_swept_at": {"$exists": False}}, {"last_swept_at": None}, {"last_swept_at": {"$lt": cutoff}}],
+        },
+        {"$set": {"last_swept_at": now}},
+        sort=[("last_swept_at", 1), ("created_at", 1)],
+        return_document=True,
+    )
+    return doc
+
+
 def _slot_key(media_role: str, take_number: Optional[int]) -> tuple:
     return (media_role, take_number)
 
@@ -510,16 +557,32 @@ async def observe_candidates(
     never depend on validate_candidates' own gating logic, only on "was
     this reply observed as an ordinary single-item mark".
 
-    Mirrors validate_candidates' OWN admission rule for ONLY the two
-    cases that mean "this candidate is a real, single-item mark that
-    belongs (or defaults) to the requested project" — reusing the exact
-    same extract_role_and_project / resolve_project_by_name functions
-    validate_candidates itself calls (never a re-implementation of that
-    logic, never a second competing matcher):
+    Reuses the exact same extract_role_and_project / resolve_project_by_name
+    functions validate_candidates itself calls (never a re-implementation
+    of that logic, never a second competing matcher), but observes a
+    candidate ONLY for the ONE case that unambiguously means "this is a
+    real, single-item mark FOR the requested project":
       - confidently matches the requested project -> observe it.
-      - matches nothing confidently and has no near-miss suggestions
-        either (genuinely unrelated text) -> defaults to the requested
-        project, same as validate_candidates' own case 4 -> observe it.
+      - confidently matches a DIFFERENT project, is tied between multiple
+        projects (ambiguous), has near-miss suggestions below the
+        auto-resolve bar, or matches nothing at all (no project,
+        ambiguous, or suggestions) -> NOT observed here, in every case,
+        each logged with its own distinct signal (MARK_INTENT_WRONG_
+        PROJECT / MARK_INTENT_PROJECT_AMBIGUOUS / MARK_INTENT_PROJECT_
+        NEAR_MISS / MARK_INTENT_PROJECT_FRAGMENT_UNRESOLVED — see the
+        function body). Safety fix (2026-09-27 forensic audit, Phase 1,
+        Task 3): this module used to mirror validate_candidates' own
+        pre-2026-09-20 "case 4" fallback and silently default a mark
+        with no confident/suggested project match to whatever project
+        the CURRENT scan happened to be scoped to — proven live against
+        real production data to silently misfile a mark explicitly
+        addressed to one project (e.g. "for LAKME Young") under a
+        completely different one a scan happened to be scoped to at the
+        time. Never guess: a candidate that doesn't confidently and
+        exclusively belong to the requested project is simply left
+        unobserved FOR THIS project_id — it will get its own correctly-
+        scoped intent the next time a scan actually targets whichever
+        project it belongs to, never a silent auto-file here.
     Deliberately does NOT create an intent for a candidate that
     confidently matches a DIFFERENT project, or is ambiguous/suggests
     another project — that candidate isn't for THIS project at all; it
@@ -565,12 +628,61 @@ async def observe_candidates(
         match = _nlu.resolve_project_by_name(parsed.project_fragment, projects)
         if match.project:
             if match.project["id"] != project_id:
+                logger.info(
+                    "MARK_INTENT_WRONG_PROJECT talent_id=%s scanned_project_id=%s "
+                    "matched_project_id=%s matched_project_label=%r project_fragment=%r "
+                    "reply_message_id=%s worker_id=%s -- confidently belongs to a DIFFERENT "
+                    "project, not observed here",
+                    talent_id, project_id, match.project["id"], match.project.get("label"),
+                    parsed.project_fragment, reply_message_id, worker_id,
+                )
                 continue  # confidently belongs to a DIFFERENT project -- not observed here
-        elif match.ambiguous or match.suggestions:
-            continue  # ambiguous/near-miss -- never guessed, not observed here
-        # else: no confident match and no suggestions at all -> genuinely
-        # unrelated text -> defaults to the requested project, same as
-        # validate_candidates' own case 4.
+            # else: confidently matches the requested project -> observe below.
+        elif match.ambiguous:
+            logger.info(
+                "MARK_INTENT_PROJECT_AMBIGUOUS talent_id=%s scanned_project_id=%s "
+                "project_fragment=%r candidates=%s reply_message_id=%s worker_id=%s -- "
+                "tied between multiple real projects, never guessed, not observed here",
+                talent_id, project_id, parsed.project_fragment,
+                [c2.get("label") for c2 in match.ambiguous], reply_message_id, worker_id,
+            )
+            continue  # ambiguous -- never guessed, not observed here
+        elif match.suggestions:
+            logger.info(
+                "MARK_INTENT_PROJECT_NEAR_MISS talent_id=%s scanned_project_id=%s "
+                "project_fragment=%r suggestions=%s reply_message_id=%s worker_id=%s -- "
+                "close candidates exist below the auto-resolve bar, never guessed, "
+                "not observed here",
+                talent_id, project_id, parsed.project_fragment,
+                [c2.get("label") for c2 in match.suggestions], reply_message_id, worker_id,
+            )
+            continue  # near-miss -- never guessed, not observed here
+        else:
+            # Safety fix (2026-09-27 forensic audit, Phase 1, Task 3) — by
+            # this point extract_role_and_project has ALREADY guaranteed
+            # parsed.project_fragment is non-empty (it returns None,
+            # filtered above, whenever there's no project text at all), so
+            # reaching here means the human DID name a project reference —
+            # it just didn't confidently match, or even near-miss-suggest,
+            # anything in the live project pool. The OLD behaviour treated
+            # this identically to "no project named at all" and silently
+            # defaulted the mark to whatever project THIS scan happens to
+            # be scoped to — proven live against real production data: a
+            # mark explicitly addressed "for LAKME Young" was silently
+            # filed under an unrelated "Snapdragon Computer" scan this way.
+            # Never guess: leave this candidate unobserved for THIS
+            # project_id (same posture as the wrong-project/ambiguous/
+            # near-miss branches above) so it can never contaminate an
+            # unrelated project's MarkIntent. A later scan correctly scoped
+            # to the intent's actual project — or a clearer re-MARK — is
+            # the safe path forward, never a silent auto-file here.
+            logger.info(
+                "MARK_INTENT_PROJECT_FRAGMENT_UNRESOLVED talent_id=%s scanned_project_id=%s "
+                "project_fragment=%r reply_message_id=%s worker_id=%s -- no confident match "
+                "or near-miss suggestion; NOT defaulting to the scanned project",
+                talent_id, project_id, parsed.project_fragment, reply_message_id, worker_id,
+            )
+            continue
         intent = await get_or_create_mark_intent(
             reply_message_id=reply_message_id,
             talent_id=talent_id, project_id=project_id, project_label=project_label,

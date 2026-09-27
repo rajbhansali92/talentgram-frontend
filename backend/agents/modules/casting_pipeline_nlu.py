@@ -324,6 +324,17 @@ _MAX_RANGE_SPAN = 5000  # sanity cap so a typo'd "1-999999999" errors instead of
 # list" as a talent_selector value — see SelectorResult.resolved_id.
 RESOLVED_TALENT_MARKER = "__resolved_talent__:"
 
+# Project counterpart (2026-09-27, Phase 2A/2D forensic audit fix) — same
+# shape/reasoning as RESOLVED_TALENT_MARKER above: encodes "the user just
+# picked THIS exact project, by id, from a numbered disambiguation list"
+# as a project_query value. See resolve_project_by_name's own bypass at
+# the top of that function. Currently produced only by casting.send's own
+# ambiguous-project disambiguation (agents/modules/casting_pipeline.py) —
+# MOVE/ADD's own disambiguation call sites are unchanged and still store a
+# plain label, by deliberate choice (a much larger, out-of-scope surface
+# to touch for this fix; resolve_project_by_name accepts either form).
+RESOLVED_PROJECT_MARKER = "__resolved_project__:"
+
 # Encodes "ignore any project constraint and search every active project"
 # as a project_query value — used when the user accepts a "would you like
 # me to search all active projects instead?" offer.
@@ -560,7 +571,7 @@ def _normalize_name(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _name_similarity(query: str, label: str) -> float:
+def _name_similarity(query: str, label: str, *, excluded_tokens: Optional[set] = None) -> float:
     """Best-effort similarity: whole-string ratio, or (if higher) the best
     ratio between any token of the query and any token of the label. A
     short/typo'd first-name-only query ("Ahna") fuzzy-matches poorly
@@ -571,7 +582,33 @@ def _name_similarity(query: str, label: str) -> float:
     exact token ("Prajal") never gets to shine against the label's
     matching token — comparing token-by-token (not just whole-query-
     against-each-label-token) and taking the best score across all three
-    comparisons handles every shape of query correctly."""
+    comparisons handles every shape of query correctly.
+
+    `excluded_tokens` (2026-09-27 forensic audit fix, Phase 1) and the
+    `len(qt) > 2 and len(lt) > 2` guard below: mirrors the identical
+    reasoning already applied to `_project_name_similarity`'s own
+    2026-09-27 fix. A token of length <=2 produces a trivially meaningless
+    "perfect" SequenceMatcher ratio against any other equally-short token;
+    `excluded_tokens` additionally lets a caller discount a token that is
+    otherwise-shared across a candidate pool from driving best_token to a
+    spurious near-perfect score on its own. The length guard applies
+    unconditionally (every caller, including talent matching, only ever
+    loses a spurious short-token tie, same non-regression argument as
+    `_project_name_similarity`'s own 2026-08-05 fix). `excluded_tokens`
+    itself is currently unused by any caller — `resolve_project_by_name`'s
+    Tier 5 (the case that motivated it, a project "family" base word like
+    "snapdragon" shared by several sibling projects) found this function's
+    un-project-aware whole-string ratio could still slip a false positive
+    past the exclusion for a genuinely-ambiguous plural-sibling pair, and
+    now scores projects with `_project_name_similarity` alone instead (see
+    that call site's own comment) — the parameter is kept here, defaulted
+    to None, as a documented, zero-cost extension point for a future
+    caller that needs it, not dead code to be removed. Every existing
+    caller passes neither, so `excluded_tokens` defaults to None (no
+    exclusion) — this can only ever REMOVE a token pair from
+    consideration, never add one, so no caller's score can
+    go UP because of this parameter, only stay the same or drop a spurious
+    tie."""
     q = _normalize_name(query)
     lab = _normalize_name(label)
     if not q or not lab:
@@ -579,8 +616,13 @@ def _name_similarity(query: str, label: str) -> float:
     whole = difflib.SequenceMatcher(None, q, lab).ratio()
     q_tokens = q.split()
     lab_tokens = lab.split()
+    excluded = excluded_tokens or set()
+    scorable_pairs = [
+        (qt, lt) for qt in q_tokens for lt in lab_tokens
+        if len(qt) > 2 and len(lt) > 2 and qt not in excluded and lt not in excluded
+    ]
     best_token = max(
-        (difflib.SequenceMatcher(None, qt, lt).ratio() for qt in q_tokens for lt in lab_tokens),
+        (difflib.SequenceMatcher(None, qt, lt).ratio() for qt, lt in scorable_pairs),
         default=0.0,
     )
     return max(whole, best_token)
@@ -919,14 +961,54 @@ def resolve_option_reply_multi(reply: str, options: List[Dict[str, str]]) -> Opt
 _LETTER_DIGIT_BOUNDARY_RE = re.compile(r"(?<=[a-z])(?=[0-9])|(?<=[0-9])(?=[a-z])")
 
 
-def _normalize_project_label(s: str) -> str:
+def _project_canonical_words(s: str) -> List[str]:
+    """The ONE shared word-level canonicalization for every project-name
+    comparison tier (2026-09-27 forensic audit fix, Phase 1, Task 2).
+
+    Before this fix, plural/possessive folding was applied
+    INCONSISTENTLY: `_normalize_project_label` (used by Tiers 1-3) only
+    stripped a possessive ("Carter's" -> "carter") via _normalize_name's
+    own _POSSESSIVE_RE, but never folded a bare plural ("Carters" stayed
+    "carters"); `_project_match_tokens` (used by Tier 4+) folded a
+    trailing plural 's' on any token longer than 3 characters, but that
+    tokenizer was never used before Tier 4. The practical effect: with a
+    same-named-family of sibling projects present, "Carter's" and
+    "Carters" could resolve via DIFFERENT tiers (and therefore, in a
+    pathological case, produce different ambiguity outcomes) depending
+    entirely on which tier happened to be the first to match — the two
+    forms should always compare identically. Folding plurals here, in the
+    ONE function every tier's own normalized form is now built from,
+    closes that gap for Tiers 1-3 too, without changing what Tier 4
+    already did.
+
+    Deliberately does NOT strip filler words ("film"/"project"/etc.) —
+    that tolerance stays exclusive to `_project_match_tokens` (Tier 4+):
+    removing a real word from a name-level exact/substring comparison
+    could make two genuinely DIFFERENT projects compare as identical at
+    Tiers 1-3, which are meant to still be close to exact matching;
+    filler-word tolerance is a deliberately looser, later-tier-only
+    behaviour and is unaffected by this change. Same reasoning as the
+    module's existing plural-fold rule: only ever removes a spurious
+    distinction between two spellings of the SAME name, never collapses
+    two different names — see _project_match_tokens' own comment for the
+    identical fold rule this now shares."""
     # same base rules as _normalize_name: lowercase, punctuation/hyphen-
     # stripped, whitespace-collapsed — plus the letter/digit boundary
     # split above, applied AFTER lowercasing (regex is case-sensitive to
     # a-z) but BEFORE the final whitespace-collapse handles it.
     normalized = _normalize_name(s)
     split = _LETTER_DIGIT_BOUNDARY_RE.sub(" ", normalized)
-    return re.sub(r"\s+", " ", split).strip()
+    words = re.sub(r"\s+", " ", split).strip().split()
+    folded = []
+    for w in words:
+        if len(w) > 3 and w.endswith("s"):
+            w = w[:-1]
+        folded.append(w)
+    return folded
+
+
+def _normalize_project_label(s: str) -> str:
+    return " ".join(_project_canonical_words(s))
 
 
 def _token_subset_matches(query: str, labels: List[str]) -> List[int]:
@@ -2942,22 +3024,17 @@ _PROJECT_AMBIGUITY_MARGIN = 0.03
 
 
 def _project_match_tokens(s: str) -> set:
-    """Tokenizes a project name/query for forgiving comparison: same
-    normalization _normalize_project_label already uses, plus filler-word
-    removal and simple plural/singular folding (a trailing 's' on a token
-    longer than 3 characters is dropped, e.g. "Films"/"Film" and the
-    common typo pattern "Ahaans"/"Ahaan" both fold to the same token).
-    Project-matching only — talent matching's own tokenization in
-    _name_similarity is untouched."""
-    out = set()
-    for t in _normalize_project_label(s).split():
-        if t in _PROJECT_FILLER_WORDS:
-            continue
-        if len(t) > 3 and t.endswith("s"):
-            t = t[:-1]
-        if t:
-            out.add(t)
-    return out
+    """Tokenizes a project name/query for forgiving comparison: the same
+    canonical words `_normalize_project_label` is now also built from
+    (_project_canonical_words — lowercase, punctuation/hyphen-stripped,
+    letter/digit-boundary-split, plural-folded), plus filler-word removal
+    on top (2026-09-27 fix: plural-folding moved into the shared
+    canonicalizer so Tiers 1-3 get it too; filler-word removal stays
+    exclusive to this function, used from Tier 4 onward — see
+    _project_canonical_words' own docstring for why). Project-matching
+    only — talent matching's own tokenization in _name_similarity is
+    untouched."""
+    return {w for w in _project_canonical_words(s) if w and w not in _PROJECT_FILLER_WORDS}
 
 
 def _project_token_subset_matches(query: str, labels: List[str]) -> List[int]:
@@ -2975,13 +3052,26 @@ def _project_token_subset_matches(query: str, labels: List[str]) -> List[int]:
     return [i for i, l in enumerate(labels) if q_tokens <= _project_match_tokens(l)]
 
 
-def _project_name_similarity(query: str, label: str) -> float:
+def _project_name_similarity(query: str, label: str, *, excluded_tokens: Optional[set] = None) -> float:
     """Project-only fuzzy similarity, computed over filler-word/plural-
     normalized tokens (order-independent — token-subset above already
     handles reordering, so this tier's job is purely typo tolerance).
     Combined with (never replacing) the shared _name_similarity via max()
     at the call site, so this can only ever IMPROVE a project match
     relative to today's behaviour, never regress one.
+
+    `excluded_tokens` (2026-09-27 forensic audit fix, Phase 1) — see
+    `_name_similarity`'s matching parameter for the full reasoning; used
+    the same way here by `resolve_project_by_name`'s Tier 5 to discount a
+    token shared by 2+ of the CURRENT candidate labels (a sibling-project
+    "family" base word, e.g. "snapdragon") from the best_token
+    computation below. Reproduced live bug this closes: a query like
+    "Snapdragon startup" against four "Snapdragon ..." sibling projects
+    scored every one of them at a tied 1.0 purely because they all share
+    the single token "snapdragon" — none of them longer than the len<=2
+    threshold the 2026-09-27 fix below already guards against, so that fix
+    alone did not close this case. Defaults to None (no exclusion, exact
+    prior behaviour) for every caller that doesn't pass it.
 
     2026-09-27 fix — `best_token` excludes tokens of length <= 2 from
     scoring. Root cause of a real, reproduced bug: a project label/query
@@ -3014,14 +3104,36 @@ def _project_name_similarity(query: str, label: str) -> float:
     if not q_tokens or not lab_tokens:
         return 0.0
     whole = difflib.SequenceMatcher(None, " ".join(q_tokens), " ".join(lab_tokens)).ratio()
+    excluded = excluded_tokens or set()
     scorable_pairs = [
-        (qt, lt) for qt in q_tokens for lt in lab_tokens if len(qt) > 2 and len(lt) > 2
+        (qt, lt) for qt in q_tokens for lt in lab_tokens
+        if len(qt) > 2 and len(lt) > 2 and qt not in excluded and lt not in excluded
     ]
     best_token = max(
         (difflib.SequenceMatcher(None, qt, lt).ratio() for qt, lt in scorable_pairs),
         default=0.0,
     )
     return max(whole, best_token)
+
+
+def _shared_tokens_across(token_sets: List[set]) -> set:
+    """Tokens appearing in 2+ of the given token sets (2026-09-27 forensic
+    audit fix) — used by `resolve_project_by_name`'s Tier 5 to identify a
+    project "family" base word (shared by several sibling CANDIDATES in
+    THIS specific resolution call, e.g. every "Snapdragon ..." project
+    when they're all in the pool together) so it can be excluded from
+    fuzzy best_token scoring via `_name_similarity`/`_project_name_
+    similarity`'s new `excluded_tokens` parameter. Computed fresh from
+    whatever candidate pool the caller passes in on every call — never a
+    static/global stopword list — so a word that's generic in one
+    resolution (shared by several projects currently in the pool) is
+    still fully meaningful in another call where it's the only candidate
+    carrying it."""
+    counts: Dict[str, int] = {}
+    for tokset in token_sets:
+        for t in tokset:
+            counts[t] = counts.get(t, 0) + 1
+    return {t for t, c in counts.items() if c >= 2}
 
 
 # ---------------------------------------------------------------------------
@@ -3051,6 +3163,20 @@ _PROJECT_NAME_FUZZY_CUTOFF = 0.6
 
 def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> ProjectNameMatch:
     q_raw = (name_query or "").strip()
+
+    # Durable disambiguation pick (2026-09-27, Phase 2A/2D forensic audit
+    # fix) — bypasses EVERY matching tier below entirely, exactly like
+    # RESOLVED_TALENT_MARKER already does for resolve_against_candidates.
+    # Checked before the empty-query/empty-projects guard below (and
+    # before ever touching `projects`) since a locked id needs neither —
+    # the whole point is "never re-derive the project from a name or an
+    # ambiguous candidate pool again once the user has picked one."
+    if q_raw.startswith(RESOLVED_PROJECT_MARKER):
+        payload = q_raw[len(RESOLVED_PROJECT_MARKER):]
+        pid, _, label = payload.partition("|")
+        if pid and label:
+            return ProjectNameMatch(project={"id": pid, "label": label})
+
     if not q_raw or not projects:
         return ProjectNameMatch(error=f'I couldn\'t find a project matching "{name_query}".')
 
@@ -3113,9 +3239,42 @@ def resolve_project_by_name(name_query: str, projects: List[Dict[str, str]]) -> 
     # fuzzy ratio is already a confident signal on its own, and real
     # production evidence showed the shared, stricter talent thresholds
     # triggering unwanted "did you mean" prompts even at high top scores.
+    #
+    # Sibling-family fuzzy-tie fix (2026-09-27 forensic audit, Phase 1) —
+    # a token shared by 2+ of the CANDIDATE labels in THIS call (e.g.
+    # "snapdragon" across a whole family of sibling projects) is not
+    # distinguishing and must not, on its own, drive best_token to a
+    # spuriously perfect score for every sibling alike. Reproduced live:
+    # "Snapdragon startup" against a Male Start-up Founder / Researcher /
+    # Film 2 / Film 4 sibling set used to score all four at a tied 1.0.
+    # Computed fresh from the actual candidate pool on every call, never a
+    # global/static stopword list.
+    #
+    # Tier 5 now scores PROJECTS with _project_name_similarity alone (no
+    # longer maxed against the shared, non-project-aware _name_similarity)
+    # — discovered while building the fix above: _name_similarity has no
+    # filler-word/plural awareness at all, so its own (undiscounted, by
+    # design — see _name_similarity's docstring) whole-string ratio could
+    # still silently re-introduce a false auto-resolve for a genuinely
+    # ambiguous sibling PAIR once the shared-token discount removed the
+    # OLD accidental tie that used to keep it safely ambiguous — proven
+    # live against this module's own "Hingle Project" vs "Hingle Projects"
+    # regression test (a real plural-sibling collision, not a typo of a
+    # single project, that must keep asking rather than confidently
+    # pick one). _project_name_similarity was already documented (hotfix
+    # 2026-08-05) as a pure improvement over _name_similarity for
+    # projects specifically ("can only ever IMPROVE a project match...
+    # never regress one") — its own filler-word/plural-aware tokenization
+    # is the project-appropriate signal; _name_similarity's un-aware,
+    # character-level fallback is what was introducing this class of
+    # false confidence once the shared-word tie it used to rely on was
+    # correctly removed. _name_similarity itself is untouched (still used
+    # exactly as before by every OTHER caller, e.g. talent matching) —
+    # only Tier 5's own combination changed.
+    project_shared_tokens = _shared_tokens_across([_project_match_tokens(l) for l in labels])
     scored = sorted(
         (
-            (i, max(_name_similarity(q_raw, labels[i]), _project_name_similarity(q_raw, labels[i])))
+            (i, _project_name_similarity(q_raw, labels[i], excluded_tokens=project_shared_tokens))
             for i in range(len(labels))
         ),
         key=lambda pair: pair[1], reverse=True,

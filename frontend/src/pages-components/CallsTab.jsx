@@ -380,7 +380,7 @@ function CallEntryModal({ row, onClose, onSaved }) {
 export default function CallsTab({ isAdmin, currentUserId, users }) {
     const [rows, setRows] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [baseline, setBaseline] = useState({ projects: [], talents: [] });
+    const [baseline, setBaseline] = useState({ projects: [], talents: [], assignees: [] });
 
     const [search, setSearch] = useState("");
     const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -388,7 +388,15 @@ export default function CallsTab({ isAdmin, currentUserId, users }) {
     const [pipelineFilter, setPipelineFilter] = useState([]);
     const [talentFilter, setTalentFilter] = useState("");
     const [assignmentFilter, setAssignmentFilter] = useState(isAdmin ? "all" : "mine");
+    const [assignedToFilter, setAssignedToFilter] = useState("");
     const [callStatusFilter, setCallStatusFilter] = useState("");
+
+    // Guards fetchRows against out-of-order responses: rapid successive
+    // filter changes (e.g. toggling Project on/off quickly) can fire
+    // overlapping requests whose responses arrive out of send order — a
+    // later-fired-but-faster response must never be overwritten by an
+    // earlier-fired-but-slower one landing after it.
+    const fetchSeq = useRef(0);
 
     const [selectedKeys, setSelectedKeys] = useState(new Set());
     const [assignTarget, setAssignTarget] = useState("");
@@ -415,13 +423,16 @@ export default function CallsTab({ isAdmin, currentUserId, users }) {
                 const rows_ = data.rows || [];
                 const projectMap = new Map();
                 const talentMap = new Map();
+                const assigneeMap = new Map();
                 rows_.forEach((r) => {
                     projectMap.set(r.project_id, r.project_name);
                     talentMap.set(r.talent_id, r.talent_name);
+                    if (r.assigned_to_id) assigneeMap.set(r.assigned_to_id, r.assigned_to_name || r.assigned_to_id);
                 });
                 setBaseline({
                     projects: [...projectMap.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label)),
                     talents: [...talentMap.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label)),
+                    assignees: [...assigneeMap.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label)),
                 });
             })
             .catch(() => {});
@@ -429,26 +440,37 @@ export default function CallsTab({ isAdmin, currentUserId, users }) {
     }, []);
 
     const fetchRows = () => {
+        const seq = ++fetchSeq.current;
         setLoading(true);
         const params = {};
         if (projectFilter.length) params.project_ids = projectFilter.join(",");
         if (talentFilter) params.talent_id = talentFilter;
         if (assignmentFilter) params.assignment = assignmentFilter;
+        if (assignedToFilter) params.assigned_to_id = assignedToFilter;
         if (pipelineFilter.length) params.pipeline = pipelineFilter.join(",");
         if (callStatusFilter) params.call_status = callStatusFilter;
         if (debouncedSearch) params.search = debouncedSearch;
         adminApi
             .get("/workflow/calls", { params })
-            .then(({ data }) => setRows(data.rows || []))
-            .catch(() => toast.error("Failed to load calls"))
-            .finally(() => setLoading(false));
+            .then(({ data }) => {
+                if (seq !== fetchSeq.current) return; // a newer request already resolved — discard this stale response
+                setRows(data.rows || []);
+            })
+            .catch(() => {
+                if (seq !== fetchSeq.current) return;
+                toast.error("Failed to load calls");
+            })
+            .finally(() => {
+                if (seq !== fetchSeq.current) return;
+                setLoading(false);
+            });
     };
 
     useEffect(() => {
         fetchRows();
         setSelectedKeys(new Set());
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [projectFilter, talentFilter, assignmentFilter, pipelineFilter, callStatusFilter, debouncedSearch]);
+    }, [projectFilter, talentFilter, assignmentFilter, assignedToFilter, pipelineFilter, callStatusFilter, debouncedSearch]);
 
     const rowKey = (r) => `${r.talent_id}::${r.project_id}`;
 
@@ -539,28 +561,37 @@ export default function CallsTab({ isAdmin, currentUserId, users }) {
                             <option key={o.id} value={o.id}>{o.label === "All" ? "All Call Statuses" : o.label}</option>
                         ))}
                     </select>
-                    {isAdmin && (
-                        <div className="flex items-center gap-1 ml-auto">
-                            {[
-                                { id: "all", label: "All Calls" },
-                                { id: "mine", label: "My Calls" },
-                                { id: "unassigned", label: "Unassigned" },
-                                { id: "assigned", label: "Assigned" },
-                            ].map((o) => (
-                                <button
-                                    key={o.id}
-                                    onClick={() => setAssignmentFilter(o.id)}
-                                    className={`px-2.5 py-1.5 rounded-sm text-[11px] font-medium border ${
-                                        assignmentFilter === o.id
-                                            ? "bg-black text-white border-black"
-                                            : "bg-black/[0.015] text-black/50 border-black/[0.06] hover:bg-black/[0.03]"
-                                    }`}
-                                >
-                                    {o.label}
-                                </button>
-                            ))}
-                        </div>
-                    )}
+                    <select
+                        value={assignedToFilter}
+                        onChange={(e) => setAssignedToFilter(e.target.value)}
+                        className="px-2.5 py-1.5 border border-black/[0.1] rounded-sm text-xs bg-white focus:outline-none"
+                    >
+                        <option value="">All Team Members</option>
+                        <option value="unassigned">Unassigned</option>
+                        {baseline.assignees.map((a) => (
+                            <option key={a.id} value={a.id}>{a.label}</option>
+                        ))}
+                    </select>
+                    <div className="flex items-center gap-1 ml-auto">
+                        {[
+                            { id: "all", label: "All Calls" },
+                            { id: "mine", label: "My Calls" },
+                            { id: "unassigned", label: "Unassigned" },
+                            { id: "assigned", label: "Assigned" },
+                        ].map((o) => (
+                            <button
+                                key={o.id}
+                                onClick={() => setAssignmentFilter(o.id)}
+                                className={`px-2.5 py-1.5 rounded-sm text-[11px] font-medium border ${
+                                    assignmentFilter === o.id
+                                        ? "bg-black text-white border-black"
+                                        : "bg-black/[0.015] text-black/50 border-black/[0.06] hover:bg-black/[0.03]"
+                                }`}
+                            >
+                                {o.label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
             </div>
 

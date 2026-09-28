@@ -44,7 +44,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pymongo.errors import DuplicateKeyError
 
 from core import db, current_team_or_admin, require_role, _now, active_only
@@ -122,7 +122,8 @@ def _call_status_bucket(called_at: Optional[str]) -> str:
 async def list_calls(
     project_ids: Optional[str] = None,  # comma-separated
     talent_id: Optional[str] = None,
-    assignment: Optional[str] = None,  # all | mine | unassigned | assigned (admin only — see below)
+    assignment: Optional[str] = None,  # all | mine | unassigned | assigned
+    assigned_to_id_filter: Optional[str] = Query(None, alias="assigned_to_id"),  # exact team member id, or "unassigned" — the "Assigned To" filter (2026-09-28)
     pipeline: Optional[str] = None,  # comma-separated stage keys
     call_status: Optional[str] = None,  # never | today | recent | stale
     search: Optional[str] = None,
@@ -133,15 +134,20 @@ async def list_calls(
     membership, never a completed/hold/locked project's rows (brief
     section 3/15, a hard requirement).
 
-    Authorization (never trust the frontend — same principle
-    core.require_role's own docstring states): a "team" role user's
-    results are ALWAYS restricted server-side to rows assigned to them,
-    regardless of what `assignment` was requested — assignment is an
-    admin-only action (see POST /assign), so a team member only ever
-    works their own assigned queue (brief section 13/25). An "admin" may
-    use `assignment` freely.
+    Visibility (2026-09-28 — see this task's own audit/report): a "team"
+    role user sees the SAME set of calls an admin's default view would —
+    every ongoing-project pipeline row, not just rows assigned to them.
+    This was a deliberate broadening (previously team members were hard-
+    scoped server-side to their own assigned queue only, which made
+    "record a call not assigned to you" unreachable through the UI at
+    all, since that row was never even visible). Assignment itself
+    (POST /assign, reassigning who a call belongs to) remains admin-only
+    — this endpoint only ever reads, never writes, `assigned_to_id`.
+    `assignment`/`assigned_to_id` are optional narrowing filters
+    available to every caller now, not an admin-only capability — a team
+    member can equally filter down to "My Calls" or a specific
+    colleague's queue within the now-broader set they can see.
     """
-    is_admin = user.get("role") == "admin"
 
     project_id_list = [p for p in (project_ids.split(",") if project_ids else []) if p]
     project_map = await _ongoing_project_map(project_id_list or None)
@@ -200,16 +206,19 @@ async def list_calls(
         assignment_doc = assignment_by_pair.get((talent_id_, project_id_))
         assigned_to_id = (assignment_doc or {}).get("assigned_to_id")
 
-        if not is_admin:
-            # Hard server-side scope — see this endpoint's own docstring.
-            if assigned_to_id != user.get("id"):
-                continue
-        elif assignment and assignment != "all":
+        if assignment and assignment != "all":
             if assignment == "mine" and assigned_to_id != user.get("id"):
                 continue
             if assignment == "unassigned" and assigned_to_id:
                 continue
             if assignment == "assigned" and not assigned_to_id:
+                continue
+
+        if assigned_to_id_filter:
+            if assigned_to_id_filter == "unassigned":
+                if assigned_to_id:
+                    continue
+            elif assigned_to_id != assigned_to_id_filter:
                 continue
 
         latest_call = latest_call_by_pair.get((talent_id_, project_id_))
@@ -254,13 +263,13 @@ async def list_calls(
 async def call_history(
     talent_id: str, project_id: str, user: Dict[str, Any] = Depends(current_team_or_admin),
 ):
-    if user.get("role") != "admin":
-        assignment_doc = await db[ASSIGNMENTS_COLLECTION].find_one(
-            {"talent_id": talent_id, "project_id": project_id}, {"_id": 0, "assigned_to_id": 1},
-        )
-        if not assignment_doc or assignment_doc.get("assigned_to_id") != user.get("id"):
-            raise HTTPException(403, "Not assigned to you")
-
+    """No ownership check — history visibility now matches list_calls'
+    own broadened visibility (2026-09-28): any authenticated team/admin
+    user can view history for any (talent, project) pair, the same set
+    list_calls already shows them. Keeping an independent "assigned to
+    you" 403 here after broadening the list would have made the History
+    button silently fail for rows a team member can now see but isn't
+    assigned to — the same reachability gap this whole change closes."""
     docs = await db[CALLS_COLLECTION].find(
         {"talent_id": talent_id, "project_id": project_id}, {"_id": 0},
     ).sort("called_at", -1).to_list(500)
@@ -295,13 +304,15 @@ async def create_call(payload: CallIn, user: Dict[str, Any] = Depends(current_te
     if payload.update_status is not None and payload.update_status not in UPDATE_STATUSES:
         raise HTTPException(400, f"update_status must be one of {UPDATE_STATUSES}")
 
-    if user.get("role") != "admin":
-        assignment_doc = await db[ASSIGNMENTS_COLLECTION].find_one(
-            {"talent_id": payload.talent_id, "project_id": payload.project_id}, {"_id": 0, "assigned_to_id": 1},
-        )
-        if not assignment_doc or assignment_doc.get("assigned_to_id") != user.get("id"):
-            raise HTTPException(403, "Not assigned to you")
-
+    # No ownership check here (2026-09-28): a team member may record a
+    # call for a pair NOT assigned to them, matching list_calls' own
+    # broadened visibility — see this task's brief ("Allow a Team Member
+    # to record/add a call entry even when the call is NOT assigned to
+    # that team member"). This is deliberately the ONLY permission this
+    # endpoint relaxes: it still never writes to ASSIGNMENTS_COLLECTION
+    # (assignment/reassignment stays exclusively behind POST /assign,
+    # require_role("admin"), untouched below), so recording a call can
+    # never reassign who a pair belongs to.
     # Pipeline membership must be real and belong to a currently-ongoing
     # project — never let a call be logged against a stale/closed
     # combination (brief section 3, applied to writes too, not just the

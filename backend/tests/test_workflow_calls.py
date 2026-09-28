@@ -421,13 +421,45 @@ async def test_assign_is_scoped_to_pair_not_whole_talent(client, admin, team, en
 
 
 # ---------------------------------------------------------------------------
-# Team-role server-side scoping — never trusts the frontend
+# Team-role visibility — broadened 2026-09-28: a team member sees the SAME
+# rows an admin's default view would (no more hard "only my assigned rows"
+# scoping), and can record a call / view history for ANY visible pair, not
+# just ones assigned to them. Assignment itself (POST /assign) stays
+# admin-only and untouched — see test_assign_is_admin_only above.
 # ---------------------------------------------------------------------------
 @_aio
-async def test_team_member_only_sees_own_assigned_rows(client, admin, team, env):
+async def test_team_member_sees_assigned_and_unassigned_and_other_assigned_rows(client, admin, team, env):
     p = await env.project(name="ZZZ_TEST_CALLS ScopeProj")
     t_mine = await env.talent(name="ZZZ_TEST_CALLS ScopeMine")
-    t_other = await env.talent(name="ZZZ_TEST_CALLS ScopeOther")
+    t_other_assignee = await env.talent(name="ZZZ_TEST_CALLS ScopeOtherAssignee")
+    t_unassigned = await env.talent(name="ZZZ_TEST_CALLS ScopeUnassigned")
+    await env.pipeline(p["id"], t_mine["id"])
+    await env.pipeline(p["id"], t_other_assignee["id"])
+    await env.pipeline(p["id"], t_unassigned["id"])
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t_mine["id"], "project_id": p["id"]}], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t_other_assignee["id"], "project_id": p["id"]}], "assigned_to_id": admin["id"]},
+        headers=admin["headers"],
+    )
+    # t_unassigned stays unassigned.
+
+    r = await client.get("/api/workflow/calls", headers=team["headers"])
+    rows = r.json()["rows"]
+    assert _row_for(rows, t_mine["id"], p["id"]) is not None
+    assert _row_for(rows, t_other_assignee["id"], p["id"]) is not None  # broadened: visible even though assigned to someone else
+    assert _row_for(rows, t_unassigned["id"], p["id"]) is not None  # broadened: visible even though unassigned
+
+
+@_aio
+async def test_team_member_assignment_mine_filter_still_narrows_within_broadened_set(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CALLS ScopeMineFilter")
+    t_mine = await env.talent(name="ZZZ_TEST_CALLS ScopeMineFilterMine")
+    t_other = await env.talent(name="ZZZ_TEST_CALLS ScopeMineFilterOther")
     await env.pipeline(p["id"], t_mine["id"])
     await env.pipeline(p["id"], t_other["id"])
     await client.post(
@@ -435,16 +467,15 @@ async def test_team_member_only_sees_own_assigned_rows(client, admin, team, env)
         json={"pairs": [{"talent_id": t_mine["id"], "project_id": p["id"]}], "assigned_to_id": team["id"]},
         headers=admin["headers"],
     )
-    # t_other stays unassigned.
 
-    r = await client.get("/api/workflow/calls", params={"assignment": "all"}, headers=team["headers"])
+    r = await client.get("/api/workflow/calls", params={"assignment": "mine"}, headers=team["headers"])
     rows = r.json()["rows"]
     assert _row_for(rows, t_mine["id"], p["id"]) is not None
-    assert _row_for(rows, t_other["id"], p["id"]) is None  # ignored `assignment=all` — server enforces scope
+    assert _row_for(rows, t_other["id"], p["id"]) is None  # `assignment=mine` narrows even for a team member now
 
 
 @_aio
-async def test_team_member_403_on_unassigned_pair_create_and_history(client, admin, team, env):
+async def test_team_member_can_create_call_and_view_history_on_unassigned_pair(client, admin, team, env):
     p = await env.project(name="ZZZ_TEST_CALLS ScopeWrite")
     t = await env.talent(name="ZZZ_TEST_CALLS ScopeWrite Talent")
     await env.pipeline(p["id"], t["id"])
@@ -455,10 +486,195 @@ async def test_team_member_403_on_unassigned_pair_create_and_history(client, adm
         json={"id": str(uuid.uuid4()), "talent_id": t["id"], "project_id": p["id"], "call_result": "answered"},
         headers=team["headers"],
     )
-    assert r.status_code == 403
+    assert r.status_code == 200, r.text
+    assert r.json()["called_by"] == team["id"]
 
     r2 = await client.get(f"/api/workflow/calls/{t['id']}/{p['id']}/history", headers=team["headers"])
-    assert r2.status_code == 403
+    assert r2.status_code == 200
+    assert len(r2.json()["history"]) == 1
+
+
+@_aio
+async def test_team_member_can_record_call_on_pair_assigned_to_someone_else(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CALLS ScopeOtherRecord")
+    t = await env.talent(name="ZZZ_TEST_CALLS ScopeOtherRecord Talent")
+    await env.pipeline(p["id"], t["id"])
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t["id"], "project_id": p["id"]}], "assigned_to_id": admin["id"]},
+        headers=admin["headers"],
+    )
+
+    r = await client.post(
+        "/api/workflow/calls",
+        json={"id": str(uuid.uuid4()), "talent_id": t["id"], "project_id": p["id"], "call_result": "answered"},
+        headers=team["headers"],
+    )
+    assert r.status_code == 200, r.text
+
+
+@_aio
+async def test_recording_a_call_never_changes_assigned_to(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CALLS NoReassign")
+    t = await env.talent(name="ZZZ_TEST_CALLS NoReassign Talent")
+    await env.pipeline(p["id"], t["id"])
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t["id"], "project_id": p["id"]}], "assigned_to_id": admin["id"]},
+        headers=admin["headers"],
+    )
+
+    await client.post(
+        "/api/workflow/calls",
+        json={"id": str(uuid.uuid4()), "talent_id": t["id"], "project_id": p["id"], "call_result": "answered"},
+        headers=team["headers"],
+    )
+
+    assignment_doc = await db.talent_project_call_assignments.find_one(
+        {"talent_id": t["id"], "project_id": p["id"]}, {"_id": 0, "assigned_to_id": 1},
+    )
+    assert assignment_doc["assigned_to_id"] == admin["id"]  # untouched by a Record from a different user
+
+
+@_aio
+async def test_recording_a_call_creates_exactly_one_entry(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CALLS OneEntry")
+    t = await env.talent(name="ZZZ_TEST_CALLS OneEntry Talent")
+    await env.pipeline(p["id"], t["id"])
+    call_id = str(uuid.uuid4())
+
+    r = await client.post(
+        "/api/workflow/calls",
+        json={"id": call_id, "talent_id": t["id"], "project_id": p["id"], "call_result": "answered", "update_text": "note"},
+        headers=team["headers"],
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["talent_id"] == t["id"] and body["project_id"] == p["id"] and body["update_text"] == "note"
+
+    count = await db.talent_project_calls.count_documents({"talent_id": t["id"], "project_id": p["id"]})
+    assert count == 1
+
+
+@_aio
+async def test_admin_visibility_and_record_unchanged_by_broadening(client, admin, env):
+    """Admin behaviour must stay exactly as before — same rows, same
+    ability to record/assign/view history for anything."""
+    p = await env.project(name="ZZZ_TEST_CALLS AdminUnchanged")
+    t = await env.talent(name="ZZZ_TEST_CALLS AdminUnchanged Talent")
+    await env.pipeline(p["id"], t["id"])
+
+    r = await client.get("/api/workflow/calls", headers=admin["headers"])
+    assert _row_for(r.json()["rows"], t["id"], p["id"]) is not None
+
+    r2 = await client.post(
+        "/api/workflow/calls",
+        json={"id": str(uuid.uuid4()), "talent_id": t["id"], "project_id": p["id"], "call_result": "answered"},
+        headers=admin["headers"],
+    )
+    assert r2.status_code == 200
+
+    r3 = await client.get(f"/api/workflow/calls/{t['id']}/{p['id']}/history", headers=admin["headers"])
+    assert r3.status_code == 200 and len(r3.json()["history"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# "Assigned To" filter — new `assigned_to_id` query param (2026-09-28)
+# ---------------------------------------------------------------------------
+@_aio
+async def test_filter_by_assigned_to_id_exact_user(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CALLS AssignedToFilter")
+    t_team = await env.talent(name="ZZZ_TEST_CALLS AssignedToFilterTeam")
+    t_admin = await env.talent(name="ZZZ_TEST_CALLS AssignedToFilterAdmin")
+    await env.pipeline(p["id"], t_team["id"])
+    await env.pipeline(p["id"], t_admin["id"])
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t_team["id"], "project_id": p["id"]}], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t_admin["id"], "project_id": p["id"]}], "assigned_to_id": admin["id"]},
+        headers=admin["headers"],
+    )
+
+    r = await client.get("/api/workflow/calls", params={"assigned_to_id": team["id"]}, headers=admin["headers"])
+    rows = r.json()["rows"]
+    assert _row_for(rows, t_team["id"], p["id"]) is not None
+    assert _row_for(rows, t_admin["id"], p["id"]) is None
+
+
+@_aio
+async def test_filter_by_assigned_to_id_unassigned(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CALLS AssignedToUnassignedFilter")
+    t_assigned = await env.talent(name="ZZZ_TEST_CALLS AssignedToUnassignedFilterAssigned")
+    t_unassigned = await env.talent(name="ZZZ_TEST_CALLS AssignedToUnassignedFilterUnassigned")
+    await env.pipeline(p["id"], t_assigned["id"])
+    await env.pipeline(p["id"], t_unassigned["id"])
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t_assigned["id"], "project_id": p["id"]}], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+
+    r = await client.get("/api/workflow/calls", params={"assigned_to_id": "unassigned"}, headers=admin["headers"])
+    rows = r.json()["rows"]
+    assert _row_for(rows, t_unassigned["id"], p["id"]) is not None
+    assert _row_for(rows, t_assigned["id"], p["id"]) is None
+
+
+@_aio
+async def test_filter_by_assigned_to_id_combines_with_project_and_pipeline_filters(client, admin, team, env):
+    p1 = await env.project(name="ZZZ_TEST_CALLS AssignedToComboA")
+    p2 = await env.project(name="ZZZ_TEST_CALLS AssignedToComboB")
+    t1 = await env.talent(name="ZZZ_TEST_CALLS AssignedToComboT1")
+    t2 = await env.talent(name="ZZZ_TEST_CALLS AssignedToComboT2")
+    await env.pipeline(p1["id"], t1["id"], stage="shortlisted")
+    await env.pipeline(p2["id"], t2["id"], stage="shortlisted")
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t1["id"], "project_id": p1["id"]}], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t2["id"], "project_id": p2["id"]}], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+
+    r = await client.get(
+        "/api/workflow/calls",
+        params={"assigned_to_id": team["id"], "project_ids": p1["id"], "pipeline": "shortlisted"},
+        headers=admin["headers"],
+    )
+    rows = r.json()["rows"]
+    assert _row_for(rows, t1["id"], p1["id"]) is not None
+    assert _row_for(rows, t2["id"], p2["id"]) is None  # excluded by project_ids, despite same assignee
+
+
+@_aio
+async def test_filter_by_assigned_to_id_available_to_team_member_too(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CALLS AssignedToTeamCaller")
+    t_mine = await env.talent(name="ZZZ_TEST_CALLS AssignedToTeamCallerMine")
+    t_other = await env.talent(name="ZZZ_TEST_CALLS AssignedToTeamCallerOther")
+    await env.pipeline(p["id"], t_mine["id"])
+    await env.pipeline(p["id"], t_other["id"])
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t_mine["id"], "project_id": p["id"]}], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+    await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t_other["id"], "project_id": p["id"]}], "assigned_to_id": admin["id"]},
+        headers=admin["headers"],
+    )
+
+    r = await client.get("/api/workflow/calls", params={"assigned_to_id": team["id"]}, headers=team["headers"])
+    rows = r.json()["rows"]
+    assert _row_for(rows, t_mine["id"], p["id"]) is not None
+    assert _row_for(rows, t_other["id"], p["id"]) is None
 
 
 # ---------------------------------------------------------------------------

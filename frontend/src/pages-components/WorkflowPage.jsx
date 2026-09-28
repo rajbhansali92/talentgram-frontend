@@ -824,15 +824,19 @@ export default function WorkflowPage() {
                 </form>
             )}
 
-            {/* Split Operations Workspace Grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-                
-                {/* 2. Left Column: Workflow Tasks Feed (majority of visual weight) */}
-                <div className="lg:col-span-8 space-y-3">
-                    {/* Filters — inline pills on tablet/desktop, a single compact
-                        "Filters" popover on mobile so the toolbar never has to
-                        wrap into several rows of buttons. */}
-                    <div className="hidden sm:flex items-center justify-between gap-2 flex-wrap">
+            {/* Workflow Workspace — a single main area (2026-09-28: Scouting was
+                consolidated out of a separate right-hand sidebar into this same
+                area, selected via the category pill below, same as
+                General/Project/Finance already worked). The category pills are
+                the one persistent primary nav; the content below them swaps
+                between the task feed and the Scouting workspace. */}
+            <div className="space-y-3">
+
+                {/* Filters — inline pills on tablet/desktop, a single compact
+                    "Filters" popover on mobile so the toolbar never has to
+                    wrap into several rows of buttons. The status filter only
+                    applies to the task feed, so it hides itself on Scouting. */}
+                <div className="hidden sm:flex items-center justify-between gap-2 flex-wrap">
                         <div className="flex items-center gap-1.5 flex-wrap">
                             {["all", "general", "project", "scouting", "finance"].map((cat) => (
                                 <button
@@ -848,16 +852,18 @@ export default function WorkflowPage() {
                                 </button>
                             ))}
                         </div>
-                        <select
-                            value={statusFilter}
-                            onChange={(e) => setStatusFilter(e.target.value)}
-                            className="text-xs border border-black/[0.08] rounded-full py-1.5 px-3 focus:outline-none bg-white text-black/70"
-                        >
-                            <option value="active">Active Tasks</option>
-                            <option value="completed">Completed Only</option>
-                            <option value="archived">Archived Only</option>
-                            <option value="all">All Tasks</option>
-                        </select>
+                        {categoryFilter !== "scouting" && (
+                            <select
+                                value={statusFilter}
+                                onChange={(e) => setStatusFilter(e.target.value)}
+                                className="text-xs border border-black/[0.08] rounded-full py-1.5 px-3 focus:outline-none bg-white text-black/70"
+                            >
+                                <option value="active">Active Tasks</option>
+                                <option value="completed">Completed Only</option>
+                                <option value="archived">Archived Only</option>
+                                <option value="all">All Tasks</option>
+                            </select>
+                        )}
                     </div>
 
                     {/* Mobile: single Filters trigger + popover */}
@@ -892,24 +898,234 @@ export default function WorkflowPage() {
                                         ))}
                                     </div>
                                 </div>
-                                <div className="space-y-1.5">
-                                    <p className="text-[10px] uppercase font-semibold text-black/40">Status</p>
-                                    <select
-                                        value={statusFilter}
-                                        onChange={(e) => setStatusFilter(e.target.value)}
-                                        className="w-full text-xs border border-black/[0.08] rounded-sm py-1.5 px-2 focus:outline-none bg-white"
-                                    >
-                                        <option value="active">Active Tasks</option>
-                                        <option value="completed">Completed Only</option>
-                                        <option value="archived">Archived Only</option>
-                                        <option value="all">All Tasks</option>
-                                    </select>
-                                </div>
+                                {categoryFilter !== "scouting" && (
+                                    <div className="space-y-1.5">
+                                        <p className="text-[10px] uppercase font-semibold text-black/40">Status</p>
+                                        <select
+                                            value={statusFilter}
+                                            onChange={(e) => setStatusFilter(e.target.value)}
+                                            className="w-full text-xs border border-black/[0.08] rounded-sm py-1.5 px-2 focus:outline-none bg-white"
+                                        >
+                                            <option value="active">Active Tasks</option>
+                                            <option value="completed">Completed Only</option>
+                                            <option value="archived">Archived Only</option>
+                                            <option value="all">All Tasks</option>
+                                        </select>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
 
-                    {/* Tasks Feed Content */}
+                {categoryFilter === "scouting" ? (
+                <div className="space-y-3">
+
+                    {/* Fast entry bar — AI Capture is the obvious primary action;
+                        manual logging is progressive disclosure behind a toggle. */}
+                    <div className="border border-black/[0.06] bg-white rounded-lg p-3.5 space-y-2.5 shadow-sm max-w-xl">
+                        <p className="text-xs font-medium text-black/60">Scouting Log</p>
+                        <button
+                            type="button"
+                            onClick={() => setShowAiCapture(true)}
+                            className="w-full flex items-center justify-center gap-1.5 bg-black text-white hover:bg-black/90 py-2.5 rounded-full text-xs font-semibold focus:outline-none"
+                        >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            AI Capture
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setShowManualScout((v) => !v)}
+                            className="w-full text-center text-[11px] text-black/40 hover:text-black/65 font-medium focus:outline-none"
+                        >
+                            {showManualScout ? "Hide manual entry" : "or log manually"}
+                        </button>
+                        {showManualScout && (
+                        <form onSubmit={handleCreateScout} className="space-y-2 pt-1">
+                            <div className="space-y-1">
+                                <label className="text-[10px] uppercase font-bold text-black/45">Instagram Profile Link</label>
+                                <div className="relative">
+                                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-black/35">
+                                        <Instagram className="w-3.5 h-3.5" />
+                                    </span>
+                                    <input
+                                        type="url"
+                                        value={newScout.instagram_link}
+                                        onChange={(e) => setNewScout({ ...newScout, instagram_link: e.target.value })}
+                                        placeholder="https://instagram.com/profile..."
+                                        className="w-full text-xs pl-8 pr-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30"
+                                        required
+                                    />
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <div className="space-y-1">
+                                    <label className="text-[10px] uppercase font-bold text-black/45">Phone Number</label>
+                                    <div className="relative">
+                                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-black/35">
+                                            <Phone className="w-3.5 h-3.5" />
+                                        </span>
+                                        <input
+                                            type="text"
+                                            value={newScout.phone}
+                                            onChange={(e) => setNewScout({ ...newScout, phone: e.target.value })}
+                                            placeholder="+91..."
+                                            className="w-full text-xs pl-8 pr-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30"
+                                            required
+                                        />
+                                    </div>
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-[10px] uppercase font-bold text-black/45">Scout Name</label>
+                                    <div className="relative">
+                                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-black/35">
+                                            <User className="w-3.5 h-3.5" />
+                                        </span>
+                                        <input
+                                            type="text"
+                                            value={newScout.name}
+                                            onChange={(e) => setNewScout({ ...newScout, name: e.target.value })}
+                                            placeholder="Optional name..."
+                                            className="w-full text-xs pl-8 pr-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-[10px] uppercase font-bold text-black/45">Scouting Notes</label>
+                                <input
+                                    type="text"
+                                    value={newScout.notes}
+                                    onChange={(e) => setNewScout({ ...newScout, notes: e.target.value })}
+                                    placeholder="Add inline scouting context / looks..."
+                                    className="w-full text-xs px-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none"
+                                />
+                            </div>
+                            <button
+                                type="submit"
+                                className="w-full border border-black/15 hover:bg-black/[0.03] text-black/75 py-1.5 rounded-full text-xs font-medium mt-1 focus:outline-none"
+                            >
+                                Log Scout
+                            </button>
+                        </form>
+                        )}
+                    </div>
+
+                    {/* Scouting Pipeline Database List — a responsive grid now
+                        that it has the full workspace width instead of a
+                        narrow sidebar column. */}
+                    <div className="space-y-2">
+                        <p className="text-[11px] font-medium text-black/45 px-1">Active Scouting Queue ({scouts.length})</p>
+
+                        {loadingScouts ? (
+                            <div className="rounded-lg p-6 text-center text-xs text-black/40">
+                                <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
+                                Loading queue...
+                            </div>
+                        ) : scouts.length === 0 ? (
+                            <div className="rounded-lg p-6 text-center text-xs text-black/40">
+                                Scouting pipeline is empty.
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                            {scouts.map((s) => {
+                                const isScoutExpanded = expandedScoutId === s.id;
+                                const currentStatus = SCOUT_STATUS_OPTIONS.find((st) => st.id === s.status);
+                                return (
+                                <div
+                                    key={s.id}
+                                    className="border border-black/[0.07] bg-white rounded-lg overflow-hidden"
+                                >
+                                    {/* Scout primary details — talent identity first, pipeline
+                                        controls revealed only on expand. */}
+                                    <div
+                                        onClick={() => setExpandedScoutId(isScoutExpanded ? null : s.id)}
+                                        className="p-3 flex items-start justify-between gap-3 cursor-pointer select-none"
+                                    >
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-1.5">
+                                                {s.name && <span className="text-sm font-medium text-black/85 truncate">{s.name}</span>}
+                                                <a
+                                                    href={s.instagram_link}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    className="text-xs text-blue-600 hover:underline inline-flex items-center gap-0.5 truncate"
+                                                >
+                                                    <Instagram className="w-3 h-3 text-black/40 shrink-0" />
+                                                    Instagram
+                                                </a>
+                                            </div>
+                                            <div className="text-xs text-black/45 mt-0.5">
+                                                {s.phone}
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 shrink-0">
+                                            {currentStatus && (
+                                                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-black/[0.05] text-black/55">
+                                                    {currentStatus.label}
+                                                </span>
+                                            )}
+                                            {isScoutExpanded ? (
+                                                <ChevronUp className="w-3.5 h-3.5 text-black/35" />
+                                            ) : (
+                                                <ChevronDown className="w-3.5 h-3.5 text-black/35" />
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {isScoutExpanded && (
+                                        <div className="px-3 pb-3 pt-0.5 space-y-2.5 border-t border-black/[0.06]">
+                                            {/* Notes block editable inline */}
+                                            <div className="space-y-1 pt-2.5">
+                                                <label className="text-[10px] uppercase font-semibold text-black/40">Scouting Notes</label>
+                                                <input
+                                                    type="text"
+                                                    defaultValue={s.notes || ""}
+                                                    onBlur={(e) => handleUpdateScoutNotes(s.id, e.target.value)}
+                                                    placeholder="Click to write scout update..."
+                                                    className="w-full text-xs border border-black/[0.08] focus:border-black/25 rounded-sm px-2 py-1 text-black/75 bg-white focus:outline-none"
+                                                />
+                                            </div>
+
+                                            {/* Quick Status pills */}
+                                            <div className="space-y-1">
+                                                <label className="text-[10px] uppercase font-semibold text-black/40">Pipeline Status</label>
+                                                <div className="flex flex-wrap gap-1">
+                                                    {SCOUT_STATUS_OPTIONS.map((st) => (
+                                                        <button
+                                                            key={st.id}
+                                                            onClick={() => handleUpdateScoutStatus(s.id, st.id)}
+                                                            className={`px-2 py-1 text-[11px] font-medium rounded-full border transition-all ${
+                                                                s.status === st.id
+                                                                    ? "bg-black text-white border-black"
+                                                                    : "bg-white text-black/55 border-black/[0.08] hover:bg-black/[0.03]"
+                                                            }`}
+                                                        >
+                                                            {st.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            {isAdmin && (
+                                                <button
+                                                    onClick={() => handleDeleteScout(s.id)}
+                                                    className="inline-flex items-center gap-1 text-[11px] text-black/40 hover:text-red-600 focus:outline-none"
+                                                >
+                                                    <Trash2 className="w-3 h-3" />
+                                                    Delete
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                                );
+                            })}
+                            </div>
+                        )}
+                    </div>
+                </div>
+                ) : (
                     <div className="space-y-2">
                         {loadingTasks ? (
                             <div className="rounded-lg p-10 text-center text-xs text-black/40">
@@ -1215,212 +1431,7 @@ export default function WorkflowPage() {
                             })
                         )}
                     </div>
-                </div>
-
-                {/* 3. Right Column: Scouting utility panel — narrower, secondary */}
-                <div className="lg:col-span-4 space-y-3">
-
-                    {/* Fast entry bar — AI Capture is the obvious primary action;
-                        manual logging is progressive disclosure behind a toggle. */}
-                    <div className="border border-black/[0.06] bg-white rounded-lg p-3.5 space-y-2.5 shadow-sm">
-                        <p className="text-xs font-medium text-black/60">Scouting Log</p>
-                        <button
-                            type="button"
-                            onClick={() => setShowAiCapture(true)}
-                            className="w-full flex items-center justify-center gap-1.5 bg-black text-white hover:bg-black/90 py-2.5 rounded-full text-xs font-semibold focus:outline-none"
-                        >
-                            <Sparkles className="w-3.5 h-3.5" />
-                            AI Capture
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setShowManualScout((v) => !v)}
-                            className="w-full text-center text-[11px] text-black/40 hover:text-black/65 font-medium focus:outline-none"
-                        >
-                            {showManualScout ? "Hide manual entry" : "or log manually"}
-                        </button>
-                        {showManualScout && (
-                        <form onSubmit={handleCreateScout} className="space-y-2 pt-1">
-                            <div className="space-y-1">
-                                <label className="text-[10px] uppercase font-bold text-black/45">Instagram Profile Link</label>
-                                <div className="relative">
-                                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-black/35">
-                                        <Instagram className="w-3.5 h-3.5" />
-                                    </span>
-                                    <input
-                                        type="url"
-                                        value={newScout.instagram_link}
-                                        onChange={(e) => setNewScout({ ...newScout, instagram_link: e.target.value })}
-                                        placeholder="https://instagram.com/profile..."
-                                        className="w-full text-xs pl-8 pr-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30"
-                                        required
-                                    />
-                                </div>
-                            </div>
-                            <div className="grid grid-cols-2 gap-2">
-                                <div className="space-y-1">
-                                    <label className="text-[10px] uppercase font-bold text-black/45">Phone Number</label>
-                                    <div className="relative">
-                                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-black/35">
-                                            <Phone className="w-3.5 h-3.5" />
-                                        </span>
-                                        <input
-                                            type="text"
-                                            value={newScout.phone}
-                                            onChange={(e) => setNewScout({ ...newScout, phone: e.target.value })}
-                                            placeholder="+91..."
-                                            className="w-full text-xs pl-8 pr-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30"
-                                            required
-                                        />
-                                    </div>
-                                </div>
-                                <div className="space-y-1">
-                                    <label className="text-[10px] uppercase font-bold text-black/45">Scout Name</label>
-                                    <div className="relative">
-                                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-black/35">
-                                            <User className="w-3.5 h-3.5" />
-                                        </span>
-                                        <input
-                                            type="text"
-                                            value={newScout.name}
-                                            onChange={(e) => setNewScout({ ...newScout, name: e.target.value })}
-                                            placeholder="Optional name..."
-                                            className="w-full text-xs pl-8 pr-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none"
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="space-y-1">
-                                <label className="text-[10px] uppercase font-bold text-black/45">Scouting Notes</label>
-                                <input
-                                    type="text"
-                                    value={newScout.notes}
-                                    onChange={(e) => setNewScout({ ...newScout, notes: e.target.value })}
-                                    placeholder="Add inline scouting context / looks..."
-                                    className="w-full text-xs px-2.5 py-1.5 border border-black/[0.08] rounded-sm focus:outline-none"
-                                />
-                            </div>
-                            <button
-                                type="submit"
-                                className="w-full border border-black/15 hover:bg-black/[0.03] text-black/75 py-1.5 rounded-full text-xs font-medium mt-1 focus:outline-none"
-                            >
-                                Log Scout
-                            </button>
-                        </form>
-                        )}
-                    </div>
-
-                    {/* Scouting Pipeline Database List */}
-                    <div className="space-y-2">
-                        <p className="text-[11px] font-medium text-black/45 px-1">Active Scouting Queue ({scouts.length})</p>
-
-                        {loadingScouts ? (
-                            <div className="rounded-lg p-6 text-center text-xs text-black/40">
-                                <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
-                                Loading queue...
-                            </div>
-                        ) : scouts.length === 0 ? (
-                            <div className="rounded-lg p-6 text-center text-xs text-black/40">
-                                Scouting pipeline is empty.
-                            </div>
-                        ) : (
-                            scouts.map((s) => {
-                                const isScoutExpanded = expandedScoutId === s.id;
-                                const currentStatus = SCOUT_STATUS_OPTIONS.find((st) => st.id === s.status);
-                                return (
-                                <div
-                                    key={s.id}
-                                    className="border border-black/[0.07] bg-white rounded-lg overflow-hidden"
-                                >
-                                    {/* Scout primary details — talent identity first, pipeline
-                                        controls revealed only on expand. */}
-                                    <div
-                                        onClick={() => setExpandedScoutId(isScoutExpanded ? null : s.id)}
-                                        className="p-3 flex items-start justify-between gap-3 cursor-pointer select-none"
-                                    >
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex items-center gap-1.5">
-                                                {s.name && <span className="text-sm font-medium text-black/85 truncate">{s.name}</span>}
-                                                <a
-                                                    href={s.instagram_link}
-                                                    target="_blank"
-                                                    rel="noreferrer"
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    className="text-xs text-blue-600 hover:underline inline-flex items-center gap-0.5 truncate"
-                                                >
-                                                    <Instagram className="w-3 h-3 text-black/40 shrink-0" />
-                                                    Instagram
-                                                </a>
-                                            </div>
-                                            <div className="text-xs text-black/45 mt-0.5">
-                                                {s.phone}
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center gap-1.5 shrink-0">
-                                            {currentStatus && (
-                                                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-black/[0.05] text-black/55">
-                                                    {currentStatus.label}
-                                                </span>
-                                            )}
-                                            {isScoutExpanded ? (
-                                                <ChevronUp className="w-3.5 h-3.5 text-black/35" />
-                                            ) : (
-                                                <ChevronDown className="w-3.5 h-3.5 text-black/35" />
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    {isScoutExpanded && (
-                                        <div className="px-3 pb-3 pt-0.5 space-y-2.5 border-t border-black/[0.06]">
-                                            {/* Notes block editable inline */}
-                                            <div className="space-y-1 pt-2.5">
-                                                <label className="text-[10px] uppercase font-semibold text-black/40">Scouting Notes</label>
-                                                <input
-                                                    type="text"
-                                                    defaultValue={s.notes || ""}
-                                                    onBlur={(e) => handleUpdateScoutNotes(s.id, e.target.value)}
-                                                    placeholder="Click to write scout update..."
-                                                    className="w-full text-xs border border-black/[0.08] focus:border-black/25 rounded-sm px-2 py-1 text-black/75 bg-white focus:outline-none"
-                                                />
-                                            </div>
-
-                                            {/* Quick Status pills */}
-                                            <div className="space-y-1">
-                                                <label className="text-[10px] uppercase font-semibold text-black/40">Pipeline Status</label>
-                                                <div className="flex flex-wrap gap-1">
-                                                    {SCOUT_STATUS_OPTIONS.map((st) => (
-                                                        <button
-                                                            key={st.id}
-                                                            onClick={() => handleUpdateScoutStatus(s.id, st.id)}
-                                                            className={`px-2 py-1 text-[11px] font-medium rounded-full border transition-all ${
-                                                                s.status === st.id
-                                                                    ? "bg-black text-white border-black"
-                                                                    : "bg-white text-black/55 border-black/[0.08] hover:bg-black/[0.03]"
-                                                            }`}
-                                                        >
-                                                            {st.label}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            </div>
-
-                                            {isAdmin && (
-                                                <button
-                                                    onClick={() => handleDeleteScout(s.id)}
-                                                    className="inline-flex items-center gap-1 text-[11px] text-black/40 hover:text-red-600 focus:outline-none"
-                                                >
-                                                    <Trash2 className="w-3 h-3" />
-                                                    Delete
-                                                </button>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                                );
-                            })
-                        )}
-                    </div>
-                </div>
+                )}
 
             </div>
 

@@ -1012,7 +1012,10 @@ def test_report_unresolved_names_real_talent_never_presents_agent_as_talent():
     )
     assert "MEDIA RESOLUTION FAILED" in report
     assert "Talent: Ishani Kouli" in report
-    assert "SINGLETON with shruti hassan Take 1" in report
+    # 2026-09-28 (Paakhi Baranwal / Loreal fix) — take-role phrasing now
+    # matches media_assignment.py's own established "Audition Take N"
+    # wording (was bare "Take N").
+    assert "SINGLETON with shruti hassan Audition Take 1" in report
     assert "No upload was performed" in report
     assert "Gunwanti" not in report
     assert "marked for Gunwanti" not in report
@@ -1056,6 +1059,29 @@ def test_report_unresolved_distinguishes_transient_from_remark_states():
     assert "no_verifiable_signal" not in no_signal  # never leak the raw machine tag
     assert "never rendered any identifiable media content" in no_signal
     assert "Re-send the MARK reply" in no_signal
+
+
+def test_report_unresolved_take_without_number_never_says_take_none():
+    """2026-09-28 (Paakhi Baranwal / Loreal production incident) — the
+    employee's mark text ("Mark audition take for Loreal") never specified
+    a take number, so take_number is correctly None; the report used to
+    format this as the literal string "Take None". Must now match
+    media_assignment.py's own already-established guard (line ~1060):
+    "Audition Take {n}" when a number exists, else bare "Audition Take"."""
+    report = orch._report_unresolved(
+        "Paakhi Baranwal", "Loreal Campaign (tinted serum foundation + lipstick french riviera)",
+        [{"media_role": "take", "take_number": None, "resolution_failure_state": "tile_not_found"}],
+    )
+    assert "None" not in report
+    assert "Audition Take" in report
+    assert "Take None" not in report
+
+    with_number = orch._report_unresolved(
+        "Some Talent", "Some Project",
+        [{"media_role": "take", "take_number": 2, "resolution_failure_state": "not_located"}],
+    )
+    assert "Audition Take 2" in with_number
+    assert "None" not in with_number
 
 
 async def test_orchestrator_unresolved_report_names_ishani_not_gunwanti():

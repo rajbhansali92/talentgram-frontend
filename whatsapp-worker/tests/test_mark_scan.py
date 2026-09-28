@@ -2961,10 +2961,23 @@ def main():
     assert "album" in result_87["reason"], result_87
     print("87. live-jump fallback safety: jumped-to album -> rejected, not treated as a single-media match")
 
-    # 88: jumped-to message's hash matches (same embedded blob) but it
-    # carries no recognizable image/video testid marker at all -> clean
-    # fallback failure, never assumed to be media just because a hash
-    # happened to match.
+    # 88: jumped-to message's hash matches EXACTLY (same embedded blob) but
+    # it carries no recognizable image/video testid marker at all.
+    #
+    # Fix (2026-09-28, Paakhi Baranwal / Loreal production incident,
+    # "MEDIA RESOLUTION FAILED — Take None") — this used to be a hard
+    # failure ("tile_not_found") purely because _media_type() didn't
+    # recognize this particular live DOM read. Real production evidence
+    # proved that's wrong: the jumped-to message's hash matched the
+    # stored quoted_thumbnail_hash EXACTLY (the strongest identity signal
+    # this codebase has — see this function's own docstring, Phase 0's
+    # proof that a real thumbnail hash is byte-identical between a quoted
+    # reply and its original), yet the mark was still reported unresolved
+    # solely because media_type came back None. An exact hash match is
+    # now authoritative on its own; media_type is supplementary metadata,
+    # never a second identity gate. The hash check itself is NOT weakened
+    # — this fixture's hash still matches expected_hash_85 exactly; only
+    # a WRONG hash (see 86/88b below) is ever rejected.
     no_media_marker_88 = (
         '<div data-id="NOMEDIAMARKER88" data-testid="conv-msg-NOMEDIAMARKER88">'
         '<div style="background-image: url(&quot;data:image/jpeg;base64,'
@@ -2973,11 +2986,67 @@ def main():
     )
     page_88, _ = _setup_jump_fixture("REPLY88", "NOMEDIAMARKER88", no_media_marker_88)
     result_88 = asyncio.run(mark_scan._resolve_single_media_via_jump(
-        page_88, "Sneha Varghese", "REPLY88", expected_hash_85,
+        page_88, "Sneha Varghese", "REPLY88", expected_hash_85, expected_media_type="image",
     ))
-    assert result_88["ok"] is False, result_88
-    assert "no recognizable media" in result_88["reason"], result_88
-    print("88. live-jump fallback safety: jumped-to message has no media -> clean failure, never guessed")
+    assert result_88["ok"] is True, result_88
+    assert result_88["source_message_id"] == "NOMEDIAMARKER88", result_88
+    # media_type falls back to the caller's already-known expected_media_type
+    # (never fabricated, never guessed) when the live DOM read didn't carry
+    # a recognizable marker.
+    assert result_88["source_media_type"] == "image", result_88
+    print("88. live-jump fallback: EXACT hash match is now authoritative on its own -> a jumped-to message whose hash matches exactly but has no recognizable media-type marker is ACCEPTED (source_media_type falls back to the caller's known expected type), never rejected as tile_not_found (Paakhi Baranwal / Loreal fix)")
+
+    # 88b: same "no recognizable media marker" shape as 88, but this time
+    # the caller has NO expected_media_type either (mirrors the real
+    # Paakhi incident's take mark, whose quoted block's own media-type
+    # detection had failed too, quoted_media_type=null in production) ->
+    # still ACCEPTED on the exact hash match alone; source_media_type
+    # falls back to the existing neutral/null representation rather than
+    # rejecting an otherwise hash-verified source.
+    page_88b, _ = _setup_jump_fixture("REPLY88B", "NOMEDIAMARKER88", no_media_marker_88)
+    result_88b = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_88b, "Sneha Varghese", "REPLY88B", expected_hash_85, expected_media_type=None,
+    ))
+    assert result_88b["ok"] is True, result_88b
+    assert result_88b["source_media_type"] is None, result_88b
+    print("88b. live-jump fallback: exact hash match accepted even with NO expected_media_type at all to fall back on (matches the real Paakhi incident's quoted_media_type=null) -> source_media_type stays the neutral None, never rejected")
+
+    # 88c: WRONG hash (genuinely different content) + media_type ALSO
+    # missing -> must still be a hard failure. The hash check itself is
+    # never bypassed or weakened by this fix; media_type presence/absence
+    # is irrelevant once the hash itself doesn't match. (Since verify()
+    # never reports "matched" here at all, this falls through to the
+    # existing wrong_message classification below the matched-branch —
+    # the SAME path test 86 already exercises for a mismatched hash — not
+    # the tile_not_found branch, which this fix's added condition makes
+    # reachable ONLY when the hash already matched exactly.)
+    wrong_hash_no_marker_88c = (
+        '<div data-id="WRONGNOMARKER88C" data-testid="conv-msg-WRONGNOMARKER88C">'
+        '<div style="background-image: url(&quot;data:image/jpeg;base64,'
+        + _fake_blob("genuinelydifferentcontent88c") +
+        '&quot;);"></div></div>'
+    )
+    page_88c, _ = _setup_jump_fixture("REPLY88C", "WRONGNOMARKER88C", wrong_hash_no_marker_88c)
+    result_88c = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_88c, "Sneha Varghese", "REPLY88C", expected_hash_85, expected_media_type="image",
+    ))
+    assert result_88c["ok"] is False, result_88c
+    assert result_88c.get("source_message_id") is None, result_88c
+    print("88c. live-jump fallback safety: WRONG hash + no recognizable media marker either -> still a hard failure, the hash check is never bypassed just because media_type is also absent")
+
+    # 88d: jumped-to message carries NO embeddable base64 blob at all (not
+    # merely a different one) -> _smallest_hash returns None entirely,
+    # never equal to expected_hash -> hard failure, same as any other
+    # non-matching case. Distinct fixture from 88c (mismatched hash) to
+    # cover the "no hash extractable at all" shape specifically.
+    no_hash_at_all_88d = '<div data-id="NOHASH88D" data-testid="conv-msg-NOHASH88D"><span>just text, no media</span></div>'
+    page_88d, _ = _setup_jump_fixture("REPLY88D", "NOHASH88D", no_hash_at_all_88d)
+    result_88d = asyncio.run(mark_scan._resolve_single_media_via_jump(
+        page_88d, "Sneha Varghese", "REPLY88D", expected_hash_85, expected_media_type="image",
+    ))
+    assert result_88d["ok"] is False, result_88d
+    assert result_88d.get("source_message_id") is None, result_88d
+    print("88d. live-jump fallback safety: jumped-to message has no extractable hash at all -> hard failure, never accepted")
 
     mark_scan.sender._resolve_scope = orig_resolve_scope_jump
     mark_scan._find_message_index_by_data_id = orig_find_idx_jump

@@ -198,7 +198,18 @@ _UNRESOLVED_STATE_PHRASE = {
 
 def _report_unresolved(talent_label: str, project_label: str, unresolved: List[Dict[str, Any]]) -> str:
     def _line(u: Dict[str, Any]) -> str:
-        role = ("Take " + str(u.get("take_number"))) if u.get("media_role") == "take" else (u.get("media_role") or "").capitalize()
+        # Fix (2026-09-28, Paakhi Baranwal / Loreal incident) — take_number
+        # is correctly None when the employee's mark text never specified
+        # one (e.g. "Mark audition take for Loreal"); the old
+        # "Take " + str(take_number) rendered that as the literal string
+        # "Take None". Matches media_assignment.py's own
+        # already-established guard for this exact same case (see its
+        # take-role branch at line ~1060).
+        if u.get("media_role") == "take":
+            take_number = u.get("take_number")
+            role = f"Audition Take {take_number}" if take_number else "Audition Take"
+        else:
+            role = (u.get("media_role") or "").capitalize()
         phrase = _UNRESOLVED_STATE_PHRASE.get(u.get("resolution_failure_state") or "", "the exact marked source could not be recovered after bounded automatic recovery")
         return f"- {project_label} {role} — {phrase}"
 

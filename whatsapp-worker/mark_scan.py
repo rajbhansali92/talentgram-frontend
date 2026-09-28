@@ -2150,11 +2150,40 @@ async def _resolve_single_media_via_jump(
         if verify["matched"]:
             media_type = verify["last_media_type"]
             if not media_type:
-                last_fail = {
-                    "ok": False, "data_id": data_id, "failure_state": "tile_not_found",
-                    "reason": "jumped-to message has no recognizable media",
-                }
-                continue
+                # Fix (2026-09-28, Paakhi Baranwal / Loreal production
+                # incident, "MEDIA RESOLUTION FAILED — Take None") — an
+                # EXACT hash match against `expected_hash` is already the
+                # strongest identity proof this codebase has (Phase 0's
+                # own finding: a real thumbnail hash is byte-identical
+                # between a quoted reply and its original — see this
+                # function's and _await_marked_media_on_message's own
+                # docstrings). Discarding that confirmed match purely
+                # because _media_type()'s own data-testid selectors
+                # (video-thumb/video-content/image-thumb/image-content)
+                # didn't recognize this particular live DOM read is a
+                # SEPARATE, supplementary signal failing — not a source-
+                # identity failure. Real incident evidence: the jumped-to
+                # message's hash matched the stored quoted_thumbnail_hash
+                # exactly, proving it was the correct source, yet the old
+                # code still rejected it as "tile_not_found" solely
+                # because media_type came back None on that read.
+                #
+                # This branch is only reachable when verify["matched"] is
+                # True — which (per _await_marked_media_on_message) only
+                # happens via hash-less media-type equality (impossible to
+                # reach with media_type falsy) or via exact hash equality
+                # when `expected_hash` is not None. The hash-equality
+                # condition is re-asserted explicitly below anyway, so the
+                # identity check itself is never weakened, bypassed, or
+                # replaced with fuzzy/media-type-only matching.
+                if expected_hash is not None and verify["last_hash"] == expected_hash:
+                    media_type = expected_media_type  # caller's already-known signal; None stays None (neutral), never rejected
+                else:
+                    last_fail = {
+                        "ok": False, "data_id": data_id, "failure_state": "tile_not_found",
+                        "reason": "jumped-to message has no recognizable media",
+                    }
+                    continue
             try:
                 html = await loc.evaluate("(el) => el.outerHTML", timeout=10000)
             except Exception:

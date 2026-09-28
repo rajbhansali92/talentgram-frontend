@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 import logging
 from datetime import datetime, timedelta, timezone
@@ -53,6 +54,244 @@ async def trigger_workflow_notification(
         })
     except Exception as e:
         logger.error("Workflow notification insert failed: %s", e)
+
+# --------------------------------------------------------------------------
+# Workflow → WhatsApp group notifications (Talentgram Workflow group)
+#
+# Reuses the EXACT same fire-and-forget queue mechanism already used for
+# internal submission notifications (see
+# routers.submissions._enqueue_internal_whatsapp_notification_task /
+# enqueue_internal_whatsapp_notification) — same db.whatsapp_batches /
+# db.whatsapp_jobs collections, same recipient_kind="INTERNAL_GROUP" /
+# destination_type="group" shape, same asyncio.create_task fire-and-forget
+# wrapping with all errors swallowed+logged so a WhatsApp/Mongo hiccup can
+# never fail or roll back the Workflow mutation that triggered it. No new
+# WhatsApp system, no new worker, no new queue.
+# --------------------------------------------------------------------------
+WORKFLOW_APP_URL = "https://review.talentgramagency.com/admin/workflow"
+
+
+def _workflow_task_link(task_id: str) -> str:
+    return f"{WORKFLOW_APP_URL}?task={task_id}"
+
+
+def _fmt_event_ts(iso: Optional[str]) -> str:
+    """Event date/time, always with year — e.g. '28 Sep 2026, 8:32 PM'."""
+    if not iso:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        hour12 = dt.strftime("%I").lstrip("0") or "12"
+        return f"{dt.strftime('%d %b %Y')}, {hour12}:{dt.strftime('%M %p')}"
+    except Exception:
+        return iso
+
+
+def _fmt_due(iso: Optional[str]) -> Optional[str]:
+    """Due date, no year (matches the brief's own examples) — e.g. '29 Sep, 5:00 PM'."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        hour12 = dt.strftime("%I").lstrip("0") or "12"
+        return f"{dt.strftime('%d %b')}, {hour12}:{dt.strftime('%M %p')}"
+    except Exception:
+        return iso
+
+
+async def _resolve_user_names(user_ids: set) -> Dict[str, str]:
+    ids = [uid for uid in user_ids if uid]
+    if not ids:
+        return {}
+    docs = await db.users.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "email": 1}).to_list(len(ids))
+    return {d["id"]: (d.get("name") or d.get("email") or "Unknown") for d in docs}
+
+
+async def _workflow_notification_group_name() -> str:
+    cfg = await db.whatsapp_config.find_one({"key": "workflow_notification_group_name"})
+    value = cfg.get("value") if cfg else None
+    return value or "Talentgram Workflow"
+
+
+async def _enqueue_workflow_whatsapp_notification_task(message_body: str, task_id: str):
+    try:
+        group_name = await _workflow_notification_group_name()
+        timestamp = _now()
+        batch_id = str(uuid.uuid4())
+        batch_doc = {
+            "id": batch_id,
+            "source_type": "WORKFLOW_NOTIFICATION",
+            "source_label": "Workflow Notification",
+            "project_id": None,
+            "project_name": None,
+            "template_id": "workflow_notification",
+            "template_slug": "workflow_notification",
+            "variable_data": {},
+            "media_url": None,
+            "is_dry_run": False,
+            "status": "pending",
+            "total_jobs": 1,
+            "sent_count": 0,
+            "failed_count": 0,
+            "unconfirmed_count": 0,
+            "created_by": "system",
+            "created_at": timestamp,
+            "started_at": None,
+            "completed_at": None,
+        }
+        job_doc = {
+            "id": str(uuid.uuid4()),
+            "batch_id": batch_id,
+            "template_id": "workflow_notification",
+            "template_name": "Workflow Notification",
+            "source": "WORKFLOW_NOTIFICATION",
+            "source_id": task_id,
+            "recipient_kind": "INTERNAL_GROUP",
+            "recipient_id": "workflow_notification_group",
+            "talent_id": None,
+            "talent_name": group_name,
+            "destination_type": "group",
+            "destination": group_name,
+            "message_body": message_body,
+            "media_url": None,
+            "is_dry_run": False,
+            "status": "pending",
+            "attempt_count": 0,
+            "last_attempted_at": None,
+            "sent_at": None,
+            "error_message": None,
+            "worker_picked_at": None,
+            "created_at": timestamp,
+        }
+        await db.whatsapp_batches.insert_one(batch_doc)
+        await db.whatsapp_jobs.insert_one(job_doc)
+        logger.info(f"Enqueued workflow WhatsApp notification for task {task_id}")
+    except Exception as e:
+        logger.warning(f"Error enqueuing workflow WhatsApp notification: {e}", exc_info=True)
+
+
+def enqueue_workflow_whatsapp_notification(message_body: str, task_id: str):
+    """Fire-and-forget — never awaited by the caller, never allowed to
+    raise into the request path. A Workflow mutation must always succeed
+    even if WhatsApp/Mongo is unavailable."""
+    try:
+        asyncio.create_task(_enqueue_workflow_whatsapp_notification_task(message_body, task_id))
+    except Exception as e:
+        logger.warning(f"Failed to schedule workflow WhatsApp notification: {e}", exc_info=True)
+
+
+def _build_new_task_message(task: dict, assignee_name: str, creator_name: str) -> str:
+    lines = [
+        "🆕 *NEW TASK*",
+        f"Task: {task.get('title')}",
+        f"Project: {task.get('project_name') or '—'}",
+        f"Assigned to: {assignee_name}",
+        f"Created by: {creator_name}",
+    ]
+    due_fmt = _fmt_due(task.get("due_at"))
+    if due_fmt:
+        lines.append(f"Due: {due_fmt}")
+    if task.get("priority"):
+        lines.append(f"Priority: {task['priority'].title()}")
+    lines.append(f"Created: {_fmt_event_ts(task.get('created_at'))}")
+    lines.append("Open Task:")
+    lines.append(_workflow_task_link(task["id"]))
+    return "\n".join(lines)
+
+
+def _build_new_checklist_item_message(task: dict, checklist_text: str, actor_name: str, assignee_name: str, event_ts: str) -> str:
+    lines = [
+        "📋 *NEW CHECKLIST ITEM*",
+        f"Task: {task.get('title')}",
+        f"Project: {task.get('project_name') or '—'}",
+        "Checklist:",
+        checklist_text,
+        f"Added by: {actor_name}",
+        f"Assigned to: {assignee_name}",
+    ]
+    due_fmt = _fmt_due(task.get("due_at"))
+    if due_fmt:
+        lines.append(f"Due: {due_fmt}")
+    lines.append(f"Added: {_fmt_event_ts(event_ts)}")
+    lines.append("Open Task:")
+    lines.append(_workflow_task_link(task["id"]))
+    return "\n".join(lines)
+
+
+def _build_task_completed_message(task: dict, actor_name: str, event_ts: str) -> str:
+    lines = [
+        "✅ *TASK COMPLETED*",
+        f"Task: {task.get('title')}",
+        f"Project: {task.get('project_name') or '—'}",
+        f"Completed by: {actor_name}",
+        f"Completed: {_fmt_event_ts(event_ts)}",
+        "Open Task:",
+        _workflow_task_link(task["id"]),
+    ]
+    return "\n".join(lines)
+
+
+def _build_checklist_completed_message(task: dict, checklist_text: str, actor_name: str, event_ts: str) -> str:
+    lines = [
+        "✅ *CHECKLIST COMPLETED*",
+        f"Task: {task.get('title')}",
+        f"Project: {task.get('project_name') or '—'}",
+        "Completed:",
+        checklist_text,
+        f"Completed by: {actor_name}",
+        f"Completed: {_fmt_event_ts(event_ts)}",
+        "Open Task:",
+        _workflow_task_link(task["id"]),
+    ]
+    return "\n".join(lines)
+
+
+def _build_checklist_updated_message(task: dict, old_text: str, new_text: str, actor_name: str, event_ts: str) -> str:
+    lines = [
+        "✏️ *CHECKLIST UPDATED*",
+        f"Task: {task.get('title')}",
+        f"Project: {task.get('project_name') or '—'}",
+        "Checklist:",
+        new_text,
+        f"Updated by: {actor_name}",
+        f"Updated: {_fmt_event_ts(event_ts)}",
+        "Changes:",
+        f"• Text: {old_text} → {new_text}",
+        "Open Task:",
+        _workflow_task_link(task["id"]),
+    ]
+    return "\n".join(lines)
+
+
+def _build_task_assigned_message(task: dict, old_assignee_name: str, new_assignee_name: str, actor_name: str, event_ts: str) -> str:
+    lines = [
+        "👤 *TASK ASSIGNED*",
+        f"Task: {task.get('title')}",
+        f"Project: {task.get('project_name') or '—'}",
+        f"Assigned to: {new_assignee_name}",
+        f"Previously: {old_assignee_name}",
+        f"Assigned by: {actor_name}",
+        f"Time: {_fmt_event_ts(event_ts)}",
+        "Open Task:",
+        _workflow_task_link(task["id"]),
+    ]
+    return "\n".join(lines)
+
+
+def _build_task_updated_message(task: dict, change_lines: list, actor_name: str, event_ts: str) -> str:
+    lines = [
+        "✏️ *TASK UPDATED*",
+        f"Task: {task.get('title')}",
+        f"Project: {task.get('project_name') or '—'}",
+        f"Updated by: {actor_name}",
+        f"Updated: {_fmt_event_ts(event_ts)}",
+        "Changes:",
+    ]
+    lines.extend(f"• {c}" for c in change_lines)
+    lines.append("Open Task:")
+    lines.append(_workflow_task_link(task["id"]))
+    return "\n".join(lines)
+
 
 # --------------------------------------------------------------------------
 # Tasks APIs
@@ -179,7 +418,16 @@ async def create_task(payload: TaskIn, user: dict = Depends(current_user)):
                 title=f"New task assigned: {payload.title}",
                 task_id=tid,
             )
-            
+
+        # WhatsApp group notification — fire-and-forget, never blocks/fails
+        # task creation (see enqueue_workflow_whatsapp_notification).
+        name_map = await _resolve_user_names({uid, payload.assignee_id})
+        creator_name = name_map.get(uid, user.get("name") or user.get("email") or "Someone")
+        assignee_name = name_map.get(payload.assignee_id, "Unassigned") if payload.assignee_id else "Unassigned"
+        enqueue_workflow_whatsapp_notification(
+            _build_new_task_message(task_doc, assignee_name, creator_name), tid,
+        )
+
         return _to_dict(task_doc)
     except Exception as e:
         logger.error("Error creating workflow task: %s", e)
@@ -221,41 +469,81 @@ async def update_task(tid: str, payload: TaskUpdateIn, user: dict = Depends(curr
         if is_core_edit and creator_is_admin and role != "admin":
             raise HTTPException(403, "Cannot edit core properties of admin-created tasks")
             
+        # WhatsApp change-tracking — accumulated alongside the existing
+        # field-by-field update_data construction below; a "before" value is
+        # already in `task` (fetched above) so no extra query is needed. Only
+        # a field actually changing value is ever appended — a save that
+        # resends the same value produces zero lines, matching the "no
+        # notification for no-op changes" requirement.
+        change_lines: List[str] = []
+
         if payload.title is not None:
-            update_data["title"] = payload.title.strip()
+            new_title = payload.title.strip()
+            if new_title != (task.get("title") or ""):
+                change_lines.append(f"Title: {task.get('title')} → {new_title}")
+            update_data["title"] = new_title
         if payload.description is not None:
-            update_data["description"] = payload.description.strip()
+            new_desc = payload.description.strip()
+            if new_desc != (task.get("description") or ""):
+                change_lines.append("Description updated")
+            update_data["description"] = new_desc
         if payload.category is not None:
+            if payload.category != task.get("category"):
+                change_lines.append(f"Category: {(task.get('category') or '').title()} → {payload.category.title()}")
             update_data["category"] = payload.category
+        project_changed = payload.project_id is not None and payload.project_id != task.get("project_id")
         if payload.project_id is not None:
             update_data["project_id"] = payload.project_id
         if payload.project_name is not None:
             update_data["project_name"] = payload.project_name.strip()
+        if project_changed:
+            old_pname = task.get("project_name") or "—"
+            new_pname = (payload.project_name or "").strip() or "—"
+            change_lines.append(f"Project: {old_pname} → {new_pname}")
         if payload.talent_id is not None:
             update_data["talent_id"] = payload.talent_id
         if payload.due_at is not None:
+            if payload.due_at != task.get("due_at"):
+                change_lines.append(f"Due date: {_fmt_due(task.get('due_at')) or 'None'} → {_fmt_due(payload.due_at) or 'None'}")
             update_data["due_at"] = payload.due_at
         if payload.priority is not None:
+            if payload.priority != task.get("priority"):
+                old_p = (task.get("priority") or "none").title()
+                new_p = (payload.priority or "none").title()
+                change_lines.append(f"Priority: {old_p} → {new_p}")
             update_data["priority"] = payload.priority
 
         # Assignee transition trigger
+        assignee_changed = False
+        prev_assignee = task.get("assignee_id")
         if payload.assignee_id is not None:
-            prev_assignee = task.get("assignee_id")
             update_data["assignee_id"] = payload.assignee_id
-            if payload.assignee_id and payload.assignee_id != prev_assignee and payload.assignee_id != uid:
+            assignee_changed = payload.assignee_id != prev_assignee
+            if payload.assignee_id and assignee_changed and payload.assignee_id != uid:
                 await trigger_workflow_notification(
                     user_id=payload.assignee_id,
                     title=f"Task assigned to you: {task.get('title')}",
                     task_id=tid,
                 )
-                
+
         # Status updates (allowed for both admin & team)
+        status_changed_to_completed = False
         if payload.status is not None:
             prev_status = task.get("status")
             update_data["status"] = payload.status
-            
+
             # Trigger status change notification
             if prev_status != payload.status:
+                if payload.status == "completed":
+                    status_changed_to_completed = True
+                else:
+                    # Non-completion transitions (e.g. reopened, in_progress)
+                    # are folded into the general TASK UPDATED message below
+                    # rather than a dedicated event type, per the brief's own
+                    # "avoid duplicate/fragmented notifications" guidance.
+                    change_lines.append(
+                        f"Status: {(prev_status or '').replace('_', ' ').title()} → {payload.status.replace('_', ' ').title()}"
+                    )
                 recipients = {task.get("assignee_id"), task.get("creator_id")}
                 for r in recipients:
                     if r and r != uid:
@@ -264,20 +552,80 @@ async def update_task(tid: str, payload: TaskUpdateIn, user: dict = Depends(curr
                             title=f"Task status changed to {payload.status}: {task.get('title')}",
                             task_id=tid,
                         )
-                        
-        # Subtasks updates
+
+        # Subtasks updates — the frontend always sends the FULL modified
+        # array (see workflow_schemas.TaskUpdateIn), so a checklist item's
+        # add/complete/text-edit/removal is detected by diffing the old and
+        # new arrays by id, not from any separate per-item endpoint.
+        added_subtasks: List[dict] = []
+        completed_subtasks: List[dict] = []
+        edited_subtasks: List[tuple] = []
         if payload.subtasks is not None:
-            update_data["subtasks"] = _to_dict(payload.subtasks)
-            
+            new_subtasks = _to_dict(payload.subtasks)
+            update_data["subtasks"] = new_subtasks
+            old_subtasks_by_id = {s["id"]: s for s in (task.get("subtasks") or [])}
+            new_ids = {s["id"] for s in new_subtasks}
+            for s in new_subtasks:
+                old = old_subtasks_by_id.get(s["id"])
+                if old is None:
+                    added_subtasks.append(s)
+                elif (not old.get("completed")) and s.get("completed"):
+                    completed_subtasks.append(s)
+                elif old.get("text") != s.get("text") and old.get("completed") == s.get("completed"):
+                    edited_subtasks.append((old, s))
+            for old_id, old in old_subtasks_by_id.items():
+                if old_id not in new_ids:
+                    change_lines.append(f"Checklist removed: {old.get('text')}")
+
         # Attachments updates
         if payload.attachments is not None:
             update_data["attachments"] = _to_dict(payload.attachments)
-            
+
         if update_data:
             update_data["updated_at"] = _now()
             await db.workflow_tasks.update_one({"id": tid}, {"$set": update_data})
-            
+
         updated_task = await db.workflow_tasks.find_one({"id": tid}, {"_id": 0})
+
+        # WhatsApp group notifications — fire-and-forget, computed from the
+        # diffs above; never blocks/fails the update itself (see
+        # enqueue_workflow_whatsapp_notification's own error containment).
+        event_ts = updated_task.get("updated_at") or _now()
+        name_map = await _resolve_user_names({uid, prev_assignee, payload.assignee_id})
+        actor_name = name_map.get(uid, user.get("name") or user.get("email") or "Someone")
+
+        for s in added_subtasks:
+            assignee_name = name_map.get(updated_task.get("assignee_id"), "Unassigned") if updated_task.get("assignee_id") else "Unassigned"
+            enqueue_workflow_whatsapp_notification(
+                _build_new_checklist_item_message(updated_task, s["text"], actor_name, assignee_name, event_ts), tid,
+            )
+        for s in completed_subtasks:
+            enqueue_workflow_whatsapp_notification(
+                _build_checklist_completed_message(updated_task, s["text"], actor_name, event_ts), tid,
+            )
+        for old, new in edited_subtasks:
+            enqueue_workflow_whatsapp_notification(
+                _build_checklist_updated_message(updated_task, old["text"], new["text"], actor_name, event_ts), tid,
+            )
+        if status_changed_to_completed:
+            enqueue_workflow_whatsapp_notification(
+                _build_task_completed_message(updated_task, actor_name, event_ts), tid,
+            )
+        if assignee_changed and not change_lines:
+            old_assignee_name = name_map.get(prev_assignee, "Unassigned") if prev_assignee else "Unassigned"
+            new_assignee_name = name_map.get(payload.assignee_id, "Unassigned") if payload.assignee_id else "Unassigned"
+            enqueue_workflow_whatsapp_notification(
+                _build_task_assigned_message(updated_task, old_assignee_name, new_assignee_name, actor_name, event_ts), tid,
+            )
+        elif assignee_changed:
+            old_assignee_name = name_map.get(prev_assignee, "Unassigned") if prev_assignee else "Unassigned"
+            new_assignee_name = name_map.get(payload.assignee_id, "Unassigned") if payload.assignee_id else "Unassigned"
+            change_lines.append(f"Assigned to: {old_assignee_name} → {new_assignee_name}")
+        if change_lines:
+            enqueue_workflow_whatsapp_notification(
+                _build_task_updated_message(updated_task, change_lines, actor_name, event_ts), tid,
+            )
+
         return _to_dict(updated_task)
     except HTTPException as he:
         raise he

@@ -2104,6 +2104,7 @@ async def update_config(
         "max_retries",
         "circuit_breaker_threshold",
         "internal_notification_group_name",
+        "workflow_notification_group_name",
     }
     if key not in allowed_keys:
         raise HTTPException(400, f"Unknown config key '{key}'")

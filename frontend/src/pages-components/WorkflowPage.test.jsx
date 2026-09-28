@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 const toastError = vi.fn();
 const toastSuccess = vi.fn();
@@ -100,7 +101,7 @@ beforeEach(() => {
 describe("WorkflowPage — category pill navigation", () => {
     it("All shows every task regardless of category", async () => {
         mockAdminApi({ tasks: [TASK_GENERAL, TASK_PROJECT, TASK_FINANCE] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         await waitFor(() => expect(screen.getByText("General Task")).toBeTruthy());
         expect(screen.getByText("Project Task")).toBeTruthy();
         expect(screen.getByText("Finance Task")).toBeTruthy();
@@ -108,7 +109,7 @@ describe("WorkflowPage — category pill navigation", () => {
 
     it("General filters to only category=general tasks", async () => {
         mockAdminApi({ tasks: [TASK_GENERAL, TASK_PROJECT, TASK_FINANCE] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         await waitFor(() => expect(screen.getByText("General Task")).toBeTruthy());
         fireEvent.click(screen.getByRole("button", { name: "general" }));
         await waitFor(() => expect(screen.queryByText("Project Task")).toBeNull());
@@ -118,7 +119,7 @@ describe("WorkflowPage — category pill navigation", () => {
 
     it("Project filters to only category=project tasks", async () => {
         mockAdminApi({ tasks: [TASK_GENERAL, TASK_PROJECT, TASK_FINANCE] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         await waitFor(() => expect(screen.getByText("General Task")).toBeTruthy());
         fireEvent.click(screen.getByRole("button", { name: "project" }));
         await waitFor(() => expect(screen.queryByText("General Task")).toBeNull());
@@ -128,7 +129,7 @@ describe("WorkflowPage — category pill navigation", () => {
 
     it("Finance filters to only category=finance tasks", async () => {
         mockAdminApi({ tasks: [TASK_GENERAL, TASK_PROJECT, TASK_FINANCE] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         await waitFor(() => expect(screen.getByText("General Task")).toBeTruthy());
         fireEvent.click(screen.getByRole("button", { name: "finance" }));
         await waitFor(() => expect(screen.queryByText("General Task")).toBeNull());
@@ -138,7 +139,7 @@ describe("WorkflowPage — category pill navigation", () => {
 
     it("Scouting opens the Scouting workspace (not the task feed)", async () => {
         mockAdminApi({ tasks: [TASK_GENERAL], scouts: [SCOUT_1] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         await waitFor(() => expect(screen.getByText("General Task")).toBeTruthy());
         fireEvent.click(screen.getByRole("button", { name: "scouting" }));
         await waitFor(() => expect(screen.getByText("Scouting Log")).toBeTruthy());
@@ -152,7 +153,7 @@ describe("WorkflowPage — category pill navigation", () => {
 
     it("Calls tab remains functional and unaffected by the Scouting consolidation", async () => {
         mockAdminApi({});
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         await waitFor(() => expect(adminApi.get).toHaveBeenCalledWith("/workflow/tasks"));
         fireEvent.click(screen.getByRole("button", { name: "Calls" }));
         await waitFor(() => expect(screen.getByTestId("calls-tab-stub")).toBeTruthy());
@@ -165,7 +166,7 @@ describe("WorkflowPage — category pill navigation", () => {
 describe("WorkflowPage — Scouting workspace", () => {
     it("renders scouting entries with existing statuses", async () => {
         mockAdminApi({ scouts: [SCOUT_1, SCOUT_2] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         fireEvent.click(await screen.findByRole("button", { name: "scouting" }));
         await waitFor(() => expect(screen.getByText("Jane Scout")).toBeTruthy());
         expect(screen.getByText("John Scout")).toBeTruthy();
@@ -176,14 +177,14 @@ describe("WorkflowPage — Scouting workspace", () => {
 
     it("active queue entries appear in the Scouting view with correct count", async () => {
         mockAdminApi({ scouts: [SCOUT_1, SCOUT_2] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         fireEvent.click(await screen.findByRole("button", { name: "scouting" }));
         await waitFor(() => expect(screen.getByText("Active Scouting Queue (2)")).toBeTruthy());
     });
 
     it("AI Capture remains accessible and opens the existing modal", async () => {
         mockAdminApi({});
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         fireEvent.click(await screen.findByRole("button", { name: "scouting" }));
         fireEvent.click(await screen.findByRole("button", { name: /AI Capture/ }));
         await waitFor(() => expect(screen.getByTestId("scout-capture-modal-stub")).toBeTruthy());
@@ -191,7 +192,7 @@ describe("WorkflowPage — Scouting workspace", () => {
 
     it("manual logging remains accessible and creates a scout entry via the existing endpoint", async () => {
         mockAdminApi({});
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         fireEvent.click(await screen.findByRole("button", { name: "scouting" }));
         fireEvent.click(await screen.findByText("or log manually"));
 
@@ -213,7 +214,7 @@ describe("WorkflowPage — Scouting workspace", () => {
 
     it("existing scouting status changes still work via PUT /workflow/scouting/{id}", async () => {
         mockAdminApi({ scouts: [SCOUT_1] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         fireEvent.click(await screen.findByRole("button", { name: "scouting" }));
         await waitFor(() => expect(screen.getByText("Jane Scout")).toBeTruthy());
 
@@ -228,7 +229,7 @@ describe("WorkflowPage — Scouting workspace", () => {
 
     it("does not duplicate scouting data — exactly one card per scout entry, one GET on mount", async () => {
         mockAdminApi({ scouts: [SCOUT_1] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         fireEvent.click(await screen.findByRole("button", { name: "scouting" }));
         await waitFor(() => expect(screen.getAllByText("Jane Scout")).toHaveLength(1));
         // Only one component fetches /workflow/scouting — no second, competing
@@ -244,7 +245,7 @@ describe("WorkflowPage — Scouting workspace", () => {
 describe("WorkflowPage — regression", () => {
     it("switching from Scouting to General does not break the task feed", async () => {
         mockAdminApi({ tasks: [TASK_GENERAL], scouts: [SCOUT_1] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         fireEvent.click(await screen.findByRole("button", { name: "scouting" }));
         await waitFor(() => expect(screen.getByText("Jane Scout")).toBeTruthy());
 
@@ -256,7 +257,7 @@ describe("WorkflowPage — regression", () => {
 
     it("returning to Scouting still shows the same (not re-duplicated) data", async () => {
         mockAdminApi({ tasks: [TASK_GENERAL], scouts: [SCOUT_1] });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         fireEvent.click(await screen.findByRole("button", { name: "scouting" }));
         await waitFor(() => expect(screen.getByText("Jane Scout")).toBeTruthy());
 
@@ -273,7 +274,7 @@ describe("WorkflowPage — regression", () => {
             if (url === "/workflow/tasks") return Promise.resolve({ data: { id: "new-task", ...body } });
             return Promise.reject(new Error(`unexpected POST ${url}`));
         });
-        render(<WorkflowPage />);
+        render(<MemoryRouter><WorkflowPage /></MemoryRouter>);
         await waitFor(() => expect(adminApi.get).toHaveBeenCalledWith("/workflow/tasks"));
 
         fireEvent.click(screen.getByRole("button", { name: /New Task/ }));

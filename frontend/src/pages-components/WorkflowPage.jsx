@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { adminApi, getAdmin } from "@/lib/api";
 import {
     Plus,
@@ -68,6 +69,7 @@ export default function WorkflowPage() {
     const admin = getAdmin();
     const isAdmin = admin?.role === "admin";
     const currentUserId = admin?.id;
+    const [searchParams, setSearchParams] = useSearchParams();
 
     // Tab switcher — "tasks" is the existing, unchanged Workflow content;
     // "calls" is the new Calls tab. Nothing under "tasks" is touched by
@@ -147,6 +149,29 @@ export default function WorkflowPage() {
         document.addEventListener("mousedown", onDocClick);
         return () => document.removeEventListener("mousedown", onDocClick);
     }, [showMobileFilters]);
+
+    // Deep-link support for the ?task=<id> links sent in Workflow WhatsApp
+    // notifications — force filters to "all"/"all" so the task is visible
+    // regardless of its own category/status, expand it, scroll it into
+    // view, then strip the param so a later unrelated task refetch (e.g.
+    // creating a new task) doesn't keep re-triggering this.
+    useEffect(() => {
+        const taskId = searchParams.get("task");
+        if (!taskId || tasks.length === 0) return;
+        if (!tasks.some((t) => t.id === taskId)) return;
+        setCategoryFilter("all");
+        setStatusFilter("all");
+        setExpandedTaskId(taskId);
+        requestAnimationFrame(() => {
+            document.getElementById(`workflow-task-${taskId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+        setSearchParams((prev) => {
+            const next = new URLSearchParams(prev);
+            next.delete("task");
+            return next;
+        }, { replace: true });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [tasks, searchParams]);
 
     // Fetch lists
     const fetchTasks = async () => {
@@ -1146,6 +1171,7 @@ export default function WorkflowPage() {
                                 return (
                                     <div
                                         key={t.id}
+                                        id={`workflow-task-${t.id}`}
                                         className={`border rounded-lg transition-colors duration-150 overflow-hidden ${
                                             isExpanded ? "bg-white shadow-sm border-black/[0.14]" : "bg-white border-black/[0.07] hover:border-black/[0.14]"
                                         }`}

@@ -38,6 +38,18 @@ async def headers(client):
 async def _cleanup_tasks(*task_ids):
     if task_ids:
         await db.workflow_tasks.delete_many({"id": {"$in": list(task_ids)}})
+        # Every create/update in this file now also fires a fire-and-forget
+        # Workflow WhatsApp notification (routers.workflow.
+        # enqueue_workflow_whatsapp_notification) — inert here since no
+        # worker process runs in tests, but still writes real
+        # whatsapp_jobs/whatsapp_batches docs that would otherwise leak.
+        jobs = await db.whatsapp_jobs.find(
+            {"source": "WORKFLOW_NOTIFICATION", "source_id": {"$in": list(task_ids)}}, {"_id": 0, "batch_id": 1},
+        ).to_list(500)
+        await db.whatsapp_jobs.delete_many({"source": "WORKFLOW_NOTIFICATION", "source_id": {"$in": list(task_ids)}})
+        batch_ids = [j["batch_id"] for j in jobs if j.get("batch_id")]
+        if batch_ids:
+            await db.whatsapp_batches.delete_many({"id": {"$in": batch_ids}})
 
 
 # ---------------------------------------------------------------------------

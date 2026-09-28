@@ -8496,9 +8496,46 @@ async def _locate_download_message(
             # starting point, exactly like every other call site already
             # gets.
             await _ensure_message_content_rendered(page, jumped["locator"])
+            landed_data_id = jumped.get("data_id")
             if source_thumbnail_hash:
                 verify = await _await_marked_media_on_message(page, jumped["locator"], source_thumbnail_hash, None)
                 if not verify["matched"]:
+                    # Fix (2026-09-28, Raviza Chauhan / Carter's Take 1) —
+                    # production evidence: the jump landed on a REAL,
+                    # settle_confident=True message that was nonetheless
+                    # NOT source_message_id at all (it was a sibling mark's
+                    # own source). This is expected and safe by design —
+                    # this function's own docstring already says
+                    # settle_confident is never proof of identity, only the
+                    # exact-hash check is — but it was previously
+                    # misclassified as "did not finish rendering", when the
+                    # real condition is "landed somewhere real, just not
+                    # here". WhatsApp's native reply-jump follows its own
+                    # internal reply-chain reference, independent of the
+                    # content-hash match primary_window_lookup used to
+                    # resolve source_message_id in the first place — the
+                    # two are separate identity signals that can disagree.
+                    # When we can tell the two apart (we have the exact
+                    # expected source_message_id right here), attempt ONE
+                    # bounded direct re-lookup for it — the jump's own
+                    # scroll may have brought it into the render window
+                    # that the fast index lookup at the top of this
+                    # function already tried and missed BEFORE the jump
+                    # ran. Reuses the exact same proven primitive, never a
+                    # new search mechanism, and never accepts the landed
+                    # message as a substitute under any circumstance.
+                    if landed_data_id and landed_data_id != source_message_id:
+                        retry_idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
+                        if retry_idx is not None:
+                            retry_msg = page.locator(full_sel).nth(retry_idx)
+                            await _ensure_message_content_rendered(page, retry_msg)
+                            retry_verify = await _await_marked_media_on_message(page, retry_msg, source_thumbnail_hash, None)
+                            if retry_verify["matched"]:
+                                return retry_idx, retry_msg, None
+                        return None, None, (
+                            f"jump landed on a different message ({landed_data_id}) than the expected "
+                            f"source ({source_message_id}), and it could not be located directly either"
+                        )
                     return None, None, "source located but its marked media did not finish rendering"
             re_idx = await _find_message_index_by_data_id(page, group_name, source_message_id)
             msg = page.locator(full_sel).nth(re_idx) if re_idx is not None else jumped["locator"]
@@ -8542,7 +8579,16 @@ async def _run_download_one(page, http: httpx.AsyncClient, group_name: str, targ
         source_thumbnail_hash=target.get("source_thumbnail_hash"),
     )
     if message is None:
-        locate_state = "SOURCE_NOT_HYDRATED" if "did not finish rendering" in (locate_reason or "") else "SOURCE_NOT_FOUND"
+        if "did not finish rendering" in (locate_reason or ""):
+            locate_state = "SOURCE_NOT_HYDRATED"
+        elif "jump landed on a different message" in (locate_reason or ""):
+            # Fix (2026-09-28, Raviza Chauhan / Carter's Take 1) — distinct
+            # from both NOT_HYDRATED (right message, still loading) and
+            # NOT_FOUND (nothing real located at all): a real message WAS
+            # located, it just was not the one requested.
+            locate_state = "SOURCE_WRONG_MESSAGE"
+        else:
+            locate_state = "SOURCE_NOT_FOUND"
         return {"ok": False, "source_message_id": sm_id, "error": f"[{locate_state}] {locate_reason}"}
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"
@@ -9574,7 +9620,16 @@ async def _download_source_media(
         source_thumbnail_hash=target.get("source_thumbnail_hash"),
     )
     if message is None:
-        locate_state = "SOURCE_NOT_HYDRATED" if "did not finish rendering" in (locate_reason or "") else "SOURCE_NOT_FOUND"
+        if "did not finish rendering" in (locate_reason or ""):
+            locate_state = "SOURCE_NOT_HYDRATED"
+        elif "jump landed on a different message" in (locate_reason or ""):
+            # Fix (2026-09-28, Raviza Chauhan / Carter's Take 1) — distinct
+            # from both NOT_HYDRATED (right message, still loading) and
+            # NOT_FOUND (nothing real located at all): a real message WAS
+            # located, it just was not the one requested.
+            locate_state = "SOURCE_WRONG_MESSAGE"
+        else:
+            locate_state = "SOURCE_NOT_FOUND"
         return {"ok": False, "source_message_id": sm_id, "error": f"[{locate_state}] {locate_reason}"}
     scope = await sender._resolve_scope(page)
     full_sel = f"{scope} [data-testid^='conv-msg-']"

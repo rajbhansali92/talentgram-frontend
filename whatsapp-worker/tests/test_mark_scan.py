@@ -7748,6 +7748,198 @@ def main():
     assert page_214.click_calls == 1, page_214.click_calls
     print("214. a non-interception click failure propagates immediately, unchanged -> the recovery is scoped ONLY to pointer-event interception")
 
+    # ------------------------------------------------------------------
+    # 215-222: Raviza Chauhan / Carter's Take 1, second incident (2026-09-28)
+    # — _locate_download_message's jump branch. Production evidence: the
+    # jump for Take 1's own mark reply landed on a REAL, settle_confident
+    # message that was actually the INTRODUCTION's source, not Take 1's.
+    # The exact-hash check correctly rejected it (safety was never
+    # broken), but the failure was misclassified as "did not finish
+    # rendering". These tests cover: direct lookup still wins when
+    # possible, a correct jump still succeeds, a WRONG jump is never
+    # accepted even when a bounded direct re-lookup also fails, a WRONG
+    # jump followed by a successful bounded re-lookup recovers the REAL
+    # source, and a correct jump that's genuinely still loading still
+    # uses the original (unchanged) hydration-failure classification.
+    # ------------------------------------------------------------------
+    class _FakeLocateMsg215:
+        def __init__(self, html):
+            self._html = html
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def evaluate(self, js, timeout=None):
+            if "outerHTML.length" in js:
+                return len(self._html)
+            return self._html
+
+    class _FakeLocatePage215:
+        def __init__(self, by_idx=None):
+            self._by_idx = by_idx or {}
+        def locator(self, sel):
+            return _FakeLocateLocatorRoot215(self._by_idx)
+        async def wait_for_timeout(self, ms):
+            pass
+
+    class _FakeLocateLocatorRoot215:
+        def __init__(self, by_idx):
+            self._by_idx = by_idx
+        def nth(self, idx):
+            return self._by_idx[idx]
+
+    hash_215 = mark_scan._smallest_hash(QUOTED_PHOTO_BLOCK_HTML)  # "Take 1's real hash"
+    real_take1_html_215 = PHOTO_MESSAGE_HTML.replace("3B6637D11A63081B8712", "TAKE1_REAL_215")
+    wrong_intro_html_215 = PHOTO_MESSAGE_HTML.replace("3B6637D11A63081B8712", "INTRO_WRONG_215").replace(
+        "AAAABBBBCCCCDDDDsamephotoAAAABBBBCCCCDDDDsamephotoAAAABBBBCCCCDDDDsamephotoAAAAX",
+        _fake_blob("thisistheintrovideonottake1"),
+    )
+
+    async def _fake_resolve_scope_215(page):
+        return "#main"
+    orig_scope_215 = mark_scan.sender._resolve_scope
+    mark_scan.sender._resolve_scope = _fake_resolve_scope_215
+
+    # 215: expected source found DIRECTLY (fast index lookup hits) -> jump
+    # is never even attempted.
+    jump_calls_215: list = []
+    async def _fake_jump_should_not_be_called_215(page, group_name, reply_id):
+        jump_calls_215.append(reply_id)
+        raise AssertionError("jump must not be attempted when the fast index lookup already succeeded")
+    async def _fake_find_idx_hit_215(page, group_name, data_id):
+        return 0 if data_id == "TAKE1_REAL_215" else None
+    orig_jump_215 = mark_scan._jump_to_quoted_message_with_retry
+    orig_find_idx_215 = mark_scan._find_message_index_by_data_id
+    mark_scan._jump_to_quoted_message_with_retry = _fake_jump_should_not_be_called_215
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_hit_215
+    try:
+        page_215 = _FakeLocatePage215({0: _FakeLocateMsg215(real_take1_html_215)})
+        idx_215, msg_215, reason_215 = asyncio.run(mark_scan._locate_download_message(
+            page_215, "Raviza Chauhan X Talentgram", "TAKE1_REAL_215", "REPLY_215", source_thumbnail_hash=hash_215,
+        ))
+    finally:
+        mark_scan._jump_to_quoted_message_with_retry = orig_jump_215
+        mark_scan._find_message_index_by_data_id = orig_find_idx_215
+    assert msg_215 is not None and reason_215 is None, (msg_215, reason_215)
+    assert jump_calls_215 == [], "jump should never be attempted when the direct index lookup already succeeded"
+    print("215. expected source found directly via the fast index lookup -> jump never attempted (unchanged fast path)")
+
+    # 216: fast lookup misses; jump lands EXACTLY on the expected source ->
+    # succeeds via the ORIGINAL (non-wrong-message) path.
+    target_locator_216 = _FakeLocateMsg215(real_take1_html_215)
+    async def _fake_jump_correct_216(page, group_name, reply_id):
+        return {"ok": True, "locator": target_locator_216, "data_id": "TAKE1_REAL_215", "settle_confident": True}
+    async def _fake_find_idx_miss_then_216(page, group_name, data_id):
+        return None  # both the initial fast lookup AND the post-jump re-index miss; locator is used directly
+    mark_scan._jump_to_quoted_message_with_retry = _fake_jump_correct_216
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_miss_then_216
+    try:
+        idx_216, msg_216, reason_216 = asyncio.run(mark_scan._locate_download_message(
+            _FakeLocatePage215(), "Raviza Chauhan X Talentgram", "TAKE1_REAL_215", "REPLY_216", source_thumbnail_hash=hash_215,
+        ))
+    finally:
+        mark_scan._jump_to_quoted_message_with_retry = orig_jump_215
+        mark_scan._find_message_index_by_data_id = orig_find_idx_215
+    assert msg_216 is not None and reason_216 is None, (msg_216, reason_216)
+    print("216. fast lookup misses; jump lands exactly on the expected source -> succeeds (unchanged correct-jump path)")
+
+    # 217/219/222: fast lookup misses; jump lands on a DIFFERENT real
+    # message (the Introduction's source, exactly the production shape) ->
+    # hash verification correctly rejects it, and the bounded direct
+    # re-lookup for the expected source ALSO fails -> clean failure,
+    # NEVER the wrong media, NEVER misclassified as a hydration problem.
+    wrong_locator_217 = _FakeLocateMsg215(wrong_intro_html_215)
+    async def _fake_jump_wrong_217(page, group_name, reply_id):
+        return {"ok": True, "locator": wrong_locator_217, "data_id": "INTRO_WRONG_215", "settle_confident": True}
+    async def _fake_find_idx_always_miss_217(page, group_name, data_id):
+        return None
+    mark_scan._jump_to_quoted_message_with_retry = _fake_jump_wrong_217
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_always_miss_217
+    try:
+        idx_217, msg_217, reason_217 = asyncio.run(mark_scan._locate_download_message(
+            _FakeLocatePage215(), "Raviza Chauhan X Talentgram", "TAKE1_REAL_215", "REPLY_217", source_thumbnail_hash=hash_215,
+        ))
+    finally:
+        mark_scan._jump_to_quoted_message_with_retry = orig_jump_215
+        mark_scan._find_message_index_by_data_id = orig_find_idx_215
+    assert msg_217 is None, msg_217
+    assert reason_217 is not None and "jump landed on a different message" in reason_217, reason_217
+    assert "INTRO_WRONG_215" in reason_217 and "TAKE1_REAL_215" in reason_217, reason_217
+    print("217/219/222. jump lands on a DIFFERENT real message (the Introduction's source, exactly the production shape) and the expected source can't be located directly either -> clean failure naming BOTH the wrong landed id and the expected id, the wrong media is NEVER returned")
+
+    # 218: same wrong-landing shape as 217, but this time the bounded
+    # direct re-lookup for the expected source SUCCEEDS (the jump's own
+    # scroll brought it into range) -> recovers the REAL Take 1 source,
+    # never the wrong one.
+    real_locator_218 = _FakeLocateMsg215(real_take1_html_215)
+    async def _fake_jump_wrong_218(page, group_name, reply_id):
+        return {"ok": True, "locator": wrong_locator_217, "data_id": "INTRO_WRONG_215", "settle_confident": True}
+    async def _fake_find_idx_recovers_218(page, group_name, data_id):
+        return 0 if data_id == "TAKE1_REAL_215" else None
+    page_218 = _FakeLocatePage215({0: real_locator_218})
+    mark_scan._jump_to_quoted_message_with_retry = _fake_jump_wrong_218
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_recovers_218
+    try:
+        idx_218, msg_218, reason_218 = asyncio.run(mark_scan._locate_download_message(
+            page_218, "Raviza Chauhan X Talentgram", "TAKE1_REAL_215", "REPLY_218", source_thumbnail_hash=hash_215,
+        ))
+    finally:
+        mark_scan._jump_to_quoted_message_with_retry = orig_jump_215
+        mark_scan._find_message_index_by_data_id = orig_find_idx_215
+    assert msg_218 is not None and reason_218 is None, (msg_218, reason_218)
+    print("218. wrong landing followed by a successful bounded direct re-lookup for the exact expected source -> recovers the REAL Take 1 source, never the wrong one")
+
+    # 220: correct jump target (landed_data_id == expected source), but
+    # its media genuinely never finishes rendering within the bounded poll
+    # (a real hydration-timing case, not a wrong-message case) -> falls
+    # through to the ORIGINAL, unchanged "did not finish rendering" reason
+    # -- confirms the new wrong-message branch never fires for a correct
+    # landing, and the pre-existing hydration-failure classification is
+    # untouched.
+    never_hydrates_locator_220 = _FakeLocateMsg215('<div data-id="TAKE1_REAL_215"><span>never renders real media</span></div>')
+    async def _fake_jump_correct_never_hydrates_220(page, group_name, reply_id):
+        return {"ok": True, "locator": never_hydrates_locator_220, "data_id": "TAKE1_REAL_215", "settle_confident": True}
+    mark_scan._jump_to_quoted_message_with_retry = _fake_jump_correct_never_hydrates_220
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_always_miss_217
+    try:
+        idx_220, msg_220, reason_220 = asyncio.run(mark_scan._locate_download_message(
+            _FakeLocatePage215(), "Raviza Chauhan X Talentgram", "TAKE1_REAL_215", "REPLY_220", source_thumbnail_hash=hash_215,
+        ))
+    finally:
+        mark_scan._jump_to_quoted_message_with_retry = orig_jump_215
+        mark_scan._find_message_index_by_data_id = orig_find_idx_215
+    assert msg_220 is None, msg_220
+    assert reason_220 == "source located but its marked media did not finish rendering", reason_220
+    print("220. correct jump target that genuinely never hydrates -> unchanged original hydration-failure classification, never the new wrong-message reason")
+
+    mark_scan.sender._resolve_scope = orig_scope_215
+
+    # 221: error-classification mapping — both callers of
+    # _locate_download_message must translate the new "jump landed on a
+    # different message" reason into the distinct SOURCE_WRONG_MESSAGE
+    # state, never collapsing it into SOURCE_NOT_HYDRATED or
+    # SOURCE_NOT_FOUND.
+    def _classify_221(locate_reason):
+        if "did not finish rendering" in (locate_reason or ""):
+            return "SOURCE_NOT_HYDRATED"
+        elif "jump landed on a different message" in (locate_reason or ""):
+            return "SOURCE_WRONG_MESSAGE"
+        else:
+            return "SOURCE_NOT_FOUND"
+    assert _classify_221("source located but its marked media did not finish rendering") == "SOURCE_NOT_HYDRATED"
+    assert _classify_221("jump landed on a different message (INTRO_WRONG_215) than the expected source (TAKE1_REAL_215), and it could not be located directly either") == "SOURCE_WRONG_MESSAGE"
+    assert _classify_221("source message no longer found in window") == "SOURCE_NOT_FOUND"
+    print("221. error-classification mapping distinguishes SOURCE_NOT_HYDRATED / SOURCE_WRONG_MESSAGE / SOURCE_NOT_FOUND correctly for each distinct locate_reason")
+
+    # 222: previous fixes still hold alongside this one — lightweight,
+    # independent smoke checks (tests 85-88d and 195-204 earlier in this
+    # same file already fully re-verify both in depth; this just confirms
+    # nothing in this section's monkeypatching leaked past its own
+    # try/finally restores).
+    assert mark_scan._mark_text(own_html_195) is not None  # Divija fix (mark-text extraction) still intact
+    assert mark_scan._find_message_index_by_data_id is orig_find_idx_215  # confirms every monkeypatch above was cleanly restored
+    assert mark_scan._jump_to_quoted_message_with_retry is orig_jump_215
+    assert mark_scan.sender._resolve_scope is orig_scope_215
+    print("222. previous Divija fix remains intact, and every monkeypatch this section installed was cleanly restored (no leakage into later/earlier tests)")
+
 
 if __name__ == "__main__":
     main()

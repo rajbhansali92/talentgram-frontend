@@ -312,6 +312,12 @@ _UPLOAD_STATE_PHRASE = {
     # prompt's own worked examples.
     "SOURCE_NOT_FOUND": "exact source could not be found from the marked WhatsApp message",
     "SOURCE_NOT_HYDRATED": "exact source was found, but its media did not finish loading in time",
+    # 2026-09-28 (Raviza Chauhan / Carter's Take 1) — distinct from both
+    # states above: a real message WAS located during recovery, it just
+    # was not the exact one requested (WhatsApp's own reply-jump can land
+    # on a different message than the content-hash-based resolution
+    # used) — never mistaken for a loading-timing problem.
+    "SOURCE_WRONG_MESSAGE": "the exact marked source could not be relocated — WhatsApp's recovery jump landed on different content",
     "MEDIA_HASH_MISMATCH": "was located, but the media no longer matches the mark",
     "MEDIA_TILE_NOT_FOUND": "exact source was found, but its media tile could not be located",
     "MEDIA_NOT_READY": "exact source was found, but its video never became ready to open",
@@ -438,6 +444,14 @@ def _humanize_media_send_error(raw_error: str) -> str:
     if "destination_chat_not_ready" in low:
         return ("could not be sent because WhatsApp Web's chat view had not fully switched to the "
                 "destination group before the file could be attached. Please try SEND again.")
+    # 2026-09-28 (Raviza Chauhan / Carter's Take 1) — distinct from a
+    # loading-timing problem: WhatsApp's own recovery jump landed on a
+    # different, real message than the exact one marked. Never a
+    # hydration issue, never silently substituted — see mark_scan.py's
+    # _locate_download_message for the full mechanism.
+    if "source_wrong_message" in low:
+        return ("could not be sent because WhatsApp Web's message-recovery jump landed on different content "
+                "than the exact marked video. Please re-mark the media and try SEND again.")
     if "video forward control not ready" in low or "forward control not ready" in low:
         return "could not be sent because WhatsApp Web could not make the video's Forward control ready in time. Please try SEND again."
     if "tile click failed" in low or "forward not ready" in low or "no <video> mounted" in low or "no clickable" in low or "no longer found in window" in low or "message not found in current window" in low:

@@ -419,3 +419,113 @@ async def test_custom_group_name_config_is_respected(client, admin, env):
         assert jobs[0]["destination"] == "ZZZ_TEST_WFWA Custom Group"
     finally:
         await db.whatsapp_config.delete_one({"key": "workflow_notification_group_name"})
+
+
+# ---------------------------------------------------------------------------
+# Formatting (2026-09-28 refinement pass, PART 1/10/11) — direct unit tests
+# on the shared formatter/builders, no HTTP/DB needed for most of these.
+# ---------------------------------------------------------------------------
+from routers.workflow import (  # noqa: E402
+    _build_new_task_message,
+    _build_new_checklist_item_message,
+    _build_task_updated_message,
+    _build_task_update_comment_message,
+)
+
+
+def test_project_line_present_when_project_set():
+    task = {"id": "t1", "title": "Send call sheet", "project_name": "Snapdragon Film 3", "due_at": None, "priority": None, "created_at": _now()}
+    body = _build_new_task_message(task, "Gunwanti", "Raj")
+    assert "Project: Snapdragon Film 3" in body
+
+
+def test_project_line_omitted_when_project_empty():
+    task = {"id": "t1", "title": "Send call sheet", "project_name": "", "due_at": None, "priority": None, "created_at": _now()}
+    body = _build_new_task_message(task, "Gunwanti", "Raj")
+    assert "Project:" not in body
+    assert "—" not in body
+    assert "Project: None" not in body
+    assert "Project: null" not in body
+
+
+def test_project_line_omitted_when_project_missing_key():
+    task = {"id": "t1", "title": "Send call sheet", "due_at": None, "priority": None, "created_at": _now()}
+    body = _build_new_task_message(task, "Gunwanti", "Raj")
+    assert "Project:" not in body
+
+
+def test_blank_lines_separate_logical_sections():
+    task = {"id": "t1", "title": "Send call sheet", "project_name": "Snapdragon Film 3", "due_at": None, "priority": None, "created_at": _now()}
+    body = _build_new_task_message(task, "Gunwanti", "Raj")
+    # Header block, meta block, timestamp block, link block => 3 blank-line separators.
+    assert body.count("\n\n") == 3
+
+
+def test_actor_and_assignee_appear_correctly():
+    task = {"id": "t1", "title": "Send call sheet", "project_name": "", "due_at": None, "priority": None, "created_at": _now()}
+    body = _build_new_task_message(task, "Gunwanti", "Raj")
+    assert "Assigned to: Gunwanti" in body
+    assert "Created by: Raj" in body
+
+
+def test_timestamp_and_link_appear():
+    task = {"id": "task-xyz", "title": "Send call sheet", "project_name": "", "due_at": None, "priority": None, "created_at": "2026-09-28T20:32:00+00:00"}
+    body = _build_new_task_message(task, "Gunwanti", "Raj")
+    assert "Created: 28 Sep 2026, 8:32 PM" in body
+    assert "https://review.talentgramagency.com/admin/workflow?task=task-xyz" in body
+
+
+def test_new_checklist_item_formatting_no_project():
+    task = {"id": "t1", "title": "Send call sheet", "project_name": None, "due_at": None}
+    body = _build_new_checklist_item_message(task, "Send final call sheet", "Raj", "Gunwanti", _now())
+    assert "Project:" not in body
+    assert "Checklist:\nSend final call sheet" in body
+
+
+def test_task_updated_single_change_message():
+    task = {"id": "t1", "title": "Send call sheet", "project_name": "Snapdragon Film 3"}
+    body = _build_task_updated_message(task, ["Due date: 29 Sep → 30 Sep"], "Harshita", _now())
+    assert "Updated by: Harshita" in body
+    assert "Changes:\n• Due date: 29 Sep → 30 Sep" in body
+
+
+def test_task_updated_multi_change_message_single_notification():
+    task = {"id": "t1", "title": "Send call sheet", "project_name": "Snapdragon Film 3"}
+    body = _build_task_updated_message(
+        task, ["Assigned to: Raj → Gunwanti", "Due date: 29 Sep → 30 Sep", "Priority: Medium → High"], "Harshita", _now(),
+    )
+    assert body.count("*TASK UPDATED*") == 1
+    for line in ["Assigned to: Raj → Gunwanti", "Due date: 29 Sep → 30 Sep", "Priority: Medium → High"]:
+        assert f"• {line}" in body
+
+
+def test_task_update_comment_formatting():
+    task = {"id": "t1", "title": "Send call sheet", "project_name": "Snapdragon Film 3"}
+    body = _build_task_update_comment_message(task, "Client has asked us to send the revised version.", "Harshita", _now())
+    assert "*TASK UPDATE*" in body
+    assert "Update by: Harshita" in body
+    assert '"Client has asked us to send the revised version."' in body
+
+
+# ---------------------------------------------------------------------------
+# PART 3 — task comments/updates generate a WhatsApp notification too
+# ---------------------------------------------------------------------------
+@_aio
+async def test_task_comment_generates_one_notification(client, admin, env):
+    r = await client.post("/api/workflow/tasks", json={"title": "ZZZ_TEST_WFWA comment task"}, headers=admin["headers"])
+    tid = r.json()["id"]
+    env.append(tid)
+    await _jobs_for(tid)
+
+    r2 = await client.post(
+        f"/api/workflow/tasks/{tid}/comments",
+        json={"text": "Client has asked us to send the revised version."},
+        headers=admin["headers"],
+    )
+    assert r2.status_code == 200
+
+    jobs = await _jobs_for(tid)
+    update_jobs = [j for j in jobs if "*TASK UPDATE*" in j["message_body"]]
+    assert len(update_jobs) == 1
+    assert "Client has asked us to send the revised version." in update_jobs[0]["message_body"]
+    assert f"Update by: {admin['name']}" in update_jobs[0]["message_body"]

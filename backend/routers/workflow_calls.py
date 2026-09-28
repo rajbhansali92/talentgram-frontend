@@ -50,12 +50,76 @@ from pymongo.errors import DuplicateKeyError
 from core import db, current_team_or_admin, require_role, _now, active_only
 from routers.casting_pipeline import _normalise_stage, PIPELINE_STAGE_ORDER
 from .workflow_calls_schemas import CallIn, AssignIn, CALL_RESULTS, UPDATE_STATUSES
+# Workflow -> WhatsApp notifications (2026-09-28 refinement pass, PART 4-8):
+# reuses the EXACT same shared formatter/enqueue infrastructure
+# routers.workflow already built for Tasks — same whatsapp_batches/
+# whatsapp_jobs queue, same "Talentgram Workflow" group, no second
+# notification system. Calls has no generic "update an existing call"
+# endpoint (call records are append-only, assignment is separate — see
+# this file's own module docstring), so only the two real mutation
+# points below (assign, record) get a notification.
+from .workflow import (
+    _format_workflow_message,
+    _fmt_event_ts,
+    _resolve_user_names,
+    enqueue_workflow_whatsapp_notification,
+    WORKFLOW_APP_URL,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/workflow/calls", tags=["workflow-calls"])
 
 CALLS_COLLECTION = "talent_project_calls"
 ASSIGNMENTS_COLLECTION = "talent_project_call_assignments"
+
+CALL_RESULT_LABELS = {
+    "answered": "Answered", "no_answer": "No Answer", "busy": "Busy",
+    "switched_off": "Switched Off", "call_back": "Call Back",
+}
+UPDATE_STATUS_LABELS = {
+    "sending": "Sending", "not_sending": "Not Sending", "not_interested": "Not Interested", "other": "Other",
+}
+
+
+def _call_link() -> str:
+    """Calls are a different entity than a Workflow Task (own collection,
+    own tab) — there is no per-call deep-link route to reuse (see this
+    task's own audit), so the smallest safe link is the same Workflow app
+    URL already used everywhere else, not a newly-invented URL structure."""
+    return WORKFLOW_APP_URL
+
+
+def _build_call_assigned_message(talent_name: str, project_name: Optional[str], assignee_name: str, actor_name: str, event_ts: str) -> str:
+    return _format_workflow_message(
+        "📞 *CALL ASSIGNED*", subject_label="Talent", subject_name=talent_name, project_name=project_name,
+        blocks=[[f"Assigned to: {assignee_name}", f"Assigned by: {actor_name}"], [f"Assigned: {_fmt_event_ts(event_ts)}"]],
+        link=_call_link(), link_label="Open Call:",
+    )
+
+
+def _build_call_reassigned_message(talent_name: str, project_name: Optional[str], old_assignee_name: str, new_assignee_name: str, actor_name: str, event_ts: str) -> str:
+    return _format_workflow_message(
+        "📞 *CALL REASSIGNED*", subject_label="Talent", subject_name=talent_name, project_name=project_name,
+        blocks=[
+            [f"Previously assigned to: {old_assignee_name}", f"Now assigned to: {new_assignee_name}", f"Updated by: {actor_name}"],
+            [f"Updated: {_fmt_event_ts(event_ts)}"],
+        ],
+        link=_call_link(), link_label="Open Call:",
+    )
+
+
+def _build_call_recorded_message(talent_name: str, project_name: Optional[str], call_result: str, update_status: Optional[str], actor_name: str, event_ts: str) -> str:
+    # "Recorded"/"Record" — the app's own existing terminology (the
+    # button/modal are literally labelled "Record"), not "Completed" (PART
+    # 7's own explicit "use the actual terminology" instruction).
+    content = [f"Result: {CALL_RESULT_LABELS.get(call_result, call_result)}"]
+    if update_status:
+        content.append(f"Update: {UPDATE_STATUS_LABELS.get(update_status, update_status)}")
+    return _format_workflow_message(
+        "📞 *CALL RECORDED*", subject_label="Talent", subject_name=talent_name, project_name=project_name,
+        blocks=[content, [f"Recorded by: {actor_name}"], [f"Recorded: {_fmt_event_ts(event_ts)}"]],
+        link=_call_link(), link_label="Open Call:",
+    )
 
 
 def _user_label(u: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -318,7 +382,7 @@ async def create_call(payload: CallIn, user: Dict[str, Any] = Depends(current_te
     # combination (brief section 3, applied to writes too, not just the
     # list view).
     project = await db.projects.find_one(
-        active_only({"id": payload.project_id, "status": "ongoing"}), {"_id": 0, "id": 1},
+        active_only({"id": payload.project_id, "status": "ongoing"}), {"_id": 0, "id": 1, "brand_name": 1},
     )
     if not project:
         raise HTTPException(400, "Project is not ongoing (or does not exist)")
@@ -345,11 +409,27 @@ async def create_call(payload: CallIn, user: Dict[str, Any] = Depends(current_te
     try:
         await db[CALLS_COLLECTION].insert_one(doc)
     except DuplicateKeyError:
+        # A retry of an ALREADY-recorded call — the notification for the
+        # real mutation already fired the first time; replaying it here
+        # would be exactly the duplicate-from-retry PART 13 forbids.
         existing = await db[CALLS_COLLECTION].find_one({"id": payload.id}, {"_id": 0})
         if existing:
             return existing
         raise
     doc.pop("_id", None)
+
+    # WhatsApp group notification (PART 4/7) — fires only on the genuine
+    # fresh insert above, never on the idempotent-replay path.
+    talent = await db.talents.find_one({"id": payload.talent_id}, {"_id": 0, "name": 1})
+    talent_name = (talent or {}).get("name") or "Unnamed Talent"
+    actor_name = user.get("name") or user.get("email") or "Someone"
+    enqueue_workflow_whatsapp_notification(
+        _build_call_recorded_message(
+            talent_name, project.get("brand_name"), payload.call_result, payload.update_status, actor_name, doc["called_at"],
+        ),
+        f"{payload.talent_id}:{payload.project_id}",
+    )
+
     return doc
 
 
@@ -365,8 +445,20 @@ async def assign_calls(payload: AssignIn, user: Dict[str, Any] = Depends(require
         if not assignee:
             raise HTTPException(404, "assigned_to_id does not match a real user")
 
+    # Fetch the BEFORE state for every pair in one query — this is what
+    # lets a real reassignment (old assignee != new) be told apart from a
+    # first-time assignment (was unassigned) or a genuine no-op (same
+    # assignee re-saved), so PART 13's "one logical change = one
+    # notification" holds even across a bulk multi-pair assign.
+    or_clauses = [{"talent_id": p.talent_id, "project_id": p.project_id} for p in payload.pairs]
+    existing_docs = await db[ASSIGNMENTS_COLLECTION].find(
+        {"$or": or_clauses}, {"_id": 0, "talent_id": 1, "project_id": 1, "assigned_to_id": 1},
+    ).to_list(len(payload.pairs))
+    prev_assignee_by_pair = {(d["talent_id"], d["project_id"]): d.get("assigned_to_id") for d in existing_docs}
+
     now = _now()
     updated = 0
+    changed_pairs = []  # (talent_id, project_id, prev_assignee_id)
     for pair in payload.pairs:
         result = await db[ASSIGNMENTS_COLLECTION].update_one(
             {"talent_id": pair.talent_id, "project_id": pair.project_id},
@@ -383,4 +475,33 @@ async def assign_calls(payload: AssignIn, user: Dict[str, Any] = Depends(require
         )
         if result.modified_count or result.upserted_id:
             updated += 1
+        prev_assignee = prev_assignee_by_pair.get((pair.talent_id, pair.project_id))
+        if payload.assigned_to_id and payload.assigned_to_id != prev_assignee:
+            changed_pairs.append((pair.talent_id, pair.project_id, prev_assignee))
+
+    # WhatsApp group notifications (PART 5/6) — one per pair whose
+    # assignee genuinely changed to a real user; unassignment (setting
+    # assigned_to_id back to None) has no template in this pass and is
+    # deliberately left silent rather than inventing one.
+    if changed_pairs:
+        talent_ids = {t for t, _, _ in changed_pairs}
+        project_ids = {p for _, p, _ in changed_pairs}
+        talents = await db.talents.find({"id": {"$in": list(talent_ids)}}, {"_id": 0, "id": 1, "name": 1}).to_list(len(talent_ids))
+        talent_names = {t["id"]: t.get("name") or "Unnamed Talent" for t in talents}
+        projects = await db.projects.find({"id": {"$in": list(project_ids)}}, {"_id": 0, "id": 1, "brand_name": 1}).to_list(len(project_ids))
+        project_names = {p["id"]: p.get("brand_name") for p in projects}
+        name_map = await _resolve_user_names({user.get("id"), payload.assigned_to_id} | {pa for _, _, pa in changed_pairs})
+        actor_name = name_map.get(user.get("id"), user.get("name") or user.get("email") or "Someone")
+        new_assignee_name = name_map.get(payload.assigned_to_id, "Unassigned")
+
+        for talent_id, project_id, prev_assignee in changed_pairs:
+            talent_name = talent_names.get(talent_id, "Unnamed Talent")
+            project_name = project_names.get(project_id)
+            if prev_assignee:
+                old_assignee_name = name_map.get(prev_assignee, "Unassigned")
+                message = _build_call_reassigned_message(talent_name, project_name, old_assignee_name, new_assignee_name, actor_name, now)
+            else:
+                message = _build_call_assigned_message(talent_name, project_name, new_assignee_name, actor_name, now)
+            enqueue_workflow_whatsapp_notification(message, f"{talent_id}:{project_id}")
+
     return {"updated": updated}

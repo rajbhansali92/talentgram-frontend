@@ -113,7 +113,7 @@ async def _workflow_notification_group_name() -> str:
     return value or "Talentgram Workflow"
 
 
-async def _enqueue_workflow_whatsapp_notification_task(message_body: str, task_id: str):
+async def _enqueue_workflow_whatsapp_notification_task(message_body: str, source_id: str):
     try:
         group_name = await _workflow_notification_group_name()
         timestamp = _now()
@@ -145,7 +145,7 @@ async def _enqueue_workflow_whatsapp_notification_task(message_body: str, task_i
             "template_id": "workflow_notification",
             "template_name": "Workflow Notification",
             "source": "WORKFLOW_NOTIFICATION",
-            "source_id": task_id,
+            "source_id": source_id,
             "recipient_kind": "INTERNAL_GROUP",
             "recipient_id": "workflow_notification_group",
             "talent_id": None,
@@ -165,132 +165,149 @@ async def _enqueue_workflow_whatsapp_notification_task(message_body: str, task_i
         }
         await db.whatsapp_batches.insert_one(batch_doc)
         await db.whatsapp_jobs.insert_one(job_doc)
-        logger.info(f"Enqueued workflow WhatsApp notification for task {task_id}")
+        logger.info(f"Enqueued workflow WhatsApp notification for {source_id}")
     except Exception as e:
         logger.warning(f"Error enqueuing workflow WhatsApp notification: {e}", exc_info=True)
 
 
-def enqueue_workflow_whatsapp_notification(message_body: str, task_id: str):
+def enqueue_workflow_whatsapp_notification(message_body: str, source_id: str):
     """Fire-and-forget — never awaited by the caller, never allowed to
     raise into the request path. A Workflow mutation must always succeed
-    even if WhatsApp/Mongo is unavailable."""
+    even if WhatsApp/Mongo is unavailable. `source_id` is a free-form trace
+    tag (a task id for Workflow tasks, a "talent_id:project_id" pair for
+    Workflow Calls) — shared by both routers.workflow and
+    routers.workflow_calls, same queue, same infrastructure, no second
+    notification system."""
     try:
-        asyncio.create_task(_enqueue_workflow_whatsapp_notification_task(message_body, task_id))
+        asyncio.create_task(_enqueue_workflow_whatsapp_notification_task(message_body, source_id))
     except Exception as e:
         logger.warning(f"Failed to schedule workflow WhatsApp notification: {e}", exc_info=True)
 
 
+# --------------------------------------------------------------------------
+# ONE shared message formatter (2026-09-28 refinement pass) — every event
+# type below builds its message by calling this, instead of each hand-
+# rolling its own line list. Handles the three things every event needs
+# identically: omitting an empty Project line (never "Project: —"/"None"),
+# blank-line spacing between logical sections, and the closing link block.
+# `blocks` is an ordered list of line-groups; empty/falsy groups are
+# skipped, and a single blank line separates each remaining group — this
+# is what lets NEW CHECKLIST ITEM put its content before the actor lines
+# while TASK UPDATED puts "Updated by" before its Changes list, without
+# two different formatters.
+# --------------------------------------------------------------------------
+def _format_workflow_message(
+    header: str,
+    *,
+    subject_label: str,  # "Task" or "Talent"
+    subject_name: str,
+    project_name: Optional[str],
+    blocks: list,
+    link: str,
+    link_label: str = "Open Task:",
+) -> str:
+    top = [header, f"{subject_label}: {subject_name}"]
+    if project_name:
+        top.append(f"Project: {project_name}")
+    groups = [top] + [b for b in blocks if b] + [[link_label, link]]
+    return "\n\n".join("\n".join(g) for g in groups)
+
+
 def _build_new_task_message(task: dict, assignee_name: str, creator_name: str) -> str:
-    lines = [
-        "🆕 *NEW TASK*",
-        f"Task: {task.get('title')}",
-        f"Project: {task.get('project_name') or '—'}",
-        f"Assigned to: {assignee_name}",
-        f"Created by: {creator_name}",
-    ]
+    meta = [f"Assigned to: {assignee_name}", f"Created by: {creator_name}"]
     due_fmt = _fmt_due(task.get("due_at"))
     if due_fmt:
-        lines.append(f"Due: {due_fmt}")
+        meta.append(f"Due: {due_fmt}")
     if task.get("priority"):
-        lines.append(f"Priority: {task['priority'].title()}")
-    lines.append(f"Created: {_fmt_event_ts(task.get('created_at'))}")
-    lines.append("Open Task:")
-    lines.append(_workflow_task_link(task["id"]))
-    return "\n".join(lines)
+        meta.append(f"Priority: {task['priority'].title()}")
+    return _format_workflow_message(
+        "🆕 *NEW TASK*", subject_label="Task", subject_name=task.get("title"),
+        project_name=task.get("project_name"),
+        blocks=[meta, [f"Created: {_fmt_event_ts(task.get('created_at'))}"]],
+        link=_workflow_task_link(task["id"]),
+    )
 
 
 def _build_new_checklist_item_message(task: dict, checklist_text: str, actor_name: str, assignee_name: str, event_ts: str) -> str:
-    lines = [
-        "📋 *NEW CHECKLIST ITEM*",
-        f"Task: {task.get('title')}",
-        f"Project: {task.get('project_name') or '—'}",
-        "Checklist:",
-        checklist_text,
-        f"Added by: {actor_name}",
-        f"Assigned to: {assignee_name}",
-    ]
+    meta = [f"Added by: {actor_name}", f"Assigned to: {assignee_name}"]
     due_fmt = _fmt_due(task.get("due_at"))
     if due_fmt:
-        lines.append(f"Due: {due_fmt}")
-    lines.append(f"Added: {_fmt_event_ts(event_ts)}")
-    lines.append("Open Task:")
-    lines.append(_workflow_task_link(task["id"]))
-    return "\n".join(lines)
+        meta.append(f"Due: {due_fmt}")
+    return _format_workflow_message(
+        "📋 *NEW CHECKLIST ITEM*", subject_label="Task", subject_name=task.get("title"),
+        project_name=task.get("project_name"),
+        blocks=[["Checklist:", checklist_text], meta, [f"Added: {_fmt_event_ts(event_ts)}"]],
+        link=_workflow_task_link(task["id"]),
+    )
 
 
 def _build_task_completed_message(task: dict, actor_name: str, event_ts: str) -> str:
-    lines = [
-        "✅ *TASK COMPLETED*",
-        f"Task: {task.get('title')}",
-        f"Project: {task.get('project_name') or '—'}",
-        f"Completed by: {actor_name}",
-        f"Completed: {_fmt_event_ts(event_ts)}",
-        "Open Task:",
-        _workflow_task_link(task["id"]),
-    ]
-    return "\n".join(lines)
+    return _format_workflow_message(
+        "✅ *TASK COMPLETED*", subject_label="Task", subject_name=task.get("title"),
+        project_name=task.get("project_name"),
+        blocks=[[f"Completed by: {actor_name}"], [f"Completed: {_fmt_event_ts(event_ts)}"]],
+        link=_workflow_task_link(task["id"]),
+    )
 
 
 def _build_checklist_completed_message(task: dict, checklist_text: str, actor_name: str, event_ts: str) -> str:
-    lines = [
-        "✅ *CHECKLIST COMPLETED*",
-        f"Task: {task.get('title')}",
-        f"Project: {task.get('project_name') or '—'}",
-        "Completed:",
-        checklist_text,
-        f"Completed by: {actor_name}",
-        f"Completed: {_fmt_event_ts(event_ts)}",
-        "Open Task:",
-        _workflow_task_link(task["id"]),
-    ]
-    return "\n".join(lines)
+    return _format_workflow_message(
+        "✅ *CHECKLIST COMPLETED*", subject_label="Task", subject_name=task.get("title"),
+        project_name=task.get("project_name"),
+        blocks=[["Completed:", checklist_text], [f"Completed by: {actor_name}"], [f"Completed: {_fmt_event_ts(event_ts)}"]],
+        link=_workflow_task_link(task["id"]),
+    )
 
 
 def _build_checklist_updated_message(task: dict, old_text: str, new_text: str, actor_name: str, event_ts: str) -> str:
-    lines = [
-        "✏️ *CHECKLIST UPDATED*",
-        f"Task: {task.get('title')}",
-        f"Project: {task.get('project_name') or '—'}",
-        "Checklist:",
-        new_text,
-        f"Updated by: {actor_name}",
-        f"Updated: {_fmt_event_ts(event_ts)}",
-        "Changes:",
-        f"• Text: {old_text} → {new_text}",
-        "Open Task:",
-        _workflow_task_link(task["id"]),
-    ]
-    return "\n".join(lines)
+    return _format_workflow_message(
+        "✏️ *CHECKLIST UPDATED*", subject_label="Task", subject_name=task.get("title"),
+        project_name=task.get("project_name"),
+        blocks=[
+            ["Checklist:", new_text],
+            [f"Updated by: {actor_name}"],
+            ["Changes:", f"• Text: {old_text} → {new_text}"],
+            [f"Updated: {_fmt_event_ts(event_ts)}"],
+        ],
+        link=_workflow_task_link(task["id"]),
+    )
 
 
 def _build_task_assigned_message(task: dict, old_assignee_name: str, new_assignee_name: str, actor_name: str, event_ts: str) -> str:
-    lines = [
-        "👤 *TASK ASSIGNED*",
-        f"Task: {task.get('title')}",
-        f"Project: {task.get('project_name') or '—'}",
-        f"Assigned to: {new_assignee_name}",
-        f"Previously: {old_assignee_name}",
-        f"Assigned by: {actor_name}",
-        f"Time: {_fmt_event_ts(event_ts)}",
-        "Open Task:",
-        _workflow_task_link(task["id"]),
-    ]
-    return "\n".join(lines)
+    return _format_workflow_message(
+        "👤 *TASK ASSIGNED*", subject_label="Task", subject_name=task.get("title"),
+        project_name=task.get("project_name"),
+        blocks=[
+            [f"Assigned to: {new_assignee_name}", f"Previously: {old_assignee_name}", f"Assigned by: {actor_name}"],
+            [f"Assigned: {_fmt_event_ts(event_ts)}"],
+        ],
+        link=_workflow_task_link(task["id"]),
+    )
 
 
 def _build_task_updated_message(task: dict, change_lines: list, actor_name: str, event_ts: str) -> str:
-    lines = [
-        "✏️ *TASK UPDATED*",
-        f"Task: {task.get('title')}",
-        f"Project: {task.get('project_name') or '—'}",
-        f"Updated by: {actor_name}",
-        f"Updated: {_fmt_event_ts(event_ts)}",
-        "Changes:",
-    ]
-    lines.extend(f"• {c}" for c in change_lines)
-    lines.append("Open Task:")
-    lines.append(_workflow_task_link(task["id"]))
-    return "\n".join(lines)
+    return _format_workflow_message(
+        "✏️ *TASK UPDATED*", subject_label="Task", subject_name=task.get("title"),
+        project_name=task.get("project_name"),
+        blocks=[
+            [f"Updated by: {actor_name}"],
+            ["Changes:"] + [f"• {c}" for c in change_lines],
+            [f"Updated: {_fmt_event_ts(event_ts)}"],
+        ],
+        link=_workflow_task_link(task["id"]),
+    )
+
+
+def _build_task_update_comment_message(task: dict, comment_text: str, actor_name: str, event_ts: str) -> str:
+    """PART 3 — an existing task comment/update note (POST /tasks/{id}/comments)
+    reported through the same WhatsApp event system, using the app's own
+    existing "Updates" field (no new comment mechanism invented)."""
+    return _format_workflow_message(
+        "📝 *TASK UPDATE*", subject_label="Task", subject_name=task.get("title"),
+        project_name=task.get("project_name"),
+        blocks=[[f"Update by: {actor_name}", "Update:", f'"{comment_text}"'], [f"Updated: {_fmt_event_ts(event_ts)}"]],
+        link=_workflow_task_link(task["id"]),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -497,8 +514,8 @@ async def update_task(tid: str, payload: TaskUpdateIn, user: dict = Depends(curr
         if payload.project_name is not None:
             update_data["project_name"] = payload.project_name.strip()
         if project_changed:
-            old_pname = task.get("project_name") or "—"
-            new_pname = (payload.project_name or "").strip() or "—"
+            old_pname = task.get("project_name") or "(none)"
+            new_pname = (payload.project_name or "").strip() or "(none)"
             change_lines.append(f"Project: {old_pname} → {new_pname}")
         if payload.talent_id is not None:
             update_data["talent_id"] = payload.talent_id
@@ -700,7 +717,14 @@ async def add_task_comment(tid: str, payload: CommentIn, user: dict = Depends(cu
                     title=f"New comment from {user.get('name')}: {task.get('title')}",
                     task_id=tid,
                 )
-                
+
+        # WhatsApp group notification (PART 3) — the app's existing
+        # comment/update field, reported through the same event system.
+        enqueue_workflow_whatsapp_notification(
+            _build_task_update_comment_message(task, comment["text"], user.get("name") or user.get("email") or "Someone", now),
+            tid,
+        )
+
         return _to_dict(comment)
     except HTTPException as he:
         raise he

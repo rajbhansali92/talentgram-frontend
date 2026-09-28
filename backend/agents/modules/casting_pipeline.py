@@ -6028,15 +6028,35 @@ async def _resolve_share(collected: dict) -> _ShareResolution:
                 {"id": c.id, "label": c.label, "value": f"{nlu.RESOLVED_TALENT_MARKER}{c.id}|{c.label}"}
                 for c in resolved.ambiguous_candidates
             ]
+            ambiguous_query = selector.name_query or recipient_query
+            disambiguation: Dict[str, Any] = {"kind": "talent", "field_key": "recipient_query", "options": options}
+            if (
+                selector.name_queries and resolved.ambiguous_query_index is not None
+                and 0 <= resolved.ambiguous_query_index < len(selector.name_queries)
+            ):
+                # 2026-09-28 SHARE multi-talent regression fix — this
+                # ambiguity came from ONE name inside a multi-name
+                # selector ("share with A, B, C, D, E"). Preserve the
+                # FULL originally-parsed name list + which position was
+                # ambiguous, so _share_parse_edits_async's resume can
+                # substitute the picked candidate back into that exact
+                # slot instead of the picked value silently replacing the
+                # entire recipient_query field (which previously dropped
+                # every other requested talent — see this fix's own
+                # writeup). The other names are intentionally left
+                # UNRESOLVED here (not re-attempted) — they're re-resolved
+                # fresh, from their own original text, the next time
+                # _resolve_share runs after the substitution, exactly like
+                # a normal first-time SHARE would.
+                ambiguous_query = selector.name_queries[resolved.ambiguous_query_index]
+                disambiguation["multi_name_queries"] = list(selector.name_queries)
+                disambiguation["multi_ambiguous_index"] = resolved.ambiguous_query_index
             msg = nlu.format_numbered_options(
-                f'I found multiple talents matching "{selector.name_query or recipient_query}".\n'
+                f'I found multiple talents matching "{ambiguous_query}".\n'
                 "Which one did you mean?",
                 [[c.label] for c in resolved.ambiguous_candidates],
             )
-            return _ShareResolution(
-                ok=False, error=msg,
-                disambiguation={"kind": "talent", "field_key": "recipient_query", "options": options},
-            )
+            return _ShareResolution(ok=False, error=msg, disambiguation=disambiguation)
         return _ShareResolution(
             ok=False,
             error=resolved.error or "No matching talent found.",
@@ -6867,6 +6887,46 @@ async def _share_parse_edits_async(
         await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return {PLAN_STEP_EDIT_ERROR_FIELD.key: _EDITING_CANCELLED_MESSAGE}
+
+    # 2026-09-28 SHARE multi-talent regression fix — a reply to a pending
+    # multi-talent disambiguation (see _resolve_share's "multi_name_queries"
+    # / "multi_ambiguous_index", set only when ONE name inside a "share
+    # with A, B, C, D, E"-style list was ambiguous) takes priority over
+    # every other edit-instruction pattern below, matching "the current
+    # question owns the reply" everywhere else in this file. Substitutes
+    # the picked candidate's plain label back into the EXACT original
+    # position in the original name list, preserving every other
+    # originally-requested name — this is the fix for the reported
+    # regression, where the picked value previously overwrote the whole
+    # recipient_query field, silently dropping every other requested
+    # talent (and a bare numeric reply like "2" was then re-parsed as an
+    # ORDINAL against the entire talent candidate list instead of a pick
+    # from this disambiguation, resolving to an unrelated talent).
+    session = await session_context.get_session(ctx.agent_id, ctx.sender_phone)
+    pending = (session or {}).get("pending_disambiguation")
+    if pending and pending.get("multi_name_queries") is not None:
+        options = pending.get("options") or []
+        idx = nlu.resolve_option_reply(stripped, options)
+        if idx is not None:
+            queries = list(pending["multi_name_queries"])
+            amb_idx = pending.get("multi_ambiguous_index")
+            if isinstance(amb_idx, int) and 0 <= amb_idx < len(queries):
+                queries[amb_idx] = options[idx - 1]["label"]
+            await session_context.update_session(ctx.agent_id, ctx.sender_phone, pending_disambiguation=None)
+            return {"recipient_query": ", ".join(queries), _SHARE_EDIT_FIELD_KEY: ""}
+        if stripped.isdigit():
+            # Out-of-range digit — re-ask rather than falling through to
+            # "treat this as a literal new value for recipient_query"
+            # (the exact failure mode this fix closes), same "never guess"
+            # contract every other numbered disambiguation here already has.
+            opts_text = "\n".join(f"{i} → {o['label']}" for i, o in enumerate(options, start=1))
+            return {PLAN_STEP_EDIT_ERROR_FIELD.key: (
+                f"Please choose one of the listed talents:\n\n{opts_text}\n\n"
+                f"Reply with the number, or type the full name."
+            )}
+        # Not a number and not a recognizable label match — falls through
+        # to the normal edit-instruction handling below (e.g. a genuinely
+        # different natural-language edit typed instead of answering).
 
     if collected.get(SHARE_ROUTE_FIELD.key) == "instagram":
         return await _share_instagram_parse_edits_async(text, collected, ctx)

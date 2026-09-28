@@ -7470,6 +7470,224 @@ async def test_share_edit_menu_precedence_over_real_disambiguation():
 
 
 # ---------------------------------------------------------------------------
+# 2026-09-28 — SHARE multi-talent disambiguation regression. Root cause:
+# casting_pipeline_nlu.resolve_against_candidates's multi-name
+# (selector.name_queries) branch discarded a per-name ambiguity's
+# ambiguous_candidates, keeping only the error TEXT — so a multi-talent
+# SHARE with one ambiguous name fell into the "free_text_retry" dead end
+# (empty options) instead of a real numbered disambiguation. The next
+# numeric reply ("2") was then treated as a literal new value for
+# recipient_query, re-parsed as an ORDINAL against the ENTIRE talent
+# candidate list (not the disambiguation options) — resolving to an
+# unrelated talent and silently dropping every other originally-requested
+# name. Fixed in casting_pipeline_nlu.py (propagate ambiguous_candidates +
+# which position it came from) and casting_pipeline.py (_resolve_share/
+# _share_parse_edits_async preserve the full original name list across the
+# disambiguation round trip, substituting only the resolved slot).
+# ---------------------------------------------------------------------------
+async def test_share_multi_talent_one_ambiguous_preserves_all_five():
+    """TEST 1 — the exact reported shape: 5 talents, 1 ambiguous. Resolving
+    the ambiguity must NOT collapse the operation down to a single talent
+    — all 5 must be added/moved/shared.
+
+    Each talent gets its OWN unique random suffix (never a suffix shared
+    across the whole test) — reusing one shared tag across every seeded
+    talent was tried first and produced a false 4-way "ambiguous" tie
+    (every candidate's label shared the same long, distinctive tag
+    substring, which the fuzzy matcher scored as a near-perfect token
+    match against all of them) — a self-induced test-data collision, not
+    a real bug, exactly like an earlier false alarm this session already
+    root-caused the same way for project names. The ambiguous pair is
+    queried by its bare shared first word only ("Delta"), matching the
+    proven pattern test_share_ambiguous_talent_clarification_then_resume
+    already uses for "Priya"."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    ptag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"FiveTalentProj {ptag}", shoot_dates="5 May 2029", budget="Rs 5/day",
+    )
+    t1_tag, t2_tag, t3_tag, amb_tag, t5_tag = (uuid.uuid4().hex[:6] for _ in range(5))
+    t1 = await _seed_talent(f"Aashish Arora {t1_tag}", phone="917000700201")
+    t2 = await _seed_talent(f"Nikhil Bhambri {t2_tag}", phone="917000700202")
+    t3 = await _seed_talent(f"Padm Rautela {t3_tag}", phone="917000700203")
+    amb_a = await _seed_talent(f"Delta Shah {amb_tag}", phone="917000700204")
+    amb_b = await _seed_talent(f"Delta Mehta {amb_tag}", phone="917000700205")
+    t5 = await _seed_talent(f"Aditya Sarmah {t5_tag}", phone="917000700206")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=(
+                f"Share Casting Call for FiveTalentProj {ptag} with "
+                f"Aashish Arora {t1_tag}, Nikhil Bhambri {t2_tag}, Padm Rautela {t3_tag}, "
+                f"Delta, Aditya Sarmah {t5_tag}"
+            ),
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "multiple" in r.reply.lower() or "found" in r.reply.lower(), r.reply
+        # PENDING DISAMBIGUATION STATE / SELECTION proof: the OTHER four
+        # names must never appear as "not found"/dropped at this stage —
+        # only the genuinely ambiguous one is being asked about.
+        assert "Delta Shah" in r.reply and "Delta Mehta" in r.reply, r.reply
+        assert "Aashish Arora" not in r.reply and "Aditya Sarmah" not in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",  # picks Delta Shah
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        # FINAL SHARE TALENT LIST / RECIPIENT COUNT — must be 5, never 1.
+        assert "Added 5 talents to the pipeline and moved 5 to Follow Up." in r2.reply, r2.reply
+        assert "5 WhatsApp messages queued." in r2.reply, r2.reply
+        assert f"Delta Shah {amb_tag} — sent" in r2.reply, r2.reply
+
+        for tid in (t1, t2, t3, amb_a, t5):
+            row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert row is not None and row["stage"] == "follow_up", (tid, row)
+        # The NON-picked ambiguous candidate must never have been touched.
+        assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": amb_b}) is None
+
+        jobs = await db.whatsapp_jobs.find({"talent_id": {"$in": [t1, t2, t3, amb_a, t5]}}).to_list(10)
+        assert len(jobs) == 5, jobs
+        assert await db.whatsapp_jobs.find_one({"talent_id": amb_b}) is None
+    finally:
+        await _cleanup_jobs_for_talents([t1, t2, t3, amb_a, amb_b, t5])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[t1, t2, t3, amb_a, amb_b, t5])
+        await _restore_share_config(original)
+
+
+async def _run_share_ambiguous_position_case(position: str):
+    """TEST 2 — shared implementation for first/middle/last ambiguous
+    position. Two unambiguous talents (each with their OWN unique tag —
+    see test 1's docstring for why a shared tag across candidates is
+    unsafe) plus one ambiguous pair, placed at the requested slot; the
+    two unambiguous ones must survive regardless of where the ambiguity
+    sits in the original list."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    ptag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"PosProj{position}{ptag}", shoot_dates="6 Jun 2029", budget="Rs 6/day",
+    )
+    u1_tag, u2_tag, amb_tag = (uuid.uuid4().hex[:6] for _ in range(3))
+    u1 = await _seed_talent(f"UniqueOne {u1_tag}", phone="917000700207")
+    u2 = await _seed_talent(f"UniqueTwo {u2_tag}", phone="917000700208")
+    amb_a = await _seed_talent(f"Zeta North {amb_tag}", phone="917000700209")
+    amb_b = await _seed_talent(f"Zeta South {amb_tag}", phone="917000700210")
+    if position == "first":
+        recipients = ["Zeta", f"UniqueOne {u1_tag}", f"UniqueTwo {u2_tag}"]
+    elif position == "middle":
+        recipients = [f"UniqueOne {u1_tag}", "Zeta", f"UniqueTwo {u2_tag}"]
+    else:
+        recipients = [f"UniqueOne {u1_tag}", f"UniqueTwo {u2_tag}", "Zeta"]
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Casting Call for PosProj{position}{ptag} with {', '.join(recipients)}",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Zeta North" in r.reply and "Zeta South" in r.reply, r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",  # picks Zeta North
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        assert "Added 3 talents to the pipeline and moved 3 to Follow Up." in r2.reply, r2.reply
+        assert "3 WhatsApp messages queued." in r2.reply, r2.reply
+
+        for tid in (u1, u2, amb_a):
+            row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert row is not None and row["stage"] == "follow_up", (position, tid, row)
+        assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": amb_b}) is None
+    finally:
+        await _cleanup_jobs_for_talents([u1, u2, amb_a, amb_b])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[u1, u2, amb_a, amb_b])
+        await _restore_share_config(original)
+
+
+async def test_share_multi_talent_ambiguous_talent_first_preserves_rest():
+    await _run_share_ambiguous_position_case("first")
+
+
+async def test_share_multi_talent_ambiguous_talent_middle_preserves_rest():
+    await _run_share_ambiguous_position_case("middle")
+
+
+async def test_share_multi_talent_ambiguous_talent_last_preserves_rest():
+    await _run_share_ambiguous_position_case("last")
+
+
+async def test_share_multi_talent_two_ambiguous_entries_resolved_sequentially():
+    """TEST 3 — two ambiguous names in one SHARE command. The current
+    architecture (confirmed via the _resolve_share/resolve_against_
+    candidates audit for this fix) stops at the FIRST ambiguity, asks,
+    and — once resumed — re-resolves the reconstructed list, which then
+    surfaces the SECOND ambiguity on its own turn. This is not a
+    redesign: each round trip still only ever asks about one genuine
+    ambiguity at a time, and the previously-resolved names/slots are
+    never lost across either round."""
+    group = f"Test Casting {uuid.uuid4().hex[:6]}"
+    original = await _use_share_test_config(group)
+    phone = _phone()
+    ptag = uuid.uuid4().hex[:6]
+    project_id = await _seed_project_with_details(
+        f"TwoAmbProj {ptag}", shoot_dates="7 Jul 2029", budget="Rs 7/day",
+    )
+    u1_tag, d_tag, z_tag = (uuid.uuid4().hex[:6] for _ in range(3))
+    u1 = await _seed_talent(f"Solo Unique {u1_tag}", phone="917000700211")
+    d_a = await _seed_talent(f"Delta East {d_tag}", phone="917000700212")
+    d_b = await _seed_talent(f"Delta West {d_tag}", phone="917000700213")
+    z_a = await _seed_talent(f"Zeta North {z_tag}", phone="917000700214")
+    z_b = await _seed_talent(f"Zeta South {z_tag}", phone="917000700215")
+    try:
+        r = await handle_inbound_message(
+            group_name=group, sender_phone=phone,
+            text=f"Share Casting Call for TwoAmbProj {ptag} with Solo Unique {u1_tag}, Delta, Zeta",
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r.handled, r.reply
+        assert "Delta East" in r.reply and "Delta West" in r.reply, r.reply
+        # The second ambiguity (Zeta) must not be shown yet — one question
+        # at a time, never guessed.
+        assert "Zeta North" not in r.reply
+
+        r2 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",  # picks Delta East
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r2.handled, r2.reply
+        # The FIRST ambiguity is resolved; the SECOND now surfaces, with
+        # Solo Unique and Delta East still part of the pending operation
+        # (never dropped) — the executor hasn't run yet, so nothing was
+        # added/moved/shared based on a partial list.
+        assert "Zeta North" in r2.reply and "Zeta South" in r2.reply, r2.reply
+        assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": u1}) is None
+
+        r3 = await handle_inbound_message(
+            group_name=group, sender_phone=phone, text="1",  # picks Zeta North
+            sender_name="Raj", sender_is_group_member=True,
+        )
+        assert r3.handled, r3.reply
+        assert "Added 3 talents to the pipeline and moved 3 to Follow Up." in r3.reply, r3.reply
+        assert "3 WhatsApp messages queued." in r3.reply, r3.reply
+
+        for tid in (u1, d_a, z_a):
+            row = await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid})
+            assert row is not None and row["stage"] == "follow_up", (tid, row)
+        for tid in (d_b, z_b):
+            assert await db.casting_pipeline.find_one({"project_id": project_id, "talent_id": tid}) is None
+    finally:
+        await _cleanup_jobs_for_talents([u1, d_a, d_b, z_a, z_b])
+        await _cleanup(phone, project_ids=[project_id], talent_ids=[u1, d_a, d_b, z_a, z_b])
+        await _restore_share_config(original)
+
+
+# ---------------------------------------------------------------------------
 # 2026-09-27: the pre-send recipient EDIT flow ("2" -> EDITING SHARE ->
 # "Remove 2" / "Change project" / "Share only with 1,3") is inherently
 # incompatible with the new "no confirmation, immediate execution"

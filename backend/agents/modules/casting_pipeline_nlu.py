@@ -516,6 +516,15 @@ class ResolvedTalents:
     # stateful "reply with the number" continuation instead of just
     # showing text the user would have to re-type a fix for.
     ambiguous_candidates: Optional[List[Candidate]] = None
+    # 2026-09-28 SHARE multi-talent regression fix — set alongside
+    # ambiguous_candidates ONLY when the ambiguity came from ONE name
+    # inside a multi-name selector.name_queries list (never for a plain
+    # single-name selector): the 0-based index into that original list
+    # the ambiguous candidates belong to, so a caller resolving several
+    # names in one command (e.g. SHARE's "with A, B, C, D, E") can ask
+    # about just this one name and later substitute the pick back into
+    # that exact position instead of losing the other names entirely.
+    ambiguous_query_index: Optional[int] = None
     error: Optional[str] = None
     # Local, request_scope-free sub-stage timing (2026-08-05 latency
     # sprint) — {"normalize", "exact_match", "token_match", "fuzzy_scoring",
@@ -707,9 +716,34 @@ def resolve_against_candidates(selector: SelectorResult, candidates: List[Candid
         labels: List[str] = []
         seen_ids: set = set()
         errors: List[str] = []
-        for q in selector.name_queries:
+        for i, q in enumerate(selector.name_queries):
             one = resolve_against_candidates(SelectorResult(ok=True, name_query=q), candidates)
             if not one.ok:
+                if one.ambiguous_candidates:
+                    # 2026-09-28 fix — a genuine tie (not just "no match")
+                    # used to fall into the plain `errors` bucket below,
+                    # discarding `one.ambiguous_candidates` entirely. The
+                    # caller (casting_pipeline.py's _resolve_share/move
+                    # talent resolution) branches on ambiguous_candidates
+                    # to decide between a real numbered "reply with the
+                    # number" disambiguation and a dead-end "please retype"
+                    # — losing it here silently downgraded a genuine,
+                    # resolvable ambiguity into that dead end, and a
+                    # numeric reply typed in response (e.g. "2") then fell
+                    # through to being re-parsed as an ORDINAL against the
+                    # entire candidate list instead of a pick from the
+                    # (never shown with real options) list — resolving to
+                    # an unrelated talent and silently dropping every
+                    # other name in this selector. Stop at the FIRST
+                    # genuine ambiguity (still never guessing) and
+                    # propagate both the real candidates and which
+                    # position in the original list they came from, so the
+                    # caller can ask about just this one name and later
+                    # substitute the pick back into that exact slot.
+                    return ResolvedTalents(
+                        ok=False, error=one.error, ambiguous_candidates=one.ambiguous_candidates,
+                        ambiguous_query_index=i,
+                    )
                 errors.append(one.error or f'No matching talent for "{q}".')
                 continue
             for tid, label in zip(one.talent_ids, one.talent_labels):

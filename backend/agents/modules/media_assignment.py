@@ -1051,7 +1051,7 @@ def simple_role_label(media_role: str, take_number: Optional[int] = None) -> str
     NO talent name, NO project name — the caption that actually forwards
     alongside the media into the shared casting group, and the per-item
     lines in SEND's own completion status, both need to read as just
-    "Audition Take" / "Introduction Take", never "{talent} — {project}
+    "Audition Take" / "Introduction Video", never "{talent} — {project}
     Take 1" (role_label/submission_label above are both still used
     exactly as before for UPLOAD's own reports and the submission page,
     which are unaffected — this is a new, separate function, not a
@@ -1059,7 +1059,12 @@ def simple_role_label(media_role: str, take_number: Optional[int] = None) -> str
     if media_role == "take":
         return f"Audition Take {take_number}" if take_number else "Audition Take"
     if media_role == "intro":
-        return "Introduction Take"
+        # Fix (2026-09-28, Raviza Chauhan / Carter's) — an Introduction
+        # video is not a "take" (it has no take number and isn't an
+        # audition performance); reports/captions previously said
+        # "Introduction Take", which reads as a labeling error to anyone
+        # reviewing a failure report.
+        return "Introduction Video"
     if media_role == "photos":
         return "Photo"
     return media_role.capitalize()

@@ -789,6 +789,59 @@ async def _attach_control_visible(page: Page) -> bool:
     return bool(result.get("found"))
 
 
+async def _click_with_interception_recovery(
+    page: Page, selector: str, *, timeout: int = 5_000, settle_wait_ms: int = 600,
+) -> None:
+    """Deterministic, bounded recovery for WhatsApp Web's own transient
+    "element intercepts pointer events" condition (Production fix,
+    2026-09-28 — Raviza Chauhan / Carter's: the destination compose
+    toolbar's Attach control AND the compose-box input BOTH failed this
+    way against a target that was already CONFIRMED visible and enabled —
+    proven by _resolve_attach_control / _wait_for_destination_chat_ready
+    already having passed before either click ever ran, so this is not a
+    "control not ready" case at all). Playwright's own click() already
+    retries actionability internally for the FULL timeout given; if it
+    still fails specifically because some OTHER element's subtree is
+    covering the exact click point, that overlay is either genuinely
+    persistent past this timeout or just needs a beat to finish settling
+    (e.g. a just-closed menu/preview) — clicking again at the identical
+    instant would only race the same failure.
+
+    Recovery is exactly ONE bounded retry: wait `settle_wait_ms` (a short
+    settle pause, never the original full timeout again), re-confirm via
+    a fresh count()/is_visible() read that the target is STILL present
+    and visible (never assumed), then retry the SAME real click() once —
+    never a force-click, never a synthetic coordinate click, never
+    treating a merely DOM-visible element as necessarily interactable.
+    Any other exception, or any failure on the retry itself (whether
+    another interception or a different error), propagates unchanged —
+    no infinite loop, no third attempt."""
+    try:
+        await page.click(selector, timeout=timeout)
+        return
+    except PlaywrightTimeoutError as exc:
+        if "intercepts pointer events" not in str(exc):
+            raise
+        logger.warning(
+            "sender: click on %r timed out via pointer-event interception — one bounded settle-and-retry (%dms)",
+            selector, settle_wait_ms,
+        )
+    await asyncio.sleep(settle_wait_ms / 1000)
+    loc = page.locator(selector).first
+    still_present = False
+    try:
+        still_present = bool(await loc.count()) and await loc.is_visible()
+    except Exception:
+        still_present = False
+    if not still_present:
+        logger.warning(
+            "sender: click retry target %r no longer present/visible after pointer-interception settle wait — not retrying",
+            selector,
+        )
+        raise PlaywrightTimeoutError(f"target {selector!r} no longer present/visible after pointer-interception settle wait")
+    await page.click(selector, timeout=timeout)
+
+
 async def _wait_for_destination_chat_ready(page: Page, expected_name: Optional[str]) -> Tuple[bool, Optional[str]]:
     """Re-verifies, immediately before the attach-button click, that (a) the
     VISIBLE chat header still names the intended destination and (b) the
@@ -2735,7 +2788,11 @@ async def send_whatsapp_message(
                 attach_selector, scoped_attach_selector, attach_result.get("visible"), attach_result.get("enabled"),
             )
             try:
-                await page.click(scoped_attach_selector, timeout=5_000)
+                # 2026-09-28 fix — bounded pointer-interception recovery
+                # (see _click_with_interception_recovery's own docstring;
+                # this is the exact call site the Raviza Chauhan / Carter's
+                # incident's attach-click failure traced to).
+                await _click_with_interception_recovery(page, scoped_attach_selector, timeout=5_000)
             except Exception as click_exc:
                 # Diagnostic-only (2026-08-24, extended 2026-09-20) — capture
                 # live DOM evidence at the exact instant of a real attach-
@@ -2792,7 +2849,12 @@ async def send_whatsapp_message(
         # Text-only message
         # Focus message box and clear any stale draft (a prior blocked attempt
         # may have left text in the composer — retyping on top would double it).
-        await page.click(SEL["msg_box"])
+        # 2026-09-28 fix — bounded pointer-interception recovery (see
+        # _click_with_interception_recovery's own docstring; this is the
+        # exact call site the Raviza Chauhan / Carter's incident's
+        # submission-details compose-box click failure traced to). 30_000
+        # made explicit, matching Playwright's own prior implicit default.
+        await _click_with_interception_recovery(page, SEL["msg_box"], timeout=30_000)
         await page.keyboard.press("Control+A")   # Linux worker — NOT macOS Meta+A
         await page.keyboard.press("Backspace")
         # Standard approach: paste or type text. Since we want to preserve newlines, we can use copy-paste

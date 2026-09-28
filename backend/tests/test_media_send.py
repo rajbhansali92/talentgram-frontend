@@ -1327,7 +1327,9 @@ async def test_send_two_takes_and_intro_all_dispatched_from_approved_plan_no_sec
         assert "SEND COMPLETE" in final["report"], final["report"]
         assert "3/3 media sent" in final["report"], final["report"]
         assert "✓ Audition Take" in final["report"], final["report"]
-        assert "✓ Introduction Take" in final["report"], final["report"]
+        # 2026-09-28 (Raviza Chauhan / Carter's) — corrected label.
+        assert "✓ Introduction Video" in final["report"], final["report"]
+        assert "Introduction Take" not in final["report"], final["report"]
     finally:
         req_ids = [d["id"] async for d in db[ma.SCAN_REQUESTS_COLLECTION].find({"talent_id": talent_id})]
         await _cleanup_send(talent_ids=[talent_id], project_ids=[project_id], scan_request_ids=req_ids, submission_ids=[submission_id])
@@ -4086,7 +4088,10 @@ def test_simple_role_label_take_with_number():
 
 
 def test_simple_role_label_intro():
-    assert ma.simple_role_label("intro", None) == "Introduction Take"
+    # 2026-09-28 (Raviza Chauhan / Carter's) — an Introduction video is not
+    # a "take"; the label was corrected accordingly.
+    assert ma.simple_role_label("intro", None) == "Introduction Video"
+    assert ma.simple_role_label("intro", None) != "Introduction Take"
 
 
 def test_simple_role_label_photos():

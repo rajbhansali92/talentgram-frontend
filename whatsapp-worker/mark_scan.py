@@ -8474,6 +8474,28 @@ async def _locate_download_message(
                 "mark_scan: UPLOAD download-phase jump fallback for source=%s via reply=%s -> landed on %s (settle_confident=%s)",
                 source_message_id, mark_reply_message_id, jumped.get("data_id"), jumped.get("settle_confident"),
             )
+            # Fix (2026-09-28, Raviza Chauhan / Carter's Take 1 — SOURCE_
+            # NOT_HYDRATED) — _ensure_message_content_rendered (scroll +
+            # bounded poll past a virtualized stub, proven at the fast-
+            # index-lookup branch just above and reused again below AFTER
+            # this verify) was never called on the jumped-to message BEFORE
+            # the hash-equality poll started. _await_marked_media_on_message
+            # was designed for a narrower race (shared placeholder blob
+            # before the REAL thumbnail loads — see its own docstring) and
+            # assumes the message container itself already has real content
+            # to read; a message a jump just landed on deep in scroll
+            # history can still be a near-empty virtualization stub at that
+            # exact moment (the SAME race _ensure_message_content_rendered
+            # already exists to solve for the fast-index branch and the
+            # reindexed message below). Without this, the hash poll could
+            # spend its entire bounded budget reading a stub that was never
+            # going to gain a matching hash in time. This does not weaken
+            # or bypass the exact-hash check in any way — still bounded,
+            # still fails honestly ("did not finish rendering") if the hash
+            # never appears; it only gives the poll a fair, hydrated
+            # starting point, exactly like every other call site already
+            # gets.
+            await _ensure_message_content_rendered(page, jumped["locator"])
             if source_thumbnail_hash:
                 verify = await _await_marked_media_on_message(page, jumped["locator"], source_thumbnail_hash, None)
                 if not verify["matched"]:
@@ -9487,6 +9509,49 @@ def _media_staging_path(job_id: str, media_id: str, ext: str) -> str:
     return os.path.join(MEDIA_STAGING_DIR, f"{safe_job}_{safe_media}.{ext}")
 
 
+async def _resolve_download_media_type(message: Any, target: Dict[str, Any], sm_id: str) -> Optional[str]:
+    """Fix (2026-09-28, Raviza Chauhan / Carter's Take 2) — target's own
+    source_media_type (already the best of resolved_source_media_type /
+    the mark's own candidate-time source_media_type — see mark_intent.py's
+    own fallback chain) can still be None for a message that IS actually a
+    video, when the upstream _media_type() testid-marker detection failed
+    at every earlier stage too. Routing an actual video into the non-video
+    download branches is a DETERMINISTIC failure (neither knows how to
+    extract a mounted <video> element's blob) — proven exactly this way in
+    production ("[DOWNLOAD_FAILED] no blob: media element found" for a
+    real, successfully-identified take video).
+
+    Before falling through to the generic/non-video path, re-check the
+    ALREADY-LOCATED, ALREADY-IDENTITY-VERIFIED `message`'s own live DOM —
+    never a guess, never filename-based, the exact same _media_type()
+    marker read every other live-verification call site in this file
+    already trusts, applied to the EXACT message _locate_download_message
+    just confirmed by source identity (message/hash), not a different one.
+    This can only ADD "video" when the existing signal is missing; it
+    never downgrades an already-known non-video classification, and a
+    message with no detectable video/image marker at all still falls
+    through unchanged to the caller's existing generic-path behaviour
+    (returns whatever target.get("source_media_type") already was — often
+    None, exactly as before this fix, a safe existing failure rather than
+    an unsafe guess)."""
+    resolved = target.get("source_media_type")
+    if resolved == "video":
+        return resolved
+    try:
+        live_html = await message.evaluate("(el) => el.outerHTML", timeout=10000)
+    except Exception:
+        live_html = ""
+    live_type = _media_type(live_html)
+    if live_type == "video":
+        logger.info(
+            "mark_scan: SEND download source_media_type was %r for source=%s; live DOM re-check on the "
+            "identity-verified message found video -> using the video download path",
+            target.get("source_media_type"), sm_id,
+        )
+        return "video"
+    return resolved
+
+
 async def _download_source_media(
     page, group_name: str, target: Dict[str, Any], *, job_id: str, source_type: str = "group",
 ) -> Dict[str, Any]:
@@ -9517,7 +9582,9 @@ async def _download_source_media(
     raw: Optional[bytes] = None
     content_type = ""
 
-    if target.get("source_media_type") == "video":
+    resolved_media_type = await _resolve_download_media_type(message, target, sm_id)
+
+    if resolved_media_type == "video":
         tile_index = target.get("album_tile_index")
         if tile_index is None:
             tile_index = 0

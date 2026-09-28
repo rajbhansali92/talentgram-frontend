@@ -7510,6 +7510,244 @@ def main():
     assert (len(full_html_198) >= mark_scan.HTML_TRUNCATE) is False  # the normal case never approaches the cap
     print("204. truncation observability: len(messageHtml) >= HTML_TRUNCATE correctly distinguishes the truncated Divija-shaped case from the untruncated normal case — a pure diagnostic signal, never consulted to decide whether mark text is available")
 
+    # ------------------------------------------------------------------
+    # 205-208b: Raviza Chauhan / Carter's Take 2 (2026-09-28) —
+    # _resolve_download_media_type. A resolved video whose
+    # source_media_type ended up None must never be routed to the
+    # non-video download extractor; a live DOM re-check on the
+    # already-identity-verified message recovers it safely, never a guess.
+    # ------------------------------------------------------------------
+    class _FakeDownloadMessage205:
+        def __init__(self, html):
+            self._html = html
+        async def evaluate(self, js, timeout=None):
+            return self._html
+
+    result_205 = asyncio.run(mark_scan._resolve_download_media_type(
+        _FakeDownloadMessage205("<div>irrelevant</div>"), {"source_media_type": "video"}, "SM_205",
+    ))
+    assert result_205 == "video", result_205
+    print("205. resolved video + source_media_type='video' -> video download path (unchanged fast path, no live check needed)")
+
+    video_marker_html_206 = '<div data-testid="video-content"></div>'
+    result_206 = asyncio.run(mark_scan._resolve_download_media_type(
+        _FakeDownloadMessage205(video_marker_html_206), {"source_media_type": None}, "SM_206",
+    ))
+    assert result_206 == "video", result_206
+    print("206. resolved video + source_media_type=None but live DOM shows a real video marker -> video download path (the Raviza Chauhan / Carter's Take 2 fix)")
+
+    image_marker_html_207 = '<div data-testid="image-content"></div>'
+    result_207 = asyncio.run(mark_scan._resolve_download_media_type(
+        _FakeDownloadMessage205(image_marker_html_207), {"source_media_type": None}, "SM_207",
+    ))
+    assert result_207 is None, result_207
+    print("207. actual non-video (live DOM shows an image marker, no video marker) -> media type stays as-is, never force-classified as video")
+
+    no_marker_html_208 = "<div>plain text, no media markers at all</div>"
+    result_208 = asyncio.run(mark_scan._resolve_download_media_type(
+        _FakeDownloadMessage205(no_marker_html_208), {"source_media_type": None}, "SM_208",
+    ))
+    assert result_208 is None, result_208
+    print("208. ambiguous/unknown media type (no detectable marker at all) -> stays None, safe existing failure behaviour rather than an unsafe guess")
+
+    class _FakeDownloadMessageRaises208b:
+        async def evaluate(self, js, timeout=None):
+            raise RuntimeError("page trouble")
+    result_208b = asyncio.run(mark_scan._resolve_download_media_type(
+        _FakeDownloadMessageRaises208b(), {"source_media_type": None}, "SM_208B",
+    ))
+    assert result_208b is None, result_208b
+    print("208b. live DOM re-check raising (transient page trouble) -> degrades safely to the existing target value, never crashes")
+
+    # ------------------------------------------------------------------
+    # 209: Raviza Chauhan / Carter's Take 1 (2026-09-28) —
+    # _locate_download_message's jump branch now hydrates
+    # (_ensure_message_content_rendered) BEFORE polling for the exact
+    # expected hash (_await_marked_media_on_message), not after. Verified
+    # via call-order spies wrapping the REAL functions (not stubs), so the
+    # underlying hash-verification behaviour itself is exercised
+    # unchanged — only the ORDER is asserted.
+    # ------------------------------------------------------------------
+    class _FakeLocateTarget209:
+        def __init__(self, html):
+            self._html = html
+        async def scroll_into_view_if_needed(self, timeout=None):
+            pass
+        async def evaluate(self, js, timeout=None):
+            if "outerHTML.length" in js:
+                return len(self._html)
+            return self._html
+
+    call_order_209: list = []
+    orig_ensure_209 = mark_scan._ensure_message_content_rendered
+    orig_verify_209 = mark_scan._await_marked_media_on_message
+
+    async def _spy_ensure_209(page, loc, *a, **kw):
+        call_order_209.append("ensure_rendered")
+        return await orig_ensure_209(page, loc, *a, **kw)
+
+    async def _spy_verify_209(page, loc, *a, **kw):
+        call_order_209.append("await_marked_media")
+        return await orig_verify_209(page, loc, *a, **kw)
+
+    hash_209 = mark_scan._smallest_hash(QUOTED_PHOTO_BLOCK_HTML)
+    hydrated_html_209 = PHOTO_MESSAGE_HTML.replace("3B6637D11A63081B8712", "TAKE1_SRC_209")
+    target_locator_209 = _FakeLocateTarget209(hydrated_html_209)
+
+    async def _fake_jump_with_retry_209(page, group_name, reply_id):
+        return {"ok": True, "locator": target_locator_209, "data_id": "TAKE1_SRC_209", "settle_confident": True}
+
+    async def _fake_find_idx_209(page, group_name, data_id):
+        return None  # forces the fast-index lookup to miss, exactly like a message scrolled out of the render window in production
+
+    async def _fake_resolve_scope_209(page):
+        return "#main"
+
+    orig_jump_retry_209 = mark_scan._jump_to_quoted_message_with_retry
+    orig_find_idx_209 = mark_scan._find_message_index_by_data_id
+    orig_resolve_scope_209 = mark_scan.sender._resolve_scope
+    mark_scan._ensure_message_content_rendered = _spy_ensure_209
+    mark_scan._await_marked_media_on_message = _spy_verify_209
+    mark_scan._jump_to_quoted_message_with_retry = _fake_jump_with_retry_209
+    mark_scan._find_message_index_by_data_id = _fake_find_idx_209
+    mark_scan.sender._resolve_scope = _fake_resolve_scope_209
+
+    try:
+        idx_209, msg_209, reason_209 = asyncio.run(mark_scan._locate_download_message(
+            "FAKE_PAGE_209", "Raviza Chauhan X Talentgram", "TAKE1_SRC_209", "REPLY_209",
+            source_thumbnail_hash=hash_209,
+        ))
+    finally:
+        mark_scan._ensure_message_content_rendered = orig_ensure_209
+        mark_scan._await_marked_media_on_message = orig_verify_209
+        mark_scan._jump_to_quoted_message_with_retry = orig_jump_retry_209
+        mark_scan._find_message_index_by_data_id = orig_find_idx_209
+        mark_scan.sender._resolve_scope = orig_resolve_scope_209
+
+    assert msg_209 is not None and reason_209 is None, (msg_209, reason_209)
+    assert call_order_209 and call_order_209[0] == "ensure_rendered", call_order_209
+    assert "await_marked_media" in call_order_209, call_order_209
+    assert call_order_209.index("ensure_rendered") < call_order_209.index("await_marked_media"), call_order_209
+    print("209. _locate_download_message's jump branch now hydrates (_ensure_message_content_rendered) BEFORE the hash-verification poll, not after — the ordering gap behind Take 1's SOURCE_NOT_HYDRATED, with the real hash-verification logic still exercised unchanged")
+
+    # ------------------------------------------------------------------
+    # 210-214: Raviza Chauhan / Carter's Introduction/submission-details
+    # (2026-09-28) — sender._click_with_interception_recovery: a bounded,
+    # deterministic recovery for WhatsApp Web's transient "element
+    # intercepts pointer events" condition on an already-visible/enabled
+    # destination control. Never a blind force-click, never arbitrary
+    # coordinates, never an infinite retry loop.
+    # ------------------------------------------------------------------
+    class _FakeInterceptLocator:
+        def __init__(self, present=True, visible=True):
+            self._present = present
+            self._visible = visible
+        @property
+        def first(self):
+            return self
+        async def count(self):
+            return 1 if self._present else 0
+        async def is_visible(self):
+            return self._visible
+
+    class _FakeInterceptPage:
+        def __init__(self, click_behaviors, locator=None):
+            self._behaviors = list(click_behaviors)
+            self.click_calls = 0
+            self._locator = locator or _FakeInterceptLocator()
+        async def click(self, selector, timeout=None):
+            self.click_calls += 1
+            behavior = self._behaviors.pop(0)
+            await behavior()
+        def locator(self, selector):
+            return self._locator
+
+    def _intercept_error():
+        return mark_scan.sender.PlaywrightTimeoutError(
+            "Page.click: Timeout 5000ms exceeded.\nsome subtree intercepts pointer events"
+        )
+
+    async def _ok_click():
+        return None
+
+    async def _fail_intercept_click():
+        raise _intercept_error()
+
+    # 210: normal interaction, no interception at all -> single click,
+    # succeeds immediately, no retry/settle-wait performed.
+    page_210 = _FakeInterceptPage([_ok_click])
+    asyncio.run(mark_scan.sender._click_with_interception_recovery(
+        page_210, "button[aria-label='Attach']", timeout=5000, settle_wait_ms=1,
+    ))
+    assert page_210.click_calls == 1, page_210.click_calls
+    print("210. normal Attach interaction (no interception) -> single click, no retry")
+
+    # 211: destination overlay temporarily intercepts Attach -> ONE bounded
+    # settle-and-retry -> succeeds on the second click.
+    page_211 = _FakeInterceptPage([_fail_intercept_click, _ok_click])
+    asyncio.run(mark_scan.sender._click_with_interception_recovery(
+        page_211, "button[aria-label='Attach']", timeout=5000, settle_wait_ms=1,
+    ))
+    assert page_211.click_calls == 2, page_211.click_calls
+    print("211. destination overlay temporarily intercepts Attach -> bounded settle-and-retry -> success on retry")
+
+    # 212: composer input temporarily intercepted (same helper, different
+    # selector) -> bounded recovery -> success. Confirms the fix generalizes
+    # to the compose-box click site, not just Attach.
+    page_212 = _FakeInterceptPage([_fail_intercept_click, _ok_click])
+    asyncio.run(mark_scan.sender._click_with_interception_recovery(
+        page_212, '[data-testid="conversation-compose-box-input"]', timeout=30000, settle_wait_ms=1,
+    ))
+    assert page_212.click_calls == 2, page_212.click_calls
+    print("212. composer input temporarily intercepted -> bounded recovery -> success (same fix, compose-box call site)")
+
+    # 213: PERSISTENT interception (both attempts fail) -> clean failure,
+    # exactly 2 click attempts, never an infinite loop, never a third try.
+    page_213 = _FakeInterceptPage([_fail_intercept_click, _fail_intercept_click])
+    raised_213 = None
+    try:
+        asyncio.run(mark_scan.sender._click_with_interception_recovery(
+            page_213, "button[aria-label='Attach']", timeout=5000, settle_wait_ms=1,
+        ))
+    except Exception as exc:
+        raised_213 = exc
+    assert raised_213 is not None, "persistent interception must raise, never silently succeed"
+    assert page_213.click_calls == 2, page_213.click_calls
+    print("213. persistent interception (both attempts fail) -> clean failure after exactly one bounded retry, never an infinite loop")
+
+    # 213b: the retry target is no longer present/visible after the settle
+    # wait (e.g. the whole panel closed) -> must not blindly retry a click
+    # on a vanished element; fails cleanly WITHOUT ever calling click() a
+    # second time.
+    page_213b = _FakeInterceptPage([_fail_intercept_click], locator=_FakeInterceptLocator(present=False))
+    raised_213b = None
+    try:
+        asyncio.run(mark_scan.sender._click_with_interception_recovery(
+            page_213b, "button[aria-label='Attach']", timeout=5000, settle_wait_ms=1,
+        ))
+    except Exception as exc:
+        raised_213b = exc
+    assert raised_213b is not None
+    assert page_213b.click_calls == 1, page_213b.click_calls
+    print("213b. retry target no longer present/visible after settle wait -> fails cleanly WITHOUT a blind retry click on a vanished element")
+
+    # 214: a non-interception click failure (a genuinely different error)
+    # propagates immediately, unchanged -> the fix is scoped ONLY to the
+    # specific pointer-interception condition, never masks other failures.
+    async def _fail_other_click():
+        raise mark_scan.sender.PlaywrightTimeoutError("Page.click: Timeout 5000ms exceeded.\nsome unrelated reason")
+    page_214 = _FakeInterceptPage([_fail_other_click])
+    raised_214 = None
+    try:
+        asyncio.run(mark_scan.sender._click_with_interception_recovery(
+            page_214, "button[aria-label='Attach']", timeout=5000, settle_wait_ms=1,
+        ))
+    except Exception as exc:
+        raised_214 = exc
+    assert raised_214 is not None
+    assert page_214.click_calls == 1, page_214.click_calls
+    print("214. a non-interception click failure propagates immediately, unchanged -> the recovery is scoped ONLY to pointer-event interception")
+
 
 if __name__ == "__main__":
     main()

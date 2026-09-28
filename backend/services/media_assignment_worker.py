@@ -1161,7 +1161,7 @@ async def _process_download_done() -> bool:
         unverified_items: List[Dict[str, str]] = []
         for i, target in enumerate(send_targets):
             # simple_role_label (Production fix — issue 7's own example
-            # shows "✓ Audition Take" / "✓ Introduction Take", not
+            # shows "✓ Audition Take" / "✓ Introduction Video", not
             # "✓ {talent} — {project} Take 1"; Talent/Project already have
             # their own header lines above in the completion report).
             label = media_assignment.simple_role_label(target["media_role"], target.get("take_number"))
@@ -1259,9 +1259,9 @@ async def _process_download_done() -> bool:
                             "were still sent successfully; this does not roll them back.",
                             submission_id, project_id,
                         )
-                marker_status_line = "✓ ☑️ (complete)"
+                marker_status_line = "✓ Completion marker ☑️ (complete)"
             else:
-                marker_status_line = f"✗ ☑️ {_humanize_media_send_error(marker_result.get('error') or 'not sent')}"
+                marker_status_line = f"✗ Completion marker ☑️ {_humanize_media_send_error(marker_result.get('error') or 'not sent')}"
 
         # Talent acknowledgement (Production feature) — attempted by the
         # worker only when this run's own media+form all succeeded (see

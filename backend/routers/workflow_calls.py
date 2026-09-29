@@ -93,7 +93,7 @@ def _build_call_assigned_message(talent_name: str, project_name: Optional[str], 
     return _format_workflow_message(
         "📞 *CALL ASSIGNED*", subject_label="Talent", subject_name=talent_name, project_name=project_name,
         blocks=[[f"Assigned to: {assignee_name}", f"Assigned by: {actor_name}"], [f"Assigned: {_fmt_event_ts(event_ts)}"]],
-        link=_call_link(), link_label="Open Call:",
+        link=_call_link(), link_label="Open Calls:",
     )
 
 
@@ -104,8 +104,57 @@ def _build_call_reassigned_message(talent_name: str, project_name: Optional[str]
             [f"Previously assigned to: {old_assignee_name}", f"Now assigned to: {new_assignee_name}", f"Updated by: {actor_name}"],
             [f"Updated: {_fmt_event_ts(event_ts)}"],
         ],
-        link=_call_link(), link_label="Open Call:",
+        link=_call_link(), link_label="Open Calls:",
     )
+
+
+# WhatsApp's practical message-length ceiling is ~65,536 characters — a
+# batch notification only ever gets split if the rendered text would
+# genuinely exceed a safe margin under that, never on pair-count alone
+# (brief's own explicit "do NOT split ordinary batches unnecessarily").
+_BATCH_MESSAGE_MAX_CHARS = 60000
+
+
+def _render_calls_assigned_batch(entries: list, assignee_name: str, actor_name: str, event_ts: str, part: Optional[tuple] = None) -> str:
+    header = "📞 *CALLS ASSIGNED*"
+    if part:
+        header = f"📞 *CALLS ASSIGNED — {part[0]}/{part[1]}*"
+    lines = [
+        header,
+        f"Assigned to: {assignee_name}",
+        f"Assigned by: {actor_name}",
+        f"Assigned: {_fmt_event_ts(event_ts)}",
+        "",
+    ]
+    for i, entry in enumerate(entries, 1):
+        lines.append(f"{i}. {entry['talent_name']}")
+        if entry.get("project_name"):
+            lines.append(f"Project: {entry['project_name']}")
+    lines.append("")
+    lines.append("Open Calls:")
+    lines.append(_call_link())
+    return "\n".join(lines)
+
+
+def _build_calls_assigned_batch_messages(entries: list, assignee_name: str, actor_name: str, event_ts: str) -> list:
+    """ONE message per assignment action (the batch boundary is the whole
+    assign_calls request, not any per-pair loop) — see this function's own
+    call site. Only splits into numbered parts if the single rendered
+    message would genuinely exceed WhatsApp's length ceiling; an ordinary
+    batch (even a large one) stays one message."""
+    single = _render_calls_assigned_batch(entries, assignee_name, actor_name, event_ts)
+    if len(single) <= _BATCH_MESSAGE_MAX_CHARS or len(entries) <= 1:
+        return [single]
+
+    # Estimate a safe chunk size from the single-message average entry
+    # cost, then split into that many equal-ish parts and re-render each
+    # with its own part-N-of-M header.
+    overhead = len(single) - sum(len(f"{i}. {e['talent_name']}\n" + (f"Project: {e['project_name']}\n" if e.get("project_name") else "")) for i, e in enumerate(entries, 1))
+    avg_entry_len = max(1, (len(single) - overhead) // len(entries))
+    entries_per_chunk = max(1, _BATCH_MESSAGE_MAX_CHARS // avg_entry_len)
+    chunks = [entries[i:i + entries_per_chunk] for i in range(0, len(entries), entries_per_chunk)]
+    total = len(chunks)
+    return [_render_calls_assigned_batch(chunk, assignee_name, actor_name, event_ts, part=(idx, total)) for idx, chunk in enumerate(chunks, 1)]
 
 
 def _build_call_recorded_message(talent_name: str, project_name: Optional[str], call_result: str, update_status: Optional[str], actor_name: str, event_ts: str) -> str:
@@ -494,7 +543,16 @@ async def assign_calls(payload: AssignIn, user: Dict[str, Any] = Depends(require
         actor_name = name_map.get(user.get("id"), user.get("name") or user.get("email") or "Someone")
         new_assignee_name = name_map.get(payload.assigned_to_id, "Unassigned")
 
-        for talent_id, project_id, prev_assignee in changed_pairs:
+        # ONE notification per assignment ACTION, not one per pair — the
+        # batch boundary is this request (changed_pairs is already the
+        # complete set from the single payload.pairs the frontend already
+        # sends in one POST), never a per-pair loop. A single-pair action
+        # keeps the existing dedicated ASSIGNED/REASSIGNED wording; a
+        # multi-pair action gets one consolidated CALLS ASSIGNED message
+        # (see _build_calls_assigned_batch_messages' own length-based
+        # split, which only ever fires for a genuinely oversized batch).
+        if len(changed_pairs) == 1:
+            talent_id, project_id, prev_assignee = changed_pairs[0]
             talent_name = talent_names.get(talent_id, "Unnamed Talent")
             project_name = project_names.get(project_id)
             if prev_assignee:
@@ -503,5 +561,13 @@ async def assign_calls(payload: AssignIn, user: Dict[str, Any] = Depends(require
             else:
                 message = _build_call_assigned_message(talent_name, project_name, new_assignee_name, actor_name, now)
             enqueue_workflow_whatsapp_notification(message, f"{talent_id}:{project_id}")
+        else:
+            entries = [
+                {"talent_name": talent_names.get(t, "Unnamed Talent"), "project_name": project_names.get(p)}
+                for t, p, _ in changed_pairs
+            ]
+            batch_source_id = f"assign-batch:{uuid.uuid4()}"
+            for message in _build_calls_assigned_batch_messages(entries, new_assignee_name, actor_name, now):
+                enqueue_workflow_whatsapp_notification(message, batch_source_id)
 
     return {"updated": updated}

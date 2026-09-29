@@ -326,3 +326,165 @@ async def test_call_mutation_succeeds_even_if_notification_enqueue_fails(client,
 
     stored = await db.talent_project_calls.find_one({"id": call_id}, {"_id": 0, "call_result": 1})
     assert stored is not None and stored["call_result"] == "answered"
+
+
+# ---------------------------------------------------------------------------
+# Batch assignment (2026-09-29 fix) — one assignment ACTION (one POST
+# /workflow/calls/assign request, regardless of how many pairs it
+# contains) must produce exactly ONE WhatsApp notification job, not one
+# per pair. Uses a broader drain (all pending WORKFLOW_NOTIFICATION jobs)
+# since a batch notification's source_id is a synthetic "assign-batch:*"
+# tag, not a single talent:project pair.
+# ---------------------------------------------------------------------------
+async def _drain_all_pending_jobs():
+    await asyncio.sleep(0.2)
+    jobs = await db.whatsapp_jobs.find(
+        {"source": "WORKFLOW_NOTIFICATION"}, {"_id": 0},
+    ).sort("created_at", 1).to_list(500)
+    ids = [j["id"] for j in jobs]
+    batch_ids = [j["batch_id"] for j in jobs if j.get("batch_id")]
+    if ids:
+        await db.whatsapp_jobs.delete_many({"id": {"$in": ids}})
+    if batch_ids:
+        await db.whatsapp_batches.delete_many({"id": {"$in": batch_ids}})
+    return jobs
+
+
+@_aio
+async def test_ten_calls_one_assignment_produces_exactly_one_notification(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CWA Batch Project")
+    talents = [await env.talent(name=f"ZZZ_TEST_CWA Batch Talent {i}") for i in range(10)]
+    for t in talents:
+        await env.pipeline(p["id"], t["id"])
+    await _drain_all_pending_jobs()
+
+    r = await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t["id"], "project_id": p["id"]} for t in talents], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+    assert r.status_code == 200
+    assert r.json()["updated"] == 10
+
+    # Call assignment RECORDS remain individual — 10 rows, one per pair.
+    assignment_count = await db.talent_project_call_assignments.count_documents(
+        {"project_id": p["id"], "talent_id": {"$in": [t["id"] for t in talents]}, "assigned_to_id": team["id"]},
+    )
+    assert assignment_count == 10
+
+    jobs = await _drain_all_pending_jobs()
+    assert len(jobs) == 1  # exactly ONE notification job for all 10
+    body = jobs[0]["message_body"]
+    assert "*CALLS ASSIGNED*" in body
+    for t in talents:
+        assert t["name"] in body
+    assert body.count(p["brand_name"]) == 10  # every entry shows its project
+
+
+@_aio
+async def test_ten_calls_different_projects_one_assignment_one_notification(client, admin, team, env):
+    projects = [await env.project(name=f"ZZZ_TEST_CWA Multi Project {i}") for i in range(3)]
+    pairs = []
+    talent_names = []
+    for i in range(10):
+        t = await env.talent(name=f"ZZZ_TEST_CWA Multi Talent {i}")
+        p = projects[i % 3]
+        await env.pipeline(p["id"], t["id"])
+        pairs.append({"talent_id": t["id"], "project_id": p["id"]})
+        talent_names.append((t["name"], p["brand_name"]))
+    await _drain_all_pending_jobs()
+
+    r = await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": pairs, "assigned_to_id": admin["id"]},
+        headers=admin["headers"],
+    )
+    assert r.status_code == 200
+
+    jobs = await _drain_all_pending_jobs()
+    assert len(jobs) == 1  # exactly one notification, regardless of how many distinct projects
+    body = jobs[0]["message_body"]
+    for talent_name, project_name in talent_names:
+        assert talent_name in body
+        assert project_name in body
+
+
+@_aio
+async def test_two_separate_assignment_actions_produce_two_separate_notifications(client, admin, team, env):
+    p = await env.project(name="ZZZ_TEST_CWA Separate Actions")
+    talents_a = [await env.talent(name=f"ZZZ_TEST_CWA SepA {i}") for i in range(3)]
+    talents_b = [await env.talent(name=f"ZZZ_TEST_CWA SepB {i}") for i in range(4)]
+    for t in talents_a + talents_b:
+        await env.pipeline(p["id"], t["id"])
+    await _drain_all_pending_jobs()
+
+    # Action A: 3 calls.
+    r1 = await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t["id"], "project_id": p["id"]} for t in talents_a], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+    assert r1.status_code == 200
+    jobs_a = await _drain_all_pending_jobs()
+    assert len(jobs_a) == 1
+    body_a = jobs_a[0]["message_body"]
+    for t in talents_a:
+        assert t["name"] in body_a
+    for t in talents_b:
+        assert t["name"] not in body_a  # action B's talents must NOT leak into action A's notification
+
+    # Action B (a distinct later action): 4 calls.
+    r2 = await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t["id"], "project_id": p["id"]} for t in talents_b], "assigned_to_id": admin["id"]},
+        headers=admin["headers"],
+    )
+    assert r2.status_code == 200
+    jobs_b = await _drain_all_pending_jobs()
+    assert len(jobs_b) == 1  # a second, SEPARATE notification — not combined with action A
+    body_b = jobs_b[0]["message_body"]
+    for t in talents_b:
+        assert t["name"] in body_b
+    for t in talents_a:
+        assert t["name"] not in body_b
+
+
+@_aio
+async def test_batch_assignment_omits_project_when_absent(client, admin, team, env):
+    from routers.workflow_calls import _build_calls_assigned_batch_messages
+    entries = [
+        {"talent_name": "ZZZ_TEST_CWA No Project Talent 1", "project_name": None},
+        {"talent_name": "ZZZ_TEST_CWA No Project Talent 2", "project_name": ""},
+    ]
+    msgs = _build_calls_assigned_batch_messages(entries, "Harshita", "Raj", _now())
+    assert len(msgs) == 1
+    assert "Project:" not in msgs[0]
+    assert "—" not in msgs[0]
+
+
+@_aio
+async def test_batch_assignment_notification_failure_does_not_roll_back_assignments(client, admin, team, env, monkeypatch):
+    import routers.workflow as workflow_module
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("simulated Mongo outage")
+
+    monkeypatch.setattr(workflow_module, "_enqueue_workflow_whatsapp_notification_task", _boom)
+
+    p = await env.project()
+    talents = [await env.talent(name=f"ZZZ_TEST_CWA Resilient {i}") for i in range(5)]
+    for t in talents:
+        await env.pipeline(p["id"], t["id"])
+
+    r = await client.post(
+        "/api/workflow/calls/assign",
+        json={"pairs": [{"talent_id": t["id"], "project_id": p["id"]} for t in talents], "assigned_to_id": team["id"]},
+        headers=admin["headers"],
+    )
+    assert r.status_code == 200
+    assert r.json()["updated"] == 5  # all 5 assignments succeed even though notification enqueue explodes
+
+    assignment_count = await db.talent_project_call_assignments.count_documents(
+        {"project_id": p["id"], "talent_id": {"$in": [t["id"] for t in talents]}, "assigned_to_id": team["id"]},
+    )
+    assert assignment_count == 5

@@ -131,20 +131,20 @@ async def test_new_submission_notification():
     
     # Let background tasks run
     await asyncio.sleep(0.1)
-    
-    # Assert WhatsApp batch and job were enqueued
-    mock_db.whatsapp_batches.insert_one.assert_called_once()
-    mock_db.whatsapp_jobs.insert_one.assert_called_once()
-    
-    # Verify content
-    batch_arg = mock_db.whatsapp_batches.insert_one.call_args[0][0]
-    job_arg = mock_db.whatsapp_jobs.insert_one.call_args[0][0]
-    
+
+    # Notification + completed-form message: two batches, two jobs.
+    assert mock_db.whatsapp_batches.insert_one.call_count == 2
+    assert mock_db.whatsapp_jobs.insert_one.call_count == 2
+
+    # Verify content — first call is the existing notification, unchanged.
+    batch_arg = mock_db.whatsapp_batches.insert_one.call_args_list[0][0][0]
+    job_arg = mock_db.whatsapp_jobs.insert_one.call_args_list[0][0][0]
+
     assert batch_arg["source_type"] == "INTERNAL_NOTIFICATION"
     assert batch_arg["template_id"] == "internal_notification"
     assert batch_arg["project_id"] == pid
     assert batch_arg["status"] == "pending"
-    
+
     assert job_arg["batch_id"] == batch_arg["id"]
     assert job_arg["status"] == "pending"
     assert job_arg["destination"] == "Talentgram Operations Team"
@@ -157,6 +157,24 @@ async def test_new_submission_notification():
     assert "Portfolio Images" not in job_arg["message_body"]
     assert "Assets" not in job_arg["message_body"]
     assert "Test Talent" in job_arg["message_body"]
+
+    # Second call is the completed submission form, sent immediately after,
+    # to the same destination, built from the same submitted form data.
+    form_batch_arg = mock_db.whatsapp_batches.insert_one.call_args_list[1][0][0]
+    form_job_arg = mock_db.whatsapp_jobs.insert_one.call_args_list[1][0][0]
+    assert form_job_arg["destination"] == "Talentgram Operations Team"
+    assert form_job_arg["destination_type"] == "group"
+    assert form_batch_arg["created_at"] >= batch_arg["created_at"]
+    assert "Talentgram x Super Cool Brand - Form" in form_job_arg["message_body"]
+    assert "Test - T" in form_job_arg["message_body"]
+    assert "Height - 5'9\"" in form_job_arg["message_body"]
+    assert "Current Location - Mumbai" in form_job_arg["message_body"]
+    assert "Availability - Available" in form_job_arg["message_body"]
+    assert "Budget - Accepts Day Rate" in form_job_arg["message_body"]
+    # Not answered in this fixture — must be omitted entirely, not shown as "-".
+    assert "Competitive Brand" not in form_job_arg["message_body"]
+    assert "Age -" not in form_job_arg["message_body"]
+    assert "Instagram link" not in form_job_arg["message_body"]
 
 
 @pytest.mark.asyncio
@@ -213,18 +231,24 @@ async def test_retest_submission_notification():
     
     # Let background tasks run
     await asyncio.sleep(0.1)
-    
-    # Assert WhatsApp batch and job were enqueued
-    mock_db.whatsapp_batches.insert_one.assert_called_once()
-    mock_db.whatsapp_jobs.insert_one.assert_called_once()
-    
-    # Verify content
-    batch_arg = mock_db.whatsapp_batches.insert_one.call_args[0][0]
-    job_arg = mock_db.whatsapp_jobs.insert_one.call_args[0][0]
-    
+
+    # Notification + completed-form message: two batches, two jobs.
+    assert mock_db.whatsapp_batches.insert_one.call_count == 2
+    assert mock_db.whatsapp_jobs.insert_one.call_count == 2
+
+    # Verify content — first call is the existing notification, unchanged.
+    batch_arg = mock_db.whatsapp_batches.insert_one.call_args_list[0][0][0]
+    job_arg = mock_db.whatsapp_jobs.insert_one.call_args_list[0][0][0]
+
     assert batch_arg["status"] == "pending"
     assert job_arg["destination"] == "Talentgram Operations" # fallback
     assert "SUBMISSION UPDATED" in job_arg["message_body"]
+
+    # Second call is the current/latest completed submission form.
+    form_job_arg = mock_db.whatsapp_jobs.insert_one.call_args_list[1][0][0]
+    assert form_job_arg["destination"] == "Talentgram Operations"
+    assert "Talentgram x Super Cool Brand - Form" in form_job_arg["message_body"]
+    assert "Test - T" in form_job_arg["message_body"]
 
 
 @pytest.mark.asyncio

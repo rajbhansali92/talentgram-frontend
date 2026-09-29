@@ -45,6 +45,7 @@ from core import (
     upload_and_track_asset,
     compute_age,
     compute_effective_age,
+    normalize_instagram_handle,
     current_admin,
     current_team_or_admin,
     db,
@@ -1860,6 +1861,139 @@ async def video_complete(
     return {"ok": True, "media": media}
 
 
+def _format_location_value(location) -> str:
+    """Mirrors formatTalentLocation (frontend/src/lib/sanitize.js) exactly —
+    a string, a list of locations, or a single {city, country} dict."""
+    if not location:
+        return ""
+    if isinstance(location, str):
+        return location.strip()
+    if isinstance(location, list):
+        return "; ".join(filter(None, (_format_location_value(loc) for loc in location)))
+    if isinstance(location, dict):
+        city = (location.get("city") or "").strip()
+        country = (location.get("country") or "").strip()
+        return ", ".join(p for p in (city, country) if p)
+    return ""
+
+
+def _submission_form_lines(submission: dict, project: dict) -> List[str]:
+    """The canonical 'what the talent submitted' form — mirrors the
+    Copy Form button (SubmissionReviewCenter.jsx handleCopyForm) line for
+    line: same source data (original_form_data, falling back to
+    form_data), same field order/labels, same omit-if-unanswered rule.
+    Any field fix here should be mirrored there and vice versa — this is
+    the ONE canonical formatter for what got submitted, used by both the
+    WhatsApp form message and (conceptually) Copy Form.
+    """
+    od = submission.get("original_form_data") or submission.get("form_data") or {}
+
+    availability = od.get("availability")
+    if not isinstance(availability, dict):
+        availability = {"status": "", "note": availability or ""}
+    budget = od.get("budget")
+    if not isinstance(budget, dict):
+        budget = {"status": "", "value": budget or ""}
+
+    brand_name = (project or {}).get("brand_name") or ""
+    lines = [f"Talentgram x {brand_name} - Form", ""]
+
+    first_name = (od.get("first_name") or "").strip()
+    last_name = (od.get("last_name") or "").strip()
+    last_initial = last_name[0] if last_name else ""
+    lines.append(f"{first_name} - {last_initial}" if last_initial else first_name)
+
+    age = submission.get("effective_age")
+    if age is None:
+        age = od.get("age")
+    if age is not None and str(age).strip() != "":
+        lines.append(f"Age - {age}")
+
+    if od.get("height"):
+        lines.append(f"Height - {od['height']}")
+
+    location_text = _format_location_value(od.get("location"))
+    if location_text:
+        lines.append(f"Current Location - {location_text}")
+
+    if availability.get("status"):
+        avail_text = "Available" if availability["status"] == "yes" else "Unavailable"
+        if availability.get("note"):
+            avail_text += f" — {availability['note']}"
+        lines.append(f"Availability - {avail_text}")
+
+    # Competitive Brand fix: the selected YES/NO answer lives in
+    # has_competitive_brand_experience (a bool); competitive_brand is only
+    # the free-text details, populated exclusively when the answer is YES.
+    # The pre-existing Copy Form bug checked competitive_brand alone, so a
+    # NO answer (has_competitive_brand_experience === False, competitive_
+    # brand === "") never appeared at all, and was indistinguishable from
+    # "not asked". Checking the bool explicitly fixes both.
+    has_comp = od.get("has_competitive_brand_experience")
+    if has_comp is True:
+        comp_text = "Yes"
+        if od.get("competitive_brand"):
+            comp_text += f" — {od['competitive_brand']}"
+        lines.append(f"Competitive Brand - {comp_text}")
+    elif has_comp is False:
+        lines.append("Competitive Brand - None")
+
+    custom_answers = od.get("custom_answers") or {}
+    for q in (project or {}).get("custom_questions") or []:
+        qid = q.get("id")
+        answer = custom_answers.get(qid) if qid else None
+        if answer is not None and str(answer).strip() != "":
+            lines.append(f"{q.get('question', '')} - {answer}")
+
+    ig_handle = normalize_instagram_handle(od.get("instagram_handle"))
+    if ig_handle:
+        lines.append(f"Instagram link - https://www.instagram.com/{ig_handle}/")
+
+    if budget.get("status"):
+        budget_text = "Accepts Day Rate" if budget["status"] == "accept" else "Expected Day Rate"
+        if budget.get("value"):
+            budget_text += f" — {budget['value']}"
+        lines.append(f"Budget - {budget_text}")
+
+    return lines
+
+
+# WhatsApp's practical message-length ceiling is ~65,536 characters — same
+# safety margin as workflow_calls.py's batch splitting. A submission form
+# only ever gets split if it would genuinely exceed this (many custom
+# questions); an ordinary form always stays one message.
+_FORM_MESSAGE_MAX_CHARS = 60000
+
+
+def _build_submission_form_messages(submission: dict, project: dict) -> List[str]:
+    lines = _submission_form_lines(submission, project)
+    header = lines[0]
+    body_lines = lines[1:]
+    single = "\n".join(lines)
+    if len(single) <= _FORM_MESSAGE_MAX_CHARS:
+        return [single]
+
+    # Split into line-boundary chunks (never mid-line) that fit under the
+    # ceiling, each re-prefixed with the same header plus a part marker.
+    budget_per_part = _FORM_MESSAGE_MAX_CHARS - len(header) - 20
+    parts, current, current_len = [], [], 0
+    for line in body_lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > budget_per_part:
+            parts.append(current)
+            current, current_len = [], 0
+        current.append(line)
+        current_len += line_len
+    if current:
+        parts.append(current)
+
+    total = len(parts)
+    return [
+        "\n".join([f"{header} (PART {i}/{total})"] + part)
+        for i, part in enumerate(parts, 1)
+    ]
+
+
 async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_type: str, decision: Optional[str] = None):
     try:
         project_id = submission.get("project_id")
@@ -1968,6 +2102,68 @@ async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_t
         await db.whatsapp_batches.insert_one(batch_doc)
         await db.whatsapp_jobs.insert_one(job_doc)
         logger.info(f"Successfully enqueued internal WhatsApp notification for {event_type}")
+
+        # Immediately follow with the completed submission form, as its own
+        # message(s) — same destination, same canonical formatter as Copy
+        # Form. Only for the two events that represent "the talent just
+        # (re)submitted" — DECISION CHANGED is an admin action with no form
+        # to show and is left untouched. A failure here must never take
+        # down the notification above (already sent/enqueued by this
+        # point), so it gets its own try/except.
+        if event_type in ("NEW SUBMISSION", "SUBMISSION UPDATED"):
+            try:
+                form_messages = _build_submission_form_messages(submission, project or {})
+                for form_body in form_messages:
+                    form_timestamp = _now()  # fresh, later timestamp — see module note on job ordering
+                    form_batch_id = str(uuid.uuid4())
+                    await db.whatsapp_batches.insert_one({
+                        "id": form_batch_id,
+                        "source_type": "INTERNAL_NOTIFICATION",
+                        "source_label": f"Submission Form for {project_name}",
+                        "project_id": project_id,
+                        "project_name": project_name,
+                        "template_id": "internal_notification_form",
+                        "template_slug": "internal_notification_form",
+                        "variable_data": {},
+                        "media_url": None,
+                        "is_dry_run": False,
+                        "status": "pending",
+                        "total_jobs": 1,
+                        "sent_count": 0,
+                        "failed_count": 0,
+                        "unconfirmed_count": 0,
+                        "created_by": "system",
+                        "created_at": form_timestamp,
+                        "started_at": None,
+                        "completed_at": None,
+                    })
+                    await db.whatsapp_jobs.insert_one({
+                        "id": str(uuid.uuid4()),
+                        "batch_id": form_batch_id,
+                        "template_id": "internal_notification_form",
+                        "template_name": "Submission Form",
+                        "source": "INTERNAL_NOTIFICATION",
+                        "source_id": project_id,
+                        "recipient_kind": "INTERNAL_GROUP",
+                        "recipient_id": "internal_notification_group",
+                        "talent_id": None,
+                        "talent_name": group_name,
+                        "destination_type": "group",
+                        "destination": group_name,
+                        "message_body": form_body,
+                        "media_url": None,
+                        "is_dry_run": False,
+                        "status": "pending",
+                        "attempt_count": 0,
+                        "last_attempted_at": None,
+                        "sent_at": None,
+                        "error_message": None,
+                        "worker_picked_at": None,
+                        "created_at": form_timestamp,
+                    })
+                logger.info(f"Successfully enqueued submission form message(s) for {event_type} ({len(form_messages)} part(s))")
+            except Exception as e:
+                logger.warning(f"Error enqueueing submission form message: {e}", exc_info=True)
 
     except Exception as e:
         logger.warning(f"Error in background internal WhatsApp notification task: {e}", exc_info=True)

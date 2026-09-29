@@ -1732,7 +1732,19 @@ export default function SubmissionReviewCenter() {
                 const availText = `${od.availability.status === "yes" ? "Available" : "Unavailable"}${od.availability.note ? ` — ${od.availability.note}` : ""}`;
                 lines.push(`Availability - ${availText}`);
             }
-            if (od.competitive_brand) lines.push(`Competitive Brand - ${od.competitive_brand}`);
+            // Bug fix: the selected YES/NO answer lives in
+            // has_competitive_brand_experience (a bool); competitive_brand is
+            // only the free-text details, populated exclusively when the
+            // answer is YES. Checking competitive_brand alone meant a NO
+            // answer (has_competitive_brand_experience === false, competitive_
+            // brand === "") never appeared at all — indistinguishable from
+            // "not asked". Same fix applied to the WhatsApp submission form
+            // (backend _submission_form_lines) — keep both in sync.
+            if (od.has_competitive_brand_experience === true) {
+                lines.push(`Competitive Brand - Yes${od.competitive_brand ? ` — ${od.competitive_brand}` : ""}`);
+            } else if (od.has_competitive_brand_experience === false) {
+                lines.push(`Competitive Brand - None`);
+            }
 
             (project?.custom_questions || []).forEach((q) => {
                 const answer = (od.custom_answers || {})[q.id];

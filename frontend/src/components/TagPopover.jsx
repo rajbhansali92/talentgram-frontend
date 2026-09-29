@@ -31,6 +31,21 @@ export default function TagPopover({ talent, onSave, onClose }) {
         return () => { isMounted = false; };
     }, []);
 
+    // Escape closes the popover, and background scroll is locked while it's
+    // open — this is a full-viewport fixed overlay (see the backdrop below),
+    // so without the lock the page behind it can still scroll on touch
+    // devices, which reads as broken.
+    useEffect(() => {
+        const onKey = (e) => { if (e.key === "Escape") onClose(); };
+        document.addEventListener("keydown", onKey);
+        const prevOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        return () => {
+            document.removeEventListener("keydown", onKey);
+            document.body.style.overflow = prevOverflow;
+        };
+    }, [onClose]);
+
     const togglePendingTag = (tag) => {
         setPendingTags(prev =>
             prev.some(t => t.id === tag.id)

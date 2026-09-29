@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { instagramProfileUrl } from "@/lib/mediaUtils";
-import { Search, Plus, Check, User, LayoutGrid, List, Tag, Instagram, SlidersHorizontal, FolderKanban, Eye } from "lucide-react";
+import { Search, Plus, Check, User, LayoutGrid, List, Tag, Instagram, SlidersHorizontal, FolderKanban, Eye, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
@@ -21,6 +21,7 @@ import { TalentPreviewDrawer, useMediaQuery } from "@/components/pipeline/Talent
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
 import { getRosterSnapshot, setRosterSnapshot } from "@/lib/talentRosterCache";
 import { useTalentDirectory } from "@/hooks/useTalentDirectory";
+import { useSwipeNavigation } from "@/hooks/useSwipeNavigation";
 import FilterPanel from "@/components/talent-directory/FilterPanel";
 import MobileFilterSheet from "@/components/talent-directory/MobileFilterSheet";
 import SortDropdown from "@/components/talent-directory/SortDropdown";
@@ -798,6 +799,8 @@ export default function TalentList() {
     // the modal, since the modal itself closes right after queueing.
     const [castingCallWatch, setCastingCallWatch] = useState([]); // [{ actionId, batches: [{project_id, project_name, batch_id}] }]
 
+    useSwipeNavigation();
+
     const [viewMode, setViewMode] = useState(() => {
         try {
             return localStorage.getItem("tg_talents_view") || "grid";
@@ -805,6 +808,21 @@ export default function TalentList() {
             return "grid";
         }
     });
+
+    // Direct page-jump input — local draft text so typing doesn't fight the
+    // hook's own `page` number; only commits (via setPage, the existing
+    // setter) on Enter/blur, and only when it parses to a valid page.
+    const [pageJumpDraft, setPageJumpDraft] = useState(String(page));
+    useEffect(() => { setPageJumpDraft(String(page)); }, [page]);
+    const commitPageJump = useCallback(() => {
+        const n = parseInt(pageJumpDraft, 10);
+        if (Number.isFinite(n) && n >= 1 && n <= totalPages && n !== page) {
+            setPage(n);
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        } else {
+            setPageJumpDraft(String(page)); // invalid/no-op — snap back
+        }
+    }, [pageJumpDraft, totalPages, page, setPage]);
 
     useEffect(() => {
         try {
@@ -1052,8 +1070,25 @@ export default function TalentList() {
                         <span>K</span>
                     </div>
                 </div>
+                <div className="flex items-center gap-2 shrink-0 self-start sm:self-auto">
+                {/* Refresh — re-runs the current page/search/filters/sort as-is.
+                    refetch() already aborts any in-flight request and only the
+                    latest response wins (see useTalentDirectory), so a disabled-
+                    while-loading button is enough to avoid duplicate spam without
+                    needing a separate debounce/guard here. */}
+                <button
+                    type="button"
+                    onClick={() => refetch()}
+                    disabled={loading}
+                    aria-label="Refresh"
+                    title="Refresh"
+                    data-testid="talents-refresh-btn"
+                    className="flex items-center justify-center w-11 h-11 md:w-9 md:h-9 border border-black/[0.08] bg-white hover:border-black/30 disabled:opacity-40 rounded-lg text-black/55 hover:text-black transition-colors select-none active:scale-95"
+                >
+                    <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} strokeWidth={1.75} />
+                </button>
                 {/* View Toggle Buttons */}
-                <div className="flex items-center bg-black/[0.03] border border-black/[0.06] rounded-lg p-0.5 shrink-0 self-start sm:self-auto" data-testid="view-toggle">
+                <div className="flex items-center bg-black/[0.03] border border-black/[0.06] rounded-lg p-0.5" data-testid="view-toggle">
                     <button
                         type="button"
                         onClick={() => setViewMode("grid")}
@@ -1080,6 +1115,7 @@ export default function TalentList() {
                         <List size={13} />
                         <span>List</span>
                     </button>
+                </div>
                 </div>
             </div>
 
@@ -1228,8 +1264,25 @@ export default function TalentList() {
                     >
                         Previous
                     </button>
-                    <span className="text-xs font-mono text-black/55">
-                        Page {page} of {totalPages}
+                    <span className="flex items-center gap-1.5 text-xs font-mono text-black/55">
+                        Page
+                        <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            value={pageJumpDraft}
+                            onChange={(e) => setPageJumpDraft(e.target.value.replace(/[^0-9]/g, ""))}
+                            onFocus={(e) => e.target.select()}
+                            onBlur={commitPageJump}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") { e.currentTarget.blur(); }
+                                else if (e.key === "Escape") { setPageJumpDraft(String(page)); e.currentTarget.blur(); }
+                            }}
+                            aria-label={`Jump to page, 1 to ${totalPages}`}
+                            data-testid="talents-page-jump-input"
+                            className="w-10 text-center bg-white border border-black/[0.1] focus:border-black/40 rounded-md py-1 outline-none text-xs font-mono text-black/85"
+                        />
+                        of {totalPages}
                     </span>
                     <button
                         type="button"

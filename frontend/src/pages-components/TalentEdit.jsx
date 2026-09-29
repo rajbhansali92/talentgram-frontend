@@ -40,6 +40,7 @@ import DobInput from "@/components/DobInput";
 import HlsVideo from "@/components/HlsVideo";
 import { formatErrorDetail } from "@/lib/errorFormatter";
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
+import { useSwipeNavigation } from "@/hooks/useSwipeNavigation";
 
 
 
@@ -165,6 +166,10 @@ export default function TalentEdit() {
     const nav = useNavigate();
     const isEdit = Boolean(id);
     const isAdminRole = isAdmin();
+    // Native window.history.back()/forward() under the hood, so this still
+    // runs through the unsaved-changes popstate guard further below exactly
+    // as a real back-button press would.
+    useSwipeNavigation();
     const [loading, setLoading] = useState(isEdit); // ISSUE 1: Fixed loading state
     const [isEditing, setIsEditing] = useState(!isEdit);
     const [talent, setTalent] = useState(emptyTalent);
@@ -1718,6 +1723,7 @@ export default function TalentEdit() {
             {lightboxIndex !== null && lightboxCategory !== null && (
                 <div
                     className="fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex flex-col items-center justify-between select-none"
+                    data-swipe-nav-ignore
                     onClick={() => {
                         setLightboxIndex(null);
                         setLightboxCategory(null);

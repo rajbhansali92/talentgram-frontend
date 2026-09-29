@@ -3896,6 +3896,16 @@ async def resolve_canonical_talent(*, email: Optional[str] = None) -> Optional[d
     .execute_email_merge), so a future submission/apply/portal lookup using
     either linked email resolves to the same profile instead of creating a
     new one.
+
+    Excludes status="MERGED": an absorbed talent's `source.talent_email`
+    is NOT cleared by the merge (only `email`/`normalized_email` are), so
+    without this exclusion an absorbed record can still match this query
+    on that field alongside its own canonical successor — and with no
+    explicit sort, `find_one` can return whichever of the two Mongo
+    happens to return first, silently resolving to the dead profile
+    instead of the live one (2026-09-29 incident: a "Merge Different
+    Emails" talent authenticating with her old email resolved to her own
+    absorbed record instead of the canonical one she was merged into).
     """
     ors: List[Dict[str, Any]] = []
     norm_email = normalize_email(email) if email else None
@@ -3908,7 +3918,7 @@ async def resolve_canonical_talent(*, email: Optional[str] = None) -> Optional[d
         ])
     if not ors:
         return None
-    return await db.talents.find_one({"$or": ors})
+    return await db.talents.find_one({"$and": [{"$or": ors}, {"status": {"$ne": "MERGED"}}]})
 
 
 def build_minimal_talent_from_form(

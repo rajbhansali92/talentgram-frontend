@@ -24,6 +24,7 @@ from core import (
     normalize_email,
     check_rate_limit,
     grant_trusted_device,
+    resolve_canonical_talent,
 )
 
 # Alias for readability inside login()
@@ -809,12 +810,10 @@ async def verify_otp(payload: OtpVerifyIn, request: Request, response: Response)
         if submission:
             token = make_token({"role": "submitter", "sid": submission["id"], "slug": slug}, days=30)
             await db.submissions.update_one({"id": submission["id"]}, {"$set": {"access_token": token}})
-            talent = await db.talents.find_one({
-                "$or": [
-                    {"normalized_email": email},
-                    {"email": email}
-                ]
-            })
+            # Canonical resolver (not the hand-rolled $or) so a proven
+            # alternate email ("Merge Different Emails") still resolves to
+            # the linked profile instead of appearing unrecognized.
+            talent = await resolve_canonical_talent(email=email)
             return {
                 "existing": True,
                 "email": email,
@@ -825,12 +824,12 @@ async def verify_otp(payload: OtpVerifyIn, request: Request, response: Response)
                 "portal_token": (await _grant_portal_session(talent, response)) if talent else None,
             }
 
-    talent = await db.talents.find_one({
-        "$or": [
-            {"normalized_email": email},
-            {"email": email}
-        ]
-    })
+    # Canonical resolver (not the hand-rolled $or) so a proven alternate
+    # email ("Merge Different Emails") still resolves to the linked
+    # profile instead of falling through to the "new talent" draft path
+    # below — this was the root cause of a merged talent authenticating
+    # with their old email being treated as never-seen-before.
+    talent = await resolve_canonical_talent(email=email)
     if talent:
         return {
             "existing": True,

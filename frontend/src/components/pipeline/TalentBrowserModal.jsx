@@ -1447,8 +1447,18 @@ TalentListRow.displayName = "TalentListRow";
 // ============================================================================
 
 export const TalentPreviewDrawer = memo(({ talent, onClose, isMobile }) => {
+    // Escape-to-close — mirrors the same keydown pattern already used by
+    // TagPopover/ProjectsPopover/SortDropdown elsewhere in the app; this
+    // drawer was the one overlay on the page missing it.
+    useEffect(() => {
+        if (!talent) return;
+        const onKey = (e) => { if (e.key === "Escape") onClose(); };
+        document.addEventListener("keydown", onKey);
+        return () => document.removeEventListener("keydown", onKey);
+    }, [talent, onClose]);
+
     if (!talent) return null;
-    
+
     const imageUrl = pickImage(talent);
     const media = talent.media || [];
     const images = media.filter(m => m.category !== "video" && m.url && m.url !== imageUrl);

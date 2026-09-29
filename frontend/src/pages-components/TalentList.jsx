@@ -170,7 +170,7 @@ export const TalentCard = React.memo(function TalentCard({
                     {t.name || "—"}
                 </div>
                 <div className="flex items-center justify-between gap-1.5 mt-0.5">
-                <div className="text-[11px] text-neutral-500 truncate">
+                <div className="text-[11px] text-neutral-500 truncate" title={formatTalentLocation(t.location)}>
                     {[formatTalentLocation(t.location), t.category].filter(Boolean).join(" · ") || "\u00a0"}
                 </div>
                 {igUrl && (
@@ -587,30 +587,45 @@ const TalentListRow = React.memo(function TalentListRow({
                             >
                                 <Eye className="w-4.5 h-4.5 md:w-3.5 md:h-3.5" />
                             </button>
-                            <Link
-                                to={`/admin/talents/${t.id}`}
-                                className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
-                                title="View Talent Profile"
-                            >
-                                View
-                            </Link>
-                            <Link
-                                to={`/admin/talents/${t.id}`}
-                                className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
-                                title="Edit Talent Profile"
-                            >
-                                Edit
-                            </Link>
-                            {t.phone && (
-                                <button
-                                    type="button"
-                                    onClick={handleWhatsApp}
-                                    className="inline-flex items-center justify-center border border-emerald-500/20 hover:border-emerald-500 bg-emerald-50 text-emerald-700 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] shrink-0"
-                                    title="WhatsApp Connection"
+                            {/* View/Edit/WhatsApp: previously left to the same
+                                flex-wrap as the icon actions above, so on
+                                narrow screens ONE of them (usually WhatsApp)
+                                would split off alone onto a right-aligned
+                                second line with a large dead gap to its left.
+                                Grouping them in their own full-width row —
+                                evenly split across an even grid instead of an
+                                accidental wrap — fixes that without changing
+                                anything else. `md:contents` removes this
+                                wrapper from layout at md+, so tablet/desktop
+                                is unchanged: View/Edit/WhatsApp rejoin the
+                                same single row as the icon actions exactly as
+                                before. */}
+                            <div className={`grid ${t.phone ? "grid-cols-3" : "grid-cols-2"} gap-1.5 w-full mt-1.5 md:contents`}>
+                                <Link
+                                    to={`/admin/talents/${t.id}`}
+                                    className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] w-full md:w-auto shrink-0"
+                                    title="View Talent Profile"
                                 >
-                                    WhatsApp
-                                </button>
-                            )}
+                                    View
+                                </Link>
+                                <Link
+                                    to={`/admin/talents/${t.id}`}
+                                    className="inline-flex items-center justify-center border border-black/[0.08] hover:border-black/30 bg-white text-black text-[11px] font-medium px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] w-full md:w-auto shrink-0"
+                                    title="Edit Talent Profile"
+                                >
+                                    Edit
+                                </Link>
+                                {t.phone && (
+                                    <button
+                                        type="button"
+                                        onClick={handleWhatsApp}
+                                        className="inline-flex items-center justify-center border border-emerald-500/20 hover:border-emerald-500 bg-emerald-50 text-emerald-700 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg transition-colors select-none min-h-[44px] w-full md:w-auto shrink-0"
+                                        title="WhatsApp Connection"
+                                    >
+                                        WhatsApp
+                                    </button>
+                                )}
+                            </div>
                         </>
                     )}
                 </div>

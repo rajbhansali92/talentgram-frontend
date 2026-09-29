@@ -17,8 +17,15 @@ export default function LocationMultiSelect({ value = [], onChange, options = []
     useEffect(() => {
         if (!open) return;
         const onClick = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+        // Escape-to-close — same keydown pattern SortDropdown already uses;
+        // this dropdown was the one filter overlay missing it.
+        const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
         document.addEventListener("mousedown", onClick);
-        return () => document.removeEventListener("mousedown", onClick);
+        document.addEventListener("keydown", onKey);
+        return () => {
+            document.removeEventListener("mousedown", onClick);
+            document.removeEventListener("keydown", onKey);
+        };
     }, [open]);
 
     const filteredOptions = useMemo(() => {

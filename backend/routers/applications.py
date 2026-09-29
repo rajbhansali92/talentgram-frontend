@@ -66,6 +66,7 @@ from core import (
     resolve_canonical_talent,
     merge_talent_profile,
     sync_media_to_global_talent,
+    mint_portal_token,
 )
 from drive_backup import drive_enabled, enqueue_drive_upload
 
@@ -1456,7 +1457,27 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
             {"id": aid},
             {"$set": {"talent_id": talent_id, "merged": merged}},
         )
-    return {"ok": True, "talent_id": talent_id, "merged": merged}
+
+    # A first-time applicant's OTP verify (at the start of this flow) had
+    # no existing Talent yet to grant a portal_token for, so "View My
+    # Talent Dashboard" on the success screen led nowhere (PortalHome
+    # finds no session and bounces to "/"). A real Talent record exists
+    # now — grant one here, same as _grant_portal_session does for a
+    # returning talent. Only when one isn't already set, so a returning
+    # applicant's existing session (from OTP verify or a prior visit)
+    # is never silently rotated/invalidated by an unrelated finalize.
+    portal_token = None
+    if talent_id:
+        talent_doc = await db.talents.find_one({"id": talent_id}, {"_id": 0})
+        if talent_doc and not talent_doc.get("portal_access_token"):
+            portal_email = talent_doc.get("email") or talent_doc.get("normalized_email")
+            if portal_email:
+                portal_token = mint_portal_token(portal_email)
+                await db.talents.update_one(
+                    {"id": talent_id}, {"$set": {"portal_access_token": portal_token}}
+                )
+
+    return {"ok": True, "talent_id": talent_id, "merged": merged, "portal_token": portal_token}
 
 
 # --------------------------------------------------------------------------

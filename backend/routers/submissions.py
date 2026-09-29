@@ -55,6 +55,7 @@ from core import (
     make_token,
     remove_synced_media_from_global_talent,
     sync_media_to_global_talent,
+    mint_portal_token,
     media_url,
     video_poster_url,
     video_needs_compat_delivery,
@@ -2525,12 +2526,31 @@ async def submission_finalize(sid: str, response: Response, authorization: Optio
                 snapshot_at=sub.get("talent_profile_snapshot_at"),
             )
             await update_talent_cover_cache(talent_doc["id"])
+    portal_token = None
     if talent_doc:
         patch["talent_id"] = talent_doc["id"]
         # A first-time submission is the earliest point a brand-new talent's
         # record exists — grant device trust here too, not just at OTP/Google
         # verify, so recognition works on their very next project link.
         await grant_trusted_device(response, talent_doc["id"])
+        # Same reasoning, applied to the portal session: a brand-new
+        # submitter's OTP/Google verify (at the start of this flow) had no
+        # existing Talent to grant a portal_token for, so "View My Talent
+        # Dashboard" / "Update Portfolio" on the success screen led nowhere
+        # (PortalHome finds no session and bounces to "/"). Grant one now,
+        # the same way _grant_portal_session does for a returning talent —
+        # a real Talent record exists at this exact point, for everyone.
+        # Only when one isn't already set: a returning talent resubmitting
+        # here already has a valid session (or had one issued at OTP verify
+        # this same visit) and must not have it silently rotated/invalidated
+        # by an unrelated project finalize.
+        if not talent_doc.get("portal_access_token"):
+            portal_email = talent_doc.get("email") or talent_doc.get("normalized_email")
+            if portal_email:
+                portal_token = mint_portal_token(portal_email)
+                await db.talents.update_one(
+                    {"id": talent_doc["id"]}, {"$set": {"portal_access_token": portal_token}}
+                )
 
     await db.submissions.update_one({"id": sid}, {"$set": patch})
 
@@ -2650,6 +2670,7 @@ async def submission_finalize(sid: str, response: Response, authorization: Optio
         "status": new_status,
         "resubmitted": is_retest,
         "talent_id": patch.get("talent_id") or sub.get("talent_id"),
+        "portal_token": portal_token,
     }
 
 

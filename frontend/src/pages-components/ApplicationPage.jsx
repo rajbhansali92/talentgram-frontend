@@ -1005,11 +1005,25 @@ export default function ApplicationPage() {
                 { form_data: { ...form, first_name: basics.first_name, last_name: basics.last_name } },
                 { headers: { Authorization: `Bearer ${token}` } },
             );
-            await axios.post(
+            const { data: finalizeData } = await axios.post(
                 `/public/apply/${aid}/finalize`,
                 {},
                 { headers: { Authorization: `Bearer ${token}` } },
             );
+            // A first-time applicant's Talent record is created inside
+            // finalize itself — only from this point on does a portal
+            // session exist for them. Persist it now so "View My Talent
+            // Dashboard" on the success screen actually opens the
+            // dashboard instead of bouncing to "/". talentgram_portal_email
+            // is kept in sync alongside the token, same invariant used
+            // elsewhere (see SubmissionPage.jsx's attemptSilentRecognition).
+            if (finalizeData?.portal_token) {
+                persistPortalToken(finalizeData);
+                const finalizedEmailForPortal = normEmail(basics.email);
+                if (finalizedEmailForPortal) {
+                    localStorage.setItem("talentgram_portal_email", finalizedEmailForPortal);
+                }
+            }
             setFinalized(true);
             // Success Page UX Polish — all uploads for this application are
             // done by definition (finalize just succeeded); the floating

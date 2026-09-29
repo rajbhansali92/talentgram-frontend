@@ -2493,7 +2493,7 @@ function SubmissionPage() {
         }
         setFinalizing(true);
         try {
-            await axios.post(
+            const { data: finalizeData } = await axios.post(
                 `/public/submissions/${currentSaved.id}/finalize`,
                 {},
                 {
@@ -2502,6 +2502,21 @@ function SubmissionPage() {
                     }
                 },
             );
+            // A first-time submitter's Talent record is created inside
+            // finalize itself — only from this point on does a portal
+            // session exist for them. Persist it now so "View My Talent
+            // Dashboard" / "Update Portfolio" on the success screen (below)
+            // actually opens the dashboard instead of bouncing to "/".
+            // talentgram_portal_email is kept in sync alongside the token,
+            // same invariant attemptSilentRecognition relies on elsewhere
+            // in this file.
+            if (finalizeData?.portal_token) {
+                persistPortalToken(finalizeData);
+                const finalizedEmailForPortal = (form.email || "").trim().toLowerCase();
+                if (finalizedEmailForPortal) {
+                    localStorage.setItem("talentgram_portal_email", finalizedEmailForPortal);
+                }
+            }
             const { data } = await axios.get(
                 `/public/submissions/${currentSaved.id}`,
                 {

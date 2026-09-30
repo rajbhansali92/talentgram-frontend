@@ -1084,6 +1084,170 @@ async def get_cleanup_manifest(
     return out
 
 
+# ==========================================================================
+# P9 — CONTROLLED PURGE (derived assets only). Layered, gated, audited.
+#   GET  /purge/manifest       — Layer 2: build a DRY-RUN purge manifest
+#                                (runs Layer 1 revalidation over the candidates)
+#   POST /purge/approve        — an immutable, hash-pinned, manifest-specific approval
+#   POST /purge/batch          — carve a size-capped batch (canary = exactly 10)
+#   POST /purge/execute        — Layer 3. dry_run default TRUE. Real deletion needs
+#                                MEDIA_LIFECYCLE_PHYSICAL_DELETE=on + a valid approval.
+# There is NO "delete all", NO prefix/folder delete, NO way to enable the flag
+# from an endpoint.
+# ==========================================================================
+def _p9_resource_fetcher(public_id: str, resource_type: str) -> Dict[str, Any]:
+    import cloudinary_controlled_purge as _p9
+    import cloudinary.exceptions
+    try:
+        return cloudinary.api.resource(public_id, resource_type=resource_type)
+    except cloudinary.exceptions.NotFound:
+        raise _p9._NotFound()
+
+
+def _p9_derived_deleter(derived_ids: List[str]) -> Dict[str, Any]:
+    # narrowest possible: delete these exact derived-asset ids, nothing else.
+    return cloudinary.api.delete_derived_resources(derived_ids)
+
+
+async def _p9_delete_candidate_rows() -> List[Dict[str, Any]]:
+    """Reconstruct the P8.5 DELETE_CANDIDATE rows (derived-asset candidates) from
+    a cached transformation enumeration. READ-ONLY."""
+    import cloudinary_cleanup_manifest as ccm
+    cache = await db.storage_metrics_cache.find_one({"key": "p85_delete_candidates"}, {"_id": 0})
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    if cache and cache.get("fetched_at"):
+        try:
+            age = (now - datetime.fromisoformat(cache["fetched_at"].replace("Z", "+00:00"))).total_seconds()
+            if age < 24 * 3600:
+                return cache.get("value") or []
+        except Exception:
+            pass
+    # rebuild — enumerate derived per used transformation (read-only, ~186 calls)
+    def _enumerate():
+        import re
+        r = cloudinary.api.transformations(max_results=500)
+        used = []
+        while True:
+            used.extend(t["name"] for t in r.get("transformations", []) if t.get("used"))
+            if not r.get("next_cursor"):
+                break
+            r = cloudinary.api.transformations(max_results=500, next_cursor=r["next_cursor"])
+        rows = []
+        for tx in used:
+            c = None
+            while True:
+                d = cloudinary.api.transformation(tx, max_results=500, next_cursor=c)
+                for it in d.get("derived", []) or []:
+                    rows.append({"derived_id": it.get("id"), "id": it.get("id"),
+                                 "public_id": it.get("public_id"), "url": it.get("secure_url") or it.get("url"),
+                                 "transformation": tx, "format": it.get("format"),
+                                 "bytes": it.get("bytes") or 0, "resource_type": it.get("resource_type")})
+                c = d.get("next_cursor")
+                if not c:
+                    break
+        return rows
+    raw = await run_in_threadpool(_enumerate)
+    # classify with the same logic P8.5 used (retired + parent-active + not-persisted)
+    ridx = await ccm.build_reference_index(db)
+    import cloudinary_controlled_purge as _p9
+    RET = ("vc_auto", "vc_vp9", "f_avif", "dpr_auto", "f_webm", "fl_awebp")
+    import re
+    out = []
+    for x in raw:
+        pp, xf, _rt = _p9._parse_full(x.get("url") or "")
+        t = (x["transformation"] or "").lower()
+        fam = _p9._fam(x["transformation"])
+        retired = (any(k in t for k in RET) or re.search(r"dpr_\d", t)
+                   or (("w_1280" in t or "h_720" in t) and ("f_mp4" in t or "vc_" in t)))
+        if not retired or "f_mp4" == t or t.startswith("fl_attachment") or "fl_sprite" in t:
+            continue
+        pref = bool(ridx["owners"].get(pp)) or (pp and "/" in pp and bool(ridx["owners"].get(pp.rsplit("/", 1)[-1])))
+        if not pref:
+            continue
+        out.append({**x, "parent_public_id": pp, "transformation_family": fam,
+                    "classification": "DELETE_CANDIDATE", "owner_type": "talent",
+                    "parent_referenced": True})
+    await db.storage_metrics_cache.update_one(
+        {"key": "p85_delete_candidates"},
+        {"$set": {"key": "p85_delete_candidates", "value": out, "fetched_at": now.isoformat()}},
+        upsert=True)
+    return out
+
+
+@router.get("/purge/manifest")
+async def p9_build_purge_manifest(
+    persist: bool = False,
+    admin: dict = Depends(require_role("admin")),
+):
+    """P9 Layer 2 — build a purge manifest. Runs Layer 1 revalidation (fresh
+    Cloudinary + MongoDB checks) over the DELETE_CANDIDATE derived assets.
+    NO deletion, ever.
+
+    `persist=false` (default) = a pure READ-ONLY dry-run: the manifest is
+    returned in memory and NOTHING is written to MongoDB. `persist=true` writes
+    the immutable manifest doc — required only when you intend to approve it.
+    """
+    import cloudinary_controlled_purge as p9
+    candidates = await _p9_delete_candidate_rows()
+    return await p9.build_purge_manifest(
+        db, candidates, source_manifest_id="p8.5-derived-inventory",
+        resource_fetcher=_p9_resource_fetcher, actor=admin.get("email"), persist=persist)
+
+
+class P9ApproveIn(BaseModel):
+    manifest_id: str
+    candidate_ids: List[str]
+
+
+@router.post("/purge/approve")
+async def p9_approve(payload: P9ApproveIn, admin: dict = Depends(require_role("admin"))):
+    import cloudinary_controlled_purge as p9
+    try:
+        return await p9.approve_manifest(db, payload.manifest_id, approved_by=admin.get("email") or admin.get("id"),
+                                         candidate_ids=payload.candidate_ids)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class P9BatchIn(BaseModel):
+    approval_id: str
+    canary: bool = True
+    size: int = 10
+
+
+@router.post("/purge/batch")
+async def p9_batch(payload: P9BatchIn, admin: dict = Depends(require_role("admin"))):
+    import cloudinary_controlled_purge as p9
+    try:
+        return await p9.create_batch(db, payload.approval_id, size=payload.size, canary=payload.canary)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class P9ExecuteIn(BaseModel):
+    batch_id: str
+    dry_run: bool = True
+
+
+@router.post("/purge/execute")
+async def p9_execute(payload: P9ExecuteIn, admin: dict = Depends(require_role("admin"))):
+    """P9 Layer 3. `dry_run` defaults TRUE. A real deletion additionally requires
+    the MEDIA_LIFECYCLE_PHYSICAL_DELETE env flag (which no endpoint can set) and a
+    valid, unconsumed, hash-matching approval. Any anomaly stops the batch."""
+    import cloudinary_controlled_purge as p9
+    try:
+        res = await p9.execute_batch(
+            db, payload.batch_id, actor=admin.get("email") or admin.get("id"),
+            dry_run=payload.dry_run, resource_fetcher=_p9_resource_fetcher,
+            derived_deleter=_p9_derived_deleter)
+        return res.explain()
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(400, str(e))
+    except p9.PurgeAnomaly as e:
+        raise HTTPException(409, {"anomaly": str(e), "message": "batch halted on anomaly — review required"})
+
+
 @router.get("/health")
 async def get_storage_health(admin: dict = Depends(require_role("admin"))):
     """Scan and identify orphaned assets, broken references, duplicate media, and unused files.

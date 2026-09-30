@@ -7,6 +7,19 @@ Dashboard" / "Update Portfolio" on the post-submission success screen led
 nowhere for a first-time talent (PortalHome.jsx finds no session, bounces
 to "/").
 
+Incident 2026-09-29: the first fix (only minting a token when the talent
+had none at all) missed the far more common real case — an EXISTING talent
+(already has a portal_access_token from some earlier, unrelated
+device/session) completing this flow on a browser that has no token of its
+own. That browser got portal_token: null back, persisted nothing, and
+clicking the dashboard CTA bounced/redirected exactly as before the fix.
+finalize now always mints and returns a fresh token whenever a talent_id
+exists, matching _grant_portal_session's own unconditional behavior on
+every OTP/Google login — portal_access_token is a single-field,
+single-session credential by design (see core.py's trusted-device
+comment), so rotating it here is the same accepted tradeoff every other
+login path already makes.
+
 Real-DB integration tests (local Mongo), same established pattern as
 test_submission_email_merge_resolution.py.
 """
@@ -20,7 +33,7 @@ os.environ.setdefault("ADMIN_EMAIL", "admin@talentgram.co")
 os.environ.setdefault("ADMIN_PASSWORD", "password")
 
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 
 import core
@@ -152,23 +165,36 @@ async def test_first_time_application_finalize_grants_working_portal_session():
                         config_ids=[config["id"]])
 
 
-# TEST 3 — A returning talent who already has an active portal session
-# (portal_access_token already set) must NOT have it silently rotated by
-# an unrelated project finalize — their existing session must keep working.
-async def test_returning_talent_finalize_does_not_rotate_existing_session():
+# TEST 3 — THE INCIDENT SCENARIO. A returning talent who already has an
+# active portal session (portal_access_token set, from some earlier,
+# unrelated device/session — the CURRENT browser's localStorage is
+# effectively empty, since it never obtained that old token) completes a
+# project submission. finalize must return a NEW, working portal_token —
+# not withhold one on the assumption the caller already has the old one.
+# The old token must correctly stop working (single-session semantics,
+# unchanged from before this fix — this is the "existing session on
+# another browser gets a 401 on its next call" regression check).
+async def test_returning_talent_finalize_rotates_and_returns_new_working_token():
     project = _project("t3")
     await _real_db.projects.insert_one(project)
     email = f"{_MTAG.lower()}sub3-{_uuid.uuid4().hex[:6]}@example.com"
     talent_id = f"{_MTAG}talent3_{_uuid.uuid4().hex[:8]}"
-    existing_token = mint_portal_token(email)
+    old_token = mint_portal_token(email)
     await _real_db.talents.insert_one({
         "id": talent_id, "name": "Existing Talent", "email": email, "normalized_email": email,
         "status": "SUBMITTED", "media": [], "alternate_emails": [],
-        "portal_access_token": existing_token,
+        "portal_access_token": old_token,
         "created_at": "2026-08-01T00:00:00+00:00",
     })
     sid = None
     try:
+        # Old token resolves fine before finalize — confirms it was really valid.
+        resolved_before = await current_portal_talent(authorization=f"Bearer {old_token}")
+        assert resolved_before["id"] == talent_id
+
+        # A brand-new browser session (this test never uses old_token to
+        # start the submission — exactly like a fresh device with empty
+        # localStorage) completes a full submission finalize.
         start = await create_or_resume_submission_doc(
             project, email, "Existing Talent", None, None, {}, created_from="talent_link",
         )
@@ -178,10 +204,104 @@ async def test_returning_talent_finalize_does_not_rotate_existing_session():
 
         assert result["ok"] is True
         assert result["talent_id"] == talent_id
-        assert result["portal_token"] is None, "an already-sessioned talent must not get a freshly rotated token here"
+        new_token = result["portal_token"]
+        assert new_token, "the fresh browser must be granted its own working portal session at finalize"
+        assert new_token != old_token, "finalize must mint a genuinely new token, not echo the old one"
 
-        # The ORIGINAL session must still work unchanged.
-        resolved = await current_portal_talent(authorization=f"Bearer {existing_token}")
-        assert resolved["id"] == talent_id
+        # The NEW token (what the fresh browser just persisted) must work.
+        resolved_new = await current_portal_talent(authorization=f"Bearer {new_token}")
+        assert resolved_new["id"] == talent_id
+
+        # The OLD token (the other, now-superseded browser/device's session)
+        # must correctly stop working — single-session model, unchanged.
+        with pytest.raises(HTTPException) as excinfo:
+            await current_portal_talent(authorization=f"Bearer {old_token}")
+        assert excinfo.value.status_code == 401
     finally:
         await _cleanup(talent_ids=[talent_id], project_ids=[project["id"]], submission_ids=[sid] if sid else [])
+
+
+# TEST 4 — Same incident scenario, onboarding/application path.
+async def test_returning_applicant_finalize_rotates_and_returns_new_working_token():
+    config = {
+        "id": f"{_MTAG}cfg2_{_uuid.uuid4().hex[:8]}",
+        "profile_requirements": {"name": "required", "location": "optional",
+                                  "instagram_handle": "optional", "instagram_followers": "optional"},
+        "portfolio_requirements": {"portfolio": "optional", "indian": "optional",
+                                    "western": "optional", "video": "optional"},
+    }
+    await _real_db.profile_configs.insert_one(config)
+    email = f"{_MTAG.lower()}app4-{_uuid.uuid4().hex[:6]}@example.com"
+    talent_id = f"{_MTAG}talent4_{_uuid.uuid4().hex[:8]}"
+    old_token = mint_portal_token(email)
+    await _real_db.talents.insert_one({
+        "id": talent_id, "name": "Existing Applicant", "email": email, "normalized_email": email,
+        "status": "SUBMITTED", "media": [], "alternate_emails": [],
+        "portal_access_token": old_token,
+        "created_at": "2026-08-01T00:00:00+00:00",
+    })
+    aid = None
+    try:
+        resolved_before = await current_portal_talent(authorization=f"Bearer {old_token}")
+        assert resolved_before["id"] == talent_id
+
+        # verify_email_ownership requires proof of ownership for an email
+        # that already has a talent — an existing, valid portal token
+        # satisfies that (the fresh browser used it once to prove it's
+        # really them, exactly like a real returning applicant would after
+        # OTP verify), independent of what finalize itself later returns.
+        start = await rapp.start_application(
+            ApplicationStartIn(first_name="Existing", last_name="Applicant", email=email, profile_id=config["id"]),
+            request=None, authorization=f"Bearer {old_token}",
+        )
+        aid, token = start["id"], start["token"]
+        await rapp.update_application(
+            aid, SubmissionUpdateIn(form_data={"first_name": "Existing", "last_name": "Applicant", "location": "Delhi"}),
+            authorization=f"Bearer {token}",
+        )
+        result = await rapp.finalize_application(aid, authorization=f"Bearer {token}")
+
+        assert result["ok"] is True
+        assert result["talent_id"] == talent_id
+        new_token = result["portal_token"]
+        assert new_token, "the fresh browser must be granted its own working portal session at finalize"
+        assert new_token != old_token
+
+        resolved_new = await current_portal_talent(authorization=f"Bearer {new_token}")
+        assert resolved_new["id"] == talent_id
+
+        with pytest.raises(HTTPException) as excinfo:
+            await current_portal_talent(authorization=f"Bearer {old_token}")
+        assert excinfo.value.status_code == 401
+    finally:
+        await _cleanup(talent_ids=[talent_id], application_ids=[aid] if aid else [], config_ids=[config["id"]])
+
+
+# TEST 5 — No identifiable email at finalize time => no portal_token, by
+# design (mirrors the existing `if portal_email:` guard) — an "unknown"
+# talent must never be granted a session.
+async def test_finalize_without_email_does_not_mint_portal_token():
+    project = _project("t5")
+    await _real_db.projects.insert_one(project)
+    email = f"{_MTAG.lower()}sub5-{_uuid.uuid4().hex[:6]}@example.com"
+    sid = None
+    talent_id = None
+    try:
+        start = await create_or_resume_submission_doc(
+            project, email, "No Email", None, None, {}, created_from="talent_link",
+        )
+        sid, token = start["id"], start["token"]
+        await rsub.submission_update(sid, SubmissionUpdateIn(form_data=_LEGACY_FORM), authorization=f"Bearer {token}")
+        # Simulate an invalid/unidentifiable submission at the exact moment
+        # of finalize — strip the email the same way a malformed/edge-case
+        # record could arrive with one missing.
+        await _real_db.submissions.update_one({"id": sid}, {"$set": {"talent_email": None}})
+
+        result = await rsub.submission_finalize(sid, Response(), authorization=f"Bearer {token}")
+
+        assert result["ok"] is True
+        talent_id = result.get("talent_id")
+        assert result["portal_token"] is None, "an unidentifiable talent must never be granted a portal session"
+    finally:
+        await _cleanup(talent_ids=[talent_id] if talent_id else [], project_ids=[project["id"]],
+                        submission_ids=[sid] if sid else [])

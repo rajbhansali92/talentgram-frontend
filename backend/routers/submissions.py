@@ -2540,17 +2540,21 @@ async def submission_finalize(sid: str, response: Response, authorization: Optio
         # (PortalHome finds no session and bounces to "/"). Grant one now,
         # the same way _grant_portal_session does for a returning talent —
         # a real Talent record exists at this exact point, for everyone.
-        # Only when one isn't already set: a returning talent resubmitting
-        # here already has a valid session (or had one issued at OTP verify
-        # this same visit) and must not have it silently rotated/invalidated
-        # by an unrelated project finalize.
-        if not talent_doc.get("portal_access_token"):
-            portal_email = talent_doc.get("email") or talent_doc.get("normalized_email")
-            if portal_email:
-                portal_token = mint_portal_token(portal_email)
-                await db.talents.update_one(
-                    {"id": talent_doc["id"]}, {"$set": {"portal_access_token": portal_token}}
-                )
+        # Always mint a fresh token here, unconditionally — matching
+        # _grant_portal_session's own unconditional behavior on every
+        # OTP/Google login. An existing talent completing THIS finalize on a
+        # browser that has no token of its own (a different device, a
+        # cleared session) must still get a working dashboard link; a stale
+        # DB token existing does not mean THIS browser already holds it.
+        # portal_access_token is a single-field, single-session credential
+        # (see core.py's trusted-device comment) — rotating it here is the
+        # same accepted tradeoff every other login path already makes.
+        portal_email = talent_doc.get("email") or talent_doc.get("normalized_email")
+        if portal_email:
+            portal_token = mint_portal_token(portal_email)
+            await db.talents.update_one(
+                {"id": talent_doc["id"]}, {"$set": {"portal_access_token": portal_token}}
+            )
 
     await db.submissions.update_one({"id": sid}, {"$set": patch})
 

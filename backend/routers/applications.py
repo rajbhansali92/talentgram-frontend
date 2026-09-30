@@ -1463,13 +1463,19 @@ async def finalize_application(aid: str, authorization: Optional[str] = Header(N
     # Talent Dashboard" on the success screen led nowhere (PortalHome
     # finds no session and bounces to "/"). A real Talent record exists
     # now — grant one here, same as _grant_portal_session does for a
-    # returning talent. Only when one isn't already set, so a returning
-    # applicant's existing session (from OTP verify or a prior visit)
-    # is never silently rotated/invalidated by an unrelated finalize.
+    # returning talent. Always mint a fresh token, unconditionally —
+    # matching _grant_portal_session's own unconditional behavior on every
+    # OTP/Google login. An existing talent completing THIS finalize on a
+    # browser that has no token of its own (a different device, a cleared
+    # session) must still get a working dashboard link; a stale DB token
+    # existing does not mean THIS browser already holds it.
+    # portal_access_token is a single-field, single-session credential (see
+    # core.py's trusted-device comment) — rotating it here is the same
+    # accepted tradeoff every other login path already makes.
     portal_token = None
     if talent_id:
         talent_doc = await db.talents.find_one({"id": talent_id}, {"_id": 0})
-        if talent_doc and not talent_doc.get("portal_access_token"):
+        if talent_doc:
             portal_email = talent_doc.get("email") or talent_doc.get("normalized_email")
             if portal_email:
                 portal_token = mint_portal_token(portal_email)

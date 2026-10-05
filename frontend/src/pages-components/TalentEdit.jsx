@@ -25,7 +25,9 @@ import {
     Tag,
     Plus,
     AlertTriangle,
+    Copy,
 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import {
     HEIGHT_OPTIONS,
     GENDER_OPTIONS,
@@ -193,6 +195,12 @@ export default function TalentEdit() {
     const [globalTagDeleteTarget, setGlobalTagDeleteTarget] = useState(null); // {id, name}
     const [globalTagDeleteConfirmText, setGlobalTagDeleteConfirmText] = useState("");
     const [originalTalent, setOriginalTalent] = useState(emptyTalent);
+    // Media Download Link toggle. Kept OUT of `talent` on purpose: it is saved
+    // immediately through its own endpoint (PATCH /talents/{id}/media-download),
+    // never through the profile form's Save, so it can't mark the form dirty or
+    // be clobbered by a save response. Missing flag on the server == ON.
+    const [mediaLink, setMediaLink] = useState({ enabled: true, token: null });
+    const [mediaLinkBusy, setMediaLinkBusy] = useState(false);
     const [tagSearch, setTagSearch] = useState("");
     const [isTagDropdownOpen, setIsTagDropdownOpen] = useState(false);
 
@@ -290,6 +298,10 @@ export default function TalentEdit() {
                 const { data } = await adminApi.get(`/talents/${id}`);
                 setTalent({ ...emptyTalent, ...data });
                 setOriginalTalent({ ...emptyTalent, ...data });
+                setMediaLink({
+                    enabled: data.media_download_enabled !== false,
+                    token: data.media_download_token || null,
+                });
                 setLinksDraft(linksToText(data.work_links || []));
             } catch {
                 toast.error("Failed to load talent");
@@ -1381,6 +1393,63 @@ export default function TalentEdit() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* Media Download Link */}
+            {isEdit && (
+                <section
+                    className="border border-[#eaeaea] bg-white rounded-xl px-4 py-3 md:px-6 mb-6 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6"
+                    data-testid="media-download-link-section"
+                >
+                    <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-black/85">Media Download Link</p>
+                        <p className="text-xs text-black/50 mt-0.5">
+                            Allow clients to view and download this talent&apos;s pictures and introduction video.
+                        </p>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                        {mediaLink.enabled && mediaLink.token && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const url = `${window.location.origin.replace(/^https?:\/\/[^.]+\./, "https://links.")}/talent-media/${mediaLink.token}`;
+                                    navigator.clipboard?.writeText(url).then(
+                                        () => toast.success("Media link copied"),
+                                        () => toast.error("Could not copy the link"),
+                                    );
+                                }}
+                                data-testid="media-download-copy-btn"
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-[#eaeaea] hover:border-[#d4d4d4] rounded-md text-xs text-black/70 hover:text-black transition-colors"
+                            >
+                                <Copy className="w-3 h-3" /> Copy link
+                            </button>
+                        )}
+                        <span className="text-xs font-semibold tracking-wide w-7 text-right text-black/60" data-testid="media-download-state">
+                            {mediaLink.enabled ? "ON" : "OFF"}
+                        </span>
+                        <Switch
+                            checked={mediaLink.enabled}
+                            disabled={mediaLinkBusy}
+                            aria-label="Media Download Link"
+                            data-testid="media-download-toggle"
+                            onCheckedChange={async (next) => {
+                                const prev = mediaLink;
+                                setMediaLink({ ...prev, enabled: next });
+                                setMediaLinkBusy(true);
+                                try {
+                                    const { data } = await adminApi.patch(`/talents/${id}/media-download`, { enabled: next });
+                                    setMediaLink({ enabled: data.enabled, token: data.token || prev.token });
+                                    toast.success(next ? "Media download link is ON" : "Media download link is OFF");
+                                } catch {
+                                    setMediaLink(prev);
+                                    toast.error("Failed to update the media download link");
+                                } finally {
+                                    setMediaLinkBusy(false);
+                                }
+                            }}
+                        />
+                    </div>
+                </section>
             )}
 
             {/* Media */}

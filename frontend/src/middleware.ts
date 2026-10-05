@@ -22,6 +22,9 @@ export function middleware(req: NextRequest) {
         url.pathname.startsWith('/reset-password') ||
         url.pathname.startsWith('/google-callback') ||
         url.pathname.startsWith('/portal') ||
+        // Private talent-media download page — token-gated, served identically
+        // on every host (links./review./www.), so it must NOT be subdomain-rewritten.
+        url.pathname.startsWith('/talent-media/') ||
         // sw.js caches this at the single path '/offline' and expects it to
         // resolve identically on every origin — without this bypass it gets
         // subdomain-rewritten (e.g. apply. -> /apply/offline, submit. ->

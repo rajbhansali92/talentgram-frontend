@@ -2166,6 +2166,19 @@ async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_t
             except Exception as e:
                 logger.warning(f"Error enqueueing submission form message: {e}", exc_info=True)
 
+            # Talent Media Download Link — a second, separate message right
+            # after the form (see routers/talent_media.py). Strictly additive:
+            # its own try/except, runs only after the notification + form above
+            # are already enqueued, so it can never delay or break them.
+            try:
+                from routers.talent_media import enqueue_media_link_message
+                await enqueue_media_link_message(
+                    submission, event_type,
+                    group_name=group_name, project_id=project_id, project_name=project_name,
+                )
+            except Exception as e:
+                logger.warning(f"Error enqueueing talent media link message: {e}", exc_info=True)
+
     except Exception as e:
         logger.warning(f"Error in background internal WhatsApp notification task: {e}", exc_info=True)
 

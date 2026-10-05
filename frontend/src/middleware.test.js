@@ -62,3 +62,15 @@ describe("middleware — canonical apply/submit redirect", () => {
         expect(res.status).not.toBe(308);
     });
 });
+
+describe("middleware — private talent-media page", () => {
+    it.each(["links.talentgramagency.com", "review.talentgramagency.com", "www.talentgramagency.com", "apply.talentgramagency.com"])(
+        "is NOT subdomain-rewritten on %s",
+        (host) => {
+            const res = middleware(reqFor(host, "/talent-media/abcDEF123_-abcDEF123_-abcDEF"));
+            expect(res.headers.get("x-middleware-rewrite")).toBeNull();
+            expect(res.status).not.toBe(308);
+        }
+    );
+});
+

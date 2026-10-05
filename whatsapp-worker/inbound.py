@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -191,6 +192,126 @@ async def _ensure_indexes() -> None:
         logger.exception("inbound: failed to create whatsapp_inbound_acked indexes (non-fatal)")
 
 
+# ── Dedupe-record keep-alive (Production fix, 2026-10-05) ────────────────
+# ROOT CAUSE of the "unsolicited Fletcher/casting messages" incident: each
+# scan examines only the last 15 messages of a chat, and a message's
+# dedupe record (SEEN_COLLECTION, TTL on `created_at`) expires after
+# config.INBOUND_DEDUP_TTL_SEC (48h). In a quiet group an old command stays
+# inside that 15-message tail for days; the instant its record expired it
+# looked brand new, was claimed again, re-executed and re-acked — every 48h,
+# for as long as it stayed in the tail. Confirmed against production: the
+# same Fletcher commands (e.g. "Show me Fanny Gandhi's form for Carter",
+# "Show me angela's profile") recur in whatsapp_agent_audit_log at gaps of
+# 48.0x hours, repeatedly.
+#
+# A message that is STILL VISIBLE in the scanned tail is, by definition,
+# still a live dedupe candidate, so its record must not expire. Whenever a
+# visible message's record is older than _KEEPALIVE_AFTER_SEC we push its
+# `created_at` (the TTL clock) forward to now. Throttled — at most one
+# write per message per _KEEPALIVE_AFTER_SEC — so the 2s poll adds no
+# measurable Mongo load. No index change or migration: the existing TTL
+# index on `created_at` simply never fires for a message that keeps being
+# seen. A message that scrolls out of the tail stops being refreshed and
+# expires normally, exactly as before. _KEEPALIVE_AFTER_SEC must stay far
+# below the TTL (6h vs 48h) so a keep-alive can never be missed by a TTL
+# sweep that lands between two touches.
+_KEEPALIVE_AFTER_SEC = 6 * 3600.0
+_last_keepalive: dict[str, datetime] = {}
+
+# Claims created BEFORE this instant were written by the pre-fix worker,
+# which never recorded `dispatch_started_at`. A stale in_progress claim of
+# that era is indistinguishable from "never dispatched" vs "dispatched, then
+# the worker died" — and the production incident proved the second case
+# (and burst-claims of old chat history) really happens. Such a legacy
+# claim is therefore NEVER auto-recovered/replayed; it is quarantined
+# (marked completed, loudly logged) for manual review. Claims created after
+# this instant always carry the marker when dispatched, so the normal
+# "never dispatched => safe to recover" rule applies to them unchanged.
+# Override with WA_LEGACY_CLAIM_CUTOFF_ISO.
+_LEGACY_CLAIM_CUTOFF = datetime.fromisoformat(
+    os.environ.get("WA_LEGACY_CLAIM_CUTOFF_ISO", "2026-10-05T04:30:00+00:00")
+)
+
+
+# ── Stale-message guard (Production fix, 2026-10-05) ─────────────────────
+# Second, independent layer behind the dedupe keep-alive above: a message
+# whose OWN WhatsApp timestamp is older than _MAX_NEW_COMMAND_AGE_SEC is
+# never newly executed, whatever the dedupe store says. This is what makes
+# a post-deploy first scan safe for tail messages whose dedupe record had
+# ALREADY expired before this fix existed (they would otherwise be claimed
+# as "new" once more), and it independently bounds any future replay path
+# (manual cleanup, DB restore). 36h: below the 48h dedupe TTL (so a TTL
+# expiry can never reach it) yet wider than any timezone skew between the
+# browser's rendered timestamps and this process's clock. Anything we
+# cannot parse is NOT treated as stale — unchanged pre-fix behaviour.
+# Configurable via WA_MAX_COMMAND_AGE_SEC.
+_MAX_NEW_COMMAND_AGE_SEC = float(os.environ.get("WA_MAX_COMMAND_AGE_SEC", str(36 * 3600)))
+_PRE_PLAIN_TS_RE = re.compile(
+    r"^\[\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap]\.?m\.?)?\s*,\s*(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})\s*\]",
+    re.IGNORECASE,
+)
+
+
+def _message_age_sec(pre_plain: Optional[str], now: Optional[datetime] = None) -> Optional[float]:
+    """Age in seconds of a message from its data-pre-plain-text prefix
+    ("[9:05 pm, 27/9/2026] Name: "), or None if it can't be determined.
+    WhatsApp's own locale decides day/month order, so every VALID reading
+    is considered and the MOST RECENT one wins — we only ever call a
+    message old if it is old under every interpretation."""
+    if not pre_plain:
+        return None
+    m = _PRE_PLAIN_TS_RE.match(pre_plain.strip())
+    if not m:
+        return None
+    hh, mm, ampm, a, b, yy = m.groups()
+    hh, mm, a, b, yy = int(hh), int(mm), int(a), int(b), int(yy)
+    if yy < 100:
+        yy += 2000
+    if ampm:
+        pm = ampm.lower().startswith("p")
+        if not 1 <= hh <= 12:
+            return None
+        hh = (hh % 12) + (12 if pm else 0)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    now = now or _now()
+    naive_now = now.replace(tzinfo=None)
+    ages = []
+    for day, month in ((a, b), (b, a)):
+        try:
+            ts = datetime(yy, month, day, hh, mm)
+        except ValueError:
+            continue
+        ages.append((naive_now - ts).total_seconds())
+    return min(ages) if ages else None
+
+
+async def _keepalive_seen_record(message_id: str, created_at: Optional[datetime] = None) -> None:
+    """Extends a still-visible message's dedupe record (see block comment
+    above). `created_at` is the record's current TTL clock if the caller
+    already has it (the Mongo duplicate-key path); None means "this process
+    claimed it" (the in-memory fast path) — then the last_keepalive map
+    alone decides. Best-effort: a failed refresh just means the record
+    keeps its current expiry and is retried on the next throttle window —
+    it can never cause a duplicate on its own, since the TTL is 48h and the
+    throttle 6h."""
+    now = _now()
+    last = _last_keepalive.get(message_id)
+    if last is None and created_at is not None:
+        last = _as_aware_utc(created_at)
+    if last is not None and (now - last).total_seconds() < _KEEPALIVE_AFTER_SEC:
+        _last_keepalive.setdefault(message_id, last)
+        return
+    try:
+        await get_db()[SEEN_COLLECTION].update_one(
+            {"message_id": message_id}, {"$set": {"created_at": now}},
+        )
+        _last_keepalive[message_id] = now
+        logger.info("inbound: KEEPALIVE message_id=%r still visible in the scanned tail — dedupe record TTL clock renewed", message_id)
+    except Exception:
+        logger.exception("inbound: keep-alive refresh failed for %s (non-fatal; retried next window)", message_id)
+
+
 def _cap_seen_cache() -> None:
     # Cap unbounded in-memory growth over a long-lived process; the Mongo
     # collection remains the source of truth once this cache rotates.
@@ -206,6 +327,16 @@ async def _claim_message(message_id: str) -> bool:
     acknowledgement + dispatch. Returns False for every other case
     (already in progress, already completed) — the caller must do
     nothing: no ack, no dispatch, no new job, no state change.
+
+    Return type/semantics are deliberately UNCHANGED by the 2026-09-30
+    fix below — a large existing regression suite asserts `is True`/
+    `is False` on this exact call. Whether a True here is a genuinely
+    fresh claim or a RECOVERED one whose prior attempt already started
+    dispatching (and may have already executed the command / sent a
+    reply) is a separate, additional question the caller answers via
+    `_recovery_needs_idempotent_redispatch()` right after — seeing this
+    return True on its own still means only "proceed", exactly as
+    before.
 
     The in-memory cache is checked first (cheap, and correctly blocks
     re-entry within the SAME still-running process — including the
@@ -227,6 +358,7 @@ async def _claim_message(message_id: str) -> bool:
     TTL index."""
     if message_id in _seen_cache:
         logger.info("inbound: COMMAND_DUPLICATE_IGNORED message_id=%r (in-memory)", message_id)
+        await _keepalive_seen_record(message_id)
         return False
     db = get_db()
     now = _now()
@@ -250,6 +382,7 @@ async def _claim_message(message_id: str) -> bool:
             "worker_id": config.WORKER_ID,
         })
         _seen_cache.add(message_id)
+        _last_keepalive[message_id] = now
         _cap_seen_cache()
         logger.info("inbound: COMMAND_CLAIMED message_id=%r", message_id)
         return True
@@ -274,6 +407,13 @@ async def _claim_message(message_id: str) -> bool:
         # as still claimed-by-someone rather than risk a double-claim.
         logger.warning("inbound: claim record for %s vanished between insert and lookup — treating as duplicate", message_id)
         return False
+    if existing.get("status") == _STATUS_COMPLETED:
+        # Still visible in the scanned tail => renew its TTL clock so it can
+        # never expire while visible (the 48h replay root cause), and
+        # remember it in-process so later polls skip the Mongo read.
+        await _keepalive_seen_record(message_id, existing.get("created_at"))
+        _seen_cache.add(message_id)
+        _cap_seen_cache()
     if existing.get("status") == _STATUS_IN_PROGRESS:
         # Two forms of the SAME value: `raw_claimed_at` is exactly what's
         # stored in Mongo (whatever tz-awareness the driver hands back —
@@ -284,6 +424,29 @@ async def _claim_message(message_id: str) -> bool:
         claimed_at = _as_aware_utc(raw_claimed_at)
         stale_for = (now - claimed_at).total_seconds() if claimed_at else None
         if claimed_at and stale_for > _CLAIM_RECOVERY_TIMEOUT_SEC:
+            created = _as_aware_utc(existing.get("created_at"))
+            if (
+                not existing.get("dispatch_started_at")
+                and created is not None and created < _LEGACY_CLAIM_CUTOFF
+            ):
+                # Pre-fix stale claim (see _LEGACY_CLAIM_CUTOFF): cannot be
+                # told apart from an already-executed command whose
+                # completion marker never landed, nor from a burst-claim of
+                # old chat history. Never replay it. Quarantine: mark it
+                # completed (so it also gains keep-alive protection and can
+                # not expire back into "new") and say so loudly.
+                logger.warning(
+                    "inbound: LEGACY_STALE_CLAIM_QUARANTINED message_id=%r (created %s, stale %.0fs, "
+                    "no dispatch_started_at) — NOT recovered/replayed; marked completed for manual review",
+                    message_id, created.isoformat(), stale_for,
+                )
+                await db[SEEN_COLLECTION].update_one(
+                    {"message_id": message_id, "status": _STATUS_IN_PROGRESS},
+                    {"$set": {"status": _STATUS_COMPLETED, "completed_at": now, "quarantined_legacy": True}},
+                )
+                _seen_cache.add(message_id)
+                _cap_seen_cache()
+                return False
             recovered = await db[SEEN_COLLECTION].find_one_and_update(
                 {"message_id": message_id, "claimed_at": raw_claimed_at},
                 {"$set": {"status": _STATUS_IN_PROGRESS, "claimed_at": now}},
@@ -296,12 +459,95 @@ async def _claim_message(message_id: str) -> bool:
                     "(abandoned worker, not a healthy long-running command)",
                     message_id, stale_for,
                 )
+                if existing.get("dispatch_started_at"):
+                    logger.warning(
+                        "inbound: COMMAND_RECOVERY_UNCERTAIN message_id=%r — the prior attempt had already "
+                        "started dispatching to the backend before going silent; the caller must redispatch "
+                        "through the backend's own idempotency boundary and dedupe-check before any reply is "
+                        "(re)sent (see _recovery_needs_idempotent_redispatch)", message_id,
+                    )
                 return True
             # Someone else's recovery attempt won the race first.
             logger.info("inbound: COMMAND_DUPLICATE_IGNORED message_id=%r (lost the recovery race)", message_id)
             return False
     logger.info("inbound: COMMAND_DUPLICATE_IGNORED message_id=%r (status=%s)", message_id, existing.get("status"))
     return False
+
+
+async def _recovery_needs_idempotent_redispatch(message_id: str) -> bool:
+    """Called by the caller RIGHT AFTER a successful `_claim_message()`
+    (True) returns, to answer the one question that return value cannot:
+    was this a genuinely fresh claim, or a recovered one whose PRIOR
+    attempt already reached `_mark_dispatch_started` before going silent?
+
+    Production incident (2026-09-29/30): a recovered claim whose prior
+    attempt never dispatched is exactly as safe to treat as brand new as
+    today's code already does — nothing happened yet. But a recovered
+    claim whose prior attempt DID start dispatching may have already
+    fully executed the command and even sent its reply before the worker
+    process died (the proven incident: a real Fletcher command's audit
+    log showed successful execution, but the worker's own claim never
+    reached 'completed'). Returns True only for that second, unsafe-to-
+    assume-fresh case — the caller must then redispatch through the
+    backend's own message_id-keyed idempotency boundary
+    (agents/inbound_idempotency.py, which guarantees the command body
+    itself runs at most once regardless) and dedupe-check before
+    (re)sending any reply (sender.py's is_retry/_already_delivered).
+
+    A brand-new claim's own insert never sets dispatch_started_at, so
+    this correctly returns False for it without needing to distinguish
+    'new' from 'recovered-but-never-dispatched' at all — both look
+    identical here, and both get the same (correct) answer."""
+    db = get_db()
+    try:
+        existing = await db[SEEN_COLLECTION].find_one({"message_id": message_id})
+    except Exception:
+        logger.exception(
+            "inbound: could not check dispatch_started_at for %s — treating conservatively as uncertain",
+            message_id,
+        )
+        return True
+    return bool((existing or {}).get("dispatch_started_at"))
+
+
+async def _mark_dispatch_started(message_id: str) -> None:
+    """Records that a real dispatch attempt to the backend is about to
+    begin for this message_id — the marker
+    _recovery_needs_idempotent_redispatch checks (via a future recovery
+    of this same message_id) to distinguish "nothing happened yet" (safe
+    to treat as fresh) from "a prior attempt got at least this far before
+    going silent" (needs the backend's idempotency boundary + reply
+    dedupe check). Best-effort: a write failure here just means a future
+    recovery of this exact message_id conservatively can't tell the
+    difference and treats it as uncertain — never the other way around,
+    so this can only make
+    recovery MORE cautious, never less."""
+    try:
+        db = get_db()
+        await db[SEEN_COLLECTION].update_one(
+            {"message_id": message_id}, {"$set": {"dispatch_started_at": _now()}},
+        )
+    except Exception:
+        logger.exception("inbound: failed to record dispatch_started_at for %s (non-fatal)", message_id)
+
+
+async def _mark_reply_sent(message_id: str) -> None:
+    """Records that this message_id's reply was actually sent (a
+    sent_message_id was obtained) — the fourth and final lifecycle stage
+    (never dispatched / dispatch uncertain / backend execution confirmed /
+    reply sent). Purely observability + forensic value for diagnosing any
+    future incident of this class; recovery correctness itself does not
+    depend on this field (it is covered by the backend's own idempotency
+    boundary for the command, and by is_retry/_already_delivered for the
+    reply) — so a write failure here is logged but never changes recovery
+    behaviour."""
+    try:
+        db = get_db()
+        await db[SEEN_COLLECTION].update_one(
+            {"message_id": message_id}, {"$set": {"reply_sent_at": _now()}},
+        )
+    except Exception:
+        logger.exception("inbound: failed to record reply_sent_at for %s (non-fatal)", message_id)
 
 
 async def _release_claim(message_id: str) -> None:
@@ -812,8 +1058,28 @@ async def _scan_group_for_new_messages(
         # one whose backend dispatch is still in flight — is never
         # added to new_messages again, no matter how many more times it
         # remains visible in the DOM.
-        if not await _claim_message(message_id):
+        claimed = await _claim_message(message_id)
+        if not claimed:
             continue
+        age_sec = _message_age_sec(pre_plain)
+        if age_sec is not None and age_sec > _MAX_NEW_COMMAND_AGE_SEC:
+            logger.warning(
+                "inbound: STALE_MESSAGE_SKIPPED message_id=%r group=%r age_hours=%.1f (> %.1fh) — "
+                "old chat history still visible in the scanned tail is never newly executed; "
+                "claim completed, nothing dispatched",
+                message_id, group_name, age_sec / 3600.0, _MAX_NEW_COMMAND_AGE_SEC / 3600.0,
+            )
+            await _complete_claim(message_id)
+            continue
+        # Production fix, 2026-09-30 — see _recovery_needs_idempotent_
+        # redispatch's docstring. Only a message whose PRIOR attempt (if
+        # any) already started dispatching needs the extra safety in the
+        # dispatch loop below; a genuinely fresh claim (new OR recovered-
+        # but-never-dispatched) proceeds exactly as before.
+        claim_state = (
+            "recovered_uncertain" if await _recovery_needs_idempotent_redispatch(message_id)
+            else "fresh"
+        )
 
         media_type = None
         if not text:
@@ -876,6 +1142,7 @@ async def _scan_group_for_new_messages(
             "raw_pre_plain_text": pre_plain,
             "media_type": media_type,
             "reply_context": reply_context,
+            "claim_state": claim_state,
         })
 
     message_extraction_sec = time.monotonic() - t_extraction_start
@@ -975,20 +1242,33 @@ async def _post_inbound(http: httpx.AsyncClient, *, group_name: str, sender_phon
 
 
 async def _send_reply(
-    page, group_name: str, reply_text: str
+    page, group_name: str, reply_text: str, *, is_retry: bool = False
 ) -> Tuple[float, Dict[str, float], Optional[str]]:
     """Returns (elapsed seconds spent sending, per-stage SEND_TIMING
     breakdown from sender.send_whatsapp_message, the sent message's own
     WhatsApp message id if captured) — (0.0, {}, None) if there was nothing
     to send. The message id is what makes a task's confirmation card
-    reply-addressable (Concurrent Task Engine) — see _post_task_sent."""
+    reply-addressable (Concurrent Task Engine) — see _post_task_sent.
+
+    `is_retry` (Production fix, 2026-09-30): set True only when this reply
+    is being (re)sent for a recovered, dispatch-uncertain message_id
+    (claim_state == "recovered_uncertain") — i.e. the prior attempt may
+    have already sent this exact reply before the
+    worker died. Forwarded to send_whatsapp_message, which activates its
+    existing _already_delivered DOM check (the same mechanism
+    worker.py's job-queue retries already rely on) before typing/sending
+    anything: if a recent outgoing bubble already contains this reply
+    text, it is reported as already-delivered instead of sent again.
+    False (the default) for every normal fresh reply, so first-time
+    delivery is completely unaffected — old messages from a prior,
+    unrelated turn must never suppress a genuinely new reply."""
     if not reply_text:
         return 0.0, {}, None
     t0 = time.monotonic()
     try:
         result = await sender.send_whatsapp_message(
             page, destination_type="group", destination=group_name, message_body=reply_text,
-            fast=True,
+            fast=True, is_retry=is_retry,
         )
         elapsed = time.monotonic() - t0
         logger.info("inbound: reply send result group=%r state=%s elapsed_sec=%.2f",
@@ -1420,6 +1700,16 @@ async def poll_once(
             # production for "Share Instagram link ... to Heena
             # Talentgram"). See _post_inbound's own timeout for the other
             # half of this fix.
+            # Production fix, 2026-09-30 — recorded BEFORE the dispatch
+            # call itself, so if this exact process dies anywhere from
+            # here through _complete_claim below (the proven production
+            # incident: the backend already ran the command and replied,
+            # but this worker died before its own completion marker
+            # landed), this message_id's NEXT claim recovery sees
+            # dispatch_started_at set — _recovery_needs_idempotent_redispatch
+            # then reports it as uncertain instead of silently treating it
+            # as never-attempted.
+            await _mark_dispatch_started(msg["message_id"])
             backend_task = asyncio.create_task(_post_inbound(
                 http,
                 group_name=group_name,
@@ -1496,13 +1786,25 @@ async def poll_once(
             reply_elapsed = 0.0
             send_timing: Dict[str, float] = {}
             sent_message_id: Optional[str] = None
+            # claim_state == "recovered_uncertain" (Production fix,
+            # 2026-09-30): this message_id's prior attempt already started dispatching
+            # before going silent, so — even though the backend's own
+            # idempotency boundary (agents/inbound_idempotency.py)
+            # guarantees the COMMAND itself ran at most once — this reply
+            # text may already have been sent once by that prior attempt.
+            # is_retry=True activates send_whatsapp_message's existing
+            # _already_delivered DOM check before typing/sending anything.
+            reply_is_retry = msg.get("claim_state") == "recovered_uncertain"
             if reply:
                 async with session.page_lock:
                     reply_page = session.page
                     if reply_page is not None:
-                        reply_elapsed, send_timing, sent_message_id = await _send_reply(reply_page, group_name, reply)
+                        reply_elapsed, send_timing, sent_message_id = await _send_reply(
+                            reply_page, group_name, reply, is_retry=reply_is_retry,
+                        )
                         if sent_message_id:
                             await _update_worker_status(last_reply_at=_now().isoformat())
+                            await _mark_reply_sent(msg["message_id"])
                             logger.info(
                                 "inbound: reply sent group=%r message_id=%r sent_message_id=%r",
                                 group_name, msg["message_id"], sent_message_id,

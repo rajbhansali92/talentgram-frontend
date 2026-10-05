@@ -198,6 +198,18 @@ async def ensure_agents_ready() -> None:
         await db["whatsapp_agent_disambiguation"].create_index(
             "expires_at", expireAfterSeconds=0, name="disambiguation_ttl"
         )
+        # Backend-side inbound execution boundary (Production fix,
+        # 2026-09-30 — see agents/inbound_idempotency.py's module
+        # docstring). This is the SAME collection the WhatsApp worker's
+        # own claim (whatsapp-worker/inbound.py's _ensure_indexes) already
+        # creates this exact unique index on — declared here too, on the
+        # backend side, so the atomic upsert-claim in
+        # inbound_idempotency.claim_or_get_result is correct even if this
+        # backend process is the first of the two services to ever touch
+        # the collection (a fresh environment, a test database, or the
+        # worker's own index creation simply hasn't run yet). Identical
+        # index spec from either side is an idempotent no-op.
+        await db["whatsapp_inbound_seen"].create_index("message_id", unique=True)
     except Exception:
         logger.exception("whatsapp agent platform index creation failed (non-fatal)")
 

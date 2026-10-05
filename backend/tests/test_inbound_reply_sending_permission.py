@@ -124,7 +124,30 @@ class Payload:
         self.transcript_confidence = transcript_confidence
 
 
+def _stub_idempotency():
+    """This file tests the sending-permission gate only, with a fake DB.
+    The message_id idempotency boundary (agents/inbound_idempotency.py,
+    tested against real Mongo in test_inbound_idempotency.py) is stubbed
+    to always-EXECUTE so it neither needs the fake DB nor changes what
+    this file asserts."""
+    class _Idem:
+        EXECUTE = "execute"
+        RETURN_STORED = "return_stored"
+        STILL_EXECUTING = "still_executing"
+
+        @staticmethod
+        async def claim_or_get_result(message_id):
+            return "execute", None
+
+        @staticmethod
+        async def persist_result(message_id, result):
+            return None
+
+    aw.inbound_idempotency = _Idem
+
+
 def main():
+    _stub_idempotency()
     registry.register_agent(AgentDefinition(agent_id="management-agent", name="Management", module="x", intents=[]))
 
     # SA_INBOUND_CAPTURE_ENABLED is unset, so inbound_messages.capture_inbound

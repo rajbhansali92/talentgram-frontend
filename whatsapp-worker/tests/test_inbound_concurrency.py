@@ -323,7 +323,7 @@ async def test_ack_and_reply_sends_still_reacquire_the_lock(_setup, monkeypatch)
     lock_held_during_send = []
     ack_sent = asyncio.Event()
 
-    async def recording_send_reply(page, group_name, text):
+    async def recording_send_reply(page, group_name, text, is_retry=False):
         lock_held_during_send.append(session.page_lock.locked())
         if text == inbound.ACK_TEXT:
             ack_sent.set()
@@ -370,7 +370,7 @@ async def test_reply_send_skipped_gracefully_if_page_vanishes_mid_flight(_setup,
 
     send_calls = []
 
-    async def recording_send_reply(page, group_name, text):
+    async def recording_send_reply(page, group_name, text, is_retry=False):
         send_calls.append(text)
         return 0.0, {}, "sent"
 
@@ -435,7 +435,7 @@ async def test_poll_once_never_redispatches_a_message_already_marked_processed(_
 
     send_calls = []
 
-    async def fake_send_reply(page, group_name, text):
+    async def fake_send_reply(page, group_name, text, is_retry=False):
         send_calls.append(text)
         return 0.0, {}, "sent-1"
 
@@ -488,7 +488,7 @@ async def test_same_message_observed_ten_times_still_one_ack_and_one_execution(_
 
     ack_calls = []
 
-    async def fake_send_reply(page, group_name, text):
+    async def fake_send_reply(page, group_name, text, is_retry=False):
         ack_calls.append(text)
         return 0.0, {}, "sent-1"
 
@@ -768,7 +768,7 @@ async def test_send_approval_message_is_independently_idempotent(_setup, monkeyp
 
     monkeypatch.setattr(inbound, "_post_inbound", fake_post_inbound)
 
-    async def fake_send_reply(page, group_name, text):
+    async def fake_send_reply(page, group_name, text, is_retry=False):
         return 0.0, {}, "sent"
 
     monkeypatch.setattr(inbound, "_send_reply", fake_send_reply)
@@ -911,7 +911,7 @@ async def test_slow_send_command_acked_exactly_once_and_not_redispatched(_setup,
 
     acks = []
 
-    async def fake_send_reply(page, group_name, text):
+    async def fake_send_reply(page, group_name, text, is_retry=False):
         acks.append(text)
         return 0.0, {}, "sent"
     monkeypatch.setattr(inbound, "_send_reply", fake_send_reply)
@@ -959,7 +959,7 @@ async def test_ack_once_survives_a_claim_release_and_redispatch(_setup, monkeypa
 
     acks = []
 
-    async def fake_send_reply(page, group_name, text):
+    async def fake_send_reply(page, group_name, text, is_retry=False):
         acks.append(text)
         return 0.0, {}, "sent"
     monkeypatch.setattr(inbound, "_send_reply", fake_send_reply)

@@ -31,8 +31,9 @@ from core import (
     media_url,
     video_poster_url,
 )
-from agents import audit, registry, tasks
+from agents import audit, inbound_idempotency, registry, tasks
 from agents.dispatcher import handle_inbound_message
+from agents.models import DispatchResult
 from agents.modules import media_assignment
 from agents.modules import mark_intent
 # Phase 7 (Simple Assistant) — canonical, read-only inbound-message capture.
@@ -163,19 +164,65 @@ async def inbound_message(
     except Exception:
         logger.exception("inbound capture failed (non-fatal)")
 
-    result = await handle_inbound_message(
-        group_name=payload.group_name,
-        sender_phone=payload.sender_phone,
-        text=payload.text,
-        sender_name=payload.sender_name,
-        sender_is_group_member=payload.sender_is_group_member,
-        transcript_confidence=payload.transcript_confidence,
-        media_type=payload.media_type,
-        replied_to_message_id=payload.replied_to_message_id,
-        replied_quoted_text=payload.replied_quoted_text,
-        worker_id=payload.worker_id or registry.DEFAULT_WORKER_ID,
-        message_id=payload.message_id,
-    )
+    # Backend-side execution boundary (production incident, 2026-09-29/30 —
+    # see agents/inbound_idempotency.py's module docstring for the full
+    # root-cause trace). The worker's own claim only protects against
+    # dispatching this message_id twice from a HEALTHY worker; if the
+    # worker process itself crashes after this call already ran the
+    # command and returned a reply, its later stale-claim recovery
+    # re-sends the SAME message_id here as if new. This is what actually
+    # stops that: keyed on the same message_id the worker already sends,
+    # a command only ever executes once, no matter how many times this
+    # endpoint is called for it. No message_id (should not happen in
+    # practice — every real transport call supplies one, synthesizing a
+    # fallback hash if WhatsApp's own id is unavailable) falls back to the
+    # pre-fix behavior of executing directly, unprotected.
+    if payload.message_id:
+        claim_state, stored = await inbound_idempotency.claim_or_get_result(payload.message_id)
+        if claim_state == inbound_idempotency.RETURN_STORED:
+            result = DispatchResult(
+                handled=bool(stored.get("handled")),
+                reply=stored.get("reply"),
+                operation_id=stored.get("operation_id"),
+            )
+        elif claim_state == inbound_idempotency.STILL_EXECUTING:
+            # A genuinely concurrent attempt for this exact message_id is
+            # in flight and not yet stale — never guess at its outcome.
+            # No reply now; the worker's own retry (same message_id) will
+            # converge once that attempt's result is persisted.
+            return {"handled": False, "reply": None, "operation_id": None}
+        else:
+            result = await handle_inbound_message(
+                group_name=payload.group_name,
+                sender_phone=payload.sender_phone,
+                text=payload.text,
+                sender_name=payload.sender_name,
+                sender_is_group_member=payload.sender_is_group_member,
+                transcript_confidence=payload.transcript_confidence,
+                media_type=payload.media_type,
+                replied_to_message_id=payload.replied_to_message_id,
+                replied_quoted_text=payload.replied_quoted_text,
+                worker_id=payload.worker_id or registry.DEFAULT_WORKER_ID,
+                message_id=payload.message_id,
+            )
+            await inbound_idempotency.persist_result(
+                payload.message_id,
+                {"handled": result.handled, "reply": result.reply, "operation_id": result.operation_id},
+            )
+    else:
+        result = await handle_inbound_message(
+            group_name=payload.group_name,
+            sender_phone=payload.sender_phone,
+            text=payload.text,
+            sender_name=payload.sender_name,
+            sender_is_group_member=payload.sender_is_group_member,
+            transcript_confidence=payload.transcript_confidence,
+            media_type=payload.media_type,
+            replied_to_message_id=payload.replied_to_message_id,
+            replied_quoted_text=payload.replied_quoted_text,
+            worker_id=payload.worker_id or registry.DEFAULT_WORKER_ID,
+            message_id=payload.message_id,
+        )
     t_dispatch_done = time.monotonic()
 
     # Sending-permission gate for agent-generated replies (2026-09-18,

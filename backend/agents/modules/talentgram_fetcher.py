@@ -432,6 +432,72 @@ async def _try_handle_profile_request(ctx: ExecContext, chunk: str) -> Optional[
 
 
 # ---------------------------------------------------------------------------
+# SHOW ME MEDIA LINK — returns the ONE canonical Talent Media Download Link
+# (routers/talent_media.py: the talent's `media_download_token` +
+# `media_download_enabled` toggle). Nothing here creates, stores or formats
+# a link/name of its own: URL, token, toggle rules and the "First L" name all
+# come from talent_media.resolve_media_link / short_talent_name, so the link
+# is character-for-character what the submission notification sends. When the
+# toggle is OFF the reply says so and offers NO fallback link. The profile
+# path above (and its old portfolio-link lookup) is deliberately untouched.
+# ---------------------------------------------------------------------------
+_MEDIA_WORD_RE = re.compile(r"(?i)\bmedia(?:\s+links?)?\b")
+
+
+async def _render_media_link(talent_id: str) -> str:
+    from routers.talent_media import resolve_media_link, short_talent_name
+    resolved = await resolve_media_link(talent_id)
+    if resolved is None:
+        return "No media information available."
+    name, url = resolved
+    head = f"Talentgram X {short_talent_name(name)} -"
+    if not url:
+        return f"{head}\n\nMedia download link is currently unavailable."
+    return f"{head}\n\nClick the link to view images & introduction video or Download:\n\n{url}"
+
+
+async def _handle_media_names(ctx: ExecContext, names: List[str]) -> ExecResult:
+    candidates = await _fetch_all_talent_candidates()
+    blocks: List[str] = []
+    for name_q in names:
+        talent_id, _label, _err, ambiguous = await _resolve_talent_query_target_by_name(name_q, candidates)
+        if ambiguous:
+            if len(names) == 1:
+                return await _ask_show_me_talent_clarification(ctx, name_q, ambiguous, {"request_type": "media"})
+            blocks.append(f'"{name_q}" — multiple matching talents found. Ask about them one at a time to pick.')
+            continue
+        if not talent_id:
+            if len(names) == 1:
+                return ExecResult(ok=False, error="talent_not_found", message=_talent_not_found_profile_message(name_q))
+            blocks.append(f'"{name_q}" — {_talent_not_found_profile_message(name_q)}')
+            continue
+        blocks.append(await _render_media_link(talent_id))
+    return ExecResult(ok=True, message="\n\n---\n\n".join(blocks))
+
+
+async def _try_handle_media_link_request(ctx: ExecContext, chunk: str) -> Optional[ExecResult]:
+    """Recognizes "<talent>'s media [link]" / "media link of <talent>" /
+    comma-separated talents. Returns None (never an error) for anything that
+    isn't a media request — including a FORM command ("... form for <project>",
+    even if the project is called "... Media ...") and a filtered-talents
+    search — so every other command is unaffected."""
+    if not _MEDIA_WORD_RE.search(chunk) or _FORM_FOR_RE.search(chunk) or _TALENTS_WORD_RE.search(chunk):
+        return None
+    talent_part = re.sub(r"(?i)^\s*the\s+", "", chunk)
+    talent_part = _MEDIA_WORD_RE.sub("", talent_part)
+    talent_part = _LEADING_OF_FOR_RE.sub("", talent_part)
+    talent_part = _TRAILING_OF_FOR_RE.sub("", talent_part)
+    names = []
+    for part in talent_part.strip(" ,").split(","):
+        n = _TRAILING_POSSESSIVE_RE.sub("", part.strip()).strip().rstrip("’'").strip()
+        if n:
+            names.append(n)
+    if not names:
+        return None
+    return await _handle_media_names(ctx, names)
+
+
+# ---------------------------------------------------------------------------
 # SHOW ME FILTERED TALENTS — reuses routers/talents.py's own
 # _build_talent_query (the SAME DB-side gender/age/height/location query
 # builder casting_pipeline.py's own talent_search feature already calls)
@@ -880,6 +946,8 @@ async def _resume_show_me(session: Optional[dict], ctx: ExecContext) -> ExecResu
             return ExecResult(ok=False, error="expired", message="That selection has expired — please send your command again.")
         if resume.get("request_type") == "profile":
             return ExecResult(ok=True, message=await _render_talent_profile(talent_id, talent_label))
+        if resume.get("request_type") == "media":
+            return ExecResult(ok=True, message=await _render_media_link(talent_id))
         project_q = resume.get("project_query") or ""
         projects = await _fetch_ongoing_projects()
         pmatch = nlu.resolve_project_by_name(project_q, projects)
@@ -1023,6 +1091,9 @@ async def _show_me_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     profile_result = await _try_handle_profile_request(ctx, chunks[0])
     if profile_result is not None:
         return profile_result
+    media_result = await _try_handle_media_link_request(ctx, chunks[0])
+    if media_result is not None:
+        return media_result
     filtered_result = await _try_handle_filtered_talents_request(ctx, chunks[0])
     if filtered_result is not None:
         return filtered_result
@@ -1082,6 +1153,8 @@ HELP_TEXT = (
     "3. SHOW ME TALENTS BY CRITERIA\n\n"
     "Show me all female talents between 18 and 25 in Mumbai\n\n"
     "Show me female talents height 5'4 to 5'8 in Mumbai\n\n"
+    "4. SHOW ME MEDIA LINK\n\n"
+    "Show me Angela's media link\n\n"
     "IMPORTANT\n\n"
     "- Spelling and spacing can be approximate.\n"
     "- Commas separate multiple talents or criteria.\n"

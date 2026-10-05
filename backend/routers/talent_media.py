@@ -175,6 +175,25 @@ async def ensure_token(tid: str) -> Optional[str]:
     return (t or {}).get("media_download_token")
 
 
+async def resolve_media_link(tid: str) -> Optional[Tuple[str, Optional[str]]]:
+    """The ONE canonical way to ask "what is this talent's media link?" for any
+    caller that isn't the public page itself (the WhatsApp notification and the
+    Fletcher agent both go through the same token + toggle rules).
+
+    Returns None if the talent doesn't exist, else (name, url). `url` is None
+    when the link is currently unavailable (toggle OFF, or archived/merged) —
+    callers must then NOT offer any fallback link. When enabled, the token is
+    the existing one (minted at most once by ensure_token)."""
+    talent = await db.talents.find_one({"id": tid}, {"_id": 0, "name": 1, "status": 1, "media_download_enabled": 1})
+    if not talent:
+        return None
+    name = talent.get("name") or ""
+    if not is_media_download_enabled(talent) or str(talent.get("status") or "").lower() in _BLOCKED_STATUSES:
+        return name, None
+    token = await ensure_token(tid)
+    return name, (media_link_url(token) if token else None)
+
+
 async def _talent_for_token(token: str) -> dict:
     """Resolve token -> talent, enforcing the toggle EVERY call. Invalid,
     unknown, disabled and archived/merged all return the same 404 so the

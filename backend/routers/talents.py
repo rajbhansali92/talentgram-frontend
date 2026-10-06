@@ -166,6 +166,22 @@ _LIST_PROJECTION = {
 }
 
 
+# Media counters for the list rows, computed from `media[]` INSIDE the pipeline (before
+# _LIST_PROJECTION drops the array), so the heavy array still never reaches the client.
+#   video_count — 1 if the talent has an Introduction Video, else 0. The intro video is the
+#                 single media with category "video" (the same field the Talent Preview plays);
+#                 a talent has one intro-video slot, hence the min(1, n).
+#   image_count — every other media item (what the row's image counter always meant to show;
+#                 the stored media_count is the TOTAL, which includes the video).
+# No schema change, nothing stored.
+_LIST_MEDIA_COUNTS_STAGE = {"$addFields": {
+    "video_count": {"$min": [1, {"$size": {"$filter": {
+        "input": {"$ifNull": ["$media", []]}, "cond": {"$eq": ["$$this.category", "video"]}}}}]},
+    "image_count": {"$size": {"$filter": {
+        "input": {"$ifNull": ["$media", []]}, "cond": {"$ne": ["$$this.category", "video"]}}}},
+}}
+
+
 def _enrich_list(doc: dict) -> dict:
     """Lightweight enrichment for list responses.
 
@@ -500,7 +516,7 @@ async def list_talents(
             {"$addFields": {score_field: score_expr}},
             {"$sort": {score_field: direction, "_id": 1}},
             {"$facet": {
-                "data": [{"$skip": skip}, {"$limit": page_size}, {"$project": _LIST_PROJECTION}],
+                "data": [{"$skip": skip}, {"$limit": page_size}, _LIST_MEDIA_COUNTS_STAGE, {"$project": _LIST_PROJECTION}],
                 "count": [{"$count": "total"}],
             }},
         ]
@@ -517,7 +533,7 @@ async def list_talents(
             {"$addFields": {"_hasValue": _has_value_expr(field)}},
             {"$sort": {"_hasValue": -1, field: direction, "_id": 1}},
             {"$facet": {
-                "data": [{"$skip": skip}, {"$limit": page_size}, {"$project": _LIST_PROJECTION}],
+                "data": [{"$skip": skip}, {"$limit": page_size}, _LIST_MEDIA_COUNTS_STAGE, {"$project": _LIST_PROJECTION}],
                 "count": [{"$count": "total"}],
             }},
         ]
@@ -529,9 +545,11 @@ async def list_talents(
 
     sort_spec = _SIMPLE_SORTS.get(sort_by, [("created_at", -1)])
     collation = {"locale": "en", "strength": 2} if sort_by in ("name_asc", "name_desc") else None
-    cursor = db.talents.find(query, _LIST_PROJECTION).sort(sort_spec)
-    if collation:
-        cursor = cursor.collation(collation)
+    # Same match/sort/skip/limit as the former find(); aggregate() only so the media counters
+    # can be computed before `media` is projected away.
+    pipeline = [{"$match": query}, {"$sort": dict(sort_spec)}, {"$skip": skip}, {"$limit": page_size},
+                _LIST_MEDIA_COUNTS_STAGE, {"$project": _LIST_PROJECTION}]
+    cursor = db.talents.aggregate(pipeline, collation=collation) if collation else db.talents.aggregate(pipeline)
     # count_documents and the find don't depend on each other — run them
     # concurrently instead of two sequential round trips. The other two
     # sort branches above already avoid this via a single $facet
@@ -540,7 +558,7 @@ async def list_talents(
     # Mongo round trip in production.
     total, talents = await asyncio.gather(
         db.talents.count_documents(query),
-        cursor.skip(skip).limit(page_size).to_list(page_size),
+        cursor.to_list(page_size),
     )
     return _paginated([_enrich_list(t) for t in talents], total, p, s)
 

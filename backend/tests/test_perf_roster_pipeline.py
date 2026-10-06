@@ -53,10 +53,9 @@ def test_talents_list_never_returns_media():
         "cover_thumbnail_url": "https://cdn/thumb.jpg", "media_count": 3,
         "status": "active", "created_at": "2026-01-01T00:00:00Z",
     }
+    # The default list branch is an aggregate() pipeline (so the media counters can be
+    # computed before `media` is projected away) — see _LIST_MEDIA_COUNTS_STAGE.
     mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = mock_cursor
-    mock_cursor.skip.return_value = mock_cursor
-    mock_cursor.limit.return_value = mock_cursor
     mock_cursor.to_list = AsyncMock(return_value=[talent_doc])
 
     # current_user is baked into current_team_or_admin's Depends(...) default
@@ -68,7 +67,7 @@ def test_talents_list_never_returns_media():
     }
     try:
         with patch.object(talents_module, "db") as mock_db:
-            mock_db.talents.find.return_value = mock_cursor
+            mock_db.talents.aggregate.return_value = mock_cursor
             mock_db.talents.count_documents = AsyncMock(return_value=1)
 
             resp = client.get("/api/talents?page=0&size=10", headers=_admin_headers())
@@ -82,8 +81,9 @@ def test_talents_list_never_returns_media():
     # The projection actually passed to Mongo must exclude it too — asserting
     # only on the response wouldn't catch a fix that filters it out in Python
     # after already paying the Mongo transfer cost.
-    _, kwargs_or_projection = mock_db.talents.find.call_args[0]
-    assert kwargs_or_projection.get("media") == 0, "Mongo projection must exclude media"
+    pipeline = mock_db.talents.aggregate.call_args[0][0]
+    projection = pipeline[-1]["$project"]  # the LAST stage must be the one that drops media
+    assert projection.get("media") == 0, "Mongo projection must exclude media"
     # Denormalized fields still flow through correctly.
     assert items[0]["cover_url"] == "https://cdn/cover.jpg"
     assert items[0]["cover_thumbnail_url"] == "https://cdn/thumb.jpg"

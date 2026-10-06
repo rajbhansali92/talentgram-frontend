@@ -19,6 +19,7 @@ import MergeEmailsModal from "@/components/MergeEmailsModal";
 // parallel preview system, no duplicated rendering.
 import { TalentPreviewDrawer, useMediaQuery } from "@/components/pipeline/TalentBrowserModal";
 import { talentPreviewCache } from "@/lib/talentPreviewCache";
+import { talentMediaCounts } from "@/lib/talentMediaCounts";
 import { getRosterSnapshot, setRosterSnapshot } from "@/lib/talentRosterCache";
 import { useTalentDirectory } from "@/hooks/useTalentDirectory";
 import { useSwipeNavigation } from "@/hooks/useSwipeNavigation";
@@ -311,7 +312,7 @@ export const TalentCard = React.memo(function TalentCard({
 // ---------------------------------------------------------------------------
 // Single roster row — memoized to avoid re-renders on parent state changes
 // ---------------------------------------------------------------------------
-const TalentListRow = React.memo(function TalentListRow({
+export const TalentListRow = React.memo(function TalentListRow({
     t,
     checked,
     isSelectionMode,
@@ -356,12 +357,9 @@ const TalentListRow = React.memo(function TalentListRow({
         [t, onQuickView]
     );
 
-    // Filter media arrays safely
-    const mediaList = t.media || [];
-    const imageCount = t.media_count !== undefined 
-        ? t.media_count 
-        : mediaList.filter(m => m.category !== "video").length;
-    const videoCount = mediaList.filter(m => m.category === "video" || m.content_type?.startsWith("video/")).length;
+    // List rows never receive media[] (see _LIST_PROJECTION); the API sends image_count /
+    // video_count instead. Single place that defines both counters: lib/talentMediaCounts.js.
+    const { imageCount, videoCount } = talentMediaCounts(t);
 
     const formattedDate = useMemo(() => {
         const dateStr = t.updated_at || t.created_at;

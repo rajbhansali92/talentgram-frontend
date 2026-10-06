@@ -43,7 +43,7 @@ export function pruneSelection(selected, groups) {
 }
 
 /** The shape POST/PUT /links expects for a roster link. */
-export function buildRosterPayload({ title, subtitle, talentIds, mediaByTalent, isPublic = true }) {
+export function buildRosterPayload({ title, subtitle, talentIds, mediaByTalent, fields = null, isPublic = true }) {
     return {
         title: title.trim(),
         brand_name: null,
@@ -60,6 +60,8 @@ export function buildRosterPayload({ title, subtitle, talentIds, mediaByTalent, 
         link_type: "roster",
         roster: {
             subtitle: (subtitle || "").trim() || null,
+            // Roster-level field visibility (null = leave the server's stored/default config alone).
+            ...(fields ? { fields } : {}),
             talents: talentIds.map((id) => ({ talent_id: id, media_ids: mediaByTalent[id] || [] })),
         },
     };
@@ -71,4 +73,14 @@ export function shortTalentName(name) {
     if (!parts.length) return "Talent";
     if (parts.length === 1) return parts[0];
     return `${parts.slice(0, -1).join(" ")} ${parts[parts.length - 1][0].toUpperCase()}`;
+}
+
+/** Toggle one roster field; returns a new map. */
+export function toggleField(fields, key) {
+    return { ...fields, [key]: !fields[key] };
+}
+
+/** Number of enabled fields (for the compact summary). */
+export function countEnabled(fields) {
+    return Object.values(fields || {}).filter(Boolean).length;
 }

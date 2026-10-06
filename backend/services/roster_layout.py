@@ -73,10 +73,26 @@ class Page:
     slots: List[Slot] = field(default_factory=list)
     template: str = ""  # hero: "portrait" | "landscape"; informational for web/tests
     fill: float = 0.0
+    info: List[dict] = field(default_factory=list)  # placed metadata (x/y/w/lines in mm)
+    rule_y: Optional[float] = None
+    video_y: Optional[float] = None
+    hero_h: Optional[float] = None
+    name_pt: Optional[float] = None
 
     def as_dict(self) -> dict:
-        return {"kind": self.kind, "template": self.template, "fill": round(self.fill, 3),
-                "slots": [s.as_dict() for s in self.slots]}
+        d = {"kind": self.kind, "template": self.template, "fill": round(self.fill, 3),
+             "slots": [s.as_dict() for s in self.slots]}
+        if self.kind == "info":
+            d["name_pt"] = self.name_pt
+        if self.kind in ("hero", "info"):
+            d["info"] = [{**{k: v for k, v in it.items() if k != "block"},
+                          "x": round(it["x"], 3), "y": round(it["y"], 3), "w": round(it["w"], 3)} for it in self.info]
+        if self.kind == "hero":
+            d["rule_y"] = round(self.rule_y, 3) if self.rule_y is not None else None
+            d["video_y"] = round(self.video_y, 3) if self.video_y is not None else None
+            d["hero_h"] = round(self.hero_h, 3) if self.hero_h is not None else None
+            d["name_pt"] = self.name_pt
+        return d
 
 
 # --------------------------------------------------------------------------
@@ -132,7 +148,7 @@ def _trees(items: Sequence[Tuple[str, float]]):
 
 def fit_images(
     items: Sequence[Tuple[str, float]], box_x: float, box_y: float, box_w: float, box_h: float,
-    gap: float = GAP, valign: str = "center",
+    gap: float = GAP, valign: str = "center", halign: str = "center",
 ) -> Tuple[List[Slot], float]:
     """Best slicing layout of `items` [(media_id, ratio w/h)] inside the box.
     Returns (slots, fill) where fill = placed image area / box area. Every slot
@@ -150,7 +166,7 @@ def fit_images(
         if h <= 0:
             continue
         slots: List[Slot] = []
-        ox = box_x + (box_w - w) / 2.0
+        ox = box_x + ((box_w - w) / 2.0 if halign == "center" else 0.0)
         oy = box_y + ((box_h - h) / 2.0 if valign == "center" else 0.0)
         _place(tree, ox, oy, w, h, gap, slots)
         area = sum(s.w * s.h for s in slots)
@@ -203,6 +219,153 @@ def paginate_gallery(items: Sequence[Tuple[str, float]]) -> List[Page]:
 
 
 # --------------------------------------------------------------------------
+# Information area (talent metadata) — wrapped with the real font metrics
+# --------------------------------------------------------------------------
+import os
+from functools import lru_cache
+
+_FONT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "fonts", "Manrope-Regular.ttf"))
+PT_MM = 0.352778
+VALUE_PT = 10.5
+VALUE_LINE_H = 4.8
+LABEL_TO_VALUE = 5.2
+ROW_GAP = 5.0
+INFO_ROW_CAP = 5.0          # total column weight that fits one row
+INFO_ROW_MIN_TOTAL = 4.65   # sparse rows keep this scale (never stretch to full width)
+INFO_WEIGHTS = {"age": 0.55, "height": 0.7, "gender": 0.75, "ethnicity": 1.1,
+                "instagram_followers": 1.1, "location": 1.9, "instagram": 1.5}
+BUTTON_H = 9.0
+INFO_LIMIT_Y = 272.0
+HERO_BASE_H = 176.0
+HERO_MIN_H = 128.0
+INFO_PAGE_TOP = 58.0
+INFO_PAGE_BOTTOM = 270.0
+
+
+@lru_cache(maxsize=1)
+def _font():
+    from PIL import ImageFont
+    return ImageFont.truetype(_FONT_PATH, 1000)
+
+
+def text_width_mm(text: str, size_pt: float = VALUE_PT) -> float:
+    return _font().getlength(text) / 1000.0 * size_pt * PT_MM
+
+
+NAME_BASE_PT = 28.0
+NAME_MIN_PT = 14.0
+
+
+def name_pt(name: str, base: float = NAME_BASE_PT) -> float:
+    """Headline size for a talent name: 28pt, stepped down (never below 14pt) until the
+    upper-cased, tracked name fits the content width. SemiBold is a little wider than the
+    Regular metrics measured here, hence the 1.08 allowance. Both the web page and the PDF
+    use this, so a very long name can never run off the page."""
+    up = (name or "").upper()
+    size = base
+    while size > NAME_MIN_PT and text_width_mm(up, size) * 1.08 + 0.352778 * 1.0 * len(up) > CONTENT_W:
+        size -= 1.0
+    return size
+
+
+def wrap_lines(text: str, max_w: float, max_lines: int, size_pt: float = VALUE_PT) -> List[str]:
+    """Greedy word wrap using Manrope metrics; the last allowed line is
+    ellipsised when the text does not fit. Never returns an empty list."""
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if text_width_mm(trial, size_pt) <= max_w or not cur:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1] + " …"
+        while len(last) > 2 and text_width_mm(last, size_pt) > max_w:
+            last = last[:-3].rstrip() + " …"
+        lines[-1] = last
+    out = []
+    for ln in lines:  # a single unbreakable word wider than the column
+        while text_width_mm(ln, size_pt) > max_w and len(ln) > 1:
+            ln = ln[:-2].rstrip() + "…"
+        out.append(ln)
+    return out or [""]
+
+
+def _needs_full_row(it: dict) -> bool:
+    """A short-field value that cannot be shown IN FULL in its normal column within two
+    lines (e.g. a 30-character handle, a four-city location) gets its own full-width row
+    instead of being ellipsised. Information is never cut."""
+    w = INFO_WEIGHTS.get(it["key"], 1.0) * (CONTENT_W / INFO_ROW_MIN_TOTAL) - 5.0
+    words = it["value"].split()
+    if any(text_width_mm(wd) > w for wd in words):
+        return True
+    lines, cur = 0, ""
+    for wd in words:
+        trial = (cur + " " + wd).strip()
+        if text_width_mm(trial) <= w or not cur:
+            cur = trial
+        else:
+            lines += 1
+            cur = wd
+    lines += 1 if cur else 0
+    return lines > 2
+
+
+def place_info(items: Sequence[dict], y0: float, max_lines: int = 2, block_lines: int = 6,
+               left: float = MARGIN, width: float = CONTENT_W) -> Tuple[List[dict], float]:
+    """Pack info items into rows starting at y0. Short items share a row (by
+    column weight); `block` items (skills, languages) take a full-width row.
+    Returns (placed items with x/y/w/lines, visual bottom of the last row)."""
+    placed: List[dict] = []
+    y = y0
+    bottom = y0
+    row: List[dict] = []
+    row_total = 0.0
+
+    def flush():
+        nonlocal y, bottom, row, row_total
+        if not row:
+            return
+        scale = width / max(row_total, INFO_ROW_MIN_TOTAL)
+        x = left
+        row_lines = 1
+        cells = []
+        for it in row:
+            w = INFO_WEIGHTS.get(it["key"], 1.0) * scale
+            lines = wrap_lines(it["value"], w - 5.0, max_lines)
+            row_lines = max(row_lines, len(lines))
+            cells.append((it, x, w, lines))
+            x += w
+        for it, cx, w, lines in cells:
+            placed.append({**it, "x": cx, "y": y, "w": w, "lines": lines})
+        bottom = y + LABEL_TO_VALUE + VALUE_LINE_H * row_lines
+        y += LABEL_TO_VALUE + VALUE_LINE_H * row_lines + ROW_GAP
+        row, row_total = [], 0.0
+
+    for it in items:
+        if not it.get("block") and _needs_full_row(it):
+            it = {**it, "block": True}
+        if it.get("block"):
+            flush()
+            lines = wrap_lines(it["value"], width - 5.0, block_lines)
+            placed.append({**it, "x": left, "y": y, "w": width, "lines": lines})
+            bottom = y + LABEL_TO_VALUE + VALUE_LINE_H * len(lines)
+            y += LABEL_TO_VALUE + VALUE_LINE_H * len(lines) + ROW_GAP
+            continue
+        wgt = INFO_WEIGHTS.get(it["key"], 1.0)
+        if row and row_total + wgt > INFO_ROW_CAP:
+            flush()
+        row.append(it)
+        row_total += wgt
+    flush()
+    return placed, bottom
+
+
+# --------------------------------------------------------------------------
 # Hero / comp-card page
 # --------------------------------------------------------------------------
 def _hero_slot(media_id: str, ratio: float, box: Tuple[float, float, float, float]) -> Slot:
@@ -233,52 +396,140 @@ def _hero_slot(media_id: str, ratio: float, box: Tuple[float, float, float, floa
     return Slot(media_id, bx + (bw - w) / 2.0, by + (bh - h) / 2.0, w, h, fit="contain")
 
 
-# Hero page geometry (mm)
-HERO_PORTRAIT_BOX = (MARGIN, BODY_TOP, 120.0, 176.0)
-HERO_PORTRAIT_SUPPORT_BOX = (MARGIN + 120.0 + GAP, BODY_TOP, CONTENT_W - 120.0 - GAP, 176.0)
-HERO_FULL_BOX = (MARGIN, BODY_TOP, CONTENT_W, 176.0)
-HERO_LANDSCAPE_BOX = (MARGIN, BODY_TOP, CONTENT_W, 114.0)
-HERO_LANDSCAPE_SUPPORT_BOX = (MARGIN, BODY_TOP + 114.0 + GAP, CONTENT_W, 58.0)
-INFO_Y_PORTRAIT = 240.0
-INFO_Y_LANDSCAPE = 238.0
+# Hero page geometry (mm). Heights depend on `hero_h` (default HERO_BASE_H); the
+# info area below it grows by shrinking the hero, never by crushing the type.
+def _hero_boxes(hero_h: float, supports: bool, landscape: bool, hero_ratio: float = 0.72):
+    if landscape:
+        # landscape heroes scale with hero_h but keep the supports strip
+        top = hero_h * (114.0 / HERO_BASE_H)
+        strip = hero_h - top - GAP
+        return ((MARGIN, BODY_TOP, CONTENT_W, top),
+                (MARGIN, BODY_TOP + top + GAP, CONTENT_W, max(strip, 30.0)))
+    # Default geometry: 120mm hero column. When the info area forces a shorter hero,
+    # the column narrows to the photo's own width (no letter-box gutter) and the
+    # supporting images get the freed space.
+    hero_w = 120.0 if hero_h >= HERO_BASE_H - 1e-6 else min(120.0, max(hero_h * hero_ratio, 80.0))
+    return ((MARGIN, BODY_TOP, hero_w if supports else CONTENT_W, hero_h),
+            (MARGIN + hero_w + GAP, BODY_TOP, CONTENT_W - hero_w - GAP, hero_h))
 
 
-def plan_hero_page(items: Sequence[Tuple[str, float]]) -> Tuple[Page, List[Tuple[str, float]]]:
-    """Hero page = first image (hero) + up to two supporting images. Returns the
-    page and the images that did not fit (for gallery pages)."""
-    hero_id, hero_ratio = items[0]
+HERO_PORTRAIT_BOX = (MARGIN, BODY_TOP, 120.0, HERO_BASE_H)  # default-geometry reference (tests / docs)
+
+
+HERO_COMFORT_H = 150.0  # below this, long text blocks move to an information page instead of shrinking the hero further
+
+
+def _fit_info(main: List[dict], has_video: bool, min_h: float):
+    """Try to fit `main` under the hero, shrinking the hero down to `min_h`.
+    Returns (fit_ok, hero_h, placed, rule_y, video_y)."""
+    hero_h = HERO_BASE_H
+    placed, rule_y, video_y = [], BODY_TOP + hero_h + 6.0, None
+    for _ in range(40):
+        rule_y = BODY_TOP + hero_h + 6.0
+        y0 = rule_y + 4.0
+        placed, rows_bottom = place_info(main, y0)
+        if main:
+            # legacy position (rule + 23) when short; pushed down only if the rows need it
+            video_y = max(y0 + 19.0, rows_bottom + 4.2) if has_video else None
+        else:
+            video_y = y0 if has_video else None
+        total_bottom = (video_y + BUTTON_H) if has_video else (rows_bottom if main else y0)
+        over = total_bottom - INFO_LIMIT_Y
+        if over <= 1e-6:
+            return True, hero_h, placed, rule_y, video_y
+        if hero_h - over >= min_h:
+            hero_h -= over
+            continue
+        return False, hero_h, placed, rule_y, video_y
+    return False, hero_h, placed, rule_y, video_y
+
+
+def _plan_info(info_items: Sequence[dict], has_video: bool):
+    """Choose hero height + which info items stay on the hero page. Returns
+    (hero_h, placed_main, rule_y, video_y, overflow_items). Preference order:
+    keep everything under the hero (shrinking it up to the comfort limit) ->
+    move the long text blocks (skills/languages) to an information page ->
+    shrink the hero further -> spill the trailing items."""
+    main = list(info_items)
+    ok, hero_h, placed, rule_y, video_y = _fit_info(main, has_video, HERO_COMFORT_H)
+    if ok:
+        return hero_h, placed, rule_y, video_y, []
+    blocks = [it for it in main if it.get("block")]
+    if blocks:
+        main = [it for it in main if not it.get("block")]
+        overflow = blocks
+    else:
+        overflow = []
+    while True:
+        ok, hero_h, placed, rule_y, video_y = _fit_info(main, has_video, HERO_MIN_H)
+        if ok or not main:
+            return hero_h, placed, rule_y, video_y, overflow
+        overflow.insert(0, main.pop())
+
+
+def plan_hero_page(items: Sequence[Tuple[str, float]], info_items: Sequence[dict] = (), has_video: bool = False,
+                   ) -> Tuple[Page, List[Tuple[str, float]], List[dict]]:
+    """Hero page = first image (hero) + up to two supporting images + the info
+    area. Returns the page, the images that did not fit (for gallery pages) and
+    the info items that did not fit (for an information page)."""
+    hero_h, placed, rule_y, video_y, overflow = _plan_info(info_items, has_video)
+    hero_id, hero_ratio = items[0] if items else (None, 1.0)
     supports = list(items[1:3])
     rest = list(items[3:])
     landscape = hero_ratio >= LANDSCAPE_HERO_RATIO
     slots: List[Slot] = []
-    if landscape:
-        slots.append(_hero_slot(hero_id, hero_ratio, HERO_LANDSCAPE_BOX))
-        if supports:
-            s, _ = fit_images(supports, *HERO_LANDSCAPE_SUPPORT_BOX, valign="top")
-            slots.extend(s)
-        template = "landscape"
-    else:
-        hero_box = HERO_PORTRAIT_BOX if supports else HERO_FULL_BOX
+    template = "landscape" if landscape else "portrait"
+    if hero_id is not None:
+        hero_box, sup_box = _hero_boxes(hero_h, bool(supports), landscape, hero_ratio)
         slots.append(_hero_slot(hero_id, hero_ratio, hero_box))
         if supports:
-            s, _ = fit_images(supports, *HERO_PORTRAIT_SUPPORT_BOX, valign="top")
-            slots.extend(s)
-        template = "portrait"
+            s_, _ = fit_images(supports, *sup_box, valign="top",
+                               halign="center" if hero_h >= HERO_BASE_H - 1e-6 else "left")
+            slots.extend(s_)
     area = sum(s.w * s.h for s in slots)
-    return Page(kind="hero", slots=slots, template=template, fill=area / (CONTENT_W * 176.0)), rest
+    page = Page(kind="hero", slots=slots, template=template, fill=area / (CONTENT_W * hero_h))
+    page.info = placed
+    page.rule_y = rule_y
+    page.video_y = video_y
+    page.hero_h = hero_h
+    return page, rest, overflow
 
 
-def info_y(template: str) -> float:
-    return INFO_Y_LANDSCAPE if template == "landscape" else INFO_Y_PORTRAIT
+def info_y(template: str) -> float:  # legacy accessor (default geometry)
+    return BODY_TOP + HERO_BASE_H + 6.0 + 4.0
 
 
-def plan_talent_pages(items: Sequence[Tuple[str, float]]) -> List[Page]:
+def plan_info_pages(overflow: Sequence[dict], page_name: str = "") -> List[Page]:
+    """Clean information page(s) for the fields that did not fit under the hero."""
+    pages: List[Page] = []
+    items = list(overflow)
+    while items:
+        chunk: List[dict] = []
+        placed: List[dict] = []
+        for it in items:
+            trial, bottom = place_info(chunk + [it], INFO_PAGE_TOP, max_lines=3, block_lines=14)
+            if bottom > INFO_PAGE_BOTTOM and chunk:
+                break
+            chunk.append(it)
+            placed = trial
+        items = items[len(chunk):]
+        pg = Page(kind="info", slots=[], template="info")
+        pg.info = placed
+        pg.name_pt = name_pt(page_name, 20.0) if page_name else 20.0
+        pages.append(pg)
+    return pages
+
+
+def plan_talent_pages(items: Sequence[Tuple[str, float]], info_items: Sequence[dict] = (),
+                      has_video: bool = False, name: str = "") -> List[Page]:
     """items = [(media_id, ratio)] in the admin's order; the first is the hero.
     A talent with no images still gets a (text-only) hero page."""
-    if not items:
-        return [Page(kind="hero", slots=[], template="portrait")]
-    hero, rest = plan_hero_page(items)
-    return [hero] + paginate_gallery(rest)
+    hero, rest, overflow = plan_hero_page(items, info_items, has_video)
+    hero.name_pt = name_pt(name) if name else NAME_BASE_PT
+    pages = [hero]
+    pages += plan_info_pages(overflow, name)
+    pages += paginate_gallery(rest)
+    return pages
 
 
 def safe_ratio(w: Optional[float], h: Optional[float]) -> float:

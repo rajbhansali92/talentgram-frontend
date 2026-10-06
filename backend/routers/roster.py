@@ -52,6 +52,7 @@ from core import (
 )
 from routers.links import _extract_stream_uid, _format_location, _require_active_link
 from routers.talent_media import short_talent_name
+from services import roster_fields as F
 from services import roster_layout as L
 from services import roster_pdf
 
@@ -143,6 +144,12 @@ async def probe_image_dims(client: httpx.AsyncClient, url: str) -> Optional[Tupl
         except Exception:
             continue
     return None
+
+
+@router.get("/roster/fields")
+async def roster_fields_registry(admin: dict = Depends(current_team_or_admin)):
+    """The field groups/defaults the roster builder offers (single source of truth)."""
+    return F.registry()
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +247,17 @@ async def prepare_roster(raw: Optional[dict], existing: Optional[dict] = None) -
                 if d:
                     out_talents[idx]["dims"][mid] = [d[0], d[1]]
     subtitle = (raw.get("subtitle") or "").strip() or None
-    return [e["talent_id"] for e in entries], {"subtitle": subtitle, "talents": out_talents, "updated_at": _now()}
+    # Field visibility is roster-level config (never touches a talent). A save that
+    # sends no `fields` keeps an existing roster's stored config; a brand-new roster
+    # (or one that never had any) gets the standard defaults stored explicitly.
+    if isinstance(raw.get("fields"), dict):
+        fields = F.normalize_fields(raw["fields"])
+    elif F.has_stored_fields((existing or {}).get("roster")):
+        fields = F.normalize_fields(existing["roster"]["fields"])
+    else:
+        fields = F.normalize_fields(None)
+    return [e["talent_id"] for e in entries], {"subtitle": subtitle, "fields": fields, "talents": out_talents,
+                                               "updated_at": _now()}
 
 
 def _warm_pdf(link: dict) -> None:
@@ -323,29 +340,18 @@ async def update_roster_link(lid: str, payload: LinkIn, admin: dict, existing: d
 # ---------------------------------------------------------------------------
 # Resolve a roster against live talent data (web view + PDF input)
 # ---------------------------------------------------------------------------
-def _info_items(t: dict) -> List[dict]:
+def _info_items(t: dict, fields: Dict[str, bool]) -> List[dict]:
     t = enrich_talent(dict(t)) or {}
-    items: List[dict] = []
-    if t.get("age") not in (None, ""):
-        items.append({"label": "Age", "value": str(t["age"])})
-    if t.get("height"):
-        items.append({"label": "Height", "value": str(t["height"])})
-    loc = _format_location(t.get("location")) if t.get("location") else ""
-    if loc and loc != "-":
-        items.append({"label": "Location", "value": loc})
-    handle = normalize_instagram_handle(t.get("instagram_handle"))
-    if handle:
-        items.append({"label": "Instagram", "value": f"@{handle}", "href": f"https://www.instagram.com/{handle}/"})
-    return items
+    return F.info_items(t, fields, _format_location, normalize_instagram_handle)
 
 
 async def resolve_roster(link: dict) -> Dict[str, Any]:
     roster = link.get("roster") or {}
+    fields = F.normalize_fields(roster.get("fields"))  # old rosters (no stored config) -> defaults
     entries = roster.get("talents") or []
     docs = await db.talents.find(
         {"id": {"$in": [e["talent_id"] for e in entries]}},
-        {"_id": 0, "id": 1, "name": 1, "media": 1, "age": 1, "dob": 1, "height": 1, "location": 1,
-         "instagram_handle": 1, "status": 1},
+        F.projection(),
     ).to_list(len(entries) or 1)
     by_id = {d["id"]: d for d in docs}
     talents: List[dict] = []
@@ -363,32 +369,28 @@ async def resolve_roster(link: dict) -> Dict[str, Any]:
             d = (e.get("dims") or {}).get(mid)
             images.append({"id": mid, "url": m["url"], "category": cat,
                            "ratio": L.safe_ratio(d[0], d[1]) if d else L.DEFAULT_RATIO})
-        video = _intro_video(t)
+        video = _intro_video(t) if fields.get("intro_video") else None
         talents.append({
-            "name": short_talent_name(t.get("name")),
-            "info": _info_items(t),
+            # Name OFF: a neutral numbered label keeps nav / index usable without naming the talent.
+            "name": short_talent_name(t.get("name")) if fields.get("name") else f"Talent {len(talents) + 1:02d}",
+            "info": _info_items(t, fields),
             "video_url": video_watch_url(video) if video else None,
             "images": images,
         })
-    return {"title": link.get("title") or "Talentgram Roster", "subtitle": roster.get("subtitle"), "talents": talents}
+    return {"title": link.get("title") or "Talentgram Roster", "subtitle": roster.get("subtitle"),
+            "fields": fields, "talents": talents}
 
 
 def web_view(resolved: Dict[str, Any]) -> Dict[str, Any]:
     talents = []
     for i, t in enumerate(resolved["talents"]):
-        plan = L.plan_talent_pages([(im["id"], im["ratio"]) for im in t["images"]])
-        pages = []
-        for p in plan:
-            d = p.as_dict()
-            if p.kind == "hero":
-                d["info_y"] = L.info_y(p.template)
-            pages.append(d)
+        plan = L.plan_talent_pages([(im["id"], im["ratio"]) for im in t["images"]], t["info"], bool(t["video_url"]), t["name"])
         talents.append({
             "key": f"t{i + 1}", "index": i + 1, "name": t["name"], "info": t["info"],
             "video": {"url": t["video_url"]} if t["video_url"] else None,
-            "images": t["images"], "pages": pages,
+            "images": t["images"], "pages": [p.as_dict() for p in plan],
         })
-    return {"title": resolved["title"], "subtitle": resolved["subtitle"],
+    return {"title": resolved["title"], "subtitle": resolved["subtitle"], "fields": resolved["fields"],
             "page": {"w": L.PAGE_W, "h": L.PAGE_H, "margin": L.MARGIN},
             "talents": talents, "pdf_available": any(t["images"] for t in resolved["talents"])}
 

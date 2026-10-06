@@ -34,9 +34,25 @@ const OPTIONS = {
     ],
 };
 
+const REGISTRY = {
+    groups: [
+        { key: "basic", label: "Basic information", fields: [
+            { key: "name", label: "Name", default: true }, { key: "age", label: "Age", default: true },
+            { key: "ethnicity", label: "Ethnicity", default: false }] },
+        { key: "social", label: "Social", fields: [
+            { key: "instagram", label: "Instagram", default: true },
+            { key: "instagram_followers", label: "Instagram Followers", default: false }] },
+        { key: "media", label: "Media", fields: [{ key: "intro_video", label: "Introduction Video", default: true }] },
+    ],
+    defaults: { name: true, age: true, ethnicity: false, instagram: true, instagram_followers: false, intro_video: true },
+};
+
 beforeEach(() => {
     adminApi.get.mockReset(); adminApi.post.mockReset(); adminApi.put.mockReset();
-    adminApi.get.mockResolvedValue({ data: { items: TALENTS, has_more: false } });
+    adminApi.get.mockImplementation((url) => {
+        if (url === "/roster/fields") return Promise.resolve({ data: REGISTRY });
+        return Promise.resolve({ data: { items: TALENTS, has_more: false } });
+    });
     adminApi.post.mockImplementation((url) => {
         if (url === "/roster/media-options") return Promise.resolve({ data: OPTIONS });
         if (url === "/links") return Promise.resolve({ data: { id: "L1", slug: "talentgram-x-pepsi-abc", title: "Talentgram X Pepsi", talent_ids: ["t2", "t1"] } });
@@ -118,5 +134,62 @@ describe("RosterBuilder", () => {
         expect(screen.getByTestId("roster-save").disabled).toBe(true); // nothing selected anywhere
         fireEvent.click(card.getByText("Suggested"));
         expect(screen.getByTestId("roster-count-t1").textContent).toContain("2 of 12");
+    });
+
+    it("shows the grouped field panel with the standard defaults and sends the chosen fields", async () => {
+        renderBuilder();
+        await screen.findByTestId("roster-fields");
+        const on = (k) => screen.getByTestId(`roster-field-${k}`).getAttribute("aria-checked");
+        // defaults: Name, Age, Instagram, Introduction Video ON; the rest OFF
+        expect(["name", "age", "instagram", "intro_video"].map(on)).toEqual(["true", "true", "true", "true"]);
+        expect(["ethnicity", "instagram_followers"].map(on)).toEqual(["false", "false"]);
+        expect(screen.getByTestId("roster-fields-count").textContent).toContain("4 selected");
+        // group headings are shown
+        expect(screen.getByText("Basic information")).toBeTruthy();
+        expect(screen.getByText("Social")).toBeTruthy();
+        // toggle Instagram OFF and Followers ON
+        fireEvent.click(screen.getByTestId("roster-field-instagram"));
+        fireEvent.click(screen.getByTestId("roster-field-instagram_followers"));
+        expect(on("instagram")).toBe("false");
+        expect(on("instagram_followers")).toBe("true");
+        // go through the flow and save
+        fireEvent.change(screen.getByTestId("roster-title"), { target: { value: "Talentgram X BKB" } });
+        fireEvent.click(screen.getByTestId("roster-next"));
+        await screen.findByTestId("roster-talent-t1");
+        fireEvent.click(screen.getByTestId("roster-talent-t1"));
+        fireEvent.click(screen.getByTestId("roster-next"));
+        await screen.findByTestId("roster-images-t1");
+        fireEvent.click(screen.getByTestId("roster-save"));
+        await screen.findByTestId("roster-created");
+        const [, payload] = adminApi.post.mock.calls.find((c) => c[0] === "/links");
+        expect(payload.roster.fields).toEqual({ name: true, age: true, ethnicity: false, instagram: false, instagram_followers: true, intro_video: true });
+    });
+
+    it("edit loads the roster's SAVED field configuration (and old rosters fall back to the defaults)", async () => {
+        const saved = { name: true, age: false, ethnicity: true, instagram: false, instagram_followers: false, intro_video: false };
+        adminApi.get.mockImplementation((url) => {
+            if (url === "/roster/fields") return Promise.resolve({ data: REGISTRY });
+            if (url === "/links/L9") return Promise.resolve({ data: { id: "L9", title: "Existing", slug: "s", roster: { subtitle: null, fields: saved, talents: [{ talent_id: "t1", media_ids: ["i1"] }] } } });
+            return Promise.resolve({ data: { items: TALENTS, has_more: false } });
+        });
+        adminApi.post.mockImplementation((url) => (url === "/talents/bulk" ? Promise.resolve({ data: TALENTS }) : Promise.resolve({ data: OPTIONS })));
+        render(<MemoryRouter><RosterBuilder editId="L9" /></MemoryRouter>);
+        await screen.findByTestId("roster-fields");
+        await waitFor(() => expect(screen.getByTestId("roster-field-ethnicity").getAttribute("aria-checked")).toBe("true"));
+        expect(screen.getByTestId("roster-field-age").getAttribute("aria-checked")).toBe("false");
+        expect(screen.getByTestId("roster-field-intro_video").getAttribute("aria-checked")).toBe("false");
+        cleanup();
+
+        // a roster created before this feature has no stored `fields` -> standard defaults
+        adminApi.get.mockImplementation((url) => {
+            if (url === "/roster/fields") return Promise.resolve({ data: REGISTRY });
+            if (url === "/links/L8") return Promise.resolve({ data: { id: "L8", title: "Old", slug: "o", roster: { subtitle: null, talents: [{ talent_id: "t1", media_ids: ["i1"] }] } } });
+            return Promise.resolve({ data: { items: TALENTS, has_more: false } });
+        });
+        render(<MemoryRouter><RosterBuilder editId="L8" /></MemoryRouter>);
+        await screen.findByTestId("roster-fields");
+        await waitFor(() => expect(screen.getByTestId("roster-field-name").getAttribute("aria-checked")).toBe("true"));
+        expect(screen.getByTestId("roster-field-age").getAttribute("aria-checked")).toBe("true");
+        expect(screen.getByTestId("roster-field-ethnicity").getAttribute("aria-checked")).toBe("false");
     });
 });

@@ -227,28 +227,22 @@ def _draw_slot(pdf, slot: L.Slot, prepared: Dict[str, dict], workdir: str) -> No
     pdf.image(path, x=slot.x, y=slot.y, w=slot.w, h=slot.h)
 
 
-_INFO_WEIGHTS = {"Age": 0.55, "Height": 0.7, "Location": 1.9, "Instagram": 1.5}
-
-
-def _info_row(pdf, items: List[dict], y: float) -> None:
-    if not items:
+def _draw_info(pdf, placed: List[dict], rule_y: Optional[float]) -> None:
+    """Draw metadata exactly where the layout engine placed it (same plan the
+    web page renders): hairline above, small tracked labels, wrapped values."""
+    if not placed:
         return
-    pdf.set_draw_color(*HAIR)
-    pdf.set_line_width(0.2)
-    pdf.line(L.MARGIN, y - 4.0, L.PAGE_W - L.MARGIN, y - 4.0)
-    weights = [_INFO_WEIGHTS.get(it["label"], 1.0) for it in items]
-    total = sum(weights)
-    x = L.MARGIN
-    for it, wgt in zip(items, weights):
-        col_w = L.CONTENT_W * wgt / total
-        _text(pdf, x, y, col_w - 3, it["label"].upper(), "MMed", 6.2, MUTED, "L", 1.0)
-        lines = _wrap(pdf, it["value"], "M", 10.5, col_w - 5, max_lines=2)
-        for k, ln in enumerate(lines):
-            _text(pdf, x, y + 5.2 + k * 4.8, col_w - 3, ln, "M", 10.5, INK, "L", 0.0)
+    if rule_y is not None:
+        pdf.set_draw_color(*HAIR)
+        pdf.set_line_width(0.2)
+        pdf.line(L.MARGIN, rule_y, L.PAGE_W - L.MARGIN, rule_y)
+    for it in placed:
+        _text(pdf, it["x"], it["y"], it["w"] - 3, it["label"].upper(), "MMed", 6.2, MUTED, "L", 1.0)
+        for k, ln in enumerate(it["lines"]):
+            _text(pdf, it["x"], it["y"] + L.LABEL_TO_VALUE + k * L.VALUE_LINE_H, it["w"] - 3, ln, "M", L.VALUE_PT, INK, "L", 0.0)
         if it.get("href"):
-            pdf.set_font("M", size=10.5)
-            pdf.link(x, y + 4.8, min(col_w - 3, pdf.get_string_width(lines[0]) + 1), 5.5, it["href"])
-        x += col_w
+            pdf.set_font("M", size=L.VALUE_PT)
+            pdf.link(it["x"], it["y"] + 4.8, min(it["w"] - 3, pdf.get_string_width(it["lines"][0]) + 1), 5.5, it["href"])
 
 
 def _video_button(pdf, url: str, y: float) -> None:
@@ -266,9 +260,41 @@ def _video_button(pdf, url: str, y: float) -> None:
 # --------------------------------------------------------------------------
 # Pages
 # --------------------------------------------------------------------------
+INSTAGRAM_URL = "https://www.instagram.com/talentgram.agency/"
+INSTAGRAM_HANDLE = "@talentgram.agency"
+COVER_LOGO_W = 108.0
+
+
+INSTAGRAM_ICON_W = 6.0
+INSTAGRAM_GAP = 2.8
+INSTAGRAM_PT = 8.8
+
+
+def instagram_text_w() -> float:
+    """Width (mm) of the handle as drawn on the cover (Manrope Medium 8.2pt, 0.6pt tracking)."""
+    from PIL import ImageFont
+    f = ImageFont.truetype(os.path.join(FONT_DIR, "Manrope-Medium.ttf"), 1000)
+    return f.getlength(INSTAGRAM_HANDLE) / 1000 * INSTAGRAM_PT * 0.352778 + 0.6 * 0.352778 * len(INSTAGRAM_HANDLE)
+
+
+def _instagram_mark(pdf, x: float, y: float, size: float, color) -> None:
+    """Instagram glyph drawn as vectors (rounded square + lens + dot): crisp at any
+    zoom and no image asset."""
+    pdf.set_draw_color(*color)
+    pdf.set_fill_color(*color)
+    pdf.set_line_width(size * 0.075)
+    pdf.rect(x, y, size, size, style="D", round_corners=True, corner_radius=size * 0.3)
+    # NOTE: this fpdf2 build treats circle()'s x/y as the CENTRE (its docstring says
+    # upper-left) — verified by rendering; a test pins the glyph's geometry.
+    r = size * 0.22
+    pdf.circle(x=x + size / 2, y=y + size / 2, radius=r, style="D")
+    d = size * 0.06
+    pdf.circle(x=x + size * 0.77, y=y + size * 0.23, radius=d, style="F")
+
+
 def _cover(pdf, title: str, subtitle: Optional[str]) -> None:
     pdf.add_page()
-    _logo(pdf, (L.PAGE_W - 66) / 2, 98.0, 66.0)
+    _logo(pdf, (L.PAGE_W - COVER_LOGO_W) / 2, 62.0, COVER_LOGO_W)
     t = title.strip().upper() or "TALENTGRAM ROSTER"
     size = 19.0
     pdf.set_font("MSemi", size=size)
@@ -277,14 +303,25 @@ def _cover(pdf, title: str, subtitle: Optional[str]) -> None:
         size -= 0.5
         pdf.set_font("MSemi", size=size)
     pdf.set_char_spacing(0)
-    _text(pdf, L.MARGIN, 160.0, L.CONTENT_W, t, "MSemi", size, INK, "C", 2.6, h=9)
+    _text(pdf, L.MARGIN, 168.0, L.CONTENT_W, t, "MSemi", size, INK, "C", 2.6, h=9)
     pdf.set_draw_color(*INK)
     pdf.set_line_width(0.35)
-    pdf.line(L.PAGE_W / 2 - 9, 177.0, L.PAGE_W / 2 + 9, 177.0)
+    pdf.line(L.PAGE_W / 2 - 9, 185.0, L.PAGE_W / 2 + 9, 185.0)
     if subtitle:
-        _text(pdf, L.MARGIN, 185.0, L.CONTENT_W, _fit_text(pdf, subtitle.upper(), "MLight", 9.0, L.CONTENT_W, 2.0),
+        _text(pdf, L.MARGIN, 193.0, L.CONTENT_W, _fit_text(pdf, subtitle.upper(), "MLight", 9.0, L.CONTENT_W, 2.0),
               "MLight", 9.0, MUTED, "C", 2.0, h=5)
-    _text(pdf, L.MARGIN, 280.0, L.CONTENT_W, "TALENTGRAMAGENCY.COM", "MMed", 6.2, MUTED, "C", 1.6)
+    # Instagram footer: icon + handle, the whole element is one link
+    pdf.set_font("MMed", size=INSTAGRAM_PT)
+    pdf.set_char_spacing(0.6)
+    tw = pdf.get_string_width(INSTAGRAM_HANDLE)
+    pdf.set_char_spacing(0)
+    icon, gap = INSTAGRAM_ICON_W, INSTAGRAM_GAP
+    total = icon + gap + tw
+    x0 = (L.PAGE_W - total) / 2
+    y0 = 272.5
+    _instagram_mark(pdf, x0, y0, icon, INK)
+    _text(pdf, x0 + icon + gap, y0 + (icon - 3.1) / 2, tw + 2, INSTAGRAM_HANDLE, "MMed", INSTAGRAM_PT, INK, "L", 0.6, h=3.1)
+    pdf.link(x0 - 2, y0 - 2, total + 4, icon + 4, INSTAGRAM_URL)
 
 
 def _index(pdf, title: str, talents: List[dict], link_ids: List[int], start_page: int) -> int:
@@ -313,7 +350,7 @@ def _talent_pages(pdf, title: str, ti: int, total: int, t: dict, prepared: Dict[
                   workdir: str, page_no: int, link_id: int) -> int:
     imgs = [(i["id"], L.safe_ratio(prepared[i["id"]]["w"], prepared[i["id"]]["h"]))
             for i in t["images"] if i["id"] in prepared]
-    pages = L.plan_talent_pages(imgs)
+    pages = L.plan_talent_pages(imgs, t.get("info") or [], bool(t.get("video_url")), t["name"])
     counter = f"{ti + 1:02d} / {total:02d}"
     name_up = t["name"].upper()
     for pi, page in enumerate(pages):
@@ -322,7 +359,7 @@ def _talent_pages(pdf, title: str, ti: int, total: int, t: dict, prepared: Dict[
             pdf.set_link(link_id, page=pdf.page)
         _header(pdf, counter if pi == 0 else f"{name_up}   ·   {counter}")
         if page.kind == "hero":
-            size = 28.0
+            size = page.name_pt or 28.0
             pdf.set_font("MSemi", size=size)
             pdf.set_char_spacing(1.0)
             while pdf.get_string_width(name_up) > L.CONTENT_W and size > 14:
@@ -335,10 +372,22 @@ def _talent_pages(pdf, title: str, ti: int, total: int, t: dict, prepared: Dict[
             pdf.line(L.MARGIN, L.RULE_Y, L.MARGIN + 14, L.RULE_Y)
             for s in page.slots:
                 _draw_slot(pdf, s, prepared, workdir)
-            iy = L.info_y(page.template)
-            _info_row(pdf, t.get("info") or [], iy)
-            if t.get("video_url"):
-                _video_button(pdf, t["video_url"], iy + 19.0)
+            _draw_info(pdf, page.info, page.rule_y)
+            if t.get("video_url") and page.video_y is not None:
+                _video_button(pdf, t["video_url"], page.video_y)
+        elif page.kind == "info":
+            isize = page.name_pt or 20.0
+            pdf.set_font("MSemi", size=isize)
+            pdf.set_char_spacing(1.0)
+            while pdf.get_string_width(name_up) > L.CONTENT_W and isize > 12:
+                isize -= 1
+                pdf.set_font("MSemi", size=isize)
+            pdf.set_char_spacing(0)
+            _text(pdf, L.MARGIN, L.NAME_Y, L.CONTENT_W, name_up, "MSemi", isize, INK, "L", 1.0, h=10)
+            pdf.set_draw_color(*INK)
+            pdf.set_line_width(0.35)
+            pdf.line(L.MARGIN, 46.0, L.MARGIN + 14, 46.0)
+            _draw_info(pdf, page.info, None)
         else:
             for s in page.slots:
                 _draw_slot(pdf, s, prepared, workdir)
@@ -350,13 +399,30 @@ def _talent_pages(pdf, title: str, ti: int, total: int, t: dict, prepared: Dict[
 # --------------------------------------------------------------------------
 # Build + cache
 # --------------------------------------------------------------------------
-# Bump when the page design / layout changes, so cached PDFs from the old
-# design are never served for an unchanged roster.
-DESIGN_VERSION = "2026-10-06.1"
+# A cached PDF must never outlive the design that produced it. The cache key therefore
+# includes a hash of the layout + PDF source files and the logo asset, computed at import:
+# any deploy that changes how pages are drawn invalidates every cached PDF automatically
+# (no manual version bump to forget). DESIGN_VERSION remains as a manual override.
+DESIGN_VERSION = "2026-10-07.2"
+
+
+def _design_hash() -> str:
+    h = hashlib.sha1()
+    for path in (os.path.join(_HERE, "roster_layout.py"), os.path.join(_HERE, "roster_pdf.py"),
+                 os.path.join(_HERE, "roster_fields.py"), LOGO_PATH):
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            h.update(b"missing:" + path.encode())
+    return h.hexdigest()[:12]
+
+
+_DESIGN_HASH = _design_hash()
 
 
 def content_key(data: dict) -> str:
-    blob = json.dumps([DESIGN_VERSION, data], sort_keys=True, default=str, separators=(",", ":"))
+    blob = json.dumps([DESIGN_VERSION, _DESIGN_HASH, data], sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha1(blob.encode()).hexdigest()[:20]
 
 

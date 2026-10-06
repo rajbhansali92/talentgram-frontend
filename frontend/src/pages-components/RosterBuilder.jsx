@@ -7,7 +7,7 @@ import {
     Copy, Download, ExternalLink, GripVertical, Loader2, Search, Star, Video, X,
 } from "lucide-react";
 import {
-    buildRosterPayload, makeHero, moveItem, pruneSelection, selectAllIds, shortTalentName, toggleId,
+    buildRosterPayload, countEnabled, makeHero, moveItem, pruneSelection, selectAllIds, shortTalentName, toggleField, toggleId,
 } from "@/lib/rosterSelection";
 
 const MAX_IMAGES_PER_TALENT = 12;
@@ -47,6 +47,20 @@ export default function RosterBuilder({ editId = null }) {
     const [pdfBusy, setPdfBusy] = useState(false);
     const [loadingEdit, setLoadingEdit] = useState(Boolean(editId));
     const editSelectionRef = useRef(null);
+    // Roster-level field visibility. The registry (groups, labels, defaults) comes from the
+    // server so the builder never hard-codes which Global Talent fields exist.
+    const [registry, setRegistry] = useState(null);
+    const [fields, setFields] = useState(null);
+
+    useEffect(() => {
+        let live = true;
+        adminApi.get("/roster/fields").then(({ data }) => {
+            if (!live) return;
+            setRegistry(data);
+            setFields((prev) => prev || data.defaults);
+        }).catch(() => toast.error("Couldn't load the field options"));
+        return () => { live = false; };
+    }, []);
 
     // ---- edit: hydrate from the saved roster --------------------------------
     useEffect(() => {
@@ -58,6 +72,9 @@ export default function RosterBuilder({ editId = null }) {
                 if (!live) return;
                 setTitle(data.title || "");
                 setSubtitle(data.roster?.subtitle || "");
+                // Saved field config wins; a roster made before this feature has none and
+                // (like the public page) falls back to the standard defaults.
+                if (data.roster?.fields) setFields(data.roster.fields);
                 const entries = data.roster?.talents || [];
                 editSelectionRef.current = Object.fromEntries(entries.map((e) => [e.talent_id, e.media_ids || []]));
                 const ids = entries.map((e) => e.talent_id);
@@ -112,7 +129,7 @@ export default function RosterBuilder({ editId = null }) {
         if (saving) return;
         setSaving(true);
         try {
-            const payload = buildRosterPayload({ title, subtitle, talentIds: selectedIds, mediaByTalent });
+            const payload = buildRosterPayload({ title, subtitle, talentIds: selectedIds, mediaByTalent, fields });
             const { data } = editId
                 ? await adminApi.put(`/links/${editId}`, payload)
                 : await adminApi.post("/links", payload);
@@ -200,6 +217,36 @@ export default function RosterBuilder({ editId = null }) {
                     <input id="roster-subtitle" data-testid="roster-subtitle" value={subtitle} onChange={(e) => setSubtitle(e.target.value)}
                         placeholder="Selected Talent — October 2026" maxLength={120}
                         className="w-full border border-black/[0.12] rounded-lg px-4 min-h-[48px] text-base focus:outline-none focus:border-black/50" />
+
+                    {registry && fields && (
+                        <div className="mt-8 pt-6 border-t border-black/[0.08]" data-testid="roster-fields">
+                            <div className="flex items-baseline justify-between mb-1">
+                                <h2 className="text-[11px] tracking-widest uppercase text-black/45">Information shown</h2>
+                                <span className="text-[11px] text-black/40" data-testid="roster-fields-count">{countEnabled(fields)} selected</span>
+                            </div>
+                            <p className="text-xs text-black/45 mb-4">Pulled from each talent&apos;s Global Talent profile. Empty values are simply left out.</p>
+                            <div className="space-y-4">
+                                {registry.groups.map((g) => (
+                                    <div key={g.key}>
+                                        <div className="text-[10px] tracking-widest uppercase text-black/35 mb-2">{g.label}</div>
+                                        <div className="flex flex-wrap gap-2">
+                                            {g.fields.map((f) => {
+                                                const on = !!fields[f.key];
+                                                return (
+                                                    <button key={f.key} type="button" role="switch" aria-checked={on}
+                                                        data-testid={`roster-field-${f.key}`}
+                                                        onClick={() => setFields((cur) => toggleField(cur, f.key))}
+                                                        className={`inline-flex items-center gap-1.5 px-3.5 min-h-[40px] rounded-full text-xs font-medium border transition-colors ${on ? "bg-black text-white border-black" : "bg-white text-black/55 border-black/[0.14] hover:border-black/40"}`}>
+                                                        {on && <Check className="w-3.5 h-3.5" />}{f.label}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
                 </section>
             )}
 

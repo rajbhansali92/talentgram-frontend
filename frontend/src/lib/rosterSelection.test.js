@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-    buildRosterPayload, makeHero, moveItem, pruneSelection, selectAllIds, shortTalentName, toggleId,
+    buildRosterPayload, countEnabled, makeHero, moveItem, pruneSelection, selectAllIds, shortTalentName, toggleField, toggleId,
 } from "./rosterSelection";
 
 describe("rosterSelection", () => {
@@ -62,5 +62,22 @@ describe("rosterSelection", () => {
         expect(shortTalentName("Mary Ann smith")).toBe("Mary Ann S");
         expect(shortTalentName("Cher")).toBe("Cher");
         expect(shortTalentName("  ")).toBe("Talent");
+    });
+
+    it("toggles roster fields immutably and counts them", () => {
+        const f = { name: true, age: true, instagram: true, ethnicity: false };
+        const off = toggleField(f, "instagram");
+        expect(off.instagram).toBe(false);
+        expect(f.instagram).toBe(true);
+        expect(toggleField(off, "instagram").instagram).toBe(true);
+        expect(countEnabled(f)).toBe(3);
+        expect(countEnabled(null)).toBe(0);
+    });
+
+    it("sends roster fields only when provided (so an older roster keeps its stored config)", () => {
+        const base = { title: "T", subtitle: "", talentIds: ["t1"], mediaByTalent: { t1: ["a"] } };
+        expect("fields" in buildRosterPayload(base).roster).toBe(false);
+        const withF = buildRosterPayload({ ...base, fields: { name: true, age: false } });
+        expect(withF.roster.fields).toEqual({ name: true, age: false });
     });
 });

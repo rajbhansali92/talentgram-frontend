@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { api as axios, API, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
-import { ChevronLeft, ChevronRight, Download, ExternalLink, Loader2, Play, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, ExternalLink, Instagram, Loader2, Play, X } from "lucide-react";
 
 /**
  * Public Roster / comp-card viewer. Mirrors the PDF: the server sends the same
@@ -17,6 +17,9 @@ import { ChevronLeft, ChevronRight, Download, ExternalLink, Loader2, Play, X } f
  * bound to this slug), so views / unique viewers are counted by the existing
  * link_views machinery.
  */
+// Shared branding (the PDF cover uses the same destination/handle).
+const INSTAGRAM_URL = "https://www.instagram.com/talentgram.agency/";
+const INSTAGRAM_HANDLE = "@talentgram.agency";
 const PW = 210;
 const PH = 297;
 const pct = (v, total) => `${(v / total) * 100}%`;
@@ -206,13 +209,14 @@ export default function RosterView() {
 
     return (
         <Shell title={data.title} right={pdfButton("px-5 min-h-[40px]")}>
-            {/* Cover */}
-            <section className="px-4 sm:px-6 pt-16 pb-12 md:pt-24 md:pb-16 text-center" data-testid="roster-cover">
-                <p className="text-[10px] tracking-[0.3em] uppercase text-black/40 mb-6">Talent Roster</p>
-                <h1 className="font-display text-3xl sm:text-4xl md:text-5xl tracking-[0.14em] uppercase break-words max-w-4xl mx-auto" data-testid="roster-title">{data.title}</h1>
+            {/* Cover — same hierarchy as the PDF cover: logo, title, rule, subtitle, Instagram */}
+            <section className="px-4 sm:px-6 pt-14 pb-14 md:pt-20 md:pb-20 text-center flex flex-col items-center" data-testid="roster-cover">
+                <Logo size={isDesktop ? 132 : 92} forceVariant="black" className="mb-12 md:mb-16" />
+                <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-[0.14em] uppercase break-words max-w-4xl mx-auto" data-testid="roster-title">{data.title}</h1>
                 <div className="w-10 h-px bg-black mx-auto my-7" />
                 {data.subtitle && <p className="text-xs tracking-[0.22em] uppercase text-black/45" data-testid="roster-subtitle">{data.subtitle}</p>}
                 <p className="text-xs text-black/40 mt-3">{data.talents.length} talent{data.talents.length === 1 ? "" : "s"}</p>
+                <InstagramLink className="mt-12 md:mt-16" />
             </section>
 
             {/* Navigation */}
@@ -243,7 +247,7 @@ export default function RosterView() {
                 ))}
             </main>
 
-            <footer className="text-center text-[10px] tracking-[0.25em] uppercase text-black/35 pb-14">talentgramagency.com</footer>
+            <footer className="flex justify-center pb-20"><InstagramLink /></footer>
 
             {!isDesktop && data.pdf_available && (
                 <div className="fixed inset-x-0 bottom-0 z-30 bg-white/95 backdrop-blur border-t border-black/[0.08] px-4 pt-3" style={{ paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
@@ -292,15 +296,22 @@ function DesktopTalent({ t, total, onOpen }) {
 
                     {p.kind === "hero" && (
                         <>
-                            <div style={{ position: "absolute", left: pct(14, PW), top: pct(30, PH), fontSize: mm(9.4), fontWeight: 600, letterSpacing: "0.035em", textTransform: "uppercase", lineHeight: 1.1, color: "#111" }}>{t.name}</div>
+                            <div style={{ position: "absolute", left: pct(14, PW), top: pct(30, PH), fontSize: mm(((p.name_pt || 28) / 28) * 9.4), fontWeight: 600, letterSpacing: "0.035em", textTransform: "uppercase", lineHeight: 1.1, color: "#111", whiteSpace: "nowrap" }}>{t.name}</div>
                             <div style={{ position: "absolute", left: pct(14, PW), top: pct(49, PH), width: pct(14, PW), height: 1.5, background: "#111" }} />
-                            <InfoRow info={t.info} y={p.info_y} />
-                            {t.video && (
+                            <PlacedInfo items={p.info} ruleY={p.rule_y} />
+                            {t.video && p.video_y != null && (
                                 <a href={t.video.url} target="_blank" rel="noreferrer" data-testid={`roster-video-${t.key}`}
-                                    style={{ position: "absolute", left: pct(14, PW), top: pct(p.info_y + 19, PH), width: pct(58, PW), height: pct(9, PH), background: "#111", color: "#fff", display: "flex", alignItems: "center", gap: mm(2.4), paddingLeft: mm(3.6), fontSize: mm(2.2), letterSpacing: "0.16em", fontWeight: 600, textTransform: "uppercase" }}>
+                                    style={{ position: "absolute", left: pct(14, PW), top: pct(p.video_y, PH), width: pct(58, PW), height: pct(9, PH), background: "#111", color: "#fff", display: "flex", alignItems: "center", gap: mm(2.4), paddingLeft: mm(3.6), fontSize: mm(2.2), letterSpacing: "0.16em", fontWeight: 600, textTransform: "uppercase" }}>
                                     <Play style={{ width: mm(3), height: mm(3), fill: "#fff" }} /> Introduction Video
                                 </a>
                             )}
+                        </>
+                    )}
+                    {p.kind === "info" && (
+                        <>
+                            <div style={{ position: "absolute", left: pct(14, PW), top: pct(30, PH), fontSize: mm(((p.name_pt || 20) / 20) * 7), fontWeight: 600, letterSpacing: "0.035em", textTransform: "uppercase", lineHeight: 1.1, color: "#111", whiteSpace: "nowrap" }}>{t.name}</div>
+                            <div style={{ position: "absolute", left: pct(14, PW), top: pct(46, PH), width: pct(14, PW), height: 1.5, background: "#111" }} />
+                            <PlacedInfo items={p.info} ruleY={null} />
                         </>
                     )}
 
@@ -325,21 +336,34 @@ function DesktopTalent({ t, total, onOpen }) {
     );
 }
 
-function InfoRow({ info, y }) {
-    if (!info?.length) return null;
-    const W = { Age: 0.55, Height: 0.7, Location: 1.9, Instagram: 1.5 };
-    const total = info.reduce((n, it) => n + (W[it.label] || 1), 0);
+/** Metadata exactly where the server's layout engine placed it (same plan as the PDF). */
+function PlacedInfo({ items, ruleY }) {
+    if (!items?.length) return null;
     return (
-        <div style={{ position: "absolute", left: pct(14, PW), right: pct(14, PW), top: pct(y - 4, PH), borderTop: "1px solid #deded9", paddingTop: mm(4), display: "flex" }}>
-            {info.map((it) => (
-                <div key={it.label} style={{ width: `${((W[it.label] || 1) / total) * 100}%`, paddingRight: mm(2) }}>
-                    <div style={{ fontSize: mm(2.1), letterSpacing: "0.16em", textTransform: "uppercase", color: "#7d7d7a", fontWeight: 500 }}>{it.label}</div>
-                    {it.href
-                        ? <a href={it.href} target="_blank" rel="noreferrer" style={{ fontSize: mm(3.5), color: "#111", marginTop: mm(1.4), display: "block", textDecoration: "none" }}>{it.value}</a>
-                        : <div style={{ fontSize: mm(3.5), color: "#111", marginTop: mm(1.4) }}>{it.value}</div>}
+        <>
+            {ruleY != null && <div style={{ position: "absolute", left: pct(14, PW), right: pct(14, PW), top: pct(ruleY, PH), height: 1, background: "#deded9" }} />}
+            {items.map((it) => (
+                <div key={it.key} style={{ position: "absolute", left: pct(it.x, PW), top: pct(it.y, PH), width: pct(it.w - 3, PW) }} data-testid={`roster-info-${it.key}`}>
+                    <div style={{ fontSize: mm(2.1), letterSpacing: "0.16em", textTransform: "uppercase", color: "#7d7d7a", fontWeight: 500, lineHeight: 1.2 }}>{it.label}</div>
+                    {it.lines.map((ln, i) => {
+                        const style = { fontSize: mm(3.7), color: "#111", lineHeight: `${(4.8 / 3.7).toFixed(4)}`, display: "block", whiteSpace: "nowrap", marginTop: i === 0 ? mm(1.2) : 0, textDecoration: "none" };
+                        return it.href && i === 0
+                            ? <a key={i} href={it.href} target="_blank" rel="noreferrer" style={style}>{ln}</a>
+                            : <span key={i} style={style}>{ln}</span>;
+                    })}
                 </div>
             ))}
-        </div>
+        </>
+    );
+}
+
+function InstagramLink({ className = "" }) {
+    return (
+        <a href={INSTAGRAM_URL} target="_blank" rel="noreferrer" aria-label={`Talentgram on Instagram ${INSTAGRAM_HANDLE}`}
+            data-testid="roster-instagram"
+            className={`inline-flex items-center gap-2.5 min-h-[44px] px-2 text-[12px] tracking-[0.08em] font-medium text-black/80 hover:text-black ${className}`}>
+            <Instagram className="w-[18px] h-[18px]" strokeWidth={1.6} /> {INSTAGRAM_HANDLE}
+        </a>
     );
 }
 
@@ -357,9 +381,9 @@ function MobileTalent({ t, total, onOpen }) {
             {t.info.length > 0 && (
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-t border-black/[0.08] mt-5 pt-4">
                     {t.info.map((it) => (
-                        <div key={it.label} className={it.label === "Location" ? "col-span-2" : ""}>
+                        <div key={it.key || it.label} className={`min-w-0 ${it.block || it.key === "location" || it.value.length > 16 ? "col-span-2" : ""}`}>
                             <dt className="text-[10px] tracking-[0.16em] uppercase text-black/40">{it.label}</dt>
-                            <dd className="text-base mt-1">{it.href ? <a href={it.href} target="_blank" rel="noreferrer" className="underline-offset-2 hover:underline">{it.value}</a> : it.value}</dd>
+                            <dd className="text-base mt-1 break-words [overflow-wrap:anywhere]">{it.href ? <a href={it.href} target="_blank" rel="noreferrer" className="underline-offset-2 hover:underline">{it.value}</a> : it.value}</dd>
                         </div>
                     ))}
                 </dl>

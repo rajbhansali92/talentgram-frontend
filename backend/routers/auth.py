@@ -23,6 +23,7 @@ from core import (
     compute_age,
     normalize_email,
     check_rate_limit,
+    get_client_ip,
     grant_trusted_device,
     resolve_canonical_talent,
 )
@@ -333,12 +334,6 @@ class OtpVerifyIn(BaseModel):
     email: str
     otp: str
     slug: str
-
-def get_client_ip(request: Request) -> str:
-    return (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or (request.client.host if request.client else "127.0.0.1")
-    )
 
 RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Talentgram Agency <team@talentgramagency.com>")
 print(f"Using Resend sender: {RESEND_FROM_EMAIL}")

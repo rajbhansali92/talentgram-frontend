@@ -27,6 +27,15 @@ export async function verifyOtp({ email, otp, slug }) {
     return data;
 }
 
+/** True only for the backend's "prove you own this email" answer (HTTP 403 with
+ * the verification-required detail from core.verify_email_ownership's callers) —
+ * NOT any 403. Callers use it to decide whether to send a one-time code, so an
+ * unrelated 403 (inactive link, permissions, ...) never turns into an OTP send. */
+export function isEmailVerificationRequired(err) {
+    const detail = err?.response?.data?.detail;
+    return err?.response?.status === 403 && typeof detail === "string" && /verify your email/i.test(detail);
+}
+
 /** Builds the Google OAuth authorize URL. Pure — does not navigate. Callers
  * decide when/whether to assign it to window.location.href, keeping the
  * actual navigation (and any routing decision around it) in the caller. */

@@ -37,6 +37,7 @@ from core import (
     hash_reset_token,
     verify_password,
     check_rate_limit,
+    get_client_ip,
 )
 
 router = APIRouter(prefix="/api", tags=["password"])
@@ -70,10 +71,7 @@ def _check_rate_limit(bucket: str) -> Tuple[bool, int]:
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for") or ""
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    return get_client_ip(request, default="unknown")
 
 
 # --------------------------------------------------------------------------

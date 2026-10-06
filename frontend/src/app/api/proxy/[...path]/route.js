@@ -207,6 +207,19 @@ async function handleProxy(request, context) {
     upstreamHeaders.set("x-request-id", requestId);
     const clientIp = resolveClientIp(request);
     if (clientIp) upstreamHeaders.set("x-forwarded-for", clientIp);
+    // Railway's edge replaces X-Forwarded-For with the connecting peer (this
+    // function's shared AWS egress IP), so the line above never reaches the
+    // backend's rate limiters. Send the real client IP in a dedicated header,
+    // authenticated with a shared secret the backend checks (core.get_client_ip).
+    // Both are set ONLY here, from server-side values: neither is in
+    // FORWARD_REQUEST_HEADERS, so a browser-supplied x-tg-* header can never be
+    // relayed. With no secret configured nothing is sent and the backend keeps
+    // its previous behaviour.
+    const proxySecret = process.env.TG_PROXY_SHARED_SECRET;
+    if (proxySecret && clientIp) {
+        upstreamHeaders.set("x-tg-client-ip", clientIp.split(",")[0].trim());
+        upstreamHeaders.set("x-tg-proxy-secret", proxySecret);
+    }
     upstreamHeaders.set("x-forwarded-proto", incomingUrl.protocol.replace(":", ""));
     upstreamHeaders.set("x-forwarded-host", request.headers.get("host") || incomingUrl.host);
 

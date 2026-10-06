@@ -425,10 +425,7 @@ _PREFILL_WINDOW = 60.0
 def _prefill_rate_limit_ok(request: Request) -> bool:
     import time
     now = time.monotonic()
-    ip = (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or (request.client.host if request.client else "unknown")
-    )
+    ip = client_ip(request)
     bucket = _PREFILL_BUCKET.setdefault(ip, [])
     # Drop expired
     cutoff = now - _PREFILL_WINDOW
@@ -4589,10 +4586,7 @@ _DIAGNOSTICS_LIMIT = 10     # max 10 requests per IP per hour
 
 def _diagnostics_rate_limit_ok(request: Request) -> bool:
     now = time.monotonic()
-    ip = (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or (request.client.host if request.client else "unknown")
-    )
+    ip = client_ip(request)
     bucket = _DIAGNOSTICS_BUCKET.setdefault(ip, [])
     cutoff = now - _DIAGNOSTICS_WINDOW
     bucket[:] = [t for t in bucket if t > cutoff]

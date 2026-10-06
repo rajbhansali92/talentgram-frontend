@@ -5,6 +5,8 @@ Everything that multiple routers need lives here to keep router modules pure of 
 from __future__ import annotations
 
 import hashlib
+import hmac
+import ipaddress
 import logging
 import os
 import re
@@ -400,6 +402,15 @@ async def verify_email_ownership(
        `/public/trusted-device/recognize` endpoint and at auth-grant sites),
        so calling this can never invalidate a cookie the caller still has.
 
+    Forms 1 and 3 also accept an ALTERNATE/merged email of the credential's own
+    canonical talent ("Merge Different Emails"): a portal token is minted with
+    the talent's primary email, so a talent who legitimately verified via their
+    alternate email would otherwise fail this check and be bounced back into
+    another OTP (P1 incident 2026-10-06). The relationship must be established
+    by identity, never by email similarity: credential -> canonical talent id
+    AND request email -> canonical talent id (core.resolve_canonical_talent,
+    which excludes absorbed/MERGED records), and the two ids must be equal.
+
     A completely anonymous caller (no/invalid token) returns ``False``.
     """
     target = normalize_email(email)
@@ -412,7 +423,11 @@ async def verify_email_ownership(
         # --- Form 1: portal token (pure JWT check, no DB) -------------------
         data = decode_token(token)
         if data and data.get("role") == "portal":
-            if normalize_email(data.get("email")) == target:
+            token_email = normalize_email(data.get("email"))
+            if token_email == target:
+                return True
+            # Alternate email of the SAME canonical talent as the token.
+            if token_email and await _emails_resolve_to_same_talent(token_email, target):
                 return True
 
         # --- Form 2: existing submitter credential bound to this email -----
@@ -434,8 +449,23 @@ async def verify_email_ownership(
             talent_emails = {normalize_email(talent.get("email")), normalize_email(talent.get("normalized_email"))}
             if target in talent_emails:
                 return True
+            # Alternate email of the SAME canonical talent as the device's.
+            target_talent = await resolve_canonical_talent(email=target)
+            if target_talent and target_talent.get("id") and target_talent.get("id") == talent.get("id"):
+                return True
 
     return False
+
+
+async def _emails_resolve_to_same_talent(email_a: str, email_b: str) -> bool:
+    """True only if both emails resolve (via the canonical resolver) to the
+    same, live canonical talent. Unknown email, absorbed records and different
+    talents all return False."""
+    talent_a = await resolve_canonical_talent(email=email_a)
+    if not talent_a or not talent_a.get("id"):
+        return False
+    talent_b = await resolve_canonical_talent(email=email_b)
+    return bool(talent_b) and talent_b.get("id") == talent_a.get("id")
 
 
 # ---------------------------------------------------------------------------
@@ -631,14 +661,11 @@ def rate_limit_ok(key: str, limit: int, window_seconds: float) -> bool:
 
 
 def client_ip(request) -> str:
-    """Best-effort client IP for rate-limiting keys, honouring the first
-    X-Forwarded-For hop (Railway/Vercel set this) and falling back to the
-    socket peer."""
+    """Best-effort client IP for rate-limiting keys. Thin alias of
+    get_client_ip() (the single implementation) that never raises and uses
+    "unknown" as its last-resort value."""
     try:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            return xff.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
+        return get_client_ip(request, default="unknown")
     except Exception:
         return "unknown"
 
@@ -4896,11 +4923,47 @@ async def build_talent_submission_view(sub: dict) -> dict:
     return sign_r2_media_if_needed(sub)
 
 
-def get_client_ip(request: Request) -> str:
-    x_forwarded_for = request.headers.get("x-forwarded-for")
-    if x_forwarded_for:
-        return x_forwarded_for.split(",")[0].strip()
-    return request.client.host if request.client else "127.0.0.1"
+# --- Real client IP behind the Vercel proxy -------------------------------
+# Public JSON traffic reaches Railway through the same-origin Vercel proxy
+# (frontend/src/app/api/proxy), so Railway's own X-Forwarded-For is the proxy's
+# AWS egress IP — shared by unrelated users, which made every IP-keyed limiter
+# (OTP send/verify, login, prefill, ...) pool strangers into one bucket
+# (P1 incident 2026-10-06). The proxy therefore also sends the real client IP in
+# X-TG-Client-IP, authenticated by a shared secret in X-TG-Proxy-Secret
+# (env TG_PROXY_SHARED_SECRET, set on BOTH Vercel and Railway). The IP header is
+# honoured ONLY when the secret matches, so nobody else can choose their own
+# rate-limit identity; missing/invalid secret, missing/garbled header, or an
+# unconfigured server all fall straight back to the previous behaviour.
+PROXY_SECRET_HEADER = "x-tg-proxy-secret"
+PROXY_CLIENT_IP_HEADER = "x-tg-client-ip"
+
+
+def trusted_proxy_client_ip(request) -> Optional[str]:
+    """The client IP asserted by our own Vercel proxy, or None. Never raises."""
+    try:
+        expected = os.environ.get("TG_PROXY_SHARED_SECRET", "")
+        if not expected:
+            return None
+        supplied = request.headers.get(PROXY_SECRET_HEADER, "")
+        if not supplied or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+            return None
+        # Canonical text form, so one client always maps to one bucket key.
+        return str(ipaddress.ip_address((request.headers.get(PROXY_CLIENT_IP_HEADER) or "").strip()))
+    except Exception:
+        return None
+
+
+def get_client_ip(request: Request, default: str = "127.0.0.1") -> str:
+    """THE client-IP resolver for every rate limiter / audit log (do not parse
+    forwarding headers anywhere else): trusted proxy header first, then the first
+    X-Forwarded-For hop, then the socket peer."""
+    trusted = trusted_proxy_client_ip(request)
+    if trusted:
+        return trusted
+    first_hop = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if first_hop:
+        return first_hop
+    return request.client.host if request.client else default
 
 
 async def check_rate_limit(request: Request, endpoint: str, email: str = None):

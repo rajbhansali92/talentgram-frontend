@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { api as axios, adminApi, portalApi, PORTAL_TOKEN_KEY, IMAGE_URL } from "@/lib/api";
-import { sendOtp, verifyOtp, buildGoogleAuthUrl, persistPortalToken } from "@/lib/talentAuth";
+import { sendOtp, verifyOtp, buildGoogleAuthUrl, persistPortalToken, isEmailVerificationRequired } from "@/lib/talentAuth";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import { useStickyFooterHeightVar } from "@/hooks/useStickyFooterHeightVar";
@@ -1284,7 +1284,10 @@ function SubmissionPage() {
         } catch (e) {
             // P0-2: ownership now required when a record already exists for the
             // email. Route the returning talent through the one-time-code flow.
-            if (e?.response?.status === 403) {
+            // Only a genuine "verify your email" answer re-enters the OTP flow, and
+            // not again right after this session just verified (a second code
+            // can't fix that — it only burns the rate-limit bucket).
+            if (isEmailVerificationRequired(e) && !emailVerified) {
                 const verifyEmail = (form.email || "").trim().toLowerCase();
                 setEmailGateUnlocked(false);
                 setGatewayEmail(verifyEmail);

@@ -1,29 +1,21 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { api as axios, API, IMAGE_URL, getViewerToken, saveViewerToken } from "@/lib/api";
+import { api as axios, API, getViewerToken, saveViewerToken } from "@/lib/api";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
-import { ChevronLeft, ChevronRight, Download, ExternalLink, Instagram, Loader2, Play, X } from "lucide-react";
+import { Download, Loader2 } from "lucide-react";
+import RosterShell from "@/pages-components/RosterShell";
+import RosterSections from "@/pages-components/RosterSections";
 
 /**
- * Public Roster / comp-card viewer. Mirrors the PDF: the server sends the same
- * layout plan (mm on an A4 page) that the PDF is drawn from, so ≥768px renders
- * those exact page layouts; on phones the plan is replaced by a natural-ratio
- * stack (a scaled A4 page would make photos and text tiny).
- *
- * Access reuses the Generated Links identify flow (name + email → viewer token
- * bound to this slug), so views / unique viewers are counted by the existing
- * link_views machinery.
+ * Public Roster link. This file owns ACCESS and state only: the Generated Links identify flow
+ * (name + email -> viewer token bound to this slug, so views / unique viewers are counted by the
+ * existing link_views machinery), loading, and the error states. What a signed-in viewer sees is
+ * the vertical, one-section-per-talent roster in RosterSections.jsx. The downloadable PDF is a separate artefact built
+ * server-side and is not affected by anything here.
  */
-// Shared branding (the PDF cover uses the same destination/handle).
-const INSTAGRAM_URL = "https://www.instagram.com/talentgram.agency/";
-const INSTAGRAM_HANDLE = "@talentgram.agency";
-const PW = 210;
-const PH = 297;
-const pct = (v, total) => `${(v / total) * 100}%`;
-const mm = (n) => `calc(var(--mm) * ${n})`;
 
 function getBrowserAndDevice() {
     const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
@@ -40,18 +32,6 @@ function getSessionId() {
     } catch { return undefined; }
 }
 
-function useIsDesktop() {
-    const [d, setD] = useState(false);
-    useEffect(() => {
-        const mq = window.matchMedia("(min-width: 768px)");
-        const on = () => setD(mq.matches);
-        on();
-        mq.addEventListener("change", on);
-        return () => mq.removeEventListener("change", on);
-    }, []);
-    return d;
-}
-
 export default function RosterView() {
     const { slug } = useParams();
     const [phase, setPhase] = useState("boot"); // boot | identify | loading | ready | inactive | error
@@ -60,10 +40,7 @@ export default function RosterView() {
     const [name, setName] = useState("");
     const [email, setEmail] = useState("");
     const [busy, setBusy] = useState(false);
-    const [active, setActive] = useState("t1");
-    const [lightbox, setLightbox] = useState(null); // {images, index}
     const [pdfStarting, setPdfStarting] = useState(false);
-    const isDesktop = useIsDesktop();
     const inflight = useRef(false);
 
     const load = useCallback(async () => {
@@ -114,32 +91,6 @@ export default function RosterView() {
         }
     };
 
-    // active section highlight for the nav
-    useEffect(() => {
-        if (phase !== "ready" || !data) return undefined;
-        const els = data.talents.map((t) => document.getElementById(t.key)).filter(Boolean);
-        if (!els.length || typeof IntersectionObserver === "undefined") return undefined;
-        const io = new IntersectionObserver((entries) => {
-            const vis = entries.filter((en) => en.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
-            if (vis) setActive(vis.target.id);
-        }, { rootMargin: "-20% 0px -65% 0px" });
-        els.forEach((el) => io.observe(el));
-        return () => io.disconnect();
-    }, [phase, data, isDesktop]);
-
-    useEffect(() => {
-        if (!lightbox) return undefined;
-        const onKey = (e) => {
-            if (e.key === "Escape") setLightbox(null);
-            if (e.key === "ArrowRight") setLightbox((l) => l && { ...l, index: (l.index + 1) % l.images.length });
-            if (e.key === "ArrowLeft") setLightbox((l) => l && { ...l, index: (l.index - 1 + l.images.length) % l.images.length });
-        };
-        window.addEventListener("keydown", onKey);
-        const prev = document.body.style.overflow;
-        document.body.style.overflow = "hidden";
-        return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
-    }, [lightbox]);
-
     const downloadPdf = () => {
         if (pdfStarting) return;
         setPdfStarting(true);
@@ -147,24 +98,19 @@ export default function RosterView() {
         setTimeout(() => setPdfStarting(false), 12000);
     };
 
-    const goTo = (key) => {
-        const el = document.getElementById(key);
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-    };
-
     /* ------------------------------- gate / states ------------------------------ */
     if (phase === "boot" || phase === "loading") {
         return (
-            <Shell title={meta.title}>
+            <RosterShell title={meta.title}>
                 <div className="py-32 text-center text-sm text-black/45" aria-busy="true" role="status" data-testid="roster-loading">
                     <Loader2 className="w-5 h-5 animate-spin mx-auto mb-3" /> Loading roster…
                 </div>
-            </Shell>
+            </RosterShell>
         );
     }
     if (phase === "identify") {
         return (
-            <Shell title={meta.title} bare>
+            <RosterShell title={meta.title} bare>
                 <div className="min-h-[80vh] flex items-center justify-center px-6" data-testid="roster-identify">
                     <form onSubmit={identify} className="w-full max-w-sm text-center">
                         <div className="flex justify-center mb-10"><Logo size={44} forceVariant="black" /></div>
@@ -181,12 +127,12 @@ export default function RosterView() {
                         </button>
                     </form>
                 </div>
-            </Shell>
+            </RosterShell>
         );
     }
     if (phase === "inactive" || phase === "error") {
         return (
-            <Shell title={meta.title}>
+            <RosterShell title={meta.title}>
                 <div className="py-28 px-6 text-center max-w-md mx-auto" data-testid="roster-unavailable">
                     <h1 className="font-display text-2xl mb-2">{phase === "inactive" ? "This link is no longer active" : "Couldn’t load the roster"}</h1>
                     <p className="text-sm text-black/55 leading-relaxed">
@@ -194,238 +140,19 @@ export default function RosterView() {
                     </p>
                     {phase === "error" && <button onClick={load} className="mt-6 inline-flex items-center justify-center min-h-[44px] px-6 rounded-lg bg-black text-white text-sm font-medium">Try again</button>}
                 </div>
-            </Shell>
+            </RosterShell>
         );
     }
 
     /* ---------------------------------- ready ----------------------------------- */
-    const pdfButton = (cls) => data.pdf_available && (
+    const pdfButton = data.pdf_available && (
         <button type="button" onClick={downloadPdf} disabled={pdfStarting} data-testid="roster-download-pdf"
-            className={`inline-flex items-center justify-center gap-2 bg-black text-white rounded-lg text-xs font-medium disabled:opacity-70 ${cls}`}>
+            aria-label={pdfStarting ? "Preparing PDF" : "Download PDF"}
+            className="inline-flex items-center justify-center gap-2 bg-black text-white rounded-lg text-xs font-medium disabled:opacity-70 min-w-[40px] min-h-[40px] px-2.5 md:px-5">
             {pdfStarting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            {pdfStarting ? "Preparing PDF…" : "Download PDF"}
+            <span className="hidden md:inline">{pdfStarting ? "Preparing PDF…" : "Download PDF"}</span>
         </button>
     );
 
-    return (
-        <Shell title={data.title} right={pdfButton("px-5 min-h-[40px]")}>
-            {/* Cover — same hierarchy as the PDF cover: logo, title, rule, subtitle, Instagram */}
-            <section className="px-4 sm:px-6 pt-14 pb-14 md:pt-20 md:pb-20 text-center flex flex-col items-center" data-testid="roster-cover">
-                <Logo size={isDesktop ? 132 : 92} forceVariant="black" className="mb-12 md:mb-16" />
-                <h1 className="font-display text-2xl sm:text-3xl md:text-4xl tracking-[0.14em] uppercase break-words max-w-4xl mx-auto" data-testid="roster-title">{data.title}</h1>
-                <div className="w-10 h-px bg-black mx-auto my-7" />
-                {data.subtitle && <p className="text-xs tracking-[0.22em] uppercase text-black/45" data-testid="roster-subtitle">{data.subtitle}</p>}
-                <p className="text-xs text-black/40 mt-3">{data.talents.length} talent{data.talents.length === 1 ? "" : "s"}</p>
-                <InstagramLink className="mt-12 md:mt-16" />
-            </section>
-
-            {/* Navigation */}
-            {data.talents.length > 1 && (
-                <nav aria-label="Talents" data-testid="roster-nav"
-                    className="sticky top-[57px] z-20 bg-[#f6f6f4]/95 backdrop-blur border-y border-black/[0.06]">
-                    <ol className="flex gap-1 overflow-x-auto px-3 sm:px-6 py-2 max-w-[1400px] mx-auto no-scrollbar">
-                        {data.talents.map((t) => (
-                            <li key={t.key} className="shrink-0">
-                                <button type="button" onClick={() => goTo(t.key)} aria-current={active === t.key ? "true" : undefined}
-                                    data-testid={`roster-nav-${t.key}`}
-                                    className={`px-3 min-h-[40px] rounded-full text-[11px] tracking-wider uppercase whitespace-nowrap ${active === t.key ? "bg-black text-white" : "text-black/55 hover:text-black hover:bg-black/[0.05]"}`}>
-                                    <span className="font-mono opacity-60 mr-1.5">{String(t.index).padStart(2, "0")}</span>{t.name}
-                                </button>
-                            </li>
-                        ))}
-                    </ol>
-                </nav>
-            )}
-
-            <main className="max-w-[1100px] mx-auto px-3 sm:px-6 py-8 md:py-12 space-y-14 md:space-y-20">
-                {data.talents.map((t) => (
-                    <section key={t.key} id={t.key} className="scroll-mt-[120px]" data-testid={`roster-talent-${t.key}`}>
-                        {isDesktop
-                            ? <DesktopTalent t={t} total={data.talents.length} onOpen={(images, index) => setLightbox({ images, index })} />
-                            : <MobileTalent t={t} total={data.talents.length} onOpen={(images, index) => setLightbox({ images, index })} />}
-                    </section>
-                ))}
-            </main>
-
-            <footer className="flex justify-center pb-20"><InstagramLink /></footer>
-
-            {!isDesktop && data.pdf_available && (
-                <div className="fixed inset-x-0 bottom-0 z-30 bg-white/95 backdrop-blur border-t border-black/[0.08] px-4 pt-3" style={{ paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
-                    {pdfButton("w-full min-h-[50px] text-sm rounded-xl")}
-                </div>
-            )}
-
-            {lightbox && <Lightbox state={lightbox} setState={setLightbox} />}
-        </Shell>
-    );
-}
-
-/* ------------------------------------ shell ----------------------------------- */
-function Shell({ title, right, children, bare }) {
-    return (
-        <div className="min-h-screen bg-[#f6f6f4] text-black/85" data-testid="roster-page">
-            {!bare && (
-                <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-black/[0.06]">
-                    <div className="max-w-[1400px] mx-auto px-4 sm:px-6 h-[57px] flex items-center justify-between gap-4">
-                        <Logo size={26} forceVariant="black" />
-                        <div className="hidden md:block flex-1 text-center text-[10px] tracking-[0.25em] uppercase text-black/40 truncate px-4">{title}</div>
-                        <div className="hidden md:block">{right}</div>
-                    </div>
-                </header>
-            )}
-            {children}
-        </div>
-    );
-}
-
-/* ------------------------------ desktop: page mirror ---------------------------- */
-function DesktopTalent({ t, total, onOpen }) {
-    const imgById = useMemo(() => Object.fromEntries(t.images.map((i) => [i.id, i])), [t.images]);
-    return (
-        <div className="space-y-6">
-            {t.pages.map((p, pi) => (
-                <div key={pi} className="bg-white border border-black/[0.07] shadow-[0_1px_2px_rgba(0,0,0,0.04),0_8px_24px_rgba(0,0,0,0.04)]"
-                    style={{ position: "relative", aspectRatio: `${PW} / ${PH}`, containerType: "inline-size", "--mm": "calc(100cqw / 210)" }}
-                    data-testid={`roster-page-${t.key}-${pi}`}>
-                    {/* header */}
-                    <img src="/brand/talentgram-black.png" alt="Talentgram" style={{ position: "absolute", left: pct(14, PW), top: pct(7.5, PH), width: pct(28, PW), height: "auto" }} />
-                    <div style={{ position: "absolute", right: pct(14, PW), top: pct(11.2, PH), fontSize: mm(2.4), letterSpacing: "0.14em", color: "#7d7d7a", fontWeight: 500, textTransform: "uppercase" }}>
-                        {pi === 0 ? `${String(t.index).padStart(2, "0")} / ${String(total).padStart(2, "0")}` : `${t.name}  ·  ${String(t.index).padStart(2, "0")} / ${String(total).padStart(2, "0")}`}
-                    </div>
-                    <div style={{ position: "absolute", left: pct(14, PW), right: pct(14, PW), top: pct(22, PH), height: 1, background: "#deded9" }} />
-
-                    {p.kind === "hero" && (
-                        <>
-                            <div style={{ position: "absolute", left: pct(14, PW), top: pct(30, PH), fontSize: mm(((p.name_pt || 28) / 28) * 9.4), fontWeight: 600, letterSpacing: "0.035em", textTransform: "uppercase", lineHeight: 1.1, color: "#111", whiteSpace: "nowrap" }}>{t.name}</div>
-                            <div style={{ position: "absolute", left: pct(14, PW), top: pct(49, PH), width: pct(14, PW), height: 1.5, background: "#111" }} />
-                            <PlacedInfo items={p.info} ruleY={p.rule_y} />
-                            {t.video && p.video_y != null && (
-                                <a href={t.video.url} target="_blank" rel="noreferrer" data-testid={`roster-video-${t.key}`}
-                                    style={{ position: "absolute", left: pct(14, PW), top: pct(p.video_y, PH), width: pct(58, PW), height: pct(9, PH), background: "#111", color: "#fff", display: "flex", alignItems: "center", gap: mm(2.4), paddingLeft: mm(3.6), fontSize: mm(2.2), letterSpacing: "0.16em", fontWeight: 600, textTransform: "uppercase" }}>
-                                    <Play style={{ width: mm(3), height: mm(3), fill: "#fff" }} /> Introduction Video
-                                </a>
-                            )}
-                        </>
-                    )}
-                    {p.kind === "info" && (
-                        <>
-                            <div style={{ position: "absolute", left: pct(14, PW), top: pct(30, PH), fontSize: mm(((p.name_pt || 20) / 20) * 7), fontWeight: 600, letterSpacing: "0.035em", textTransform: "uppercase", lineHeight: 1.1, color: "#111", whiteSpace: "nowrap" }}>{t.name}</div>
-                            <div style={{ position: "absolute", left: pct(14, PW), top: pct(46, PH), width: pct(14, PW), height: 1.5, background: "#111" }} />
-                            <PlacedInfo items={p.info} ruleY={null} />
-                        </>
-                    )}
-
-                    {p.slots.map((s) => {
-                        const im = imgById[s.media_id];
-                        if (!im) return null;
-                        const idx = t.images.findIndex((x) => x.id === s.media_id);
-                        const c = s.crop;
-                        const pos = c && s.fit === "cover"
-                            ? `${c[2] >= 1 ? 50 : (c[0] / (1 - c[2])) * 100}% ${c[3] >= 1 ? 50 : (c[1] / (1 - c[3])) * 100}%`
-                            : "50% 50%";
-                        return (
-                            <button key={s.media_id} type="button" onClick={() => onOpen(t.images, idx)} aria-label={`${t.name} image ${idx + 1}`}
-                                style={{ position: "absolute", left: pct(s.x, PW), top: pct(s.y, PH), width: pct(s.w, PW), height: pct(s.h, PH), padding: 0, border: 0, cursor: "zoom-in", background: "#f3f2ef", overflow: "hidden" }}>
-                                <img src={IMAGE_URL(im)} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: s.fit === "cover" ? "cover" : "contain", objectPosition: pos, display: "block" }} />
-                            </button>
-                        );
-                    })}
-                </div>
-            ))}
-        </div>
-    );
-}
-
-/** Metadata exactly where the server's layout engine placed it (same plan as the PDF). */
-function PlacedInfo({ items, ruleY }) {
-    if (!items?.length) return null;
-    return (
-        <>
-            {ruleY != null && <div style={{ position: "absolute", left: pct(14, PW), right: pct(14, PW), top: pct(ruleY, PH), height: 1, background: "#deded9" }} />}
-            {items.map((it) => (
-                <div key={it.key} style={{ position: "absolute", left: pct(it.x, PW), top: pct(it.y, PH), width: pct(it.w - 3, PW) }} data-testid={`roster-info-${it.key}`}>
-                    <div style={{ fontSize: mm(2.1), letterSpacing: "0.16em", textTransform: "uppercase", color: "#7d7d7a", fontWeight: 500, lineHeight: 1.2 }}>{it.label}</div>
-                    {it.lines.map((ln, i) => {
-                        const style = { fontSize: mm(3.7), color: "#111", lineHeight: `${(4.8 / 3.7).toFixed(4)}`, display: "block", whiteSpace: "nowrap", marginTop: i === 0 ? mm(1.2) : 0, textDecoration: "none" };
-                        return it.href && i === 0
-                            ? <a key={i} href={it.href} target="_blank" rel="noreferrer" style={style}>{ln}</a>
-                            : <span key={i} style={style}>{ln}</span>;
-                    })}
-                </div>
-            ))}
-        </>
-    );
-}
-
-function InstagramLink({ className = "" }) {
-    return (
-        <a href={INSTAGRAM_URL} target="_blank" rel="noreferrer" aria-label={`Talentgram on Instagram ${INSTAGRAM_HANDLE}`}
-            data-testid="roster-instagram"
-            className={`inline-flex items-center gap-2.5 min-h-[44px] px-2 text-[12px] tracking-[0.08em] font-medium text-black/80 hover:text-black ${className}`}>
-            <Instagram className="w-[18px] h-[18px]" strokeWidth={1.6} /> {INSTAGRAM_HANDLE}
-        </a>
-    );
-}
-
-/* ------------------------------- mobile: natural stack --------------------------- */
-function MobileTalent({ t, total, onOpen }) {
-    const [hero, ...rest] = t.images;
-    return (
-        <article>
-            <div className="flex items-baseline justify-between mb-3">
-                <h2 className="font-display text-3xl tracking-[0.03em] uppercase">{t.name}</h2>
-                <span className="text-[11px] font-mono text-black/40">{String(t.index).padStart(2, "0")} / {String(total).padStart(2, "0")}</span>
-            </div>
-            <div className="w-6 h-px bg-black mb-4" />
-            {hero && <ImgTile im={hero} onClick={() => onOpen(t.images, 0)} label={`${t.name} hero image`} />}
-            {t.info.length > 0 && (
-                <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-t border-black/[0.08] mt-5 pt-4">
-                    {t.info.map((it) => (
-                        <div key={it.key || it.label} className={`min-w-0 ${it.block || it.key === "location" || it.value.length > 16 ? "col-span-2" : ""}`}>
-                            <dt className="text-[10px] tracking-[0.16em] uppercase text-black/40">{it.label}</dt>
-                            <dd className="text-base mt-1 break-words [overflow-wrap:anywhere]">{it.href ? <a href={it.href} target="_blank" rel="noreferrer" className="underline-offset-2 hover:underline">{it.value}</a> : it.value}</dd>
-                        </div>
-                    ))}
-                </dl>
-            )}
-            {t.video && (
-                <a href={t.video.url} target="_blank" rel="noreferrer" data-testid={`roster-video-${t.key}`}
-                    className="mt-5 inline-flex w-full items-center justify-center gap-2 bg-black text-white rounded-lg min-h-[48px] text-[11px] tracking-[0.16em] uppercase font-semibold">
-                    <Play className="w-3.5 h-3.5 fill-white" /> Introduction Video <ExternalLink className="w-3.5 h-3.5 opacity-60" />
-                </a>
-            )}
-            {rest.length > 0 && (
-                <div className="columns-2 gap-3 mt-6 [&>*]:mb-3">
-                    {rest.map((im, i) => <ImgTile key={im.id} im={im} onClick={() => onOpen(t.images, i + 1)} label={`${t.name} image ${i + 2}`} />)}
-                </div>
-            )}
-        </article>
-    );
-}
-
-function ImgTile({ im, onClick, label }) {
-    return (
-        <button type="button" onClick={onClick} aria-label={label} className="block w-full break-inside-avoid bg-[#f3f2ef] overflow-hidden" style={{ aspectRatio: `${im.ratio}` }}>
-            <img src={IMAGE_URL(im)} alt="" loading="lazy" decoding="async" className="w-full h-full object-contain block" />
-        </button>
-    );
-}
-
-/* ----------------------------------- lightbox ------------------------------------ */
-function Lightbox({ state, setState }) {
-    const { images, index } = state;
-    const step = (d) => setState({ images, index: (index + d + images.length) % images.length });
-    return (
-        <div className="fixed inset-0 z-50 bg-black/92 flex flex-col" role="dialog" aria-modal="true" data-testid="roster-lightbox">
-            <div className="flex items-center justify-between px-3 py-2 text-white">
-                <span className="text-xs text-white/70 px-2">{index + 1} / {images.length}</span>
-                <button onClick={() => setState(null)} aria-label="Close" className="min-w-[44px] min-h-[44px] flex items-center justify-center"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="relative flex-1 min-h-0 flex items-center justify-center px-2" onClick={() => setState(null)}>
-                {images.length > 1 && <button aria-label="Previous" onClick={(e) => { e.stopPropagation(); step(-1); }} className="absolute left-1 z-10 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full bg-white/15 text-white"><ChevronLeft className="w-5 h-5" /></button>}
-                <img src={IMAGE_URL(images[index])} alt="" onClick={(e) => e.stopPropagation()} className="max-w-full max-h-full object-contain" />
-                {images.length > 1 && <button aria-label="Next" onClick={(e) => { e.stopPropagation(); step(1); }} className="absolute right-1 z-10 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full bg-white/15 text-white"><ChevronRight className="w-5 h-5" /></button>}
-            </div>
-        </div>
-    );
+    return <RosterSections data={data} slug={slug} pdfButton={pdfButton} />;
 }

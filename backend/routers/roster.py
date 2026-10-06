@@ -443,10 +443,72 @@ async def _roster_link_for_viewer(slug: str, authorization: Optional[str]) -> di
     return link
 
 
+async def _live_talent_ids(link: dict) -> List[str]:
+    """Talent ids in the SAME order and with the SAME filter as resolve_roster()
+    (a talent that is gone/archived/merged is skipped), so position i here is
+    web key "t{i+1}". The public payload never exposes talent ids; this is the only
+    place a key is turned back into one."""
+    entries = (link.get("roster") or {}).get("talents") or []
+    docs = await db.talents.find({"id": {"$in": [e["talent_id"] for e in entries]}}, {"_id": 0, "id": 1, "status": 1}).to_list(len(entries) or 1)
+    by_id = {d["id"]: d for d in docs}
+    return [e["talent_id"] for e in entries
+            if e["talent_id"] in by_id and str(by_id[e["talent_id"]].get("status") or "").lower() not in _BLOCKED]
+
+
 @router.get("/public/links/{slug}/roster")
 async def public_roster(slug: str, authorization: Optional[str] = Header(None)):
     link = await _roster_link_for_viewer(slug, authorization)
-    return web_view(await resolve_roster(link))
+    viewer = decode_viewer(authorization)
+    payload = web_view(await resolve_roster(link))
+    # This viewer's own shortlist (keys only), from the same link_actions rows the classic
+    # Client View writes — never another viewer's.
+    rows = await db.link_actions.find(
+        {"link_id": link["id"], "viewer_email": viewer["email"], "action": "shortlist"}, {"_id": 0, "talent_id": 1},
+    ).to_list(5000)
+    mine = {r["talent_id"] for r in rows}
+    payload["shortlisted"] = [f"t{i + 1}" for i, tid in enumerate(await _live_talent_ids(link)) if tid in mine]
+    return payload
+
+
+class RosterShortlistIn(BaseModel):
+    key: str                      # "t3" — the public key; a raw talent id is never accepted
+    shortlisted: bool             # explicit state, so retries / double taps are idempotent
+    session_id: Optional[str] = None
+
+
+@router.post("/public/links/{slug}/roster/shortlist")
+async def roster_shortlist(slug: str, payload: RosterShortlistIn, authorization: Optional[str] = Header(None)):
+    """Client shortlist for a roster talent. REUSES the existing shortlist mechanism: one
+    `link_actions` row per (link, viewer email, talent) with action "shortlist" plus the same
+    `link_action_history` entry as the classic POST /public/links/{slug}/action — which stays
+    locked out for rosters. Only shortlist <-> none is possible here, and only for talents that
+    are in THIS roster."""
+    link = await _roster_link_for_viewer(slug, authorization)
+    viewer = decode_viewer(authorization)
+    m = re.fullmatch(r"t([1-9]\d{0,3})", payload.key or "")
+    ids = await _live_talent_ids(link)
+    if not m or int(m.group(1)) > len(ids):
+        raise HTTPException(404, "Talent not found in this roster")
+    talent_id = ids[int(m.group(1)) - 1]
+    filt = {"link_id": link["id"], "viewer_email": viewer["email"], "talent_id": talent_id}
+    existing = await db.link_actions.find_one(filt, {"_id": 0})
+    already = bool(existing) and existing.get("action") == "shortlist"
+    if payload.shortlisted == already:
+        return {"ok": True, "key": payload.key, "shortlisted": already}  # idempotent: no duplicate row, no history spam
+    new_action = "shortlist" if payload.shortlisted else None
+    now = _now()
+    if existing:
+        await db.link_actions.update_one(filt, {"$set": {"action": new_action, "viewer_name": viewer.get("name"), "session_id": payload.session_id, "updated_at": now}})
+    else:
+        await db.link_actions.update_one(filt, {"$set": {
+            **filt, "id": str(uuid.uuid4()), "viewer_name": viewer.get("name"), "action": new_action, "comment": None,
+            "comments": [], "voice_notes": [], "role": viewer.get("role") or "viewer", "session_id": payload.session_id,
+            "created_at": now, "updated_at": now}}, upsert=True)
+    await db.link_action_history.insert_one({
+        "id": str(uuid.uuid4()), "link_id": link["id"], "slug": slug, "talent_id": talent_id,
+        "viewer_name": viewer.get("name"), "viewer_email": viewer["email"], "action": new_action,
+        "session_id": payload.session_id, "created_at": now})
+    return {"ok": True, "key": payload.key, "shortlisted": bool(payload.shortlisted)}
 
 
 @router.get("/public/links/{slug}/roster/pdf")

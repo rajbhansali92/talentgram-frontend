@@ -3,6 +3,8 @@ import "@/App.css";
 import { Toaster } from "sonner";
 
 import { headers } from "next/headers";
+import { ogImages, twitterImages } from "@/lib/ogBrand";
+import { sanitizeMetadata } from "@/lib/sanitize";
 
 /**
  * viewport-fit=cover is REQUIRED for env(safe-area-inset-*) to work on
@@ -33,17 +35,13 @@ export async function generateMetadata() {
   let title = "Talentgram Agency";
   let description = "India - UAE";
   const baseSiteUrl = `https://${domain}`;
-  const versionString = `v=${Date.now()}`;
-  let ogImageUrl = `https://talentgramagency.com/og-image?${versionString}`;
 
   if (domain.startsWith("apply.")) {
     title = "Talentgram Agency — Apply Portal";
     description = "India - UAE";
-    ogImageUrl = `https://talentgramagency.com/og-image?portal=apply&${versionString}`;
   } else if (domain.startsWith("review.")) {
     title = "Talentgram Agency — Review Centre";
     description = "Secure access portal for casting directors and clients to review, shortlist, and approve talent portfolios.";
-    ogImageUrl = `https://talentgramagency.com/og-image?portal=review&${versionString}`;
   } else if (domain.startsWith("submit.")) {
     title = "Talentgram Agency — Submission Portal";
     description = "Submit your video auditions, polaroids, and details for active casting projects.";
@@ -52,7 +50,6 @@ export async function generateMetadata() {
     description = "Explore premium artist headshots, intro videos, and work reels.";
   }
 
-  const { sanitizeMetadata } = require("@/lib/sanitize");
   const cleanTitle = sanitizeMetadata(title);
   const cleanDescription = sanitizeMetadata(description);
 
@@ -69,14 +66,7 @@ export async function generateMetadata() {
       url: baseSiteUrl,
       siteName: "Talentgram",
       type: "website",
-      images: [
-        {
-          url: ogImageUrl,
-          width: 1200,
-          height: 630,
-          alt: cleanTitle,
-        }
-      ],
+      images: ogImages(cleanTitle),
     },
     manifest: '/site.webmanifest',
     icons: {
@@ -87,7 +77,7 @@ export async function generateMetadata() {
       card: "summary_large_image",
       title: cleanTitle,
       description: cleanDescription,
-      images: [ogImageUrl],
+      images: twitterImages(),
     }
   };
 }

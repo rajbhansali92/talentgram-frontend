@@ -1,6 +1,7 @@
 import React from 'react';
 import ClientView from '@/pages-components/ClientView';
 import RosterView from '@/pages-components/RosterView';
+import { ogImages, twitterImages } from '@/lib/ogBrand';
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "https://api.talentgramagency.com";
 
@@ -31,20 +32,13 @@ export async function generateMetadata({ params }) {
       description,
       type: 'website',
       siteName: 'Talentgram Agency',
-      images: [
-        {
-          url: `/l/${slug}/opengraph-image`,
-          width: 1200,
-          height: 630,
-          alt: 'Talentgram Agency',
-        },
-      ],
+      images: ogImages(),
     },
     twitter: {
       card: 'summary_large_image',
       title,
       description,
-      images: [`/l/${slug}/opengraph-image`],
+      images: twitterImages(),
     },
   };
 }

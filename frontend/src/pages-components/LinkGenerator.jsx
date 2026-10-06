@@ -3,6 +3,7 @@ import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import BudgetLines from "@/components/BudgetLines";
+import RosterBuilder from "@/pages-components/RosterBuilder";
 import { thumbnailUrl, resolveTalentCover } from "@/lib/mediaUtils";
 import {
     ArrowLeft,
@@ -15,6 +16,7 @@ import {
     UserCircle,
     Folder,
     Settings2,
+    FileText,
 } from "lucide-react";
 
 const VIS_ITEMS = [
@@ -59,7 +61,7 @@ const DEFAULT_VIS = {
     download: false,
 };
 
-// M1 = Individual Talent Share · M2 = Project Showcase · M3 = Submission/Audition Link
+// M1 = Individual Talent Share · M2 = Project Showcase · M3 = Submission/Audition Link · M4 = Roster / PDF
 const MODES = [
     {
         key: "individual",
@@ -82,9 +84,17 @@ const MODES = [
         desc: "Hand-pick approved submissions across any project. Static curation.",
         icon: Film,
     },
+    {
+        key: "roster",
+        title: "Roster / PDF",
+        tag: "M4",
+        desc: "Create a professional Talentgram roster or comp-card presentation from selected talents.",
+        icon: FileText,
+    },
 ];
 
 function inferMode(data) {
+    if (data?.link_type === "roster") return "roster";
     if (data?.auto_pull && data?.auto_project_id) return "showcase";
     const t = (data?.talent_ids || []).length;
     const s = (data?.submission_ids || []).length;
@@ -311,7 +321,7 @@ export default function LinkGenerator() {
                     </p>
                 </div>
                 <div
-                    className="grid md:grid-cols-3 gap-4"
+                    className="grid md:grid-cols-2 lg:grid-cols-4 gap-4"
                     data-testid="mode-picker-grid"
                 >
                     {MODES.map((m) => (
@@ -341,6 +351,11 @@ export default function LinkGenerator() {
                 </div>
             </div>
         );
+    }
+
+    // M4 — Roster / PDF has its own dedicated creation flow.
+    if (mode === "roster") {
+        return <RosterBuilder editId={isEdit ? id : null} />;
     }
 
     const activeMode = MODES.find((m) => m.key === mode);

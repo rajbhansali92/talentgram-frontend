@@ -14,6 +14,9 @@ import {
     Plus,
     Files,
     Check,
+    FileDown,
+    Pencil,
+    Loader2,
 } from "lucide-react";
 
 // Helper function for safe clipboard operations
@@ -48,6 +51,7 @@ export default function LinkHistory() {
     const [selected, setSelected] = useState(new Set());
     const [bulkConfirm, setBulkConfirm] = useState(false);
     const [togglingPublicIds, setTogglingPublicIds] = useState(new Set());
+    const [pdfBusyId, setPdfBusyId] = useState(null);
     const canDelete = isAdmin();
     const canCreate = isAdmin();
 
@@ -162,6 +166,28 @@ export default function LinkHistory() {
     const shareWhatsApp = (l) => {
         const url = `${getSubdomainUrl("links")}/${l.slug}`;
         window.open(generateClientViewMessage(l.title, url), "_blank");
+    };
+
+    // Roster / PDF links: re-download the PDF at any time (built from the
+    // roster's current selection; cached server-side, so repeat downloads are fast).
+    const downloadRosterPdf = async (l) => {
+        if (pdfBusyId) return;
+        setPdfBusyId(l.id);
+        try {
+            const res = await adminApi.get(`/links/${l.id}/roster/pdf`, { responseType: "blob" });
+            const url = URL.createObjectURL(res.data);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${(l.title || "Talentgram Roster").replace(/[^A-Za-z0-9 _.-]/g, "").trim() || "Talentgram Roster"}.pdf`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 4000);
+        } catch {
+            toast.error("Couldn't generate the PDF. Please try again in a moment.");
+        } finally {
+            setPdfBusyId(null);
+        }
     };
 
     const duplicate = async (id) => {
@@ -299,10 +325,13 @@ export default function LinkHistory() {
                                                 {(() => {
                                                     const hasSubs = (l.submission_ids || []).length > 0;
                                                     const hasTalents = (l.talent_ids || []).length > 0;
-                                                    const label = hasSubs && hasTalents ? "Mixed"
+                                                    const isRoster = l.link_type === "roster";
+                                                    const label = isRoster ? "Roster / PDF"
+                                                        : hasSubs && hasTalents ? "Mixed"
                                                         : hasSubs ? "Audition"
                                                         : "Manual";
-                                                    const cls = hasSubs && hasTalents ? "border-black/30 text-black/60"
+                                                    const cls = isRoster ? "border-black bg-black text-white"
+                                                        : hasSubs && hasTalents ? "border-black/30 text-black/60"
                                                         : hasSubs ? "border-green-600/40 text-green-700"
                                                         : "border-black/20 text-black/50";
                                                     return (
@@ -374,6 +403,27 @@ export default function LinkHistory() {
                                             label=""
                                             className="p-2 border-none hover:border-none text-black/55 hover:text-black hover:bg-black/[0.04] rounded-md transition-colors duration-150 min-h-0 h-auto flex-none focus-visible:ring-0 active:scale-100 px-2 py-2 w-auto"
                                         />
+                                        {l.link_type === "roster" && (
+                                            <>
+                                                <button
+                                                    onClick={() => downloadRosterPdf(l)}
+                                                    disabled={pdfBusyId === l.id}
+                                                    title="Download PDF"
+                                                    data-testid={`roster-pdf-${l.id}`}
+                                                    className="p-2 text-black/50 hover:text-black/80 hover:bg-black/[0.04] rounded-md transition-colors duration-150 disabled:opacity-50"
+                                                >
+                                                    {pdfBusyId === l.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
+                                                </button>
+                                                <Link
+                                                    to={`/admin/links/${l.id}/edit`}
+                                                    title="Edit roster"
+                                                    data-testid={`roster-edit-${l.id}`}
+                                                    className={`p-2 text-black/50 hover:text-black/80 hover:bg-black/[0.04] rounded-md transition-colors duration-150 ${canCreate ? "" : "hidden"}`}
+                                                >
+                                                    <Pencil className="w-3.5 h-3.5" />
+                                                </Link>
+                                            </>
+                                        )}
                                         <button
                                             onClick={() => duplicate(l.id)}
                                             title="Duplicate"
@@ -431,10 +481,13 @@ export default function LinkHistory() {
                                         {(() => {
                                             const hasSubs = (l.submission_ids || []).length > 0;
                                             const hasTalents = (l.talent_ids || []).length > 0;
-                                            const label = hasSubs && hasTalents ? "Mixed"
+                                            const isRoster = l.link_type === "roster";
+                                            const label = isRoster ? "Roster / PDF"
+                                                : hasSubs && hasTalents ? "Mixed"
                                                 : hasSubs ? "Audition"
                                                 : "Manual";
-                                            const cls = hasSubs && hasTalents ? "border-black/20 text-black/60 bg-black/[0.02]"
+                                            const cls = isRoster ? "border-black bg-black text-white"
+                                                : hasSubs && hasTalents ? "border-black/20 text-black/60 bg-black/[0.02]"
                                                 : hasSubs ? "border-green-600/30 text-green-700 bg-green-50/50"
                                                 : "border-black/10 text-black/50 bg-black/[0.01]";
                                             return (
@@ -523,6 +576,28 @@ export default function LinkHistory() {
                                                 <span>Copy Link</span>
                                             </button>
                                         </div>
+                                        {l.link_type === "roster" && (
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={() => downloadRosterPdf(l)}
+                                                    disabled={pdfBusyId === l.id}
+                                                    data-testid={`roster-pdf-mobile-${l.id}`}
+                                                    className="flex-1 h-11 inline-flex items-center justify-center gap-2 border border-black/[0.08] hover:bg-black/[0.02] rounded-xl transition-colors duration-150 text-[11px] font-semibold text-black/75 shadow-sm disabled:opacity-60"
+                                                >
+                                                    {pdfBusyId === l.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4 text-black/45" />}
+                                                    <span>{pdfBusyId === l.id ? "Preparing…" : "Download PDF"}</span>
+                                                </button>
+                                                {canCreate && (
+                                                    <Link
+                                                        to={`/admin/links/${l.id}/edit`}
+                                                        className="flex-1 h-11 inline-flex items-center justify-center gap-2 border border-black/[0.08] hover:bg-black/[0.02] rounded-xl transition-colors duration-150 text-[11px] font-semibold text-black/75 shadow-sm"
+                                                    >
+                                                        <Pencil className="w-4 h-4 text-black/45" />
+                                                        <span>Edit Roster</span>
+                                                    </Link>
+                                                )}
+                                            </div>
+                                        )}
                                         {/* Secondary Actions (WhatsApp, Duplicate, Delete) */}
                                         <div className="flex gap-2 justify-between">
                                             <WhatsAppShareButton

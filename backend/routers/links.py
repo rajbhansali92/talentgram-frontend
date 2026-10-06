@@ -63,7 +63,7 @@ router = APIRouter(prefix="/api", tags=["links"])
 logger = logging.getLogger(__name__)
 
 
-def _require_active_link(link: dict) -> None:
+def _require_active_link(link: dict, allow_roster: bool = False) -> None:
     """Enforce is_public on public client endpoints.
 
     Called AFTER `link = await db.links.find_one(...)` has already
@@ -73,6 +73,13 @@ def _require_active_link(link: dict) -> None:
     still counts as active to preserve backwards compatibility with
     links created before the field was introduced.
     """
+    # A Roster / PDF link (routers/roster.py) is curated down to selected
+    # talents + selected images. Its talent_ids must never be servable through
+    # the classic client-view endpoints (which would expose each talent's whole
+    # portfolio), so every classic endpoint that calls this rejects it; only the
+    # identify step and the roster endpoints opt in with allow_roster=True.
+    if link.get("link_type") == "roster" and not allow_roster:
+        raise HTTPException(status_code=404, detail="Link not found")
     if link.get("is_public") is False:
         raise HTTPException(status_code=403, detail="This link is no longer active")
 
@@ -82,6 +89,9 @@ def _require_active_link(link: dict) -> None:
 # --------------------------------------------------------------------------
 @router.post("/links", response_model=LinkOut)
 async def create_link(payload: LinkIn, admin: dict = Depends(current_admin)):
+    if payload.link_type == "roster":
+        from routers.roster import create_roster_link
+        return await create_roster_link(payload, admin)
     vis = {**DEFAULT_VISIBILITY, **(payload.visibility or {})}
     talent_ids = _clean_ids(payload.talent_ids)
     submission_ids = _clean_ids(payload.submission_ids)
@@ -189,6 +199,12 @@ async def get_link(lid: str, admin: dict = Depends(current_team_or_admin)):
 
 @router.put("/links/{lid}", response_model=LinkOut)
 async def update_link(lid: str, payload: LinkIn, admin: dict = Depends(current_admin)):
+    _existing_type = await db.links.find_one({"id": lid}, {"_id": 0, "link_type": 1, "title": 1, "roster": 1, "subject_added_at": 1})
+    if _existing_type is None:
+        raise HTTPException(404, "Link not found")
+    if _existing_type.get("link_type") == "roster":
+        from routers.roster import update_roster_link
+        return await update_roster_link(lid, payload, admin, _existing_type)
     vis = {**DEFAULT_VISIBILITY, **(payload.visibility or {})}
     update = payload.model_dump()
     update["visibility"] = vis
@@ -488,7 +504,7 @@ async def identify_viewer(slug: str, payload: IdentifyIn):
     link = await db.links.find_one({"slug": slug}, {"_id": 0})
     if not link:
         raise HTTPException(404, "Link not found")
-    _require_active_link(link)
+    _require_active_link(link, allow_roster=True)
     viewer_id = str(uuid.uuid4())
     email = payload.email.lower()
     now = _now()
@@ -553,7 +569,7 @@ async def mark_seen(
     viewer = decode_viewer(authorization)
     if not viewer or viewer.get("slug") != slug:
         raise HTTPException(401, "Identity required")
-    link = await db.links.find_one({"slug": slug}, {"_id": 0, "id": 1, "is_public": 1})
+    link = await db.links.find_one({"slug": slug}, {"_id": 0, "id": 1, "is_public": 1, "link_type": 1})
     if not link:
         raise HTTPException(404, "Link not found")
     _require_active_link(link)
@@ -578,7 +594,7 @@ async def mark_reviewed(
     viewer = decode_viewer(authorization)
     if not viewer or viewer.get("slug") != slug:
         raise HTTPException(401, "Identity required")
-    link = await db.links.find_one({"slug": slug}, {"_id": 0, "id": 1, "is_public": 1})
+    link = await db.links.find_one({"slug": slug}, {"_id": 0, "id": 1, "is_public": 1, "link_type": 1})
     if not link:
         raise HTTPException(404, "Link not found")
     _require_active_link(link)

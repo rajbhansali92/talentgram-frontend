@@ -2504,6 +2504,10 @@ class LinkIn(BaseModel):
     # Optional per-link override for client-facing budget. When non-empty it
     # REPLACES the aggregated project client_budget in the public link payload.
     client_budget_override: Optional[List[Dict[str, str]]] = None
+    # "Roster / PDF" link type (routers/roster.py). Absent/None for every
+    # pre-existing link type, so nothing about those changes.
+    link_type: Optional[str] = None
+    roster: Optional[Dict[str, Any]] = None
 
 
 class LinkOut(LinkIn):

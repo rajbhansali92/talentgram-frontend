@@ -35,6 +35,7 @@ from routers import (
     production_desk,
     projects,
     submissions,
+    roster,
     talent_media,
     talents,
     users,
@@ -145,6 +146,7 @@ app.include_router(_meta)
 app.include_router(auth.router)
 app.include_router(talents.router)
 app.include_router(talent_media.router)
+app.include_router(roster.router)
 app.include_router(links.router)
 app.include_router(projects.router)
 app.include_router(production_desk.router)

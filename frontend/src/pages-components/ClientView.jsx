@@ -1943,7 +1943,7 @@ function ClientView() {
     );
 }
 
-function TalentDetail({
+export function TalentDetail({
     talent,
     talents,
     link,
@@ -3625,7 +3625,7 @@ function TalentDetail({
                             </div>
 
                             <SectionErrorBoundary label="metadata" getDiagnostics={getSectionDiagnostics}>
-                                <CollapsibleSection title="Availability &amp; Budget" defaultOpen={false} testid="availability-budget-section">
+                                <CollapsibleSection title="Availability &amp; Budget" defaultOpen={true} testid="availability-budget-section">
                                     <AvailabilityBudgetSection
                                         talent={talent}
                                         projectShootDates={projectShootDates}

@@ -193,3 +193,86 @@ describe("RosterBuilder", () => {
         expect(screen.getByTestId("roster-field-ethnicity").getAttribute("aria-checked")).toBe("false");
     });
 });
+
+describe("RosterBuilder — Allow PDF Download", () => {
+    const sw = () => screen.getByTestId("roster-allow-pdf");
+
+    // details -> talents -> images -> save (the same flow the other tests use)
+    async function saveCurrent(mode = "new") {
+        if (mode === "new") fireEvent.change(screen.getByTestId("roster-title"), { target: { value: "Talentgram X BKB" } });
+        fireEvent.click(screen.getByTestId("roster-next"));
+        await screen.findByTestId("roster-talent-t1");
+        if (mode === "new") fireEvent.click(screen.getByTestId("roster-talent-t1"));
+        fireEvent.click(screen.getByTestId("roster-next"));
+        await screen.findByTestId("roster-images-t1");
+        fireEvent.click(screen.getByTestId("roster-save"));
+        await screen.findByTestId("roster-created");
+    }
+    const editWith = (roster) => {
+        adminApi.get.mockImplementation((url) => {
+            if (url === "/roster/fields") return Promise.resolve({ data: REGISTRY });
+            if (url === "/links/L9") return Promise.resolve({ data: { id: "L9", title: "Existing", slug: "s", roster: { subtitle: null, talents: [{ talent_id: "t1", media_ids: ["i1"] }], ...roster } } });
+            return Promise.resolve({ data: { items: TALENTS, has_more: false } });
+        });
+        adminApi.post.mockImplementation((url) => (url === "/talents/bulk" ? Promise.resolve({ data: TALENTS }) : Promise.resolve({ data: OPTIONS })));
+        adminApi.put.mockResolvedValue({ data: { id: "L9", slug: "s", title: "Existing", talent_ids: ["t1"] } });
+        render(<MemoryRouter><RosterBuilder editId="L9" /></MemoryRouter>);
+    };
+
+    it("is a clearly labelled toggle in the details step, ON by default for a new roster", async () => {
+        renderBuilder();
+        await screen.findByTestId("roster-step-details");
+        expect(within(screen.getByTestId("roster-pdf-setting")).getByText("Allow PDF Download")).toBeTruthy();
+        expect(screen.getByText("Allow clients to download the roster as a PDF.")).toBeTruthy();
+        expect(sw().getAttribute("role")).toBe("switch");
+        expect(sw().getAttribute("aria-checked")).toBe("true");
+    });
+
+    it("a new roster is saved with allow_pdf_download = true unless the admin switches it off", async () => {
+        renderBuilder();
+        await screen.findByTestId("roster-step-details");
+        await saveCurrent();
+        const [, payload] = adminApi.post.mock.calls.find((c) => c[0] === "/links");
+        expect(payload.roster.allow_pdf_download).toBe(true);
+    });
+
+    it("can be switched OFF and back ON, and OFF is what gets saved", async () => {
+        renderBuilder();
+        await screen.findByTestId("roster-step-details");
+        fireEvent.click(sw());
+        expect(sw().getAttribute("aria-checked")).toBe("false");
+        fireEvent.click(sw());
+        expect(sw().getAttribute("aria-checked")).toBe("true");
+        fireEvent.click(sw());
+        await saveCurrent();
+        const [, payload] = adminApi.post.mock.calls.find((c) => c[0] === "/links");
+        expect(payload.roster.allow_pdf_download).toBe(false);
+    });
+
+    it("reopening a roster saved OFF shows OFF, and saving without touching it keeps it OFF", async () => {
+        editWith({ allow_pdf_download: false });
+        await screen.findByTestId("roster-pdf-setting");
+        await waitFor(() => expect(sw().getAttribute("aria-checked")).toBe("false"));
+        await saveCurrent("edit");
+        expect(adminApi.put.mock.calls[0][1].roster.allow_pdf_download).toBe(false);
+    });
+
+    it("reopening a roster saved ON shows ON, and it can be turned OFF in an edit", async () => {
+        editWith({ allow_pdf_download: true });
+        await screen.findByTestId("roster-pdf-setting");
+        await waitFor(() => expect(screen.getByTestId("roster-title").value).toBe("Existing"));
+        expect(sw().getAttribute("aria-checked")).toBe("true");
+        fireEvent.click(sw());
+        await saveCurrent("edit");
+        expect(adminApi.put.mock.calls[0][1].roster.allow_pdf_download).toBe(false);
+    });
+
+    it("an older roster that has no stored setting opens as ON (and keeps behaving as today)", async () => {
+        editWith({});
+        await screen.findByTestId("roster-pdf-setting");
+        await waitFor(() => expect(screen.getByTestId("roster-title").value).toBe("Existing"));
+        expect(sw().getAttribute("aria-checked")).toBe("true");
+        await saveCurrent("edit");
+        expect(adminApi.put.mock.calls[0][1].roster.allow_pdf_download).toBe(true);
+    });
+});

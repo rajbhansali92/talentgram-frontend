@@ -51,6 +51,7 @@ export default function RosterBuilder({ editId = null }) {
     // server so the builder never hard-codes which Global Talent fields exist.
     const [registry, setRegistry] = useState(null);
     const [fields, setFields] = useState(null);
+    const [allowPdf, setAllowPdf] = useState(true); // "Allow PDF Download" — ON for new rosters and for any saved roster without the setting
 
     useEffect(() => {
         let live = true;
@@ -75,6 +76,7 @@ export default function RosterBuilder({ editId = null }) {
                 // Saved field config wins; a roster made before this feature has none and
                 // (like the public page) falls back to the standard defaults.
                 if (data.roster?.fields) setFields(data.roster.fields);
+                setAllowPdf(data.roster?.allow_pdf_download !== false);
                 const entries = data.roster?.talents || [];
                 editSelectionRef.current = Object.fromEntries(entries.map((e) => [e.talent_id, e.media_ids || []]));
                 const ids = entries.map((e) => e.talent_id);
@@ -129,7 +131,7 @@ export default function RosterBuilder({ editId = null }) {
         if (saving) return;
         setSaving(true);
         try {
-            const payload = buildRosterPayload({ title, subtitle, talentIds: selectedIds, mediaByTalent, fields });
+            const payload = buildRosterPayload({ title, subtitle, talentIds: selectedIds, mediaByTalent, fields, allowPdfDownload: allowPdf });
             const { data } = editId
                 ? await adminApi.put(`/links/${editId}`, payload)
                 : await adminApi.post("/links", payload);
@@ -217,6 +219,19 @@ export default function RosterBuilder({ editId = null }) {
                     <input id="roster-subtitle" data-testid="roster-subtitle" value={subtitle} onChange={(e) => setSubtitle(e.target.value)}
                         placeholder="Selected Talent — October 2026" maxLength={120}
                         className="w-full border border-black/[0.12] rounded-lg px-4 min-h-[48px] text-base focus:outline-none focus:border-black/50" />
+
+                    <div className="mt-8 pt-6 border-t border-black/[0.08] flex items-center justify-between gap-4" data-testid="roster-pdf-setting">
+                        <div className="min-w-0">
+                            <h2 className="text-[11px] tracking-widest uppercase text-black/45">Allow PDF Download</h2>
+                            <p className="text-xs text-black/45 mt-1">Allow clients to download the roster as a PDF.</p>
+                        </div>
+                        <button type="button" role="switch" aria-checked={allowPdf} aria-label="Allow PDF Download" data-testid="roster-allow-pdf"
+                            onClick={() => setAllowPdf((v) => !v)} className="shrink-0 min-w-[48px] min-h-[44px] flex items-center justify-end">
+                            <span className={`relative inline-flex h-6 w-11 rounded-full transition-colors ${allowPdf ? "bg-black" : "bg-black/20"}`}>
+                                <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${allowPdf ? "translate-x-5" : ""}`} />
+                            </span>
+                        </button>
+                    </div>
 
                     {registry && fields && (
                         <div className="mt-8 pt-6 border-t border-black/[0.08]" data-testid="roster-fields">

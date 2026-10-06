@@ -425,3 +425,27 @@ describe("PDF button (unchanged behaviour)", () => {
         expect(screen.queryByTestId("roster-download-pdf")).toBeNull();
     });
 });
+
+describe("Allow PDF Download (server decides via pdf_available)", () => {
+    it("ON: Download PDF is in the header", async () => {
+        await openRoster({ pdf_available: true });
+        const btn = screen.getByTestId("roster-download-pdf");
+        expect(btn.textContent).toContain("Download PDF");
+        expect(btn.getAttribute("aria-label")).toBe("Download PDF");
+    });
+
+    it("OFF: no Download PDF anywhere, no empty button area, and the rest of the page is unchanged", async () => {
+        await openRoster({ pdf_available: false });
+        expect(screen.queryByTestId("roster-download-pdf")).toBeNull();
+        expect(screen.queryByText(/Download PDF|Preparing PDF/)).toBeNull();
+        expect(screen.queryByLabelText(/PDF/)).toBeNull();
+        const header = screen.getByTestId("roster-header-title").parentElement;
+        expect(header.children.length).toBe(3);                                     // logo, title, right slot — same structure as ON
+        expect(screen.getByTestId("roster-index-open")).toBeTruthy();               // the other header control is still there
+        expect(within(screen.getByTestId("roster-sections")).getAllByRole("heading", { level: 2 }).length).toBe(3);
+        fireEvent.click(screen.getByTestId("roster-next-t1"));                      // carousel + shortlist still work
+        expect(screen.getByTestId("roster-counter-t1").textContent).toBe("02 / 03");
+        fireEvent.click(screen.getByTestId("roster-shortlist-t1"));
+        expect(screen.getByTestId("roster-shortlist-t1").getAttribute("aria-pressed")).toBe("true");
+    });
+});

@@ -81,3 +81,16 @@ describe("rosterSelection", () => {
         expect(withF.roster.fields).toEqual({ name: true, age: false });
     });
 });
+
+describe("allow_pdf_download in the roster payload", () => {
+    const base = { title: "T", subtitle: "", talentIds: ["t1"], mediaByTalent: { t1: ["a"] } };
+    it("is ON by default and carries an explicit boolean", () => {
+        expect(buildRosterPayload(base).roster.allow_pdf_download).toBe(true);
+        expect(buildRosterPayload({ ...base, allowPdfDownload: true }).roster.allow_pdf_download).toBe(true);
+    });
+    it("sends false only when switched off (anything else stays ON)", () => {
+        expect(buildRosterPayload({ ...base, allowPdfDownload: false }).roster.allow_pdf_download).toBe(false);
+        expect(buildRosterPayload({ ...base, allowPdfDownload: undefined }).roster.allow_pdf_download).toBe(true);
+        expect(buildRosterPayload({ ...base, allowPdfDownload: null }).roster.allow_pdf_download).toBe(true);
+    });
+});

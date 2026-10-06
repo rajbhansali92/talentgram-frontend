@@ -43,7 +43,7 @@ export function pruneSelection(selected, groups) {
 }
 
 /** The shape POST/PUT /links expects for a roster link. */
-export function buildRosterPayload({ title, subtitle, talentIds, mediaByTalent, fields = null, isPublic = true }) {
+export function buildRosterPayload({ title, subtitle, talentIds, mediaByTalent, fields = null, isPublic = true, allowPdfDownload = true }) {
     return {
         title: title.trim(),
         brand_name: null,
@@ -62,6 +62,8 @@ export function buildRosterPayload({ title, subtitle, talentIds, mediaByTalent, 
             subtitle: (subtitle || "").trim() || null,
             // Roster-level field visibility (null = leave the server's stored/default config alone).
             ...(fields ? { fields } : {}),
+            // Admin switch: may the public viewer download the PDF? (server default / legacy rosters = ON)
+            allow_pdf_download: allowPdfDownload !== false,
             talents: talentIds.map((id) => ({ talent_id: id, media_ids: mediaByTalent[id] || [] })),
         },
     };

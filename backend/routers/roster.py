@@ -190,6 +190,12 @@ async def roster_media_options(payload: MediaOptionsIn, admin: dict = Depends(cu
 # ---------------------------------------------------------------------------
 # Create / update (called from links.create_link / update_link)
 # ---------------------------------------------------------------------------
+def pdf_download_allowed(link: Optional[dict]) -> bool:
+    """Admin switch "Allow PDF Download" (roster.allow_pdf_download). Only an explicit False turns the
+    public download off — a missing/null value (every roster created before the setting existed) is ON."""
+    return ((link or {}).get("roster") or {}).get("allow_pdf_download") is not False
+
+
 async def prepare_roster(raw: Optional[dict], existing: Optional[dict] = None) -> Tuple[List[str], dict]:
     if not isinstance(raw, dict) or not isinstance(raw.get("talents"), list) or not raw["talents"]:
         raise HTTPException(400, "Select at least one talent for the roster")
@@ -256,8 +262,14 @@ async def prepare_roster(raw: Optional[dict], existing: Optional[dict] = None) -
         fields = F.normalize_fields(existing["roster"]["fields"])
     else:
         fields = F.normalize_fields(None)
+    # Per-roster permission: may the PUBLIC viewer download the PDF? A save that sends no value keeps
+    # the stored one; a roster that never had one (all legacy rosters) is ON.
+    if isinstance(raw.get("allow_pdf_download"), bool):
+        allow_pdf = raw["allow_pdf_download"]
+    else:
+        allow_pdf = pdf_download_allowed(existing)
     return [e["talent_id"] for e in entries], {"subtitle": subtitle, "fields": fields, "talents": out_talents,
-                                               "updated_at": _now()}
+                                               "allow_pdf_download": allow_pdf, "updated_at": _now()}
 
 
 def _warm_pdf(link: dict) -> None:
@@ -460,6 +472,7 @@ async def public_roster(slug: str, authorization: Optional[str] = Header(None)):
     link = await _roster_link_for_viewer(slug, authorization)
     viewer = decode_viewer(authorization)
     payload = web_view(await resolve_roster(link))
+    payload["pdf_available"] = payload["pdf_available"] and pdf_download_allowed(link)   # drives the public Download PDF button
     # This viewer's own shortlist (keys only), from the same link_actions rows the classic
     # Client View writes — never another viewer's.
     rows = await db.link_actions.find(
@@ -515,6 +528,8 @@ async def roster_shortlist(slug: str, payload: RosterShortlistIn, authorization:
 async def public_roster_pdf(slug: str, authorization: Optional[str] = Header(None), token: Optional[str] = None):
     auth = authorization or (f"Bearer {token}" if token else None)
     link = await _roster_link_for_viewer(slug, auth)
+    if not pdf_download_allowed(link):
+        raise HTTPException(403, "PDF download is not available for this roster")   # no bytes, no log, no build
     viewer = decode_viewer(auth) or {}
     try:
         await db.link_downloads.insert_one({

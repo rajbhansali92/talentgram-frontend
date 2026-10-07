@@ -3,7 +3,7 @@ import { X, Search, Check, Loader2, FolderKanban, Send, MessageSquare } from "lu
 import { adminApi } from "@/lib/api";
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
-import { sendCastingCall, getTemplates } from "@/lib/whatsappApi";
+import { sendCastingCall, getTemplates, getWorkers } from "@/lib/whatsappApi";
 
 /**
  * AddToProjectModal — bulk "Add to Project" picker launched from the Global
@@ -25,6 +25,14 @@ import { sendCastingCall, getTemplates } from "@/lib/whatsappApi";
  * addition: onSuccess/onClose fire immediately with no WhatsApp send and no
  * pipeline movement.
  */
+// A worker can send only when sending is enabled for it AND its live session is authenticated.
+const isSendableWorker = (w) => w?.sending_enabled === true && w?.session?.status === "authenticated";
+const workerStatusLabel = (w) => {
+    if (w?.sending_enabled !== true) return "Sending off";
+    const st = w?.session?.status;
+    return st === "authenticated" ? "Connected" : st === "qr_pending" ? "Scan QR" : "Disconnected";
+};
+
 export default function AddToProjectModal({ open, talentIds, onClose, onSuccess, onCastingCallQueued }) {
     const [projects, setProjects] = useState([]);
     const [loadingProjects, setLoadingProjects] = useState(false);
@@ -45,6 +53,12 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
     const [loadingTemplates, setLoadingTemplates] = useState(false);
     const [templateSearch, setTemplateSearch] = useState("");
     const [selectedTemplateId, setSelectedTemplateId] = useState("");
+    // "Send via" (2026-10-07): the WhatsApp worker the admin explicitly chooses. Rendered from the
+    // live worker registry (GET /whatsapp/workers), so any number of workers shows up — never a
+    // hard-coded pair. Nothing is chosen for the admin when several are available.
+    const [workers, setWorkers] = useState([]);
+    const [loadingWorkers, setLoadingWorkers] = useState(false);
+    const [selectedWorkerId, setSelectedWorkerId] = useState("");
     const searchInputRef = useRef(null);
     const listRef = useRef(null);
     const itemRefs = useRef(new Map());
@@ -120,6 +134,33 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
         setTimeout(() => templateSearchInputRef.current?.focus(), 50);
         return () => { isMounted = false; };
     }, [showTemplatePicker]);
+
+    // A worker can be chosen only while it can actually send: sending enabled AND its live session
+    // authenticated (the status the WhatsApp Engine shows as "Connected").
+    const refreshWorkers = useCallback(() => {
+        return getWorkers()
+            .then((list) => {
+                const arr = Array.isArray(list) ? list : [];
+                setWorkers(arr);
+                setSelectedWorkerId((cur) => {
+                    const ready = arr.filter(isSendableWorker);
+                    if (cur && ready.some((w) => w.id === cur)) return cur;   // keep a still-valid choice
+                    return ready.length === 1 ? ready[0].id : "";              // only ONE available -> preselect; else the admin must choose
+                });
+            })
+            .catch(() => {})
+            .finally(() => setLoadingWorkers(false));
+    }, []);
+
+    // Same moment the template list loads; re-polled slowly so a worker that drops while the picker is
+    // open can't stay selected.
+    useEffect(() => {
+        if (!showTemplatePicker) return undefined;
+        setLoadingWorkers(true);
+        refreshWorkers();
+        const timer = setInterval(refreshWorkers, 8000);
+        return () => clearInterval(timer);
+    }, [showTemplatePicker, refreshWorkers]);
 
     const filteredTemplates = useMemo(() => {
         const q = templateSearch.trim().toLowerCase();
@@ -214,13 +255,15 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
         // Required, no silent fallback: the Send button is already disabled
         // until a template is picked, but this guard keeps the invariant
         // true even if this function is ever called some other way.
-        if (sendingCastingCall || !selectedTemplateId) return;
+        if (sendingCastingCall || !selectedTemplateId || !selectedWorkerId) return;
         setSendingCastingCall(true);
+        let keepOpen = false;
         try {
             const result = await sendCastingCall({
                 talent_ids: talentIds,
                 project_ids: Array.from(checked),
                 template_id: selectedTemplateId,
+                worker_id: selectedWorkerId,
             });
             if (result.errors?.length) {
                 toast.error(
@@ -238,10 +281,20 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
             if (result.batches?.length) onCastingCallQueued?.(result.batches);
         } catch (err) {
             toast.error(formatErrorDetail(err, "Failed to queue casting call"));
+            // The chosen worker was refused (not connected / sending off): nothing was queued, so stay
+            // on this step with a fresh worker list and let the admin pick another — never auto-switch.
+            const st = err?.response?.status;
+            if (st === 409 || st === 403) {
+                keepOpen = true;
+                setSelectedWorkerId("");
+                refreshWorkers();
+            }
         } finally {
             setSendingCastingCall(false);
-            onSuccess?.(addResult);
-            onClose();
+            if (!keepOpen) {
+                onSuccess?.(addResult);
+                onClose();
+            }
         }
     };
 
@@ -319,6 +372,47 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
                         )}
                     </div>
 
+                    <div className="mb-4 shrink-0" data-testid="send-via">
+                        <p className="text-[10px] tracking-widest uppercase text-black/40 mb-2">Send via</p>
+                        {loadingWorkers && workers.length === 0 ? (
+                            <div className="flex items-center gap-2 text-xs text-black/40"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Checking WhatsApp workers…</div>
+                        ) : (
+                            <>
+                                <div role="radiogroup" aria-label="Send via" className="flex flex-wrap gap-2">
+                                    {workers.map((w) => {
+                                        const ready = isSendableWorker(w);
+                                        const chosen = selectedWorkerId === w.id;
+                                        return (
+                                            <button
+                                                key={w.id}
+                                                type="button"
+                                                role="radio"
+                                                aria-checked={chosen}
+                                                disabled={!ready || sendingCastingCall}
+                                                onClick={() => setSelectedWorkerId(w.id)}
+                                                data-testid={`send-via-${w.id}`}
+                                                className={[
+                                                    "inline-flex items-center gap-2 px-3 min-h-[40px] rounded-lg border text-xs transition-colors",
+                                                    chosen ? "bg-black text-white border-black" : "bg-white border-black/[0.12] text-black/80 hover:border-black/40",
+                                                    !ready ? "opacity-45 cursor-not-allowed hover:border-black/[0.12]" : "",
+                                                ].join(" ")}
+                                            >
+                                                <span className={["w-1.5 h-1.5 rounded-full shrink-0", ready ? "bg-emerald-500" : "bg-red-400"].join(" ")} />
+                                                <span className="font-medium">{w.label || w.id}</span>
+                                                <span className={chosen ? "text-white/70" : "text-black/45"}>{workerStatusLabel(w)}</span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                {!loadingWorkers && !workers.some(isSendableWorker) && (
+                                    <p className="mt-2 text-xs text-red-600/90" data-testid="send-via-none">
+                                        No WhatsApp worker is currently connected. Connect a worker in WhatsApp Engine, then try again.
+                                    </p>
+                                )}
+                            </>
+                        )}
+                    </div>
+
                     <div className="flex gap-2 shrink-0">
                         <button
                             onClick={finishNotNow}
@@ -330,7 +424,7 @@ export default function AddToProjectModal({ open, talentIds, onClose, onSuccess,
                         </button>
                         <button
                             onClick={handleSendCastingCall}
-                            disabled={sendingCastingCall || !selectedTemplateId}
+                            disabled={sendingCastingCall || !selectedTemplateId || !selectedWorkerId}
                             data-testid="template-picker-send"
                             className="flex-1 py-2.5 bg-black text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-40 hover:bg-black/85 flex items-center justify-center gap-1.5"
                         >

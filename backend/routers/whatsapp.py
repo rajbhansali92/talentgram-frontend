@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from core import _now, current_team_or_admin, current_admin, db
-from routers.whatsapp_workers import DEFAULT_WORKER_ID, require_worker, worker_match_filter
+from routers.whatsapp_workers import DEFAULT_WORKER_ID, require_sendable_worker, require_worker, worker_match_filter
 
 logger = logging.getLogger(__name__)
 
@@ -1655,6 +1655,10 @@ class CastingCallSendIn(BaseModel):
     talent_ids: List[str] = Field(default_factory=list)
     project_ids: List[str] = Field(default_factory=list)
     template_id: str = ""
+    # "Send via" — the worker the admin explicitly chose. The UI always sends it. Omitted (None) keeps the
+    # pre-existing behaviour for any caller that predates the picker (BatchIn's own default worker);
+    # present-but-blank is rejected, and a chosen worker is NEVER swapped for another one.
+    worker_id: Optional[str] = None
 
 
 def _clean_id_list(raw: List[str]) -> List[str]:
@@ -1757,6 +1761,16 @@ async def send_casting_call(payload: CastingCallSendIn, admin: dict = Depends(cu
     if not template:
         raise HTTPException(404, "Template not found")
 
+    # Validate the chosen sender ONCE, before any batch/job exists, so an unavailable worker
+    # rejects the whole send (no partial jobs, no silent switch to another worker).
+    batch_worker: Dict[str, str] = {}
+    if payload.worker_id is not None:
+        chosen = payload.worker_id.strip()
+        if not chosen:
+            raise HTTPException(400, "Select a WhatsApp worker to send from")
+        await require_sendable_worker(chosen)
+        batch_worker = {"worker_id": chosen}
+
     from routers.casting_pipeline import PIPELINE_STAGE_ORDER
 
     results: List[dict] = []
@@ -1777,6 +1791,7 @@ async def send_casting_call(payload: CastingCallSendIn, admin: dict = Depends(cu
             source_params=SourceParams(project_id=pid, pipeline_stages=list(PIPELINE_STAGE_ORDER), talent_ids=talent_ids),
             template_id=template["id"],
             is_dry_run=False,
+            **batch_worker,            # empty when no worker was chosen -> BatchIn's own default, exactly as before
         )
         try:
             batch_result = await _create_batch_internal(batch_payload, admin)
@@ -1799,7 +1814,7 @@ async def send_casting_call(payload: CastingCallSendIn, admin: dict = Depends(cu
     if batch_ids:
         asyncio.create_task(_watch_and_apply_casting_call_move(batch_ids))
 
-    return {"success": True, "batches": results, "errors": errors}
+    return {"success": True, "batches": results, "errors": errors, **batch_worker}
 
 
 @router.get("/batches")

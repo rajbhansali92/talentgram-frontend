@@ -163,6 +163,26 @@ async def require_worker(worker_id: str) -> dict:
     return doc
 
 
+async def require_sendable_worker(worker_id: str) -> dict:
+    """Validate a worker the caller EXPLICITLY chose to send from (e.g. the casting-call
+    "Send via" picker). Never picks or substitutes a worker: it either returns the chosen
+    worker's doc or raises, so a caller can reject a whole send before creating any job.
+
+      404  unknown worker_id (never registered)
+      403  registered but sending is not enabled for it (same rule _create_batch_internal enforces)
+      409  registered + enabled but not currently connected — the live session is not
+           `authenticated` (the same status the WhatsApp Engine shows as "Connected")
+    """
+    doc = await require_worker(worker_id)
+    label = doc.get("label") or worker_id
+    if doc.get("sending_enabled") is not True:
+        raise HTTPException(status_code=403, detail=f"{label} is not enabled for sending. An admin must enable sending for this worker first.")
+    session = await db.whatsapp_sessions.find_one({"id": worker_id}, {"_id": 0, "status": 1})
+    if (session or {}).get("status") != "authenticated":
+        raise HTTPException(status_code=409, detail=f"{label} is not connected to WhatsApp right now. Choose a connected worker.")
+    return doc
+
+
 async def _session_doc_for(worker_id: str) -> dict:
     doc = await db.whatsapp_sessions.find_one({"id": worker_id}, {"_id": 0})
     if doc:

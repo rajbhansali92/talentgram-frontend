@@ -61,6 +61,13 @@ const TALENT = {
     commissionable_amount: 50000,
     reimbursement_total: 0,
     invoice_amount: 42500,
+    // Production/client side (internal only): talent rate 50,000 vs production quote 60,000.
+    talent_agreed_rate: 50000,
+    talent_net_payable: 42500,
+    production_quote: 60000,
+    spread: 10000,
+    production_billable: 60000,
+    talentgram_earning: 17500,
     readings_rehearsals: [],
     costume_trial_at: null,
     costume_trial_time: null,
@@ -90,7 +97,6 @@ const BASE_DATA = {
         pd_last_follow_up_at: null, pd_next_follow_up_at: null, pd_payment_followup_status: "in_progress",
         pd_payment_followup_notes: "",
         pd_agreement_status: null,
-        pd_shoot_dates_list: ["2026-09-20", "2026-09-21"],
         pd_invoice_raised_and_sent: true,
     },
     finance: { zoho_status: "not_connected" },
@@ -102,6 +108,11 @@ const BASE_DATA = {
         commission_gross: 7500, kickbacks_total: 0, commission_net: 7500,
         payments_cleared: 0, payments_total: 1, payments_pending_amount: 50000,
         tranches_total: 0, tranches_received_total: 0,
+        production_basis: "per_talent", production_quote_total: 60000, production_quotes_set: 1, production_quotes_missing: 0,
+        production_billable_total: 60000, production_overtime_total: 0, production_reimbursements_total: 0,
+        talent_agreed_total: 50000, talent_payable_total: 42500, spread_total: 10000,
+        talentgram_earnings_total: 17500, talentgram_earnings_net_of_kickbacks: 17500,
+        client_received_total: 0, client_outstanding_total: 60000,
     },
     needs_attention: [],
     kickbacks: [],
@@ -244,12 +255,13 @@ describe("ProductionDesk V2 final polish", () => {
 
     // ---- Shoot Details (merged: project dates + per-talent schedule) ----
     describe("Shoot Details (merged)", () => {
-        it("holds the structured project Shoot Dates and each talent's own schedule in one section", async () => {
+        it("holds each talent's own schedule in one section — there is no separate project-level date list", async () => {
             render(<ProductionDesk projectId="proj-1" project={{}} />);
             await waitFor(() => expect(screen.getByTestId("pd-shoot-details")).toBeTruthy());
             const card = screen.getByTestId("pd-shoot-details");
             expect(card.textContent).toMatch(/Talent Shooting Schedule/);
-            expect(screen.getByTestId("pd-shoot-dates-list")).toBeTruthy();
+            expect(screen.queryByTestId("pd-shoot-dates-list")).toBeNull();          // duplicate date system removed
+            expect(screen.queryByTestId(`pd-use-project-dates-${TALENT.talent_id}`)).toBeNull();
             expect(screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`)).toBeTruthy();
             expect(screen.queryByTestId("pd-shoot-schedule")).toBeNull(); // no longer a separate top-level card
         });
@@ -350,13 +362,11 @@ describe("ProductionDesk V2 final polish", () => {
             ));
         });
 
-        it("'Use Project Dates' one-tap calls the seed endpoint", async () => {
+        it("never calls the removed project-dates seed endpoint", async () => {
             render(<ProductionDesk projectId="proj-1" project={{}} />);
-            await waitFor(() => expect(screen.getByTestId(`pd-use-project-dates-${TALENT.talent_id}`)).toBeTruthy());
-            fireEvent.click(screen.getByTestId(`pd-use-project-dates-${TALENT.talent_id}`));
-            await waitFor(() => expect(globalThis.__mockAdminApi.post).toHaveBeenCalledWith(
-                "/projects/proj-1/production-desk/talents/t1/shoot-days/use-project-dates",
-            ));
+            await waitFor(() => expect(screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`)).toBeTruthy());
+            expect(screen.queryByText("Use Project Dates")).toBeNull();
+            expect(globalThis.__mockAdminApi.post).not.toHaveBeenCalledWith(expect.stringContaining("use-project-dates"));
         });
 
         it("two talents keep fully independent shoot schedules on screen", async () => {
@@ -373,21 +383,126 @@ describe("ProductionDesk V2 final polish", () => {
             });
             render(<ProductionDesk projectId="proj-1" project={{}} />);
             await waitFor(() => expect(screen.getByTestId("pd-shoot-day-d1")).toBeTruthy());
-            expect(screen.getByTestId("pd-shoot-day-d1").textContent).toMatch(/2026-09-20/);
-            expect(screen.getByTestId("pd-shoot-day-d2").textContent).toMatch(/2026-09-21/);
+            expect(screen.getByTestId("pd-shoot-day-d1").textContent).toMatch(/20 Sep/);
+            expect(screen.getByTestId("pd-shoot-day-d2").textContent).toMatch(/21 Sep/);
         });
 
-        it("structured Shoot Dates list can add and remove dates", async () => {
+        it("adding a shoot day sends IST HH:MM times from time pickers and refuses reporting later than call", async () => {
             render(<ProductionDesk projectId="proj-1" project={{}} />);
-            await waitFor(() => expect(screen.getByTestId("pd-shoot-dates-list")).toBeTruthy());
-            expect(screen.getByTestId("pd-shoot-date-chip-2026-09-20")).toBeTruthy();
-            expect(screen.getByTestId("pd-shoot-date-chip-2026-09-21")).toBeTruthy();
-            const removeBtn = screen.getByTestId("pd-shoot-date-chip-2026-09-20").querySelector("button");
-            fireEvent.click(removeBtn);
-            await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalledWith(
-                "/projects/proj-1/production-desk",
-                expect.objectContaining({ shoot_dates_list: ["2026-09-21"] }),
+            await waitFor(() => expect(screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`)).toBeTruthy());
+            fireEvent.click(screen.getByTestId(`pd-add-shoot-day-${TALENT.talent_id}`));
+            fireEvent.change(screen.getByTestId(`pd-form-date-${TALENT.talent_id}`), { target: { value: "2026-10-08" } });
+            fireEvent.change(screen.getByTestId(`pd-form-call-${TALENT.talent_id}`), { target: { value: "09:00" } });
+            fireEvent.change(screen.getByTestId(`pd-form-reporting-${TALENT.talent_id}`), { target: { value: "10:00" } });
+            // Reporting 10:00 is later than call 09:00 -> blocked with a visible reason.
+            expect(screen.getByTestId(`pd-form-time-error-${TALENT.talent_id}`).textContent).toMatch(/cannot be later than call/);
+            const form = screen.getByTestId(`pd-shoot-day-form-${TALENT.talent_id}`);
+            expect(within(form).getByText("Save").disabled).toBe(true);
+            fireEvent.change(screen.getByTestId(`pd-form-reporting-${TALENT.talent_id}`), { target: { value: "08:00" } });
+            expect(screen.getByTestId(`pd-form-time-error-${TALENT.talent_id}`).textContent).toBe("");
+            fireEvent.click(within(form).getByText("Save"));
+            await waitFor(() => expect(globalThis.__mockAdminApi.post).toHaveBeenCalledWith(
+                "/projects/proj-1/production-desk/talents/t1/shoot-days",
+                expect.objectContaining({ date: "2026-10-08", call_time: "09:00", reporting_time: "08:00" }),
             ));
+        });
+
+        it("a schedule row shows times as 12-hour IST clock and links the selected Google place", async () => {
+            const day = { id: "d9", date: "2026-10-08", call_time: "09:00", reporting_time: "08:00", location: "Mehboob Studio", location_address: "Bandra West, Mumbai", location_place_id: "ChIJabcdefghij", location_lat: 19.05, location_lng: 72.83, location_map_url: "https://maps.google.com/?cid=1", shoot_status: "scheduled", notes: "Bring props" };
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: { ...BASE_DATA, locked_talents: [{ ...TALENT, shoot_days: [day] }] } });
+                    return Promise.resolve({ data: url.endsWith("known-locations") ? { locations: [] } : (url === "/marketing/clients" ? [] : {}) });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-shoot-day-d9")).toBeTruthy());
+            const row = screen.getByTestId("pd-shoot-day-d9");
+            expect(row.textContent).toMatch(/9:00 AM/);
+            expect(row.textContent).toMatch(/8:00 AM/);
+            expect(row.textContent).toMatch(/Bandra West, Mumbai/);
+            expect(row.textContent).toMatch(/Bring props/);
+            const link = row.querySelector('a[href="https://maps.google.com/?cid=1"]');
+            expect(link).toBeTruthy();
+            expect(link.textContent).toMatch(/Mehboob Studio/);
+        });
+
+        it("editing a day keeps a legacy free-text call time unchanged instead of wiping it", async () => {
+            const day = { id: "d8", date: "2026-10-08", call_time: "8 AM", reporting_time: "7 AM", location: "Mumbai", agreed_hours: 12, actual_hours: 12, shoot_status: "scheduled" };
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: { ...BASE_DATA, locked_talents: [{ ...TALENT, shoot_days: [day] }] } });
+                    return Promise.resolve({ data: url.endsWith("known-locations") ? { locations: [] } : (url === "/marketing/clients" ? [] : {}) });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-shoot-day-d8")).toBeTruthy());
+            fireEvent.click(screen.getByTestId("pd-shoot-day-d8").querySelector("button")); // Edit
+            fireEvent.change(screen.getByTestId("pd-day-reporting-d8"), { target: { value: "06:30" } }); // only change reporting
+            fireEvent.click(screen.getByText("Save"));
+            await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalled());
+            const body = globalThis.__mockAdminApi.patch.mock.calls.at(-1)[1];
+            expect(body.reporting_time).toBe("06:30");
+            expect("call_time" in body).toBe(false);          // untouched legacy text is not sent, so not wiped
+        });
+
+        it("picking a Google Maps result saves the real place (address, id, coordinates, link)", async () => {
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url, cfg) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: { ...BASE_DATA, capabilities: { places_search: true } } });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    if (url === "/projects/proj-1/production-desk/places/search") return Promise.resolve({ data: { results: [{ place_id: "ChIJplace12345", name: "Film City", address: "Goregaon East, Mumbai" }] } });
+                    if (url.startsWith("/projects/proj-1/production-desk/places/")) return Promise.resolve({ data: { place_id: "ChIJplace12345", name: "Film City", address: "Goregaon East, Mumbai, Maharashtra", lat: 19.16, lng: 72.88, maps_url: "https://maps.google.com/?cid=99" } });
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`)).toBeTruthy());
+            fireEvent.click(screen.getByTestId(`pd-add-shoot-day-${TALENT.talent_id}`));
+            fireEvent.change(screen.getByTestId(`pd-form-date-${TALENT.talent_id}`), { target: { value: "2026-10-09" } });
+            const form = screen.getByTestId(`pd-shoot-day-form-${TALENT.talent_id}`);
+            const locInput = form.querySelector('input[placeholder="Search or type a location"]');
+            fireEvent.focus(locInput);
+            fireEvent.change(locInput, { target: { value: "Film City" } });
+            await waitFor(() => expect(screen.getByTestId("pd-place-result")).toBeTruthy(), { timeout: 3000 });
+            fireEvent.click(screen.getByTestId("pd-place-result"));
+            await waitFor(() => expect(within(form).getByText("Goregaon East, Mumbai, Maharashtra")).toBeTruthy());
+            fireEvent.click(within(form).getByText("Save"));
+            await waitFor(() => expect(globalThis.__mockAdminApi.post).toHaveBeenCalledWith(
+                "/projects/proj-1/production-desk/talents/t1/shoot-days",
+                expect.objectContaining({
+                    location: "Film City", location_address: "Goregaon East, Mumbai, Maharashtra",
+                    location_place_id: "ChIJplace12345", location_lat: 19.16, location_lng: 72.88,
+                    location_map_url: "https://maps.google.com/?cid=99",
+                }),
+            ));
+        });
+
+        it("does not call Google search at all when the server has no Maps key", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />);          // BASE_DATA has no capabilities.places_search
+            await waitFor(() => expect(screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`)).toBeTruthy());
+            fireEvent.click(screen.getByTestId(`pd-add-shoot-day-${TALENT.talent_id}`));
+            const form = screen.getByTestId(`pd-shoot-day-form-${TALENT.talent_id}`);
+            const locInput = form.querySelector('input[placeholder="Search or type a location"]');
+            fireEvent.focus(locInput);
+            fireEvent.change(locInput, { target: { value: "Film City" } });
+            await new Promise((r) => setTimeout(r, 600));
+            expect(globalThis.__mockAdminApi.get).not.toHaveBeenCalledWith(expect.stringContaining("/places/search"), expect.anything());
+        });
+
+        it("typing a different location after picking a place drops the old place's address and coordinates", async () => {
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId(`pd-shoot-schedule-${TALENT.talent_id}`)).toBeTruthy());
+            fireEvent.click(screen.getByTestId(`pd-add-shoot-day-${TALENT.talent_id}`));
+            fireEvent.change(screen.getByTestId(`pd-form-date-${TALENT.talent_id}`), { target: { value: "2026-10-09" } });
+            const form = screen.getByTestId(`pd-shoot-day-form-${TALENT.talent_id}`);
+            const locInput = form.querySelector('input[placeholder="Search or type a location"]');
+            fireEvent.change(locInput, { target: { value: "Plain typed studio" } });
+            fireEvent.click(within(form).getByText("Save"));
+            await waitFor(() => expect(globalThis.__mockAdminApi.post).toHaveBeenCalled());
+            const body = globalThis.__mockAdminApi.post.mock.calls.at(-1)[1];
+            expect(body).toMatchObject({ location: "Plain typed studio", location_address: null, location_place_id: null, location_lat: null, location_lng: null });
         });
 
         it("project-level shoot info (call time, location, status) is read-only until Edit", async () => {
@@ -442,14 +557,19 @@ describe("ProductionDesk V2 final polish", () => {
             ));
         });
 
-        it("WhatsApp Follow-up fetches the message and updates last_follow_up_at", async () => {
+        it("Follow-up shows a review dialog first, and only its confirm opens WhatsApp and updates last_follow_up_at", async () => {
+            const contacts = [
+                { client_id: "c1", name: "Mudita", role: null, company_name: "Google", has_phone: true, is_default: true, source: "production_contact" },
+                { client_id: "c2", name: "Accounts Anil", role: "Production Manager", company_name: "Google", has_phone: true, is_default: false, source: "crew" },
+            ];
             globalThis.__mockAdminApi = mockAdminApi({
-                get: vi.fn((url) => {
+                get: vi.fn((url, cfg) => {
                     if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: BASE_DATA });
                     if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
                     if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    if (url === "/projects/proj-1/production-desk/payment-followup-contacts") return Promise.resolve({ data: { contacts } });
                     if (url === "/projects/proj-1/production-desk/payment-followup-message") {
-                        return Promise.resolve({ data: { phone: "+919000000000", contact_name: "Mudita", message: "Hi Mudita,\n\nJust a gentle reminder..." } });
+                        return Promise.resolve({ data: { phone: "+919000000000", contact_id: "c1", contact_name: "Mudita", message: "Hi Mudita,\n\nProduction amount: ₹60,000\nOutstanding: ₹60,000", warnings: [] } });
                     }
                     return Promise.resolve({ data: {} });
                 }),
@@ -458,6 +578,15 @@ describe("ProductionDesk V2 final polish", () => {
             render(<ProductionDesk projectId="proj-1" project={{}} />);
             await waitFor(() => expect(screen.getByTestId("pd-whatsapp-followup-btn")).toBeTruthy());
             fireEvent.click(screen.getByTestId("pd-whatsapp-followup-btn"));
+            // The message and recipient are shown BEFORE anything opens.
+            await waitFor(() => expect(screen.getByTestId("pd-followup-dialog")).toBeTruthy());
+            expect(screen.getByTestId("pd-followup-recipient-summary").textContent).toMatch(/Mudita/);
+            expect(screen.getByTestId("pd-followup-message").textContent).toMatch(/Outstanding: ₹60,000/);
+            expect(openSpy).not.toHaveBeenCalled();
+            expect(globalThis.__mockAdminApi.get).toHaveBeenCalledWith(
+                "/projects/proj-1/production-desk/payment-followup-message", { params: { contact_id: "c1" } },
+            );
+            fireEvent.click(screen.getByTestId("pd-followup-confirm"));
             await waitFor(() => expect(openSpy).toHaveBeenCalled());
             expect(openSpy.mock.calls[0][0]).toContain("https://wa.me/919000000000");
             await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalledWith(
@@ -465,6 +594,51 @@ describe("ProductionDesk V2 final polish", () => {
                 expect.objectContaining({ last_follow_up_at: expect.any(String) }),
             ));
             openSpy.mockRestore();
+        });
+
+        it("Cancel in the follow-up review sends nothing and does not mark the project followed up", async () => {
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: BASE_DATA });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    if (url === "/projects/proj-1/production-desk/payment-followup-message") {
+                        return Promise.resolve({ data: { phone: "+919000000000", contact_id: "c1", contact_name: "Mudita", message: "Hi", warnings: ["No production quote entered — the message has no amounts."] } });
+                    }
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            const openSpy = vi.spyOn(window, "open").mockImplementation(() => {});
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-whatsapp-followup-btn")).toBeTruthy());
+            fireEvent.click(screen.getByTestId("pd-whatsapp-followup-btn"));
+            await waitFor(() => expect(screen.getByTestId("pd-followup-dialog")).toBeTruthy());
+            expect(screen.getByTestId("pd-followup-warning").textContent).toMatch(/no amounts/);
+            fireEvent.click(screen.getByText("Cancel"));
+            await waitFor(() => expect(screen.queryByTestId("pd-followup-dialog")).toBeNull());
+            expect(openSpy).not.toHaveBeenCalled();
+            expect(globalThis.__mockAdminApi.patch).not.toHaveBeenCalledWith("/projects/proj-1/production-desk", expect.objectContaining({ last_follow_up_at: expect.anything() }));
+            openSpy.mockRestore();
+        });
+
+        it("lists the project's CRM contacts as follow-up recipients and disables ones with no phone", async () => {
+            const contacts = [
+                { client_id: "c1", name: "Mudita", role: null, company_name: "Google", has_phone: true, is_default: true },
+                { client_id: "c3", name: "No Phone Nina", role: "Producer", company_name: null, has_phone: false, is_default: false },
+            ];
+            globalThis.__mockAdminApi = mockAdminApi({
+                get: vi.fn((url) => {
+                    if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data: BASE_DATA });
+                    if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                    if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                    if (url === "/projects/proj-1/production-desk/payment-followup-contacts") return Promise.resolve({ data: { contacts } });
+                    return Promise.resolve({ data: {} });
+                }),
+            });
+            render(<ProductionDesk projectId="proj-1" project={{}} />);
+            await waitFor(() => expect(screen.getByTestId("pd-followup-recipient-select")).toBeTruthy());
+            // The default contact with a phone number is preselected.
+            expect(screen.getByTestId("pd-followup-recipient-select").textContent).toMatch(/Mudita/);
         });
     });
 
@@ -861,8 +1035,8 @@ describe("ProductionDesk V2 final polish", () => {
             expect(screen.getByTestId("pd-overview-content")).toBeTruthy();
             const overview = screen.getByTestId("pd-overview");
             expect(overview.textContent).toMatch(/Google AI/);
-            expect(overview.textContent).toMatch(/Talent Cost/);
-            expect(overview.textContent).toMatch(/TG Commission/);
+            expect(overview.textContent).toMatch(/Talent Agreed Rates/);
+            expect(overview.textContent).toMatch(/Total Earnings/);
         });
 
         it("shows Needs Attention, Today, Upcoming, and Completed panels", async () => {
@@ -923,16 +1097,13 @@ describe("ProductionDesk V2 final polish", () => {
             expect(screen.queryByTestId("pd-needs-attention")).toBeNull();
         });
 
-        it("groups the key numbers into Production / Financials / Payments instead of one flat list", async () => {
+        it("groups the key numbers into Production / Talent / Talentgram / Payments instead of one flat list", async () => {
             render(<ProductionDesk projectId="proj-1" project={{}} />);
             await waitFor(() => expect(screen.getByTestId("pd-overview-content")).toBeTruthy());
-            const content = screen.getByTestId("pd-overview-content");
-            expect(content.textContent).toMatch(/Production/);
-            expect(content.textContent).toMatch(/Financials/);
-            expect(content.textContent).toMatch(/Payments/);
-            expect(content.textContent).toMatch(/Locked Talents/);
-            expect(content.textContent).toMatch(/Talent Budget/);
-            expect(content.textContent).toMatch(/Client Payment/);
+            const content = screen.getByTestId("pd-overview-content").textContent;
+            for (const group of ["Production", "Talent", "Talentgram", "Payments"]) expect(content).toMatch(new RegExp(group));
+            expect(content).toMatch(/Client Outstanding/);
+            expect(content).toMatch(/Additional Spread/);
         });
 
         it("the Schedule section stays compact (a single muted line) for an empty Today/Upcoming/Completed", async () => {
@@ -985,5 +1156,153 @@ describe("ProductionDesk V2 final polish", () => {
         render(<ProductionDesk projectId="proj-1" project={{}} />);
         await waitFor(() => expect(screen.getByTestId("pd-checklist-agreement")).toBeTruthy());
         expect(screen.getByTestId("pd-checklist-agreement").textContent).toMatch(/N\/A/);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Production Financials — talent rate ≠ production quote
+// ---------------------------------------------------------------------------
+describe("Production Financials", () => {
+    const talentCard = (id, name, rate, quote, commission, extra = {}) => ({
+        ...TALENT, talent_id: id, name, budget_per_day: rate, budget_total: rate, talent_agreed_rate: rate,
+        commission_percent: 15, commission_amount: commission, production_quote: quote,
+        spread: quote === null ? null : quote - rate, talent_net_payable: rate - commission,
+        talentgram_earning: commission + (quote === null ? 0 : quote - rate), extra_hours_total: 0, reimbursement_total: 0, ...extra,
+    });
+    const THREE = [
+        talentCard("ta", "Talent A", 50000, 60000, 7500),
+        talentCard("tb", "Talent B", 60000, 60000, 9000),
+        talentCard("tc", "Talent C", 40000, 60000, 6000),
+    ];
+    const SUMMARY = {
+        ...BASE_DATA.summary, locked_count: 3, production_basis: "per_talent", production_quote_total: 180000, production_quotes_set: 3,
+        production_quotes_missing: 0, production_billable_total: 180000, production_overtime_total: 0, production_reimbursements_total: 0,
+        talent_agreed_total: 150000, talent_payable_total: 127500, commission_gross: 22500, spread_total: 30000,
+        talentgram_earnings_total: 52500, talentgram_earnings_net_of_kickbacks: 52500, client_received_total: 0, client_outstanding_total: 180000,
+    };
+    const load = (data) => {
+        globalThis.__mockAdminApi = mockAdminApi({
+            get: vi.fn((url) => {
+                if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data });
+                if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                return Promise.resolve({ data: {} });
+            }),
+        });
+        render(<ProductionDesk projectId="proj-1" project={{}} />);
+    };
+
+    it("lays out client money, talent money and Talentgram earnings as three clearly separate groups", async () => {
+        load({ ...BASE_DATA, locked_talents: THREE, summary: SUMMARY });
+        await waitFor(() => expect(screen.getByTestId("pd-production-financials")).toBeTruthy());
+        expect(screen.getByTestId("pd-fin-client").textContent).toMatch(/Client/);
+        expect(screen.getByTestId("pd-fin-talent").textContent).toMatch(/Talent-facing/);
+        expect(screen.getByTestId("pd-fin-internal").textContent).toMatch(/Internal only/);
+        expect(screen.getByTestId("pd-fin-quote").textContent).toBe("₹1,80,000");          // production quote
+        expect(screen.getByTestId("pd-fin-talent-rates").textContent).toBe("₹1,50,000");   // talent agreed rates
+        expect(screen.getByTestId("pd-fin-spread").textContent).toBe("₹30,000");            // quote − rate
+        expect(screen.getByTestId("pd-fin-earnings").textContent).toBe("₹52,500");          // 22,500 commission + 30,000 spread
+        expect(screen.getByTestId("pd-fin-talent-payable").textContent).toBe("₹1,27,500");
+        expect(screen.getByTestId("pd-fin-outstanding").textContent).toBe("₹1,80,000");
+    });
+
+    it("shows each talent's own rate, quote, commission, spread and earning independently", async () => {
+        load({ ...BASE_DATA, locked_talents: THREE, summary: SUMMARY });
+        await waitFor(() => expect(screen.getByTestId("pd-fin-row-ta")).toBeTruthy());
+        const a = screen.getByTestId("pd-fin-row-ta").textContent;
+        expect(a).toMatch(/₹50,000/); expect(a).toMatch(/₹60,000/); expect(a).toMatch(/₹7,500/); expect(a).toMatch(/₹10,000/); expect(a).toMatch(/₹17,500/);
+        const b = screen.getByTestId("pd-fin-row-tb").textContent;
+        expect(b).toMatch(/₹9,000/);                     // commission on the 60,000 rate
+        expect(b).toMatch(/₹0/);                         // zero spread
+        const c = screen.getByTestId("pd-fin-row-tc").textContent;
+        expect(c).toMatch(/₹6,000/); expect(c).toMatch(/₹20,000/); expect(c).toMatch(/₹26,000/);
+    });
+
+    it("flags a talent with no production quote instead of inventing one", async () => {
+        const noQuote = talentCard("ta", "Talent A", 50000, null, 7500);
+        load({
+            ...BASE_DATA, locked_talents: [noQuote, THREE[1]],
+            summary: { ...SUMMARY, production_basis: "partial", production_quotes_set: 1, production_quotes_missing: 1, client_outstanding_total: null, spread_total: 0 },
+        });
+        await waitFor(() => expect(screen.getByTestId("pd-fin-row-ta")).toBeTruthy());
+        expect(screen.getByTestId("pd-fin-row-ta").textContent).toMatch(/Not entered/);
+        expect(screen.getByTestId("pd-fin-basis-note").textContent).toMatch(/only some talents/);
+        expect(screen.getByTestId("pd-fin-outstanding").textContent).toBe("Incomplete");
+    });
+
+    it("keeps using the legacy project-level production budget until per-talent quotes exist", async () => {
+        const legacy = talentCard("ta", "Talent A", 50000, null, 7500);
+        load({
+            ...BASE_DATA, locked_talents: [legacy],
+            summary: { ...SUMMARY, locked_count: 1, production_basis: "project_budget", production_quotes_set: 0, production_quotes_missing: 1, production_billable_total: 85000, client_outstanding_total: 85000 },
+        });
+        await waitFor(() => expect(screen.getByTestId("pd-fin-basis-note")).toBeTruthy());
+        expect(screen.getByTestId("pd-fin-basis-note").textContent).toMatch(/project-level production budget/);
+        expect(screen.getByTestId("pd-fin-quote").textContent).toBe("₹85,000");
+        fireEvent.click(screen.getByTestId("pd-fin-legacy-toggle"));
+        expect(screen.getByTestId("pd-fin-legacy")).toBeTruthy();
+    });
+
+    it("the Production Quote is its own editable column, saved separately from the talent rate", async () => {
+        render(<ProductionDesk projectId="proj-1" project={{}} />);
+        await waitFor(() => expect(screen.getByTestId(`pd-talent-row-${TALENT.talent_id}`)).toBeTruthy());
+        const row = screen.getByTestId(`pd-talent-row-${TALENT.talent_id}`);
+        const inputs = row.querySelectorAll('input[type="number"]');
+        // Budget/Day, Shoot Days, Talent Rate (Total), Production Quote, Commission %
+        expect(inputs[3].value).toBe("60000");
+        fireEvent.change(inputs[3], { target: { value: "65000" } });
+        fireEvent.blur(inputs[3]);
+        await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalledWith(
+            "/projects/proj-1/production-desk/talents/t1", { production_quote: 65000 },
+        ));
+        expect(globalThis.__mockAdminApi.patch).not.toHaveBeenCalledWith(
+            "/projects/proj-1/production-desk/talents/t1", expect.objectContaining({ budget_total: expect.anything() }),
+        );
+    });
+
+    it("the talent-facing Talent Financials card never shows the production quote or the spread", async () => {
+        load({ ...BASE_DATA, locked_talents: [THREE[0]], summary: { ...SUMMARY, locked_count: 1 } });
+        await waitFor(() => expect(screen.getByTestId(`pd-financial-${THREE[0].talent_id}`)).toBeTruthy());
+        const card = screen.getByTestId(`pd-financial-${THREE[0].talent_id}`).textContent;
+        expect(card).toMatch(/Invoice Amount/);
+        expect(card).not.toMatch(/Production Quote/i);
+        expect(card).not.toMatch(/Spread/i);
+        expect(card).not.toMatch(/60,000/);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// IST — dates are the Asia/Kolkata calendar day, whatever the browser's zone is
+// ---------------------------------------------------------------------------
+describe("IST dates", () => {
+    it("a UTC evening instant shows as the NEXT calendar day in IST", async () => {
+        // 2026-10-01 20:00 UTC == 2026-10-02 01:30 IST
+        const data = { ...BASE_DATA, project: { ...BASE_DATA.project, pd_next_follow_up_at: "2026-10-01T20:00:00.000Z" } };
+        globalThis.__mockAdminApi = mockAdminApi({
+            get: vi.fn((url) => {
+                if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data });
+                if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                return Promise.resolve({ data: {} });
+            }),
+        });
+        render(<ProductionDesk projectId="proj-1" project={{}} />);
+        await waitFor(() => expect(screen.getByTestId("pd-payment-followup-block")).toBeTruthy());
+        expect(screen.getByTestId("pd-payment-followup-block").textContent).toMatch(/02 Oct/);
+    });
+
+    it("a stored noon-UTC date-only value keeps its calendar day", async () => {
+        const data = { ...BASE_DATA, project: { ...BASE_DATA.project, pd_expected_payment_date: "2026-10-05T12:00:00.000Z" } };
+        globalThis.__mockAdminApi = mockAdminApi({
+            get: vi.fn((url) => {
+                if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data });
+                if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                return Promise.resolve({ data: {} });
+            }),
+        });
+        render(<ProductionDesk projectId="proj-1" project={{}} />);
+        await waitFor(() => expect(screen.getByTestId("pd-payment-followup-block")).toBeTruthy());
+        expect(screen.getByTestId("pd-payment-followup-block").textContent).toMatch(/05 Oct/);
     });
 });

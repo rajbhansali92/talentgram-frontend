@@ -102,10 +102,14 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date
+import os
+import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+import httpx
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from core import (
@@ -202,6 +206,93 @@ TRANCHE_INVOICE_STATUSES = ["pending", "raised", "raised_and_sent"]
 TRANCHE_PAYMENT_STATUSES = ["pending", "received"]
 
 READING_REHEARSAL_TYPES = {"reading", "rehearsal"}
+
+
+# ── Business timezone: Asia/Kolkata (IST, UTC+05:30) ────────────────────────
+# The server runs in UTC, so a bare date.today()/datetime.now() disagrees with
+# the business calendar for 5.5 hours every day (00:00-05:30 IST is still "yesterday" in UTC).
+# Every Production Desk "today" below goes through these two helpers instead —
+# the same zone the reminder worker (services/production_reminder_worker._ist_today)
+# already uses, so the desk, the reminders and the Management Agent agree.
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def ist_now() -> datetime:
+    return datetime.now(IST)
+
+
+def ist_today() -> date:
+    return ist_now().date()
+
+
+def ist_day_bounds_utc() -> tuple:
+    """[start, end) of the CURRENT IST calendar day, as ISO strings for comparing against stored *_at values.
+
+    "Today" comes from the real clock in IST. Stored values are compared by the date they are WRITTEN
+    with — the codebase's documented convention (services/production_reminder_worker.py): date-only
+    fields are noon-UTC of the picked date, and times typed through WhatsApp keep the hour as typed
+    but carry a UTC tag. Bucketing those by the real UTC instant of the IST day would push a 7 PM IST
+    costume trial (stored 19:00Z) into tomorrow, so the bounds are the IST date's own 00:00-24:00 in the
+    stored tagging, never a UTC conversion of IST midnight."""
+    d = ist_today()
+    start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    return start.isoformat(), (start + timedelta(days=1)).isoformat()
+
+
+# Call / reporting times are IST wall-clock times — stored as plain "HH:MM" (24h), never as a
+# UTC instant, so nothing can shift them across a day boundary. Legacy free-text values
+# ("9 AM", "morning") already in the DB are left untouched on read; only NEW writes are validated.
+_CLOCK_24H = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+_CLOCK_12H = re.compile(r"^(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*([AaPp])\.?[Mm]\.?$")
+
+
+def parse_clock(raw: Optional[str]) -> Optional[int]:
+    """Minutes since midnight for "09:30" / "9:30 AM" / "9 pm", else None (unparseable / empty)."""
+    if raw is None:
+        return None
+    t = str(raw).strip()
+    if not t:
+        return None
+    m = _CLOCK_24H.match(t)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    m = _CLOCK_12H.match(t)
+    if m:
+        hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "p" else 0)
+        return hour * 60 + int(m.group(2) or 0)
+    return None
+
+
+def normalize_clock(raw: Optional[str], field: str) -> Optional[str]:
+    """Canonical "HH:MM" for a NEW write; None/"" clears the field; anything unparseable is a 400."""
+    if raw is None or str(raw).strip() == "":
+        return None
+    minutes = parse_clock(raw)
+    if minutes is None:
+        raise HTTPException(400, f"{field} must be a time like 09:30 (IST)")
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def validate_reporting_before_call(reporting: Optional[str], call: Optional[str]) -> None:
+    """Reporting time is when the talent must arrive; the call is when they are called onto set,
+    so reporting may not be LATER than call. Only enforced when both parse (legacy text is exempt)."""
+    r, c = parse_clock(reporting), parse_clock(call)
+    if r is not None and c is not None and r > c:
+        raise HTTPException(400, "Reporting time cannot be later than call time")
+
+
+def build_maps_url(place_id: Optional[str], lat: Optional[float], lng: Optional[float], address: Optional[str]) -> Optional[str]:
+    """A canonical Google Maps URL for a selected place (the Maps URLs API — no key needed to OPEN)."""
+    from urllib.parse import quote_plus
+    if lat is not None and lng is not None:
+        url = f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+    elif address:
+        url = f"https://www.google.com/maps/search/?api=1&query={quote_plus(address)}"
+    else:
+        return None
+    if place_id:
+        url += f"&query_place_id={quote_plus(place_id)}"
+    return url
 
 
 def _num(v) -> Optional[float]:
@@ -354,6 +445,32 @@ def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float =
         else None
     )
 
+    # ── Production (client) side — INTERNAL ONLY ───────────────────────────
+    # `pd_budget_*` above is the TALENT-facing agreed rate: commission, the talent's
+    # invoice and "Ask to Raise Invoice" are all computed from it and never from the
+    # quote below. `pd_production_quote` is what Talentgram quoted the production for
+    # this talent; the difference is Talentgram's own margin and must never reach a
+    # talent-facing surface (see _build_invoice_message, which reads none of these keys).
+    # None (unset) is NOT zero: legacy rows have no quote and nothing is invented for them.
+    production_quote = _num(row.get("pd_production_quote"))
+    spread = (
+        round(production_quote - budget_total, 2)
+        if production_quote is not None and budget_total is not None
+        else None
+    )
+    # Overtime and reimbursements are billed through to the production exactly as they are
+    # owed to the talent (no margin added on them) — see _financial_rollup's docstring.
+    production_billable = (
+        round(production_quote + extra_hours_total + reimbursement_total, 2)
+        if production_quote is not None
+        else None
+    )
+    talentgram_earning = (
+        round((commission_amount or 0.0) + (spread or 0.0), 2)
+        if commission_amount is not None or spread is not None
+        else None
+    )
+
     return {
         "talent_id": t.get("id"),
         "name": merged["talent_name"],
@@ -373,6 +490,13 @@ def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float =
         "commissionable_amount": commissionable_amount,
         "reimbursement_total": round(reimbursement_total, 2),
         "invoice_amount": invoice_amount,
+        # Production/client side (internal only) — see the block above.
+        "talent_agreed_rate": budget_total,
+        "talent_net_payable": invoice_amount,
+        "production_quote": production_quote,
+        "spread": spread,
+        "production_billable": production_billable,
+        "talentgram_earning": talentgram_earning,
         # V2 — Readings & Rehearsals (spec section 8).
         "readings_rehearsals": readings_rehearsals,
         # Talent Preparation (Phase 2) — additive fields on the SAME
@@ -510,6 +634,81 @@ def _bucket_tasks(tasks: List[dict], today_start: str, today_end: str) -> Dict[s
     return {"due_today": due_today, "overdue": overdue, "upcoming": upcoming, "pending": pending}
 
 
+def _financial_rollup(
+    locked: List[dict], project: dict, *, extra_hours_total: float, reimbursements_total: float,
+    kickbacks_total: float, commission_gross: float, tranches: List[dict], tranches_received_total: float,
+) -> Dict[str, Any]:
+    """The ONE place the project-level money model is computed (the desk summary and the
+    payment follow-up message both call this, so they can never disagree).
+
+      Talent rate         what the talent was told (pd_budget_*)           — talent-facing
+      Production quote    what the production is charged (pd_production_quote) — internal
+      Commission          commission % x (talent rate + overtime)          — never on the quote
+      Spread              production quote - talent rate (only where a quote exists)
+      Talentgram earning  commission + spread
+      Talent net payable  talent rate + overtime - commission + reimbursements
+      Production billable production quote + overtime + reimbursements
+      Client outstanding  production billable - amount received
+
+    Overtime and reimbursements are passed through to the production at the same amount owed
+    to the talent. Nothing here invents a number: a talent with no production quote contributes
+    no spread, and a project whose quotes are only partly entered reports `partial` rather than a
+    misleading total. Legacy projects that only ever had the single project-level production
+    budget (`pd_production_budget_total`) keep using it (`project_budget` basis) until per-talent
+    quotes are entered."""
+    quotes = [c["production_quote"] for c in locked if c.get("production_quote") is not None]
+    missing = len(locked) - len(quotes)
+    legacy_total = _num(project.get("pd_production_budget_total"))
+    if legacy_total is None:
+        per_day = _num(project.get("pd_production_budget_per_day"))
+        days = project.get("pd_shooting_days")
+        legacy_total = per_day * days if per_day is not None and days else None
+
+    if locked and missing == 0:
+        basis, base = "per_talent", sum(quotes)
+    elif quotes:
+        basis, base = "partial", sum(quotes)
+    elif legacy_total is not None:
+        basis, base = "project_budget", legacy_total
+    else:
+        basis, base = "none", None
+
+    billable = round(base + extra_hours_total + reimbursements_total, 2) if base is not None else None
+
+    if tranches:
+        received = float(tranches_received_total)
+    else:
+        received = 0.0
+    # An explicit "client payment received" tick means the production has paid in full.
+    if project.get("pd_payment_in_received") and billable is not None:
+        received = max(received, billable)
+    outstanding = (
+        round(max(billable - received, 0.0), 2)
+        if billable is not None and basis != "partial"
+        else None
+    )
+
+    spreads = [c["spread"] for c in locked if c.get("spread") is not None]
+    spread_total = round(sum(spreads), 2)
+    nets = [c["talent_net_payable"] for c in locked if c.get("talent_net_payable") is not None]
+    return {
+        "production_basis": basis,
+        "production_quote_total": round(sum(quotes), 2),
+        "production_quotes_set": len(quotes),
+        "production_quotes_missing": missing,
+        "production_billable_total": billable,
+        "production_overtime_total": round(extra_hours_total, 2),
+        "production_reimbursements_total": round(reimbursements_total, 2),
+        "talent_agreed_total": round(sum(c["talent_agreed_rate"] for c in locked if c.get("talent_agreed_rate") is not None), 2),
+        "talent_payable_total": round(sum(nets), 2),
+        "spread_total": spread_total,
+        "talentgram_earnings_total": round(commission_gross + spread_total, 2),
+        "talentgram_earnings_net_of_kickbacks": round(commission_gross + spread_total - kickbacks_total, 2),
+        "client_received_total": round(received, 2),
+        "client_outstanding_total": outstanding,
+    }
+
+
 # ---------------------------------------------------------------------------
 # GET /projects/{pid}/production-desk — the consolidated view
 # ---------------------------------------------------------------------------
@@ -588,8 +787,8 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     # date comparison); shoots use the manually-set pd_shoot_status
     # (see SHOOT_STATUS_OPTIONS' docstring for why — no parseable shoot
     # date exists anywhere in this schema).
-    from routers.workflow import _today_bounds_utc
-    today_start, today_end = _today_bounds_utc()
+    # The IST calendar day (not the UTC day) — see ist_day_bounds_utc.
+    today_start, today_end = ist_day_bounds_utc()
 
     locked_talent_ids = [c["talent_id"] for c in locked]
     tasks = await _tasks_for_project(pid, locked_talent_ids)
@@ -613,7 +812,7 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     # pd_shoot_days / pd_readings_rehearsals, reimbursements, tranches,
     # tasks) — no new collection, no second reminder engine, purely a
     # presentation-layer read of what already exists.
-    today_date_str = date.today().isoformat()
+    today_date_str = ist_today().isoformat()
     shoot_days_today: List[dict] = []
     shoot_days_upcoming: List[dict] = []
     prep_events_today: List[dict] = []
@@ -691,8 +890,23 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
         needs_attention.append("Payment follow-up overdue")
     elif payment_followup_due_today:
         needs_attention.append("Payment follow-up due today")
-    if locked and not project.get("pd_shoot_location") and not project.get("pd_call_time"):
+    # The Talent Shooting Schedule is the source of truth for shoot dates/times/places, so the
+    # project-level "Shoot Info" defaults no longer have to be filled in once every locked talent
+    # has at least one fully specified day (date + call time + location).
+    talent_schedules_complete = bool(locked) and all(
+        any(d.get("date") and d.get("call_time") and d.get("location") for d in (c.get("shoot_days") or []))
+        for c in locked
+    )
+    if locked and not (project.get("pd_shoot_location") or project.get("pd_call_time") or talent_schedules_complete):
         needs_attention.append("Shoot details incomplete")
+    # Financial completeness — flagged, never guessed. A talent whose agreed rate is entered but
+    # whose production quote is not has no spread/earning yet (legacy rows land here until completed).
+    unquoted = [c["name"] for c in locked if c.get("production_quote") is None and c.get("talent_agreed_rate") is not None]
+    if unquoted:
+        needs_attention.append(f"Production quote missing for {len(unquoted)} talent{'s' if len(unquoted) != 1 else ''}")
+    below_cost = [c["name"] for c in locked if c.get("spread") is not None and c["spread"] < 0]
+    if below_cost:
+        needs_attention.append(f"Production quote below talent rate: {', '.join(below_cost)}")
     # Only nags when the admin has explicitly marked it pending — an unset
     # (None) agreement_status never surfaces here, so old projects that
     # never touched this new field aren't retroactively flagged.
@@ -774,13 +988,6 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             # but never auto-flagged in needs_attention (see above) so an
             # old project isn't retroactively nagged.
             "pd_agreement_status": project.get("pd_agreement_status"),
-            # V2 — structured multi-date shoot schedule (spec section 4).
-            # Independent of the free-text `shoot_dates` above and the
-            # single reminder-only `pd_shoot_date` — this is the new
-            # proper date-picker's backing store, and the source a locked
-            # talent's own per-day schedule can be seeded from (spec
-            # section 3's "Use Project Dates" one-tap, never auto-synced).
-            "pd_shoot_dates_list": project.get("pd_shoot_dates_list") or [],
             # V2 — combined checklist convenience: true only when BOTH
             # underlying fields (kept alive for Management Agent's existing
             # invoice-status NLU/digest commands) are true.
@@ -791,6 +998,9 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             # flipped to "synced" by any code path in this repo.
             "zoho_status": ZOHO_STATUS,
         },
+        # What this deployment can do. The UI only offers Google Maps place search when the server
+        # actually has a key, so an unconfigured environment never makes (or logs) a failing request.
+        "capabilities": {"places_search": bool((os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip())},
         "locked_talents": locked,
         "summary": {
             "locked_count": len(locked),
@@ -813,6 +1023,11 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
             "payments_pending_amount": round(pending_amount, 2),
             "tranches_total": tranches_total,
             "tranches_received_total": tranches_received_total,
+            **_financial_rollup(
+                locked, project, extra_hours_total=extra_hours_total_all, reimbursements_total=reimbursements_total_all,
+                kickbacks_total=kickbacks_total, commission_gross=commission_gross,
+                tranches=tranches, tranches_received_total=tranches_received_total,
+            ),
         },
         "needs_attention": needs_attention,
         "kickbacks": kickbacks,
@@ -904,9 +1119,9 @@ class ProductionDeskProjectPatch(BaseModel):
     # V2 — Agreement Signed (spec section 14). Explicit three-way so a
     # project genuinely without an agreement step can say so honestly.
     agreement_status: Optional[str] = None
-    # V2 — structured multi-date shoot schedule (spec section 4). A plain
-    # list of ISO dates; the frontend renders add/remove date pickers over
-    # it rather than a free-text field.
+    # REMOVED (2026-10-07): the project-level structured date list duplicated each talent's own
+    # shoot-day schedule, which is now the single source of truth for shoot dates. Still declared
+    # so a stale client gets a clear 400 instead of a silently ignored write.
     shoot_dates_list: Optional[List[str]] = None
     # V2 — convenience alias so the frontend's single "Invoice Raised &
     # Sent" checklist toggle can write both underlying fields (still kept
@@ -932,11 +1147,7 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         except ValueError:
             raise HTTPException(400, "shoot_date must be an ISO date (YYYY-MM-DD)")
     if payload.shoot_dates_list is not None:
-        for d in payload.shoot_dates_list:
-            try:
-                date.fromisoformat(d)
-            except ValueError:
-                raise HTTPException(400, f"shoot_dates_list entries must be ISO dates (YYYY-MM-DD): {d!r}")
+        raise HTTPException(400, "Project-level shoot dates were removed — schedule dates per talent in the Talent Shooting Schedule")
     field_map = {
         "production_budget_per_day": "pd_production_budget_per_day",
         "production_budget_total": "pd_production_budget_total",
@@ -964,7 +1175,6 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
         "shoot_dates": "shoot_dates",
         "shoot_date": "pd_shoot_date",
         "agreement_status": "pd_agreement_status",
-        "shoot_dates_list": "pd_shoot_dates_list",
     }
     payload_dict = payload.model_dump(exclude_unset=True)
     # invoice_raised_and_sent is a write-only alias — it maps to BOTH
@@ -1016,6 +1226,9 @@ async def update_production_desk_project(pid: str, payload: ProductionDeskProjec
 class TalentProductionPatch(BaseModel):
     budget_per_day: Optional[float] = None
     budget_total: Optional[float] = None
+    # What the PRODUCTION is quoted for this talent (internal; the talent never sees it).
+    # Independent of budget_total, which is the talent-facing agreed rate. null clears it.
+    production_quote: Optional[float] = Field(None, ge=0)
     shooting_days: Optional[int] = None
     commission_percent: Optional[float] = None
     payment_status: Optional[str] = None
@@ -1053,6 +1266,7 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
     field_map = {
         "budget_per_day": "pd_budget_per_day",
         "budget_total": "pd_budget_total",
+        "production_quote": "pd_production_quote",
         "shooting_days": "pd_shooting_days",
         "commission_percent": "pd_commission_percent",
         "payment_status": "pd_payment_status",
@@ -1101,11 +1315,19 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
 # already use plain collections rather than aggregation pipelines).
 # ---------------------------------------------------------------------------
 class ShootDayIn(BaseModel):
-    date: str = Field(..., description="ISO date YYYY-MM-DD")
+    date: str = Field(..., description="ISO date YYYY-MM-DD (an IST calendar date)")
     call_time: Optional[str] = None
     reporting_time: Optional[str] = None
     location: Optional[str] = None
     location_map_url: Optional[str] = None
+    # A place picked through the Google Maps search (see /places/* below). `location` stays the
+    # display name; these keep the real place so the schedule shows — and links to — the actual
+    # selected location instead of a typed string.
+    location_address: Optional[str] = None
+    location_place_id: Optional[str] = None
+    location_lat: Optional[float] = Field(None, ge=-90, le=90)
+    location_lng: Optional[float] = Field(None, ge=-180, le=180)
+    notes: Optional[str] = None
     agreed_hours: Optional[float] = None
     actual_hours: Optional[float] = None
     shoot_status: Optional[str] = None
@@ -1117,6 +1339,14 @@ class ShootDayUpdateIn(BaseModel):
     reporting_time: Optional[str] = None
     location: Optional[str] = None
     location_map_url: Optional[str] = None
+    # A place picked through the Google Maps search (see /places/* below). `location` stays the
+    # display name; these keep the real place so the schedule shows — and links to — the actual
+    # selected location instead of a typed string.
+    location_address: Optional[str] = None
+    location_place_id: Optional[str] = None
+    location_lat: Optional[float] = Field(None, ge=-90, le=90)
+    location_lng: Optional[float] = Field(None, ge=-180, le=180)
+    notes: Optional[str] = None
     agreed_hours: Optional[float] = None
     actual_hours: Optional[float] = None
     shoot_status: Optional[str] = None
@@ -1145,45 +1375,28 @@ async def add_talent_shoot_day(pid: str, talent_id: str, payload: ShootDayIn, ad
     _validate_shoot_day_date(payload.date)
     if payload.shoot_status is not None and payload.shoot_status not in SHOOT_STATUS_OPTIONS:
         raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
+    call_time = normalize_clock(payload.call_time, "call_time")
+    reporting_time = normalize_clock(payload.reporting_time, "reporting_time")
+    validate_reporting_before_call(reporting_time, call_time)
     shoot_days = list(row.get("pd_shoot_days") or [])
     shoot_days.append({
         "id": str(uuid.uuid4()),
         "date": payload.date,
-        "call_time": payload.call_time,
-        "reporting_time": payload.reporting_time,
+        "call_time": call_time,
+        "reporting_time": reporting_time,
         "location": payload.location,
-        "location_map_url": payload.location_map_url,
+        "location_map_url": payload.location_map_url or build_maps_url(
+            payload.location_place_id, payload.location_lat, payload.location_lng, payload.location_address,
+        ),
+        "location_address": payload.location_address,
+        "location_place_id": payload.location_place_id,
+        "location_lat": payload.location_lat,
+        "location_lng": payload.location_lng,
+        "notes": payload.notes,
         "agreed_hours": payload.agreed_hours,
         "actual_hours": payload.actual_hours,
         "shoot_status": payload.shoot_status or "scheduled",
     })
-    shoot_days.sort(key=lambda d: d.get("date") or "")
-    await _resync_talent_shooting_days(pid, talent_id, shoot_days)
-    return await get_production_desk(pid, admin)
-
-
-@router.post("/{pid}/production-desk/talents/{talent_id}/shoot-days/use-project-dates")
-async def seed_talent_shoot_days_from_project(pid: str, talent_id: str, admin: dict = Depends(current_team_or_admin)):
-    """Spec section 3's explicit, admin-triggered one-tap: copies the
-    project's own structured pd_shoot_dates_list into this talent's
-    schedule as a starting point. Never automatic, never overwrites the
-    project's own dates, and skips any date the talent already has a
-    record for (so re-clicking is safe/idempotent)."""
-    row = await _get_locked_pipeline_row(pid, talent_id)
-    project = await _get_project_or_404(pid)
-    project_dates = project.get("pd_shoot_dates_list") or []
-    if not project_dates:
-        raise HTTPException(400, "This project has no structured shoot dates set yet (Shoot Details → Shooting Dates)")
-    shoot_days = list(row.get("pd_shoot_days") or [])
-    existing_dates = {d.get("date") for d in shoot_days}
-    for d in project_dates:
-        if d in existing_dates:
-            continue
-        shoot_days.append({
-            "id": str(uuid.uuid4()), "date": d, "call_time": None, "reporting_time": None,
-            "location": None, "location_map_url": None, "agreed_hours": None, "actual_hours": None,
-            "shoot_status": "scheduled",
-        })
     shoot_days.sort(key=lambda d: d.get("date") or "")
     await _resync_talent_shooting_days(pid, talent_id, shoot_days)
     return await get_production_desk(pid, admin)
@@ -1198,10 +1411,29 @@ async def update_talent_shoot_day(pid: str, talent_id: str, day_id: str, payload
         raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
     shoot_days = list(row.get("pd_shoot_days") or [])
     changes = payload.model_dump(exclude_unset=True)
+    if "call_time" in changes:
+        changes["call_time"] = normalize_clock(changes["call_time"], "call_time")
+    if "reporting_time" in changes:
+        changes["reporting_time"] = normalize_clock(changes["reporting_time"], "reporting_time")
     found = False
     for d in shoot_days:
         if d.get("id") == day_id:
+            validate_reporting_before_call(
+                changes.get("reporting_time", d.get("reporting_time")), changes.get("call_time", d.get("call_time")),
+            )
+            place_keys = {"location_address", "location_place_id", "location_lat", "location_lng"}
+            # Typing a different location over a previously selected Google place must not leave
+            # the OLD place's address/coordinates behind on the new text.
+            if "location" in changes and changes["location"] != d.get("location") and not (place_keys & changes.keys()):
+                for k in place_keys:
+                    d[k] = None
+                if "location_map_url" not in changes:
+                    d["location_map_url"] = None
             d.update(changes)
+            if d.get("location_place_id") or d.get("location_lat") is not None:
+                d["location_map_url"] = d.get("location_map_url") or build_maps_url(
+                    d.get("location_place_id"), d.get("location_lat"), d.get("location_lng"), d.get("location_address"),
+                )
             found = True
             break
     if not found:
@@ -1536,6 +1768,95 @@ async def get_known_locations(pid: str, admin: dict = Depends(current_team_or_ad
 
 
 # ---------------------------------------------------------------------------
+# Google Maps place search/select (server-side proxy)
+#
+# The Maps API key lives ONLY in the server environment (GOOGLE_MAPS_API_KEY); the browser
+# never sees it — it talks to these two authenticated endpoints, which call Google's Places API
+# (New) and return just the fields a shoot location needs. With no key configured they answer
+# 503 and the picker silently falls back to previously-used locations + free text, exactly as
+# before. Nothing is persisted here: the chosen place is saved on the shoot day by the normal
+# shoot-day endpoints (location, address, place id, lat/lng, Maps URL).
+# ---------------------------------------------------------------------------
+_PLACE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{10,300}$")
+_PLACES_BASE = "https://places.googleapis.com/v1"
+
+
+def _maps_key() -> str:
+    key = (os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip()
+    if not key:
+        raise HTTPException(503, "Google Maps search is not configured")
+    return key
+
+
+@router.get("/{pid}/production-desk/places/search")
+async def search_places(
+    pid: str, q: str = Query(..., min_length=3, max_length=200), session: Optional[str] = Query(None, max_length=100),
+    admin: dict = Depends(current_team_or_admin),
+):
+    await _get_project_or_404(pid)
+    key = _maps_key()
+    body: Dict[str, Any] = {"input": q.strip(), "regionCode": "IN"}
+    if session:
+        body["sessionToken"] = session
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as http:
+            resp = await http.post(f"{_PLACES_BASE}/places:autocomplete", json=body, headers={"X-Goog-Api-Key": key})
+    except httpx.HTTPError:
+        raise HTTPException(502, "Google Maps search is unavailable right now")
+    if resp.status_code != 200:
+        logger.warning("places autocomplete failed status=%s", resp.status_code)
+        raise HTTPException(502, "Google Maps search is unavailable right now")
+    results = []
+    for sug in (resp.json().get("suggestions") or [])[:8]:
+        pred = sug.get("placePrediction") or {}
+        pid_ = pred.get("placeId")
+        if not pid_:
+            continue
+        fmt = pred.get("structuredFormat") or {}
+        results.append({
+            "place_id": pid_,
+            "name": (fmt.get("mainText") or {}).get("text") or (pred.get("text") or {}).get("text") or "",
+            "address": (fmt.get("secondaryText") or {}).get("text") or "",
+        })
+    return {"results": results}
+
+
+@router.get("/{pid}/production-desk/places/{place_id}")
+async def get_place(
+    pid: str, place_id: str, session: Optional[str] = Query(None, max_length=100),
+    admin: dict = Depends(current_team_or_admin),
+):
+    await _get_project_or_404(pid)
+    if not _PLACE_ID_RE.match(place_id):
+        raise HTTPException(400, "Invalid place id")
+    key = _maps_key()
+    params = {"sessionToken": session} if session else None
+    headers = {"X-Goog-Api-Key": key, "X-Goog-FieldMask": "id,displayName,formattedAddress,location,googleMapsUri"}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as http:
+            resp = await http.get(f"{_PLACES_BASE}/places/{place_id}", params=params, headers=headers)
+    except httpx.HTTPError:
+        raise HTTPException(502, "Google Maps search is unavailable right now")
+    if resp.status_code == 404:
+        raise HTTPException(404, "Place not found")
+    if resp.status_code != 200:
+        logger.warning("places details failed status=%s", resp.status_code)
+        raise HTTPException(502, "Google Maps search is unavailable right now")
+    d = resp.json()
+    loc = d.get("location") or {}
+    lat, lng = loc.get("latitude"), loc.get("longitude")
+    address = d.get("formattedAddress") or ""
+    return {
+        "place_id": d.get("id") or place_id,
+        "name": (d.get("displayName") or {}).get("text") or address,
+        "address": address,
+        "lat": lat,
+        "lng": lng,
+        "maps_url": d.get("googleMapsUri") or build_maps_url(place_id, lat, lng, address),
+    }
+
+
+# ---------------------------------------------------------------------------
 # V2 — Payment Tranches / Billing Milestones (spec sections 19-20)
 #
 # A genuinely new, small collection — nothing existing models "a project
@@ -1649,39 +1970,190 @@ def _fmt_inr(amount: Optional[float]) -> str:
     return ("-" if n < 0 else "") + s
 
 
-@router.get("/{pid}/production-desk/payment-followup-message")
-async def build_payment_followup_message(pid: str, admin: dict = Depends(current_team_or_admin)):
+async def _followup_contact_candidates(pid: str, project: dict) -> List[dict]:
+    """CRM contacts a payment follow-up may legitimately go to — the EXISTING `clients`
+    collection, no second contact list. Source order (and why):
+
+      1. the project's saved Payment Follow-up contact (`pd_production_contact_client_id`)
+      2. the project's crew (project_crew rows — role-tagged CRM links: Producer, Production
+         Manager, Client, ...) — the only project<->contact association the CRM models
+      3. other CRM contacts at the SAME company as any of those (the CRM's own company link,
+         `company_id`, falling back to the identical `company_name`) — e.g. the accounts
+         person at the production house who is not on the crew list.
+
+    Anyone outside this set is never offered and is rejected by the message endpoint, so a
+    follow-up cannot be addressed to an arbitrary contact by passing an id."""
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    sources: Dict[str, dict] = {}
+
+    def _oid(cid: Optional[str]):
+        try:
+            return ObjectId(cid) if cid else None
+        except (InvalidId, TypeError):
+            return None
+
+    primary = project.get("pd_production_contact_client_id")
+    crew_rows = await db.project_crew.find({"project_id": pid}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    ordered_ids: List[tuple] = []
+    if primary:
+        ordered_ids.append((primary, "production_contact", None))
+    for c in crew_rows:
+        if c.get("client_id"):
+            ordered_ids.append((c["client_id"], "crew", c.get("role")))
+
+    oids = [o for o in (_oid(cid) for cid, _, _ in ordered_ids) if o]
+    docs = await db.clients.find({"_id": {"$in": oids}}).to_list(len(oids) or 1) if oids else []
+    by_id = {str(d["_id"]): d for d in docs}
+    crew_role_by_id = {c["client_id"]: c.get("role") for c in crew_rows if c.get("client_id")}
+    for cid, source, role in ordered_ids:
+        d = by_id.get(cid)
+        if d and cid not in sources:
+            # the saved concerned person keeps its source, but still shows its crew role when it has one
+            sources[cid] = {"doc": d, "source": source, "role": role or crew_role_by_id.get(cid)}
+
+    company_ids = {str(d.get("company_id")) for d in docs if d.get("company_id")}
+    company_names = {(d.get("company_name") or "").strip().lower() for d in docs if (d.get("company_name") or "").strip()}
+    if company_ids or company_names:
+        ors: List[dict] = []
+        if company_ids:
+            ors.append({"company_id": {"$in": list(company_ids)}})
+        if company_names:
+            ors.append({"company_name": {"$in": [d.get("company_name") for d in docs if (d.get("company_name") or "").strip()]}})
+        async for d in db.clients.find({"$or": ors}).limit(60):
+            cid = str(d["_id"])
+            if cid not in sources:
+                sources[cid] = {"doc": d, "source": "same_company", "role": None}
+
+    out = []
+    for cid, info in sources.items():
+        d = info["doc"]
+        out.append({
+            "client_id": cid,
+            "name": d.get("name") or "",
+            "phone_number": d.get("phone_number"),
+            "has_phone": bool((d.get("phone_number") or "").strip()),
+            "company_name": d.get("company_name"),
+            "designation": d.get("designation"),
+            "contact_type": d.get("contact_type"),
+            "role": info["role"],
+            "source": info["source"],
+            "is_default": cid == primary,
+        })
+    return out
+
+
+@router.get("/{pid}/production-desk/payment-followup-contacts")
+async def get_payment_followup_contacts(pid: str, admin: dict = Depends(current_team_or_admin)):
     project = await _get_project_or_404(pid)
-    contact_id = project.get("pd_production_contact_client_id")
-    if not contact_id:
-        raise HTTPException(400, "Set a Payment Follow-up concerned person first")
-    name_map = await _client_name_map([contact_id])
-    contact = name_map.get(contact_id)
-    if not contact or not contact.get("phone_number"):
+    return {"contacts": await _followup_contact_candidates(pid, project)}
+
+
+async def _financial_context(pid: str, project: dict) -> tuple:
+    """(locked cards, rollup) for the message builders — the same numbers GET
+    /production-desk puts in `summary`, computed from the same helpers."""
+    reimbursements = await db.project_reimbursements.find({"project_id": pid}, {"_id": 0}).to_list(500)
+    reimb_totals: Dict[str, float] = {}
+    for r in reimbursements:
+        tid = r.get("talent_id")
+        if tid:
+            reimb_totals[tid] = reimb_totals.get(tid, 0.0) + (_num(r.get("amount")) or 0.0)
+    locked = await _locked_talent_cards(pid, project, reimb_totals)
+    kickbacks = await db.project_kickbacks.find({"project_id": pid}, {"_id": 0}).to_list(500)
+    tranches = await db.project_payment_tranches.find({"project_id": pid}, {"_id": 0}).to_list(200)
+    rollup = _financial_rollup(
+        locked, project,
+        extra_hours_total=sum(c["extra_hours_total"] for c in locked),
+        reimbursements_total=round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2),
+        kickbacks_total=sum(_num(k.get("amount")) or 0 for k in kickbacks),
+        commission_gross=sum(c["commission_amount"] for c in locked if c["commission_amount"] is not None),
+        tranches=tranches,
+        tranches_received_total=round(sum(_num(t.get("amount")) or 0.0 for t in tranches if t.get("payment_status") == "received"), 2),
+    )
+    return locked, rollup
+
+
+@router.get("/{pid}/production-desk/payment-followup-message")
+async def build_payment_followup_message(
+    pid: str, contact_id: Optional[str] = Query(None), admin: dict = Depends(current_team_or_admin),
+):
+    """The follow-up goes to the PRODUCTION, so every amount here is production-side:
+    production quote + overtime + reimbursements - amount already received. The talent's agreed
+    rate (and Talentgram's spread) never appear. Nothing is sent from here — the admin reviews
+    this exact text in the UI and then opens WhatsApp themselves."""
+    project = await _get_project_or_404(pid)
+    candidates = await _followup_contact_candidates(pid, project)
+    if contact_id:
+        chosen = next((c for c in candidates if c["client_id"] == contact_id), None)
+        if not chosen:
+            raise HTTPException(400, "That CRM contact is not associated with this project")
+    else:
+        default_id = project.get("pd_production_contact_client_id")
+        if not default_id:
+            raise HTTPException(400, "Set a Payment Follow-up concerned person first")
+        chosen = next((c for c in candidates if c["client_id"] == default_id), None)
+        if not chosen:
+            raise HTTPException(400, "Set a Payment Follow-up concerned person first")
+    if not (chosen.get("phone_number") or "").strip():
         raise HTTPException(400, "This CRM contact has no phone number on file")
 
-    locked = await _locked_talent_cards(pid, project)
+    locked, money = await _financial_context(pid, project)
     talent_names = ", ".join(c["name"] for c in locked if c.get("name")) or "the locked talent(s)"
     brand = project.get("brand_name") or "the project"
     terms = project.get("pd_payment_terms")
     expected = project.get("pd_expected_payment_date")
+    shoot_dates = sorted({d.get("date") for c in locked for d in (c.get("shoot_days") or []) if d.get("date")})
 
     lines = [
-        f"Hi {contact.get('name') or ''},".strip(),
+        f"Hi {chosen.get('name') or ''},".strip(),
         "",
         f"Just a gentle reminder regarding the payment for the {brand} project.",
         "",
         f"Project: {brand}",
         f"Talent(s): {talent_names}",
     ]
+    if shoot_dates:
+        lines.append("Shoot date(s): " + ", ".join(date.fromisoformat(d).strftime("%d %b %Y") for d in shoot_dates))
+    elif project.get("shoot_dates"):
+        lines.append(f"Shoot date(s): {project['shoot_dates']}")
+
+    warnings: List[str] = []
+    breakdown: Dict[str, Any] = {}
+    billable = money["production_billable_total"]
+    if billable is None:
+        warnings.append("No production quote entered — the message has no amounts.")
+    elif money["production_basis"] == "partial":
+        warnings.append(
+            f"Production quote is missing for {money['production_quotes_missing']} talent(s) — amounts omitted until it is entered."
+        )
+    else:
+        base = billable - money["production_overtime_total"] - money["production_reimbursements_total"]
+        lines += ["", f"Production amount: ₹{_fmt_inr(base)}"]
+        if money["production_overtime_total"]:
+            lines.append(f"Overtime: ₹{_fmt_inr(money['production_overtime_total'])}")
+        if money["production_reimbursements_total"]:
+            lines.append(f"Reimbursements: ₹{_fmt_inr(money['production_reimbursements_total'])}")
+        lines.append(f"Total due: ₹{_fmt_inr(billable)}")
+        if money["client_received_total"]:
+            lines.append(f"Received: ₹{_fmt_inr(money['client_received_total'])}")
+        lines.append(f"Outstanding: ₹{_fmt_inr(money['client_outstanding_total'])}")
+        breakdown = {
+            "production_amount": base, "overtime": money["production_overtime_total"],
+            "reimbursements": money["production_reimbursements_total"], "total_due": billable,
+            "received": money["client_received_total"], "outstanding": money["client_outstanding_total"],
+            "basis": money["production_basis"],
+        }
     if terms:
         lines.append(f"Payment terms: {terms}")
     if expected:
         expected_display = expected[:10] if isinstance(expected, str) else expected
         lines.append(f"Expected payment date: {expected_display}")
     lines += ["", "Kindly arrange the payment at your earliest convenience.", "", "Thank you."]
-    message = "\n".join(lines)
-    return {"phone": contact["phone_number"], "contact_name": contact.get("name"), "message": message}
+    return {
+        "phone": chosen["phone_number"], "contact_id": chosen["client_id"], "contact_name": chosen.get("name"),
+        "message": "\n".join(lines), "breakdown": breakdown, "warnings": warnings,
+    }
 
 
 async def _load_talent_invoice_card(pid: str, talent_id: str) -> tuple[dict, dict, dict]:

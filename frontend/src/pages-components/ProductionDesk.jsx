@@ -72,19 +72,53 @@ const formatCurrency = (val) => {
 // core._now()'s own shape); a plain <input type="date"> only round-trips
 // the date part, so these convert at the UI boundary — noon UTC is the
 // same default time the Management Agent's own date parsing uses.
+// Business timezone: Asia/Kolkata (IST). Every date/time this screen shows or
+// reads is the IST calendar value — never the browser's own timezone, so a
+// viewer in another country (or a laptop clock set wrong) sees the same day
+// the backend and the reminder worker use. Date-only fields are stored at
+// noon UTC (= 17:30 IST, the same calendar date in both zones), so they can
+// never slide across a day boundary in either direction.
+const IST_TZ = "Asia/Kolkata";
+const istDateParts = (d) => new Intl.DateTimeFormat("en-CA", { timeZone: IST_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
 const toDateInputValue = (iso) => {
     if (!iso) return "";
-    try { return new Date(iso).toISOString().slice(0, 10); } catch { return ""; }
+    try {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+        return istDateParts(new Date(iso));
+    } catch { return ""; }
 };
 const fromDateInputValue = (dateStr) => (dateStr ? `${dateStr}T12:00:00.000Z` : null);
 
 const formatDate = (iso) => {
     if (!iso) return "—";
     try {
-        return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+        // A bare YYYY-MM-DD (shoot-day dates) is a calendar date, not an instant.
+        const d = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T12:00:00.000Z`) : new Date(iso);
+        return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: IST_TZ });
     } catch {
         return iso;
     }
+};
+
+// Call / reporting times are stored as "HH:MM" (24h, IST wall-clock) and shown
+// as "9:30 AM". Legacy free-text values ("9 AM", "morning") pass through as-is.
+const formatClock = (v) => {
+    if (!v) return "—";
+    const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(v).trim());
+    if (!m) return v;
+    const h = Number(m[1]);
+    return `${h % 12 || 12}:${m[2]} ${h >= 12 ? "PM" : "AM"}`;
+};
+// Input value for <input type="time">: only a canonical HH:MM round-trips; legacy text is shown read-only.
+const clockInputValue = (v) => (v && /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v).trim()) ? String(v).trim() : "");
+const clockMinutes = (v) => {
+    const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(v || "").trim());
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+};
+const reportingAfterCall = (reporting, call) => {
+    const r = clockMinutes(reporting); const c = clockMinutes(call);
+    return r !== null && c !== null && r > c;
 };
 
 const DOCUMENT_CATEGORIES = [
@@ -162,31 +196,72 @@ function openWhatsApp(phone, message) {
 
 // Lightest-possible "clickable location" (spec section 7/29) — a name plus
 // an optional Google Maps URL, never a maps-search integration.
-function LocationLink({ name, mapUrl }) {
+function LocationLink({ name, mapUrl, address }) {
     if (!name && !mapUrl) return <span className="text-black/30">—</span>;
+    const addr = address && address !== name ? address : null;
     if (mapUrl) {
         return (
-            <a href={mapUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[#0c2340] hover:underline">
-                <MapPin className="h-3 w-3 shrink-0" />
-                <span className="truncate">{name || "View on map"}</span>
+            <a href={mapUrl} target="_blank" rel="noreferrer" className="inline-flex flex-col text-[#0c2340] hover:underline min-w-0" title={addr || undefined}>
+                <span className="inline-flex items-center gap-1 min-w-0">
+                    <MapPin className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{name || "View on map"}</span>
+                </span>
+                {addr && <span className="text-[10px] text-black/40 truncate pl-4">{addr}</span>}
             </a>
         );
     }
-    return <span className="text-black/70">{name}</span>;
+    return (
+        <span className="inline-flex flex-col min-w-0">
+            <span className="text-black/70 truncate">{name}</span>
+            {addr && <span className="text-[10px] text-black/40 truncate">{addr}</span>}
+        </span>
+    );
 }
 
-// V2 — lightweight location search/select (spec section 2). No Google
-// Places/Maps integration exists in this codebase (and none is added
-// here — that needs new external credentials/billing this task cannot
-// introduce). Instead: search/select from real locations the studio has
-// already used (fetched via known-locations, see production_desk.py),
-// with free text still allowed for a genuinely new location. Picking a
-// suggestion also carries over its saved map URL when one exists.
+// {projectId, enabled} for the server-side Google Maps place search (the Maps key
+// never reaches the browser — see production_desk.py's /places/* endpoints).
+// `enabled` mirrors the desk's `capabilities.places_search`, so an environment with no
+// key never issues (or logs) a failing search request.
+const PlacesContext = React.createContext(null);
+
+// Location search/select. Two sources, one list:
+//   1. Google Maps places (server-side proxy; needs GOOGLE_MAPS_API_KEY on the
+//      backend) — picking one saves the REAL place: name, formatted address,
+//      place id, latitude/longitude and the Maps URL.
+//   2. Locations the studio has already used (known-locations) + free text — the
+//      original behaviour, and the automatic fallback whenever Google search is
+//      not configured or unavailable (the 503/502 is swallowed, never shown).
+// onCommit(name, mapUrl, place) — `place` is only set for a Google selection.
 function LocationPicker({ value, onCommit, knownLocations, placeholder, className, immediate }) {
+    const places = React.useContext(PlacesContext);
+    const projectId = places?.projectId;
+    const placesEnabled = !!places?.enabled;
     const [open, setOpen] = useState(false);
     const [query, setQuery] = useState(value || "");
+    const [googleResults, setGoogleResults] = useState([]);
+    const googleOff = React.useRef(false);
+    const sessionRef = React.useRef(null);
+    if (!sessionRef.current) {
+        sessionRef.current = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Math.random()).slice(2);
+    }
 
     useEffect(() => { setQuery(value || ""); }, [value]);
+
+    useEffect(() => {
+        const q = query.trim();
+        if (!projectId || !placesEnabled || googleOff.current || q.length < 3 || !open) { setGoogleResults([]); return undefined; }
+        let cancelled = false;
+        const t = setTimeout(async () => {
+            try {
+                const { data } = await adminApi.get(`/projects/${projectId}/production-desk/places/search`, { params: { q, session: sessionRef.current } });
+                if (!cancelled) setGoogleResults(Array.isArray(data?.results) ? data.results : []);
+            } catch (err) {
+                // 503 = not configured, 502 = Google unavailable: fall back to known locations quietly.
+                if (!cancelled) { setGoogleResults([]); if (err?.response?.status === 503) googleOff.current = true; }
+            }
+        }, 300);
+        return () => { cancelled = true; clearTimeout(t); };
+    }, [query, open, projectId, placesEnabled]);
 
     const filtered = useMemo(() => {
         const q = query.trim().toLowerCase();
@@ -195,12 +270,27 @@ function LocationPicker({ value, onCommit, knownLocations, placeholder, classNam
         return list.filter((l) => l.name.toLowerCase().includes(q)).slice(0, 15);
     }, [knownLocations, query]);
 
-    const commit = (name, mapUrl) => {
+    const commit = (name, mapUrl, place) => {
         setQuery(name);
         setOpen(false);
-        onCommit(name, mapUrl);
+        onCommit(name, mapUrl, place);
     };
 
+    const pickGoogle = async (r) => {
+        try {
+            const { data } = await adminApi.get(`/projects/${projectId}/production-desk/places/${encodeURIComponent(r.place_id)}`, { params: { session: sessionRef.current } });
+            sessionRef.current = String(Math.random()).slice(2);   // a Places session ends at the details call
+            commit(data.name || r.name, data.maps_url || undefined, {
+                address: data.address || r.address || null, place_id: data.place_id || r.place_id,
+                lat: data.lat ?? null, lng: data.lng ?? null,
+            });
+        } catch {
+            // Details failed — keep what the user picked as plain text rather than losing it.
+            commit(r.name);
+        }
+    };
+
+    const hasAny = filtered.length > 0 || googleResults.length > 0;
     return (
         <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger asChild>
@@ -228,23 +318,38 @@ function LocationPicker({ value, onCommit, knownLocations, placeholder, classNam
                     }}
                 />
             </PopoverTrigger>
-            {filtered.length > 0 && (
-                <PopoverContent className="w-64 p-0" align="start" onOpenAutoFocus={(e) => e.preventDefault()}>
+            {hasAny && (
+                <PopoverContent className="w-72 p-0" align="start" onOpenAutoFocus={(e) => e.preventDefault()}>
                     <Command shouldFilter={false}>
                         <CommandList>
-                            <CommandGroup heading="Previously used">
-                                {filtered.map((l) => (
-                                    <CommandItem
-                                        key={l.name}
-                                        value={l.name}
-                                        onSelect={() => commit(l.name, l.map_url || undefined)}
-                                        className="text-xs cursor-pointer"
-                                    >
-                                        <MapPin className="h-3 w-3 mr-1.5 text-black/30 shrink-0" />
-                                        <span className="truncate">{l.name}</span>
-                                    </CommandItem>
-                                ))}
-                            </CommandGroup>
+                            {googleResults.length > 0 && (
+                                <CommandGroup heading="Google Maps">
+                                    {googleResults.map((r) => (
+                                        <CommandItem key={r.place_id} value={`g-${r.place_id}`} onSelect={() => pickGoogle(r)} className="text-xs cursor-pointer" data-testid="pd-place-result">
+                                            <MapPin className="h-3 w-3 mr-1.5 text-[#0c2340] shrink-0" />
+                                            <span className="min-w-0">
+                                                <span className="block truncate">{r.name}</span>
+                                                {r.address && <span className="block truncate text-[10px] text-black/40">{r.address}</span>}
+                                            </span>
+                                        </CommandItem>
+                                    ))}
+                                </CommandGroup>
+                            )}
+                            {filtered.length > 0 && (
+                                <CommandGroup heading="Previously used">
+                                    {filtered.map((l) => (
+                                        <CommandItem
+                                            key={l.name}
+                                            value={l.name}
+                                            onSelect={() => commit(l.name, l.map_url || undefined)}
+                                            className="text-xs cursor-pointer"
+                                        >
+                                            <MapPin className="h-3 w-3 mr-1.5 text-black/30 shrink-0" />
+                                            <span className="truncate">{l.name}</span>
+                                        </CommandItem>
+                                    ))}
+                                </CommandGroup>
+                            )}
                         </CommandList>
                     </Command>
                 </PopoverContent>
@@ -345,6 +450,194 @@ function StatPill({ label, value, tone }) {
 // needs_attention, today, upcoming, completed) — no second data source, no
 // second reminder engine. Collapse state is a per-viewer convenience
 // (localStorage), never sent to the server.
+// ============================================================================
+// Production Financials — the ONE place the two sides of the money are laid out.
+//
+//   Production / Client   what the production is quoted and owes (quote + overtime
+//                         + reimbursements − received)
+//   Talent (talent-facing) what each talent was told and is paid (agreed rate,
+//                         commission on THAT rate, net payable)
+//   Talentgram (internal)  commission + the spread between quote and talent rate
+//
+// Talent rate ≠ production quote. Commission is always % × talent rate (+ overtime), never
+// on the quote; the spread (quote − rate) is Talentgram's own margin and exists only on
+// internal surfaces — it is never part of an invoice or any message to a talent. Every number
+// here comes from the server (`_financial_rollup` / `_talent_card`); nothing is re-derived.
+// ============================================================================
+const BASIS_NOTE = {
+    per_talent: "Production quote = the sum of each locked talent's quote.",
+    partial: "A production quote is entered for only some talents — production totals are incomplete.",
+    project_budget: "No per-talent quotes yet — using the project-level production budget below.",
+    none: "No production quote entered yet. Enter one per talent in Locked Talents.",
+};
+
+function FinLine({ label, value, tone, strong, testId }) {
+    const toneCls = { warn: "text-amber-700", good: "text-emerald-700", bad: "text-red-600" }[tone] || "text-black/80";
+    return (
+        <div className={`flex items-baseline justify-between gap-3 text-xs ${strong ? "pt-1.5 mt-1 border-t border-black/[0.06]" : ""}`}>
+            <span className={strong ? "font-semibold text-black/70" : "text-black/50"}>{label}</span>
+            <span className={`${strong ? "font-bold" : "font-medium"} ${toneCls}`} data-testid={testId}>{value}</span>
+        </div>
+    );
+}
+
+function FinGroup({ title, tag, tagClass, children, testId }) {
+    return (
+        <div className="rounded-lg border border-black/[0.08] p-3" data-testid={testId}>
+            <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-black/40">{title}</span>
+                <span className={`text-[9px] font-semibold uppercase tracking-wide rounded px-1.5 py-0.5 border ${tagClass}`}>{tag}</span>
+            </div>
+            <div className="space-y-1">{children}</div>
+        </div>
+    );
+}
+
+const moneyOrDash = (v) => (v === null || v === undefined ? "—" : formatCurrency(v));
+
+function ProductionFinancials({ project: p, talents, summary: s, onSaveProject }) {
+    const [showLegacy, setShowLegacy] = useState(false);
+    const billable = s.production_billable_total;
+    const quoteBase = billable === null || billable === undefined ? null : billable - (s.production_overtime_total || 0) - (s.production_reimbursements_total || 0);
+    const incomplete = s.production_basis === "partial";
+    const missing = s.production_quotes_missing || 0;
+
+    return (
+        <SectionCard title="Production Financials" icon={Wallet} testId="pd-production-financials">
+            <div className="space-y-4" data-testid="pd-production-budget">
+                <p className="text-[11px] text-black/40 -mt-1" data-testid="pd-fin-basis-note">{BASIS_NOTE[s.production_basis] || ""}
+                    {missing > 0 && s.production_basis !== "none" && s.production_basis !== "project_budget" && ` (${missing} talent${missing !== 1 ? "s" : ""} without a quote)`}
+                </p>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                    <FinGroup title="Production / Client" tag="Client" tagClass="bg-sky-50 text-sky-700 border-sky-200" testId="pd-fin-client">
+                        <FinLine label="Production Quote" value={moneyOrDash(quoteBase)} testId="pd-fin-quote" />
+                        <FinLine label="Overtime" value={formatCurrency(s.production_overtime_total || 0)} />
+                        <FinLine label="Reimbursements" value={formatCurrency(s.production_reimbursements_total || 0)} />
+                        <FinLine label="Total to bill production" value={moneyOrDash(billable)} strong testId="pd-fin-billable" />
+                        <FinLine label="Received" value={formatCurrency(s.client_received_total || 0)} tone="good" />
+                        <FinLine label="Outstanding" value={incomplete ? "Incomplete" : moneyOrDash(s.client_outstanding_total)} strong tone={s.client_outstanding_total > 0 ? "warn" : "good"} testId="pd-fin-outstanding" />
+                        <div className="pt-2">
+                            <Label className="text-[11px] text-black/40">Shooting Days</Label>
+                            <InlineNumber value={p.pd_shooting_days} className="mt-1" onSave={(v) => onSaveProject({ shooting_days: v })} />
+                        </div>
+                    </FinGroup>
+
+                    <FinGroup title="Talent" tag="Talent-facing" tagClass="bg-emerald-50 text-emerald-700 border-emerald-200" testId="pd-fin-talent">
+                        <FinLine label="Locked talents" value={s.locked_count} />
+                        <FinLine label="Talent agreed rates" value={formatCurrency(s.talent_agreed_total || 0)} testId="pd-fin-talent-rates" />
+                        <FinLine label="Commission (on talent rate)" value={formatCurrency(s.commission_gross || 0)} />
+                        <FinLine label="Overtime" value={formatCurrency(s.extra_hours_total || 0)} />
+                        <FinLine label="Reimbursements" value={formatCurrency(s.reimbursements_total || 0)} />
+                        <FinLine label="Total talent net payable" value={formatCurrency(s.talent_payable_total || 0)} strong testId="pd-fin-talent-payable" />
+                    </FinGroup>
+
+                    <FinGroup title="Talentgram" tag="Internal only" tagClass="bg-amber-50 text-amber-800 border-amber-200" testId="pd-fin-internal">
+                        <FinLine label="Commission" value={formatCurrency(s.commission_gross || 0)} />
+                        <FinLine label="Additional spread (quote − rate)" value={formatCurrency(s.spread_total || 0)} tone={s.spread_total < 0 ? "bad" : undefined} testId="pd-fin-spread" />
+                        <FinLine label="Total Talentgram earnings" value={formatCurrency(s.talentgram_earnings_total || 0)} strong testId="pd-fin-earnings" />
+                        {s.kickbacks_total > 0 && <FinLine label="After kickbacks" value={formatCurrency(s.talentgram_earnings_net_of_kickbacks || 0)} />}
+                    </FinGroup>
+                </div>
+
+                {talents.length > 0 && (
+                    <div data-testid="pd-fin-table">
+                        <div className="hidden lg:block overflow-x-auto">
+                            <Table>
+                                <TableHeader>
+                                    <TableRow>
+                                        <TableHead className="text-xs">Talent</TableHead>
+                                        <TableHead className="text-xs">Talent Rate</TableHead>
+                                        <TableHead className="text-xs">Production Quote</TableHead>
+                                        <TableHead className="text-xs">Comm %</TableHead>
+                                        <TableHead className="text-xs">Commission</TableHead>
+                                        <TableHead className="text-xs">Spread</TableHead>
+                                        <TableHead className="text-xs">OT</TableHead>
+                                        <TableHead className="text-xs">Reimb.</TableHead>
+                                        <TableHead className="text-xs">Talent Net</TableHead>
+                                        <TableHead className="text-xs">TG Earning</TableHead>
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    {talents.map((t) => (
+                                        <TableRow key={t.talent_id} data-testid={`pd-fin-row-${t.talent_id}`}>
+                                            <TableCell className="text-xs font-medium text-black/80">{t.name || "Untitled"}</TableCell>
+                                            <TableCell className="text-xs">{moneyOrDash(t.talent_agreed_rate)}</TableCell>
+                                            <TableCell className="text-xs">{t.production_quote === null || t.production_quote === undefined ? <span className="text-amber-700">Not entered</span> : formatCurrency(t.production_quote)}</TableCell>
+                                            <TableCell className="text-xs">{t.commission_percent === null || t.commission_percent === undefined ? "—" : `${t.commission_percent}%`}</TableCell>
+                                            <TableCell className="text-xs">{moneyOrDash(t.commission_amount)}</TableCell>
+                                            <TableCell className={`text-xs ${t.spread < 0 ? "text-red-600" : ""}`}>{moneyOrDash(t.spread)}</TableCell>
+                                            <TableCell className="text-xs">{formatCurrency(t.extra_hours_total || 0)}</TableCell>
+                                            <TableCell className="text-xs">{formatCurrency(t.reimbursement_total || 0)}</TableCell>
+                                            <TableCell className="text-xs">{moneyOrDash(t.talent_net_payable)}</TableCell>
+                                            <TableCell className="text-xs font-semibold">{moneyOrDash(t.talentgram_earning)}</TableCell>
+                                        </TableRow>
+                                    ))}
+                                </TableBody>
+                            </Table>
+                        </div>
+                        <div className="lg:hidden space-y-2">
+                            {talents.map((t) => (
+                                <div key={t.talent_id} className="rounded-md border border-black/[0.06] p-3" data-testid={`pd-fin-row-mobile-${t.talent_id}`}>
+                                    <div className="text-xs font-medium text-black/80 mb-2">{t.name || "Untitled"}</div>
+                                    <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+                                        <div><span className="text-black/40 block">Talent Rate</span>{moneyOrDash(t.talent_agreed_rate)}</div>
+                                        <div><span className="text-black/40 block">Production Quote</span>{t.production_quote === null || t.production_quote === undefined ? <span className="text-amber-700">Not entered</span> : formatCurrency(t.production_quote)}</div>
+                                        <div><span className="text-black/40 block">Commission</span>{moneyOrDash(t.commission_amount)}</div>
+                                        <div><span className="text-black/40 block">Spread</span><span className={t.spread < 0 ? "text-red-600" : ""}>{moneyOrDash(t.spread)}</span></div>
+                                        <div><span className="text-black/40 block">OT / Reimb.</span>{formatCurrency(t.extra_hours_total || 0)} / {formatCurrency(t.reimbursement_total || 0)}</div>
+                                        <div><span className="text-black/40 block">Talent Net</span>{moneyOrDash(t.talent_net_payable)}</div>
+                                        <div className="col-span-2 font-semibold"><span className="text-black/40 font-normal block">TG Earning</span>{moneyOrDash(t.talentgram_earning)}</div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                <div className="pt-1 border-t border-black/[0.06]">
+                    <button className="text-[11px] text-black/40 hover:text-black/70 inline-flex items-center gap-1" onClick={() => setShowLegacy((v) => !v)} data-testid="pd-fin-legacy-toggle">
+                        <History className="h-3 w-3" /> {showLegacy ? "Hide" : "Show"} project-level production budget
+                    </button>
+                    {showLegacy && (
+                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3" data-testid="pd-fin-legacy">
+                            <p className="sm:col-span-2 text-[11px] text-black/35">
+                                The single project-wide production budget from before per-talent quotes. It is used only while no talent has a quote; once quotes are entered they replace it.
+                            </p>
+                            <div>
+                                <Label className="text-[11px] text-black/40">Budget / Day</Label>
+                                <InlineNumber value={p.pd_production_budget_per_day} className="mt-1" onSave={(v) => onSaveProject({ production_budget_per_day: v })} />
+                            </div>
+                            <div>
+                                <Label className="text-[11px] text-black/40">Total Budget</Label>
+                                <InlineNumber value={p.pd_production_budget_total} className="mt-1" onSave={(v) => onSaveProject({ production_budget_total: v })} />
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {(p.client_budget_lines?.length > 0 || p.talent_budget_lines?.length > 0) && (
+                    <div className="pt-2 border-t border-black/[0.06]" data-testid="pd-budget-reference">
+                        <Label className="text-[11px] text-black/40">Budget Reference (from Project Details)</Label>
+                        <div className="mt-1.5 space-y-1">
+                            {p.client_budget_lines?.map((l, i) => (
+                                <div key={`cb-${i}`} className="flex justify-between text-xs text-black/60">
+                                    <span>{l.label || "Client Budget"}</span><span>{l.value}</span>
+                                </div>
+                            ))}
+                            {p.talent_budget_lines?.map((l, i) => (
+                                <div key={`tb-${i}`} className="flex justify-between text-xs text-black/60">
+                                    <span>{l.label || "Talent Budget"}</span><span>{l.value}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+        </SectionCard>
+    );
+}
+
 function OverviewDashboard({ project: p, summary, needsAttention, today, upcoming, completed }) {
     const [collapsed, setCollapsed] = useState(() => {
         try { return localStorage.getItem("pd_overview_collapsed") === "1"; } catch { return false; }
@@ -377,18 +670,32 @@ function OverviewDashboard({ project: p, summary, needsAttention, today, upcomin
     completed?.tranches?.forEach((t) => completedItems.push({ key: `t-${t.id}`, label: `Tranche received — ${t.name} — ${formatCurrency(t.amount)}` }));
     completed?.tasks?.forEach((t) => completedItems.push({ key: `task-${t.id}`, label: `Task completed — ${t.title}` }));
 
+    const billable = summary.production_billable_total;
+    const quoteBase = billable === null || billable === undefined ? null : billable - (summary.production_overtime_total || 0) - (summary.production_reimbursements_total || 0);
     const productionMetrics = [
-        { label: "Locked Talents", value: summary.locked_count },
+        { label: "Production Quote", value: moneyOrDash(quoteBase) },
         { label: "Shoot Days", value: summary.shoot_days ?? "—" },
+        { label: "Shoot Status", value: (p.pd_shoot_status || "not_scheduled").replace("_", " ") },
     ];
-    const financialMetrics = [
-        { label: "Talent Budget", value: formatCurrency(summary.talent_budget_total) },
-        { label: "Talent Cost", value: formatCurrency(summary.total_talent_and_overtime_and_reimbursements) },
-        { label: "Extra Hours", value: formatCurrency(summary.extra_hours_total), tone: summary.extra_hours_total > 0 ? "warn" : "neutral" },
-        { label: "Reimbursements", value: formatCurrency(summary.reimbursements_total) },
-        { label: "TG Commission (Net)", value: formatCurrency(summary.commission_net) },
+    const talentMetrics = [
+        { label: "Locked Talents", value: summary.locked_count },
+        { label: "Talent Agreed Rates", value: formatCurrency(summary.talent_agreed_total || 0) },
+        { label: "Talent Net Payable", value: formatCurrency(summary.talent_payable_total || 0) },
+    ];
+    const earningsMetrics = [
+        { label: "Commission", value: formatCurrency(summary.commission_gross || 0) },
+        { label: "Additional Spread", value: formatCurrency(summary.spread_total || 0), tone: summary.spread_total < 0 ? "warn" : "neutral" },
+        { label: "Total Earnings", value: formatCurrency(summary.talentgram_earnings_total || 0), tone: "good" },
+        ...(summary.kickbacks_total > 0 ? [{ label: "After Kickbacks", value: formatCurrency(summary.talentgram_earnings_net_of_kickbacks || 0) }] : []),
     ];
     const paymentMetrics = [
+        { label: "Client Total", value: moneyOrDash(billable) },
+        { label: "Client Received", value: formatCurrency(summary.client_received_total || 0), tone: "good" },
+        {
+            label: "Client Outstanding",
+            value: summary.production_basis === "partial" ? "Incomplete" : moneyOrDash(summary.client_outstanding_total),
+            tone: summary.client_outstanding_total > 0 || summary.production_basis === "partial" ? "warn" : "good",
+        },
         {
             label: "Client Payment",
             value: p.pd_payment_in_received ? "Received" : "Pending",
@@ -400,7 +707,7 @@ function OverviewDashboard({ project: p, summary, needsAttention, today, upcomin
             tone: summary.payments_cleared === summary.payments_total && summary.payments_total > 0 ? "good" : "warn",
         },
         ...(summary.payments_pending_amount > 0
-            ? [{ label: "Pending Amount", value: formatCurrency(summary.payments_pending_amount), tone: "warn" }]
+            ? [{ label: "Talent Pending Amount", value: formatCurrency(summary.payments_pending_amount), tone: "warn" }]
             : []),
     ];
 
@@ -448,9 +755,10 @@ function OverviewDashboard({ project: p, summary, needsAttention, today, upcomin
 
                     {/* Key numbers — grouped by what decision they inform, not a
                         flat wall of equally-weighted metrics. */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
                         <MetricGroup title="Production" items={productionMetrics} />
-                        <MetricGroup title="Financials" items={financialMetrics} />
+                        <MetricGroup title="Talent" items={talentMetrics} />
+                        <MetricGroup title="Talentgram" items={earningsMetrics} />
                         <MetricGroup title="Payments" items={paymentMetrics} />
                     </div>
 
@@ -787,15 +1095,6 @@ export default function ProductionDesk({ projectId, project }) {
         }
     }, [projectId]);
 
-    const useProjectDatesForTalent = useCallback(async (talentId) => {
-        try {
-            const { data } = await adminApi.post(`/projects/${projectId}/production-desk/talents/${talentId}/shoot-days/use-project-dates`);
-            setData(data);
-        } catch (err) {
-            toast.error(formatErrorDetail(err) || "Could not use project dates");
-        }
-    }, [projectId]);
-
     // V2 — Readings & Rehearsals (spec section 8).
     const addReadingRehearsal = useCallback(async (talentId, payload) => {
         try {
@@ -857,15 +1156,48 @@ export default function ProductionDesk({ projectId, project }) {
     // source of truth for the financial formula); this just opens the
     // SAME wa.me deep link every other one-off admin WhatsApp send in
     // this codebase already uses — see openWhatsApp() above.
+    // Payment follow-up: pick WHO it goes to (CRM contacts tied to this project — crew, the saved
+    // concerned person, and same-company contacts), then REVIEW the exact message and recipient in
+    // a dialog; only the dialog's confirm button opens WhatsApp (the admin still taps Send there).
+    const [followupContacts, setFollowupContacts] = useState([]);
+    const [followupContactId, setFollowupContactId] = useState("");
+    const [followupPreview, setFollowupPreview] = useState(null);
+    const crewCount = data?.crew?.length ?? 0;
+    const defaultContactId = data?.project?.pd_production_contact?.client_id || "";
+    useEffect(() => {
+        let cancelled = false;
+        adminApi.get(`/projects/${projectId}/production-desk/payment-followup-contacts`).then(({ data: d }) => {
+            if (cancelled) return;
+            const list = Array.isArray(d?.contacts) ? d.contacts : [];
+            setFollowupContacts(list);
+            setFollowupContactId((cur) => {
+                if (cur && list.some((c) => c.client_id === cur && c.has_phone)) return cur;
+                const pick = list.find((c) => c.is_default && c.has_phone) || list.find((c) => c.has_phone);
+                return pick ? pick.client_id : "";
+            });
+        }).catch(() => { if (!cancelled) setFollowupContacts([]); });
+        return () => { cancelled = true; };
+    }, [projectId, crewCount, defaultContactId]);
+
     const sendPaymentFollowUp = useCallback(async () => {
         try {
-            const { data } = await adminApi.get(`/projects/${projectId}/production-desk/payment-followup-message`);
-            openWhatsApp(data.phone, data.message);
-            await patchProject({ last_follow_up_at: new Date().toISOString() });
+            const { data: msg } = await adminApi.get(
+                `/projects/${projectId}/production-desk/payment-followup-message`,
+                followupContactId ? { params: { contact_id: followupContactId } } : undefined,
+            );
+            setFollowupPreview(msg);
         } catch (err) {
             toast.error(formatErrorDetail(err) || "Could not build follow-up message");
         }
-    }, [projectId]);
+    }, [projectId, followupContactId]);
+
+    const confirmPaymentFollowUp = useCallback(async () => {
+        const msg = followupPreview;
+        if (!msg) return;
+        setFollowupPreview(null);
+        openWhatsApp(msg.phone, msg.message);
+        await patchProject({ last_follow_up_at: new Date().toISOString() });
+    }, [followupPreview, patchProject]);
 
     // V2 polish (spec sections 22-25) — destination_type is "group" when
     // this talent has a whatsapp_group_name on file (the SAME field the
@@ -941,6 +1273,7 @@ export default function ProductionDesk({ projectId, project }) {
     const { project: p, locked_talents: talents, summary, needs_attention, kickbacks, reimbursements, reimbursement_checklist_status, tranches, crew, documents, finance, today, upcoming, tasks } = data;
 
     return (
+        <PlacesContext.Provider value={{ projectId, enabled: !!data.capabilities?.places_search }}>
         <div className="space-y-4 pb-16" data-testid="production-desk-root">
             <OverviewDashboard project={p} summary={summary} needsAttention={needs_attention} today={today} upcoming={upcoming} completed={data.completed} />
 
@@ -965,7 +1298,8 @@ export default function ProductionDesk({ projectId, project }) {
                                         <TableHead className="text-xs">Talent</TableHead>
                                         <TableHead className="text-xs">Budget / Day</TableHead>
                                         <TableHead className="text-xs">Shoot Days</TableHead>
-                                        <TableHead className="text-xs">Total Budget</TableHead>
+                                        <TableHead className="text-xs">Talent Rate (Total)</TableHead>
+                                        <TableHead className="text-xs">Production Quote</TableHead>
                                         <TableHead className="text-xs">Commission %</TableHead>
                                         <TableHead className="text-xs">Commission ₹</TableHead>
                                         <TableHead className="text-xs">Payment</TableHead>
@@ -990,13 +1324,16 @@ export default function ProductionDesk({ projectId, project }) {
                                                 </button>
                                             </TableCell>
                                             <TableCell>
-                                                <InlineNumber value={t.budget_per_day} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_per_day: v })} />
+                                                <InlineNumber value={t.budget_per_day} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { budget_per_day: v })} />
                                             </TableCell>
                                             <TableCell>
                                                 <InlineNumber value={t.shooting_days} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { shooting_days: v })} />
                                             </TableCell>
                                             <TableCell>
-                                                <InlineNumber value={t.budget_total} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_total: v })} />
+                                                <InlineNumber value={t.budget_total} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { budget_total: v })} />
+                                            </TableCell>
+                                            <TableCell>
+                                                <InlineNumber value={t.production_quote} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { production_quote: v })} />
                                             </TableCell>
                                             <TableCell>
                                                 <InlineNumber value={t.commission_percent} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { commission_percent: v })} />
@@ -1031,9 +1368,10 @@ export default function ProductionDesk({ projectId, project }) {
                                         <span className="text-xs font-medium text-black/80">{t.name || "Untitled"}</span>
                                     </button>
                                     <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-[11px]">
-                                        <div><span className="text-black/40 block mb-0.5">Budget / Day</span><InlineNumber value={t.budget_per_day} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_per_day: v })} /></div>
+                                        <div><span className="text-black/40 block mb-0.5">Budget / Day</span><InlineNumber value={t.budget_per_day} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { budget_per_day: v })} /></div>
                                         <div><span className="text-black/40 block mb-0.5">Shoot Days</span><InlineNumber value={t.shooting_days} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { shooting_days: v })} /></div>
-                                        <div><span className="text-black/40 block mb-0.5">Total Budget</span><InlineNumber value={t.budget_total} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { budget_total: v })} /></div>
+                                        <div><span className="text-black/40 block mb-0.5">Talent Rate (Total)</span><InlineNumber value={t.budget_total} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { budget_total: v })} /></div>
+                                        <div><span className="text-black/40 block mb-0.5">Production Quote</span><InlineNumber value={t.production_quote} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { production_quote: v })} /></div>
                                         <div><span className="text-black/40 block mb-0.5">Commission %</span><InlineNumber value={t.commission_percent} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { commission_percent: v })} /></div>
                                         <div><span className="text-black/40 block mb-0.5">Commission ₹</span><span className="text-black/60">{formatCurrency(t.commission_amount)}</span></div>
                                         <div>
@@ -1136,49 +1474,7 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
-            <SectionCard title="Production Budget" icon={Wallet} testId="pd-production-budget">
-                    <div className="space-y-3">
-                        <div>
-                            <Label className="text-[11px] text-black/40">Budget / Day</Label>
-                            <InlineNumber value={p.pd_production_budget_per_day} className="mt-1" onSave={(v) => patchProject({ production_budget_per_day: v })} />
-                        </div>
-                        <div>
-                            <Label className="text-[11px] text-black/40">Total Budget</Label>
-                            <InlineNumber value={p.pd_production_budget_total} className="mt-1" onSave={(v) => patchProject({ production_budget_total: v })} />
-                        </div>
-                        <div>
-                            <Label className="text-[11px] text-black/40">Number of Shooting Days</Label>
-                            <InlineNumber value={p.pd_shooting_days} className="mt-1" onSave={(v) => patchProject({ shooting_days: v })} />
-                        </div>
-                        {/* V2 (spec section 21) — auto-aggregated, never manually
-                            typed. A SEPARATE total from the manual line above,
-                            which stays exactly as it was. */}
-                        <div className="pt-3 border-t border-black/[0.06] space-y-1.5" data-testid="pd-budget-auto-breakdown">
-                            <Label className="text-[11px] text-black/40">Auto-Calculated (Talent + Overtime + Reimbursements)</Label>
-                            <div className="flex justify-between text-xs text-black/60"><span>Talent Fees</span><span>{formatCurrency(summary.talent_budget_total)}</span></div>
-                            <div className="flex justify-between text-xs text-black/60"><span>Extra Hours (Overtime)</span><span>{formatCurrency(summary.extra_hours_total)}</span></div>
-                            <div className="flex justify-between text-xs text-black/60"><span>Reimbursements</span><span>{formatCurrency(summary.reimbursements_total)}</span></div>
-                            <div className="flex justify-between text-xs font-semibold text-black/80 pt-1 border-t border-black/[0.05]"><span>Total</span><span>{formatCurrency(summary.total_talent_and_overtime_and_reimbursements)}</span></div>
-                        </div>
-                        {(p.client_budget_lines?.length > 0 || p.talent_budget_lines?.length > 0) && (
-                            <div className="pt-2 border-t border-black/[0.06]" data-testid="pd-budget-reference">
-                                <Label className="text-[11px] text-black/40">Budget Reference (from Project Details)</Label>
-                                <div className="mt-1.5 space-y-1">
-                                    {p.client_budget_lines?.map((l, i) => (
-                                        <div key={`cb-${i}`} className="flex justify-between text-xs text-black/60">
-                                            <span>{l.label || "Client Budget"}</span><span>{l.value}</span>
-                                        </div>
-                                    ))}
-                                    {p.talent_budget_lines?.map((l, i) => (
-                                        <div key={`tb-${i}`} className="flex justify-between text-xs text-black/60">
-                                            <span>{l.label || "Talent Budget"}</span><span>{l.value}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </SectionCard>
+            <ProductionFinancials project={p} talents={talents} summary={summary} onSaveProject={patchProject} />
 
             {/* V2 polish (spec section 3/4/6) — Shoot Details now holds
                 BOTH the project-level shoot info AND every locked talent's
@@ -1201,12 +1497,10 @@ export default function ProductionDesk({ projectId, project }) {
                                 <TalentShootSchedule
                                     key={t.talent_id}
                                     talent={t}
-                                    projectShootDates={p.pd_shoot_dates_list || []}
                                     knownLocations={knownLocations}
                                     onAdd={(payload) => addShootDay(t.talent_id, payload)}
                                     onUpdate={(dayId, payload) => updateShootDay(t.talent_id, dayId, payload)}
                                     onDelete={(dayId) => deleteShootDay(t.talent_id, dayId)}
-                                    onUseProjectDates={() => useProjectDatesForTalent(t.talent_id)}
                                 />
                             ))}
                         </div>
@@ -1232,7 +1526,31 @@ export default function ProductionDesk({ projectId, project }) {
                 <p className="text-[11px] text-black/35 mb-3 -mt-1">
                     Opens WhatsApp with the message pre-filled. Nothing is sent automatically — you review and tap Send yourself.
                 </p>
-                <PaymentFollowUpBlock project={p} clients={clients} onContactCreated={(c) => setClients((prev) => [c, ...prev])} onSave={patchProject} />
+                <PaymentFollowUpBlock project={p} clients={clients} onContactCreated={(c) => setClients((prev) => [c, ...prev])} onSave={patchProject}
+                    contacts={followupContacts} selectedContactId={followupContactId} onSelectContact={setFollowupContactId} />
+                <Dialog open={!!followupPreview} onOpenChange={(o) => { if (!o) setFollowupPreview(null); }}>
+                    <DialogContent className="max-w-lg" data-testid="pd-followup-dialog">
+                        <DialogHeader><DialogTitle>Review payment follow-up</DialogTitle></DialogHeader>
+                        {followupPreview && (
+                            <div className="space-y-3 text-xs">
+                                <div data-testid="pd-followup-recipient-summary">
+                                    <span className="text-black/40">To: </span>
+                                    <span className="font-medium text-black/80">{followupPreview.contact_name || "—"}</span>
+                                    <span className="text-black/40"> · {followupPreview.phone}</span>
+                                </div>
+                                {(followupPreview.warnings || []).map((w) => (
+                                    <div key={w} className="rounded-md bg-amber-50 border border-amber-200 px-2.5 py-1.5 text-amber-800" data-testid="pd-followup-warning">{w}</div>
+                                ))}
+                                <pre className="whitespace-pre-wrap rounded-md border border-black/[0.08] bg-slate-50 p-3 text-[11px] text-black/75 max-h-72 overflow-auto font-sans" data-testid="pd-followup-message">{followupPreview.message}</pre>
+                                <p className="text-[11px] text-black/40">Nothing is sent from here — this opens WhatsApp with the text pre-filled and you tap Send yourself.</p>
+                            </div>
+                        )}
+                        <DialogFooter>
+                            <Button variant="ghost" size="sm" onClick={() => setFollowupPreview(null)}>Cancel</Button>
+                            <Button size="sm" onClick={confirmPaymentFollowUp} data-testid="pd-followup-confirm"><MessageCircle className="h-3 w-3 mr-1" /> Open WhatsApp</Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
             </SectionCard>
 
             {/* V2 — Payment Tranches / Billing Milestones (spec sections
@@ -1593,53 +1911,17 @@ export default function ProductionDesk({ projectId, project }) {
                 <TalentPreviewDrawer talent={quickViewTalent} onClose={() => setQuickViewTalent(null)} isMobile={isMobile} />
             )}
         </div>
-    );
-}
-
-// ============================================================================
-// V2 — Structured multi-date shoot picker (spec section 4). Add/remove
-// ISO dates, stored structurally — no free text, no calendar-grid widget
-// (deliberately the lightest implementation that satisfies "select one,
-// select multiple, add/remove, see selected clearly").
-// ============================================================================
-function ShootDatesList({ dates, onChange }) {
-    const [newDate, setNewDate] = useState("");
-    const sorted = [...dates].sort();
-    const addDate = () => {
-        if (!newDate || dates.includes(newDate)) return;
-        onChange([...dates, newDate].sort());
-        setNewDate("");
-    };
-    const removeDate = (d) => onChange(dates.filter((x) => x !== d));
-    return (
-        <div data-testid="pd-shoot-dates-list">
-            <div className="flex flex-wrap gap-1.5 mb-2">
-                {sorted.length === 0 && <span className="text-black/30 italic">No dates set</span>}
-                {sorted.map((d) => (
-                    <span key={d} className="inline-flex items-center gap-1 px-2 py-1 bg-slate-50 border border-black/[0.08] rounded-full text-[11px] text-black/70" data-testid={`pd-shoot-date-chip-${d}`}>
-                        {d}
-                        <button type="button" onClick={() => removeDate(d)} className="text-black/30 hover:text-red-500"><X className="h-3 w-3" /></button>
-                    </span>
-                ))}
-            </div>
-            <div className="flex items-center gap-1.5">
-                <Input type="date" value={newDate} onChange={(e) => setNewDate(e.target.value)} className="h-7 text-xs w-[150px]" />
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={addDate} disabled={!newDate}>
-                    <Plus className="h-3 w-3 mr-1" /> Add Date
-                </Button>
-            </div>
-        </div>
+        </PlacesContext.Provider>
     );
 }
 
 // ============================================================================
 // V2 polish (spec section 3/6/7) — the project-level half of the merged
-// Shoot Details card. The structured Shoot Dates list stays a standalone,
-// always-available add/remove control (adding/removing a chip is already
-// a deliberate action, not an accidental edit); everything else
-// (call/reporting time, location, status, notes, and the legacy/reminder
-// fields) is section-level Edit/Save/Cancel so normal browsing can't
-// accidentally change them.
+// Shoot Details card. Shoot DATES live only in each talent's own schedule
+// (the project-level date list was removed as a duplicate); the project
+// block keeps the project-wide defaults (call/reporting time, location,
+// status, notes, and the legacy/reminder fields) behind section-level
+// Edit/Save/Cancel so normal browsing can't accidentally change them.
 // ============================================================================
 // V2 polish (spec sections 12-14) — one crew member, as a compact
 // CRM-linked card. Clicking the name opens a "peek" popover with the
@@ -1708,7 +1990,7 @@ function CrewCard({ crew: c, onDelete }) {
 // Edit/Save/Cancel exactly as illustrated: Payment Terms / Expected Date /
 // Concerned Person / Status shown read-only, Edit flips the whole block to
 // inputs, Cancel restores exactly what the server last returned.
-function PaymentFollowUpBlock({ project: p, clients, onContactCreated, onSave }) {
+function PaymentFollowUpBlock({ project: p, clients, onContactCreated, onSave, contacts = [], selectedContactId = "", onSelectContact = () => {} }) {
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState(null);
     const [pickedContact, setPickedContact] = useState(null);
@@ -1746,6 +2028,23 @@ function PaymentFollowUpBlock({ project: p, clients, onContactCreated, onSave })
                     <div><span className="text-black/40 block">Payment Terms</span><span className="text-black/70">{p.pd_payment_terms || "—"}</span></div>
                     <div><span className="text-black/40 block">Expected Date</span><span className="text-black/70">{formatDate(p.pd_expected_payment_date)}</span></div>
                     <div><span className="text-black/40 block">Concerned Person</span><span className="text-black/70">{p.pd_production_contact?.name || "—"}</span></div>
+                    <div className="sm:col-span-2" data-testid="pd-followup-recipient">
+                        <span className="text-black/40 block mb-1">Send follow-up to</span>
+                        {contacts.length === 0 ? (
+                            <span className="text-black/35">No CRM contacts on this project yet — set a Concerned Person below or add someone under Crew.</span>
+                        ) : (
+                            <Select value={selectedContactId || undefined} onValueChange={onSelectContact}>
+                                <SelectTrigger className="h-8 text-xs w-full sm:w-[360px]" data-testid="pd-followup-recipient-select"><SelectValue placeholder="Choose who to follow up with" /></SelectTrigger>
+                                <SelectContent>
+                                    {contacts.map((c) => (
+                                        <SelectItem key={c.client_id} value={c.client_id} disabled={!c.has_phone} data-testid={`pd-followup-contact-${c.client_id}`}>
+                                            {c.name || "Unnamed"}{c.role ? ` · ${c.role}` : (c.designation ? ` · ${c.designation}` : "")}{c.company_name ? ` · ${c.company_name}` : ""}{!c.has_phone ? " (no phone)" : ""}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        )}
+                    </div>
                     <div><span className="text-black/40 block">Status</span><Badge variant="outline" className="text-[10px] capitalize">{(p.pd_payment_followup_status || "not_due").replace("_", " ")}</Badge></div>
                     <div><span className="text-black/40 block">Next Follow-up</span><span className="text-black/70">{formatDate(p.pd_next_follow_up_at)}</span></div>
                     {p.pd_payment_followup_notes && <div className="sm:col-span-2"><span className="text-black/40 block">Notes</span><span className="text-black/70 whitespace-pre-wrap">{p.pd_payment_followup_notes}</span></div>}
@@ -1825,13 +2124,11 @@ function ShootDetailsProjectBlock({ project: p, knownLocations, onSave }) {
 
     return (
         <div>
-            <div>
-                <span className="text-black/40 block mb-1 text-xs">Shoot Dates</span>
-                <ShootDatesList dates={p.pd_shoot_dates_list || []} onChange={(dates) => onSave({ shoot_dates_list: dates })} />
-            </div>
-
-            <div className="flex items-center justify-between gap-2 mt-4 mb-2">
-                <span className="text-[11px] font-medium text-black/50 uppercase tracking-wide">Shoot Info</span>
+            {/* Shoot dates live ONLY in the Talent Shooting Schedule below — the project-level
+                date list that used to sit here duplicated it and was removed. These are the
+                project-wide DEFAULTS (shown on reminders and in the Management Agent). */}
+            <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[11px] font-medium text-black/50 uppercase tracking-wide">Project Shoot Info (defaults)</span>
                 <EditControls editing={editing} onEdit={startEdit} onSave={save} onCancel={() => { setEditing(false); setDraft(null); }} />
             </div>
             {!editing ? (
@@ -1862,11 +2159,11 @@ function ShootDetailsProjectBlock({ project: p, knownLocations, onSave }) {
                         <Label className="text-[10px] text-black/40">Legacy / Reminder fields</Label>
                         <div className="grid grid-cols-2 gap-2 mt-1">
                             <div>
-                                <Label className="text-[10px]" title="Free-text shooting-date summary from before the structured list above existed.">Shooting Dates (free text)</Label>
+                                <Label className="text-[10px]" title="Free-text shooting-date summary used on submission forms and the client link.">Shooting Dates (free text)</Label>
                                 <Input value={draft.shoot_dates} onChange={(e) => setDraft((d) => ({ ...d, shoot_dates: e.target.value }))} placeholder="e.g. 26th - 27th August" className="h-7 text-xs" />
                             </div>
                             <div>
-                                <Label className="text-[10px]" title="Used only by the automated shoot-reminder worker — independent of the dates above.">Reminder Date</Label>
+                                <Label className="text-[10px]" title="Used only by the automated shoot-reminder worker.">Reminder Date</Label>
                                 <Input type="date" value={draft.shoot_date} onChange={(e) => setDraft((d) => ({ ...d, shoot_date: e.target.value }))} className="h-7 text-xs" />
                             </div>
                         </div>
@@ -1916,6 +2213,48 @@ const SHOOT_SCHEDULE_GRID = "lg:grid-cols-[1fr_0.85fr_0.95fr_1.15fr_0.8fr_0.8fr_
 // Renders BOTH a desktop grid-row (proper labeled columns, not
 // placeholder-only cells) and a mobile stacked card from the SAME local
 // state, so editing never desyncs between breakpoints.
+//
+// The Talent Shooting Schedule is the ONE place shoot dates live. Times are
+// IST wall-clock "HH:MM" (a time picker — never a typed free-text string),
+// reporting cannot be later than call, and a location picked through Google
+// Maps keeps its address, place id, coordinates and Maps link.
+const EMPTY_PLACE = { location_address: "", location_place_id: "", location_lat: null, location_lng: null };
+
+// Merges a LocationPicker commit into a draft: a Google selection stores the whole place;
+// typing different text over a previous place drops that place's address/coordinates/link
+// (they would otherwise stay attached to words that no longer describe them).
+function applyLocationCommit(d, name, mapUrl, place) {
+    if (place) {
+        return {
+            ...d, location: name, location_map_url: mapUrl || "",
+            location_address: place.address || "", location_place_id: place.place_id || "",
+            location_lat: place.lat ?? null, location_lng: place.lng ?? null,
+        };
+    }
+    if (name !== d.location && d.location_place_id) {
+        return { ...d, location: name, location_map_url: mapUrl || "", ...EMPTY_PLACE };
+    }
+    return { ...d, location: name, location_map_url: mapUrl && !d.location_map_url ? mapUrl : d.location_map_url };
+}
+
+// A legacy free-text time ("9 AM") can't populate a time picker; leaving the picker blank must
+// leave that stored text UNCHANGED, never silently wipe it — so an untouched legacy value is
+// simply omitted from the PATCH.
+function timeField(key, draftValue, original) {
+    if (draftValue) return { [key]: draftValue };
+    if (original && !clockInputValue(original)) return {};   // legacy text, untouched
+    return { [key]: null };
+}
+
+function ClockInput({ value, onChange, legacy, className, testId }) {
+    return (
+        <div>
+            <Input type="time" value={value} onChange={(e) => onChange(e.target.value)} className={className || "h-7 text-[11px]"} data-testid={testId} />
+            {legacy && !value && <div className="text-[10px] text-black/35 mt-0.5 truncate" title="Saved as free text — pick a time to replace it">Saved: {legacy}</div>}
+        </div>
+    );
+}
+
 function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState(null);
@@ -1923,17 +2262,27 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
 
     const startEdit = () => {
         setDraft({
-            date: day.date || "", call_time: day.call_time || "", reporting_time: day.reporting_time || "",
+            date: day.date || "", call_time: clockInputValue(day.call_time), reporting_time: clockInputValue(day.reporting_time),
             location: day.location || "", location_map_url: day.location_map_url || "",
+            location_address: day.location_address || "", location_place_id: day.location_place_id || "",
+            location_lat: day.location_lat ?? null, location_lng: day.location_lng ?? null,
+            notes: day.notes || "",
             agreed_hours: day.agreed_hours ?? "", actual_hours: day.actual_hours ?? "",
             shoot_status: day.shoot_status || "scheduled",
         });
         setEditing(true);
     };
+    const badTimes = draft ? reportingAfterCall(draft.reporting_time, draft.call_time) : false;
     const save = () => {
+        if (badTimes) return;
         onUpdate({
-            date: draft.date, call_time: draft.call_time || null, reporting_time: draft.reporting_time || null,
+            date: draft.date,
+            ...timeField("call_time", draft.call_time, day.call_time),
+            ...timeField("reporting_time", draft.reporting_time, day.reporting_time),
             location: draft.location || null, location_map_url: draft.location_map_url || null,
+            location_address: draft.location_address || null, location_place_id: draft.location_place_id || null,
+            location_lat: draft.location_lat, location_lng: draft.location_lng,
+            notes: draft.notes || null,
             agreed_hours: draft.agreed_hours === "" ? null : Number(draft.agreed_hours),
             actual_hours: draft.actual_hours === "" ? null : Number(draft.actual_hours),
             shoot_status: draft.shoot_status,
@@ -1947,8 +2296,8 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
         return (
             <div className={`grid grid-cols-2 ${SHOOT_SCHEDULE_GRID} gap-x-2 gap-y-2 lg:items-end bg-white border border-[#0c2340]/20 rounded-md p-2.5`} data-testid={`pd-shoot-day-${day.id}`}>
                 <div><Label className="text-[10px] lg:hidden">Date</Label><Input type="date" value={draft.date} onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))} className="h-7 text-[11px]" /></div>
-                <div><Label className="text-[10px] lg:hidden">Call Time</Label><Input value={draft.call_time} onChange={(e) => setDraft((d) => ({ ...d, call_time: e.target.value }))} placeholder="e.g. 8:00 AM" className="h-7 text-[11px]" /></div>
-                <div><Label className="text-[10px] lg:hidden">Reporting Time</Label><Input value={draft.reporting_time} onChange={(e) => setDraft((d) => ({ ...d, reporting_time: e.target.value }))} placeholder="e.g. 7:00 AM" className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px] lg:hidden">Call Time (IST)</Label><ClockInput value={draft.call_time} legacy={day.call_time && !clockInputValue(day.call_time) ? day.call_time : ""} onChange={(v) => setDraft((d) => ({ ...d, call_time: v }))} testId={`pd-day-call-${day.id}`} /></div>
+                <div><Label className="text-[10px] lg:hidden">Reporting Time (IST)</Label><ClockInput value={draft.reporting_time} legacy={day.reporting_time && !clockInputValue(day.reporting_time) ? day.reporting_time : ""} onChange={(v) => setDraft((d) => ({ ...d, reporting_time: v }))} testId={`pd-day-reporting-${day.id}`} /></div>
                 <div>
                     <Label className="text-[10px] lg:hidden">Location</Label>
                     <LocationPicker
@@ -1956,10 +2305,11 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
                         knownLocations={knownLocations}
                         className="h-7 text-[11px]"
                         immediate
-                        onCommit={(name, mapUrl) => setDraft((d) => ({ ...d, location: name, location_map_url: mapUrl && !d.location_map_url ? mapUrl : d.location_map_url }))}
+                        onCommit={(name, mapUrl, place) => setDraft((d) => applyLocationCommit(d, name, mapUrl, place))}
                     />
+                    {draft.location_address && <div className="text-[10px] text-black/40 truncate mt-0.5" title={draft.location_address}>{draft.location_address}</div>}
                 </div>
-                <div><Label className="text-[10px] lg:hidden">Agreed Basis (hrs)</Label><Input type="number" value={draft.agreed_hours} onChange={(e) => setDraft((d) => ({ ...d, agreed_hours: e.target.value }))} placeholder="e.g. 12" className="h-7 text-[11px]" /></div>
+                <div><Label className="text-[10px] lg:hidden">Agreed Basis (hrs)</Label><Input type="number" value={draft.agreed_hours} onChange={(e) => setDraft((d) => ({ ...d, agreed_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
                 <div><Label className="text-[10px] lg:hidden">Actual Hours</Label><Input type="number" value={draft.actual_hours} onChange={(e) => setDraft((d) => ({ ...d, actual_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
                 <div className="text-[11px] text-black/40"><span className="lg:hidden text-black/40 mr-1">Extra:</span>{extra.hours > 0 ? `${extra.hours}h` : "—"}</div>
                 <div className="text-[11px] text-black/40"><span className="lg:hidden text-black/40 mr-1">Extra Amt:</span>{extra.hours > 0 ? formatCurrency(extra.amount) : "—"}</div>
@@ -1971,7 +2321,12 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
                     </Select>
                 </div>
                 <div className="col-span-2 lg:col-span-1 flex lg:justify-end items-center gap-1.5">
-                    <EditControls editing onSave={save} onCancel={cancel} />
+                    <EditControls editing onSave={save} onCancel={cancel} saveDisabled={badTimes} />
+                </div>
+                <div className="col-span-2 lg:col-span-full">
+                    <Label className="text-[10px]">Notes</Label>
+                    <Input value={draft.notes} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} placeholder="Anything the talent should know for this day" className="h-7 text-[11px]" />
+                    {badTimes && <div className="text-[11px] text-red-600 mt-1" data-testid={`pd-day-time-error-${day.id}`}>Reporting time cannot be later than call time.</div>}
                 </div>
             </div>
         );
@@ -1981,10 +2336,10 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
         <>
             {/* Desktop — labeled grid row, matches the header below */}
             <div className={`hidden lg:grid ${SHOOT_SCHEDULE_GRID} gap-x-2 items-center text-[11px] bg-slate-50/60 rounded-md px-2 py-2.5`} data-testid={`pd-shoot-day-${day.id}`}>
-                <div className="font-medium text-black/70 truncate">{day.date}</div>
-                <div className="text-black/60 truncate">{day.call_time || "—"}</div>
-                <div className="text-black/60 truncate">{day.reporting_time || "—"}</div>
-                <div className="text-black/60 truncate min-w-0"><LocationLink name={day.location} mapUrl={day.location_map_url} /></div>
+                <div className="font-medium text-black/70 truncate">{formatDate(day.date)} <span className="text-black/30 font-normal">{(day.date || "").slice(0, 4)}</span></div>
+                <div className="text-black/60 truncate">{formatClock(day.call_time)}</div>
+                <div className="text-black/60 truncate">{formatClock(day.reporting_time)}</div>
+                <div className="text-black/60 truncate min-w-0"><LocationLink name={day.location} mapUrl={day.location_map_url} address={day.location_address} /></div>
                 <div className="text-black/60">{day.agreed_hours ?? "—"}</div>
                 <div className="text-black/60">{day.actual_hours ?? "—"}</div>
                 <div className={extra.hours > 0 ? "text-amber-700 font-medium" : "text-black/30"}>{extra.hours > 0 ? `${extra.hours}h` : "—"}</div>
@@ -1993,22 +2348,24 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
                 <div className="flex items-center justify-end">
                     <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} compact />
                 </div>
+                {day.notes && <div className="col-span-full text-[10px] text-black/45 pt-1 truncate" title={day.notes}>Note: {day.notes}</div>}
             </div>
             {/* Mobile — stacked card, same data, same state */}
             <div className="lg:hidden rounded-md border border-black/[0.08] p-2.5 text-[11px] space-y-1.5" data-testid={`pd-shoot-day-mobile-${day.id}`}>
                 <div className="flex items-center justify-between">
-                    <span className="font-semibold text-black/80">{day.date}</span>
+                    <span className="font-semibold text-black/80">{formatDate(day.date)} {(day.date || "").slice(0, 4)}</span>
                     <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} />
                 </div>
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-black/60">
-                    <div><span className="text-black/40">Call:</span> {day.call_time || "—"}</div>
-                    <div><span className="text-black/40">Reporting:</span> {day.reporting_time || "—"}</div>
-                    <div className="col-span-2"><span className="text-black/40">Location:</span> <LocationLink name={day.location} mapUrl={day.location_map_url} /></div>
+                    <div><span className="text-black/40">Call:</span> {formatClock(day.call_time)}</div>
+                    <div><span className="text-black/40">Reporting:</span> {formatClock(day.reporting_time)}</div>
+                    <div className="col-span-2"><span className="text-black/40">Location:</span> <LocationLink name={day.location} mapUrl={day.location_map_url} address={day.location_address} /></div>
                     <div><span className="text-black/40">Agreed:</span> {day.agreed_hours ?? "—"}h</div>
                     <div><span className="text-black/40">Actual:</span> {day.actual_hours ?? "—"}h</div>
                     {extra.hours > 0 && (
                         <div className="col-span-2 text-amber-700 font-medium">Extra: {extra.hours}h · {formatCurrency(extra.amount)}</div>
                     )}
+                    {day.notes && <div className="col-span-2 text-black/50">Note: {day.notes}</div>}
                 </div>
                 <Badge variant="outline" className="text-[10px] capitalize">{(day.shoot_status || "scheduled").replace("_", " ")}</Badge>
             </div>
@@ -2016,22 +2373,34 @@ function ShootDayRow({ day, perDay, knownLocations, onUpdate, onDelete }) {
     );
 }
 
-function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd, onUpdate, onDelete, onUseProjectDates }) {
+const EMPTY_DAY_FORM = {
+    date: "", call_time: "", reporting_time: "", location: "", location_map_url: "",
+    location_address: "", location_place_id: "", location_lat: null, location_lng: null,
+    notes: "", agreed_hours: "", actual_hours: "",
+};
+
+function TalentShootSchedule({ talent, knownLocations, onAdd, onUpdate, onDelete }) {
     const [adding, setAdding] = useState(false);
-    const [form, setForm] = useState({ date: "", call_time: "", reporting_time: "", location: "", location_map_url: "", agreed_hours: "", actual_hours: "" });
+    const [form, setForm] = useState(EMPTY_DAY_FORM);
+    const badTimes = reportingAfterCall(form.reporting_time, form.call_time);
 
     const submit = () => {
-        if (!form.date) return;
+        if (!form.date || badTimes) return;
         onAdd({
             date: form.date,
             call_time: form.call_time || null,
             reporting_time: form.reporting_time || null,
             location: form.location || null,
             location_map_url: form.location_map_url || null,
+            location_address: form.location_address || null,
+            location_place_id: form.location_place_id || null,
+            location_lat: form.location_lat,
+            location_lng: form.location_lng,
+            notes: form.notes || null,
             agreed_hours: form.agreed_hours === "" ? null : Number(form.agreed_hours),
             actual_hours: form.actual_hours === "" ? null : Number(form.actual_hours),
         });
-        setForm({ date: "", call_time: "", reporting_time: "", location: "", location_map_url: "", agreed_hours: "", actual_hours: "" });
+        setForm(EMPTY_DAY_FORM);
         setAdding(false);
     };
 
@@ -2039,16 +2408,9 @@ function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd,
         <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-shoot-schedule-${talent.talent_id}`}>
             <div className="flex items-center justify-between gap-2 mb-2">
                 <span className="text-xs font-semibold text-black/80">{talent.name}</span>
-                <div className="flex items-center gap-1.5">
-                    {projectShootDates.length > 0 && (
-                        <Button size="sm" variant="ghost" className="h-6 text-[10px] px-2" onClick={onUseProjectDates} data-testid={`pd-use-project-dates-${talent.talent_id}`}>
-                            Use Project Dates
-                        </Button>
-                    )}
-                    <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => setAdding((v) => !v)}>
-                        <Plus className="h-3 w-3 mr-1" /> Add Date
-                    </Button>
-                </div>
+                <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => setAdding((v) => !v)} data-testid={`pd-add-shoot-day-${talent.talent_id}`}>
+                    <Plus className="h-3 w-3 mr-1" /> Add Date
+                </Button>
             </div>
 
             {talent.shoot_days.length === 0 && !adding && (
@@ -2076,10 +2438,10 @@ function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd,
             </div>
 
             {adding && (
-                <div className="mt-2 grid grid-cols-2 lg:grid-cols-4 gap-1.5 items-end bg-white border border-black/[0.06] rounded-md p-2">
-                    <div><Label className="text-[10px]">Date</Label><Input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} className="h-7 text-[11px]" autoFocus /></div>
-                    <div><Label className="text-[10px]">Call Time</Label><Input value={form.call_time} onChange={(e) => setForm((f) => ({ ...f, call_time: e.target.value }))} className="h-7 text-[11px]" /></div>
-                    <div><Label className="text-[10px]">Reporting</Label><Input value={form.reporting_time} onChange={(e) => setForm((f) => ({ ...f, reporting_time: e.target.value }))} className="h-7 text-[11px]" /></div>
+                <div className="mt-2 grid grid-cols-2 lg:grid-cols-4 gap-1.5 items-end bg-white border border-black/[0.06] rounded-md p-2" data-testid={`pd-shoot-day-form-${talent.talent_id}`}>
+                    <div><Label className="text-[10px]">Date</Label><Input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} className="h-7 text-[11px]" data-testid={`pd-form-date-${talent.talent_id}`} /></div>
+                    <div><Label className="text-[10px]">Call Time (IST)</Label><ClockInput value={form.call_time} onChange={(v) => setForm((f) => ({ ...f, call_time: v }))} testId={`pd-form-call-${talent.talent_id}`} /></div>
+                    <div><Label className="text-[10px]">Reporting (IST)</Label><ClockInput value={form.reporting_time} onChange={(v) => setForm((f) => ({ ...f, reporting_time: v }))} testId={`pd-form-reporting-${talent.talent_id}`} /></div>
                     <div>
                         <Label className="text-[10px]">Location</Label>
                         <LocationPicker
@@ -2087,14 +2449,19 @@ function TalentShootSchedule({ talent, projectShootDates, knownLocations, onAdd,
                             knownLocations={knownLocations}
                             className="h-7 text-[11px]"
                             immediate
-                            onCommit={(name, mapUrl) => setForm((f) => ({ ...f, location: name, location_map_url: mapUrl && !f.location_map_url ? mapUrl : f.location_map_url }))}
+                            onCommit={(name, mapUrl, place) => setForm((f) => applyLocationCommit(f, name, mapUrl, place))}
                         />
+                        {form.location_address && <div className="text-[10px] text-black/40 truncate mt-0.5" title={form.location_address}>{form.location_address}</div>}
                     </div>
-                    <div><Label className="text-[10px]">Agreed Hours (basis)</Label><Input type="number" value={form.agreed_hours} onChange={(e) => setForm((f) => ({ ...f, agreed_hours: e.target.value }))} placeholder="e.g. 12" className="h-7 text-[11px]" /></div>
+                    <div><Label className="text-[10px]">Agreed Hours (basis)</Label><Input type="number" value={form.agreed_hours} onChange={(e) => setForm((f) => ({ ...f, agreed_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
                     <div><Label className="text-[10px]">Actual Hours</Label><Input type="number" value={form.actual_hours} onChange={(e) => setForm((f) => ({ ...f, actual_hours: e.target.value }))} className="h-7 text-[11px]" /></div>
-                    <div className="col-span-2 flex justify-end gap-1.5">
-                        <Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={() => setAdding(false)}>Cancel</Button>
-                        <Button size="sm" className="h-7 text-[11px]" disabled={!form.date} onClick={submit}>Save</Button>
+                    <div className="col-span-2"><Label className="text-[10px]">Notes</Label><Input value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} className="h-7 text-[11px]" /></div>
+                    <div className="col-span-2 lg:col-span-4 flex items-center justify-between gap-1.5">
+                        <span className="text-[11px] text-red-600" data-testid={`pd-form-time-error-${talent.talent_id}`}>{badTimes ? "Reporting time cannot be later than call time." : ""}</span>
+                        <span className="flex gap-1.5">
+                            <Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={() => setAdding(false)}>Cancel</Button>
+                            <Button size="sm" className="h-7 text-[11px]" disabled={!form.date || badTimes} onClick={submit}>Save</Button>
+                        </span>
                     </div>
                 </div>
             )}

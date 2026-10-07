@@ -333,13 +333,19 @@ async def list_tasks(user: dict = Depends(current_user)):
 
 
 def _today_bounds_utc():
-    """Start/end of "today" in UTC, as ISO 8601 strings matching core._now()'s
+    """Start/end of "today" (the IST calendar date, in the stored-value tagging), as ISO 8601 strings matching core._now()'s
     own format — every due_at is written in this same shape, so a plain
     lexicographic string range query is correct (no datetime parsing
     needed) and matches the string-comparison convention already used
     elsewhere in this codebase for *_at fields."""
-    now = datetime.now(timezone.utc)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # "Today" is the IST calendar date (the business timezone — the same one Production Desk
+    # and the reminder worker use). Stored due_at values are compared by the date they are WRITTEN
+    # with (noon-UTC for date pickers, as-typed hours tagged UTC for WhatsApp-created tasks), so the
+    # bounds are that IST date's own 00:00-24:00 in the same tagging — not a UTC conversion of IST
+    # midnight, which would move an evening-hour task into tomorrow.
+    from zoneinfo import ZoneInfo
+    ist_date = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    start = datetime(ist_date.year, ist_date.month, ist_date.day, tzinfo=timezone.utc)
     end = start + timedelta(days=1)
     return start.isoformat(), end.isoformat()
 

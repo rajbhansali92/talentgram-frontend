@@ -210,35 +210,24 @@ async def test_commission_includes_overtime(client, headers):
 # Talent scheduling — independent dates/hours/locations per talent
 # ---------------------------------------------------------------------------
 @_aio
-async def test_project_dates_auto_populate_talent_schedule(client, headers):
-    pid = await _make_project()
-    tid = await _make_talent()
-    await _add_to_pipeline(pid, tid)
-    try:
-        await client.patch(f"/api/projects/{pid}/production-desk", json={"shoot_dates_list": ["2026-09-20", "2026-09-21", "2026-09-22"]}, headers=headers)
-        r = await client.post(f"/api/projects/{pid}/production-desk/talents/{tid}/shoot-days/use-project-dates", headers=headers)
-        card = _find_talent(r.json(), tid)
-        assert [d["date"] for d in card["shoot_days"]] == ["2026-09-20", "2026-09-21", "2026-09-22"]
-        assert card["shooting_days"] == 3
-    finally:
-        await _cleanup(pid, [tid])
-
-
-@_aio
 async def test_talent_can_have_fewer_dates_than_project(client, headers):
+    """The project-level date list and its "use project dates" seeding were removed as a duplicate of the
+    per-talent schedule (see test_production_desk_financials.py for the removal/legacy-data tests)."""
     pid = await _make_project()
-    tid = await _make_talent()
-    await _add_to_pipeline(pid, tid)
+    t_many = await _make_talent("ZZZ_TEST_PDV2_Many")
+    t_one = await _make_talent("ZZZ_TEST_PDV2_One")
+    await _add_to_pipeline(pid, t_many)
+    await _add_to_pipeline(pid, t_one)
     try:
-        await client.patch(f"/api/projects/{pid}/production-desk", json={"shoot_dates_list": ["2026-09-20", "2026-09-21", "2026-09-22"]}, headers=headers)
-        r = await client.post(f"/api/projects/{pid}/production-desk/talents/{tid}/shoot-days", json={"date": "2026-09-21"}, headers=headers)
-        card = _find_talent(r.json(), tid)
-        assert card["shooting_days"] == 1
-        # Project's own dates untouched by editing the talent.
-        proj = r.json()["project"]
-        assert proj["pd_shoot_dates_list"] == ["2026-09-20", "2026-09-21", "2026-09-22"]
+        for d in ("2026-09-20", "2026-09-21", "2026-09-22"):
+            await client.post(f"/api/projects/{pid}/production-desk/talents/{t_many}/shoot-days", json={"date": d}, headers=headers)
+        r = await client.post(f"/api/projects/{pid}/production-desk/talents/{t_one}/shoot-days", json={"date": "2026-09-21"}, headers=headers)
+        body = r.json()
+        assert _find_talent(body, t_many)["shooting_days"] == 3
+        assert _find_talent(body, t_one)["shooting_days"] == 1          # a talent can have fewer dates than another
+        assert "pd_shoot_dates_list" not in body["project"]
     finally:
-        await _cleanup(pid, [tid])
+        await _cleanup(pid, [t_many, t_one])
 
 
 @_aio
@@ -259,7 +248,7 @@ async def test_multiple_talents_independent_dates_call_times_locations(client, h
         assert [d["date"] for d in c2["shoot_days"]] == ["2026-09-21"]
         assert c1["shoot_days"][0]["location"] == "Studio A"
         assert c2["shoot_days"][0]["location"] == "Studio B"
-        assert c2["shoot_days"][0]["call_time"] == "9:00 AM"
+        assert c2["shoot_days"][0]["call_time"] == "09:00"          # stored as canonical IST HH:MM
     finally:
         await _cleanup(pid, [t1, t2])
 
@@ -731,13 +720,16 @@ async def test_costume_trial_time_round_trips(client, headers):
 
 @_aio
 async def test_today_and_upcoming_surface_structured_shoot_days_and_prep_events(client, headers):
-    from datetime import date, timedelta
+    from datetime import timedelta
+
+    from routers.production_desk import ist_today
 
     pid = await _make_project()
     tid = await _make_talent("ZZZ_TEST_PDV2_Today_Talent")
     await _add_to_pipeline(pid, tid)
-    today_str = date.today().isoformat()
-    tomorrow_str = (date.today() + timedelta(days=1)).isoformat()
+    # "today" is the IST calendar day (the business timezone), not the machine's/UTC date.
+    today_str = ist_today().isoformat()
+    tomorrow_str = (ist_today() + timedelta(days=1)).isoformat()
     try:
         await client.post(f"/api/projects/{pid}/production-desk/talents/{tid}/shoot-days", json={"date": today_str, "location": "Mumbai"}, headers=headers)
         await client.post(

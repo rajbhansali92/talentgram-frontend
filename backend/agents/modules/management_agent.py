@@ -478,10 +478,20 @@ _DATE_WORD_RE = re.compile(
 )
 
 
+def _ist_noon_today() -> datetime:
+    """Noon of TODAY'S IST calendar date, in this module's stored-value convention (date-only values
+    are noon with a UTC tag, so the written date can never shift). "today"/"tomorrow"/"Monday" are
+    resolved against the Indian calendar day — the server clock is UTC, which is a day behind IST from
+    00:00 to 05:30 IST."""
+    from zoneinfo import ZoneInfo
+    d = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    return datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=timezone.utc)
+
+
 def _parse_due_date(word: str) -> Optional[str]:
     w = (word or "").strip().lower()
-    now = datetime.now(timezone.utc)
-    noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    noon = _ist_noon_today()
+    now = noon
     if w == "today":
         return noon.isoformat()
     if w == "tomorrow":
@@ -702,7 +712,7 @@ async def _global_digest(day_offset: int) -> str:
     alphabetically was invisible to an earlier, capped-scan version of
     this function). Querying the signal collections directly is bounded
     by how much is ACTUALLY due, not by how many projects exist."""
-    now = datetime.now(timezone.utc)
+    now = _ist_noon_today()               # the IST calendar date (stored values are compared by written date)
     target_start = (now + timedelta(days=day_offset)).replace(hour=0, minute=0, second=0, microsecond=0)
     target_end = target_start + timedelta(days=1)
     ts, te = target_start.isoformat(), target_end.isoformat()
@@ -2742,7 +2752,7 @@ def _parse_absolute_datetime(text: str) -> Optional[str]:
                 return dt.isoformat()
             return base
 
-    now = datetime.now(timezone.utc)
+    now = _ist_noon_today()
     m = _DATE_DM_RE.search(text)
     day_group, month_group = (1, 2) if m else (None, None)
     if not m:

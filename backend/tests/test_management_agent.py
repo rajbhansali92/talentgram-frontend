@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import uuid
 import pytest
+from agents.modules.management_agent import _ist_noon_today
 import pytest_asyncio
 from core import db, _now
 
@@ -509,7 +510,7 @@ async def test_project_scoped_today_query_works(agents_ready):
     pid, label = await _make_project()
     tid, tname = await _make_locked_talent(pid, budget_total=50000)
     try:
-        today_noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+        today_noon = _ist_noon_today().isoformat()      # noon-tagged IST calendar date, as the desk now buckets it
         await db.casting_pipeline.update_one({"talent_id": tid}, {"$set": {"pd_costume_trial_at": today_noon, "pd_costume_trial_location": "Studio A", "pd_shoot_status": "today"}})
 
         r = await _send(f"What's happening today for {label}?")
@@ -556,7 +557,7 @@ async def test_payment_followups_due_today_global_query(agents_ready):
     from datetime import datetime, timezone
     pid, label = await _make_project()
     try:
-        today_noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0).isoformat()
+        today_noon = _ist_noon_today().isoformat()      # noon-tagged IST calendar date, as the desk now buckets it
         await db.projects.update_one({"id": pid}, {"$set": {"pd_next_follow_up_at": today_noon, "pd_payment_followup_status": "due"}})
         r = await _send("What payment follow-ups are due today?")
         assert r.handled

@@ -81,6 +81,7 @@ from routers.casting_pipeline import PIPELINE_STAGE_ORDER
 
 from agents.models import (
     AgentDefinition,
+    batch_worker_kwargs,
     ExecContext,
     ExecResult,
     FieldSpec,
@@ -2865,7 +2866,9 @@ async def _change_recipient_page(collected: dict, ctx: ExecContext, *, delta: in
     return await _set_recipient_page(collected, ctx, page=current + delta)
 
 
-async def _build_batch_in(target: "_SendTarget", collected: dict, *, is_dry_run: bool) -> BatchIn:
+async def _build_batch_in(
+    target: "_SendTarget", collected: dict, *, is_dry_run: bool, worker_id: Optional[str] = None,
+) -> BatchIn:
     """Single place every create_batch() call in this module builds its
     payload — threads excluded_ids into the EXISTING
     BatchIn.excluded_recipient_ids / resolve_recipients_engine exclusion
@@ -2885,11 +2888,13 @@ async def _build_batch_in(target: "_SendTarget", collected: dict, *, is_dry_run:
         excluded_recipient_ids=list(collected.get("excluded_ids") or []),
         template_id=target.template["id"], is_dry_run=is_dry_run,
         variable_data=variable_data,
+        **batch_worker_kwargs(worker_id),
     )
 
 
 async def _create_batch_for_target(
     target: "_SendTarget", collected: dict, *, is_dry_run: bool, admin: Optional[dict] = None,
+    worker_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The one place every create_batch() call for a resolved send target
     is actually made — every existing caller (confirmation-card preview,
@@ -2922,7 +2927,9 @@ async def _create_batch_for_target(
     still just "a batch" to everyone outside this function."""
     admin = admin or await _service_admin()
     if not target.multi_project_targets:
-        result = await create_batch(await _build_batch_in(target, collected, is_dry_run=is_dry_run), admin=admin)
+        result = await create_batch(
+            await _build_batch_in(target, collected, is_dry_run=is_dry_run, worker_id=worker_id), admin=admin,
+        )
         return {"jobs": result["jobs"], "skipped": result["skipped"], "batch_ids": [result["batch"]["id"]]}
 
     variable_data = {"message": target.literal_message} if target.literal_message is not None else {}
@@ -2940,6 +2947,7 @@ async def _create_batch_for_target(
             excluded_recipient_ids=excluded_ids,
             template_id=target.template["id"], is_dry_run=is_dry_run,
             variable_data=variable_data,
+            **batch_worker_kwargs(worker_id),
         )
         try:
             result = await create_batch(sub_batch_in, admin=admin)
@@ -3093,7 +3101,9 @@ async def _execute_send_plan(collected: dict, ctx: ExecContext) -> ExecResult:
             summary_lines += [f"✗ Command {i}", "", target.error or "Could not resolve this command.", ""]
             continue
         try:
-            result = await _create_batch_for_target(target, step_fields, is_dry_run=False, admin=admin)
+            result = await _create_batch_for_target(
+                target, step_fields, is_dry_run=False, admin=admin, worker_id=ctx.worker_id,
+            )
         except HTTPException as exc:
             summary_lines += [f"✗ Command {i}", "", f"Couldn't send that: {exc.detail}", ""]
             continue
@@ -3153,7 +3163,7 @@ async def _build_send_requirement_confirmation(collected: dict, ctx: ExecContext
         return target.error
 
     try:
-        preview = await _create_batch_for_target(target, collected, is_dry_run=True)
+        preview = await _create_batch_for_target(target, collected, is_dry_run=True, worker_id=ctx.worker_id)
     except HTTPException as exc:
         await conversation.clear_conversation(ctx.agent_id, ctx.sender_phone)
         return f"Couldn't prepare that: {exc.detail}"
@@ -3276,7 +3286,7 @@ async def _send_requirement_executor(collected: dict, ctx: ExecContext) -> ExecR
         return ExecResult(ok=False, error="send_requirement_resolution_failed", message=target.error)
 
     try:
-        result = await _create_batch_for_target(target, collected, is_dry_run=False)
+        result = await _create_batch_for_target(target, collected, is_dry_run=False, worker_id=ctx.worker_id)
     except HTTPException as exc:
         return ExecResult(
             ok=False, error="send_requirement_launch_failed",

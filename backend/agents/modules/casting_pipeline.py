@@ -68,6 +68,7 @@ from routers.whatsapp import BatchIn, ManualContact, SourceParams, create_batch,
 
 from agents.models import (
     AgentDefinition,
+    batch_worker_kwargs,
     ExecContext,
     ExecResult,
     FieldSpec,
@@ -2723,6 +2724,7 @@ class _GroupSendBucket:
 async def _flush_group_send(
     summary_lines: List[str], template_query: Optional[str],
     project_send_data: Dict[str, "_GroupSendBucket"], *, is_dry_run: bool,
+    worker_id: Optional[str] = None,
 ) -> None:
     """Combined Casting Pipeline + WhatsApp Automation (2026-08-19) — the
     ONE place a pending group WhatsApp send actually happens (or, for
@@ -2781,6 +2783,7 @@ async def _flush_group_send(
                         talent_ids=bucket.talent_ids,
                     ),
                     template_id=tmpl_match.template["id"], is_dry_run=False,
+                    **batch_worker_kwargs(worker_id),
                 ),
                 admin=admin,
             )
@@ -3919,7 +3922,9 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
             # See _build_plan_confirmation's identical reset — must stay
             # in sync with it (same grouping, same fan-out boundary).
             touched_pairs = []
-            await _flush_group_send(summary_lines, group_send_template, group_send_data, is_dry_run=False)
+            await _flush_group_send(
+                summary_lines, group_send_template, group_send_data, is_dry_run=False, worker_id=ctx.worker_id,
+            )
             group_send_template, group_send_data = None, {}
         last_group = group
         if step.get("send_template"):
@@ -3938,7 +3943,7 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
                 summary_lines += [f"✗ Share — {step.get('raw_text', '')}", "", share_res.error or "Could not resolve this step.", ""]
                 continue
             try:
-                body_lines, total_queued, _plan_share_batch_ids = await _run_share_sends(share_res)
+                body_lines, total_queued, _plan_share_batch_ids = await _run_share_sends(share_res, ctx.worker_id)
             except Exception:
                 logger.exception("plan share step send failed raw_text=%r", step.get("raw_text"))
                 summary_lines += [f"✗ Share {share_res.template_label}", "", "Something went wrong sending this.", ""]
@@ -4061,7 +4066,9 @@ async def _execute_plan(collected: dict, ctx: ExecContext) -> ExecResult:
                 logger.exception("plan step execution failed label=%r", label)
                 summary_lines += [f"✗ {label}", "", "Something went wrong executing this step.", ""]
 
-    await _flush_group_send(summary_lines, group_send_template, group_send_data, is_dry_run=False)
+    await _flush_group_send(
+        summary_lines, group_send_template, group_send_data, is_dry_run=False, worker_id=ctx.worker_id,
+    )
 
     if pending_send_fields is None:
         return ExecResult(ok=any_success, message="\n".join(summary_lines).rstrip())
@@ -6458,7 +6465,9 @@ async def _build_share_confirmation_preview(resolved: "_ShareResolution") -> str
     return "\n".join(lines)
 
 
-async def _run_share_sends(resolved: "_ShareResolution") -> Tuple[List[str], int, List[str]]:
+async def _run_share_sends(
+    resolved: "_ShareResolution", worker_id: Optional[str] = None,
+) -> Tuple[List[str], int, List[str]]:
     """The actual WhatsApp send loop for an already-resolved SHARE —
     factored out of _share_executor so the Compound Actions plan engine's
     "casting.share" step (_execute_plan) can reuse the EXACT same send
@@ -6500,6 +6509,7 @@ async def _run_share_sends(resolved: "_ShareResolution") -> Tuple[List[str], int
                     source_type="PROJECT", source_params=source_params,
                     template_id=resolved.template["id"], is_dry_run=False,
                     variable_data=resolved.variable_data,
+                    **batch_worker_kwargs(worker_id),
                 ),
                 admin=admin,
             )
@@ -6568,6 +6578,7 @@ _SHARE_DELIVERY_MAX_WAIT_SEC = float(os.environ.get("SHARE_DELIVERY_MAX_WAIT_SEC
 
 async def _watch_and_report_share_delivery(
     *, batch_ids: List[str], group_name: str, project_label: str, content_label: str,
+    worker_id: Optional[str] = None,
 ) -> None:
     """Fire-and-forget background task (see _share_executor's own
     asyncio.create_task call) — never awaited by the request/response
@@ -6637,6 +6648,7 @@ async def _watch_and_report_share_delivery(
                 ]),
                 template_id=custom_template["id"], is_dry_run=False,
                 variable_data={"message": report_text},
+                **batch_worker_kwargs(worker_id),
             ),
             admin=admin,
         )
@@ -6651,7 +6663,7 @@ async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     if not resolved.ok:
         return ExecResult(ok=False, error="share_resolution_failed", message=resolved.error)
 
-    body_lines, total_queued, batch_ids = await _run_share_sends(resolved)
+    body_lines, total_queued, batch_ids = await _run_share_sends(resolved, ctx.worker_id)
 
     if batch_ids:
         # Fire-and-forget — see _watch_and_report_share_delivery's own
@@ -6662,6 +6674,7 @@ async def _share_executor(collected: dict, ctx: ExecContext) -> ExecResult:
             batch_ids=batch_ids, group_name=ctx.group_name,
             project_label=" / ".join(resolved.project_labels),
             content_label=resolved.template_label,
+            worker_id=ctx.worker_id,
         ))
 
     header = ["Shared.", "", f"Content: {resolved.template_label}"]
@@ -8079,6 +8092,7 @@ _SHARE_DELIVERY_INSTAGRAM_LABEL = "Instagram links"
 
 async def _watch_and_report_instagram_share_delivery(
     *, batch_id: str, group_name: str, recipient_label: str, talent_labels: List[str],
+    worker_id: Optional[str] = None,
 ) -> None:
     """Instagram content_type's own delivery-result watcher — same
     fire-and-forget polling primitive as _watch_and_report_share_
@@ -8140,6 +8154,7 @@ async def _watch_and_report_instagram_share_delivery(
                 ]),
                 template_id=custom_template["id"], is_dry_run=False,
                 variable_data={"message": report_text},
+                **batch_worker_kwargs(worker_id),
             ),
             admin=admin,
         )
@@ -8170,6 +8185,7 @@ async def _share_instagram_executor(collected: dict, ctx: ExecContext) -> ExecRe
                 source_type=resolved.recipient_source_type, source_params=resolved.recipient_source_params,
                 template_id=custom_template["id"], is_dry_run=False,
                 variable_data={"message": body},
+                **batch_worker_kwargs(ctx.worker_id),
             ),
             admin=admin,
         )
@@ -8189,6 +8205,7 @@ async def _share_instagram_executor(collected: dict, ctx: ExecContext) -> ExecRe
     asyncio.create_task(_watch_and_report_instagram_share_delivery(
         batch_id=batch_id, group_name=ctx.group_name,
         recipient_label=resolved.recipient_label, talent_labels=list(resolved.talent_labels),
+        worker_id=ctx.worker_id,
     ))
     message = (
         "Shared.\n\n"

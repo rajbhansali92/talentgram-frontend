@@ -53,6 +53,15 @@ class ExecContext:
     inbound_message_id: Optional[str] = None
 
 
+def batch_worker_kwargs(worker_id: Optional[str]) -> Dict[str, str]:
+    """`BatchIn` keyword args that pin an agent-created WhatsApp batch to the worker the
+    triggering command ARRIVED through (`ExecContext.worker_id`). Empty when no worker is
+    known, so a caller that never had one keeps BatchIn's own default exactly as before.
+    Never picks, validates or substitutes a worker: `_create_batch_internal` already rejects
+    an unregistered or sending-disabled one."""
+    return {"worker_id": worker_id} if worker_id else {}
+
+
 @dataclass
 class ExecResult:
     """Result of actually executing an approved intent (the DB write)."""

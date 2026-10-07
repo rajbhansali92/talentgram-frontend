@@ -10,9 +10,6 @@ Real FastAPI app + real local dev DB (same approach as test_casting_call_send.py
 live in the real `whatsapp_workers` / `whatsapp_sessions` collections and are removed afterwards.
 """
 import os
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock
 
 os.environ["JWT_SECRET"] = "dummy"
 _MONGO_URL = os.environ.get("TEST_MONGO_URL", "mongodb://localhost:27017")
@@ -23,10 +20,8 @@ import uuid
 import pytest
 import pytest_asyncio
 
-import core
 from core import _now, db
-from dotenv import dotenv_values
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from real_db_isolation import install_real_db
 from routers.whatsapp_workers import DEFAULT_WORKER_ID
 from test_casting_call_send import (  # noqa: F401  (reuse the module-scoped client + helpers)
     _cleanup, _make_custom_template, _make_project, _make_talent_in_pipeline, client,
@@ -45,36 +40,11 @@ async def _worker(label, status="authenticated", sending=True):
     return wid
 
 
-def _is_db_or_stand_in(value) -> bool:
-    """A module-level `db` that is a real motor database, or a stand-in some other test module
-    installed over it at import time (MagicMock / hand-rolled FakeDB classes)."""
-    return isinstance(value, (MagicMock, AsyncIOMotorDatabase)) or type(value).__name__.startswith("Fake")
-
-
-def _intended_db_name() -> str:
-    """The DB an un-polluted run of this file uses (backend/.env, where the seeded admin lives).
-    Not core.DB_NAME: when the whole suite runs in one process an earlier-collected module
-    (e.g. test_ai_scout, test_apply_location_merge) has already forced DB_NAME to its own."""
-    return dotenv_values(Path(core.__file__).parent / ".env").get("DB_NAME") or core.DB_NAME
-
-
 @pytest_asyncio.fixture(autouse=True, scope="module", loop_scope="module")
 async def _real_db_for_this_module():
-    # Other test modules leave global state behind when the whole suite runs in one process:
-    # some replace `core.db` (and every `from core import db` copy) with a MagicMock / FakeDB, others
-    # leave a motor client bound to an event loop that is already closed. Either way a
-    # real-DB test collected later errors before it asserts anything (the same reason
-    # test_casting_call_send.py errors in a full run). Give THIS module its own real client on
-    # its own loop, point every module-level `db` at it for the module's duration, and put the
-    # previous objects back afterwards so no other module sees any difference.
-    real_client = AsyncIOMotorClient(_MONGO_URL, serverSelectionTimeoutMS=10_000)
-    real_db = real_client[_intended_db_name()]
-    swapped = [
-        (mod, mod.db) for mod in list(sys.modules.values())
-        if _is_db_or_stand_in(getattr(mod, "db", None))
-    ]
-    for mod, _ in swapped:
-        mod.db = real_db
+    # See real_db_isolation.py: other modules leave a MagicMock/FakeDB or a closed event loop in
+    # core.db when the whole suite runs in one process. Own real client for this module; restored after.
+    real_db, restore = install_real_db(_MONGO_URL)
     yield
     try:
         await real_db.whatsapp_workers.delete_many({"id": {"$in": _made_workers}})
@@ -82,9 +52,7 @@ async def _real_db_for_this_module():
         await real_db.whatsapp_jobs.delete_many({"worker_id": {"$in": _made_workers}})
         await real_db.whatsapp_batches.delete_many({"worker_id": {"$in": _made_workers}})
     finally:
-        for mod, original in swapped:
-            mod.db = original
-        real_client.close()
+        restore()
 
 
 async def _setup(n_talents=1, n_projects=1):

@@ -8640,7 +8640,7 @@ _SEND_PREVIEW_TOTAL_MAX_WAIT_SEC = float(os.environ.get("SEND_PREVIEW_TOTAL_MAX_
 async def _scan_raw_candidates_for_source(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str,
     source_type: str, group_name: str, destination_group: str,
-    budget_s: Optional[float] = None,
+    budget_s: Optional[float] = None, worker_id: str = "default",
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     """Scans exactly ONE source (a talent's group OR their individual
     chat) and returns its RAW, unvalidated candidates — never runs
@@ -8692,6 +8692,7 @@ async def _scan_raw_candidates_for_source(
         project_id=project_id, project_label=project_label,
         group_name=group_name, source_type=source_type,
         destination_group=destination_group, preview_only=True, skip_validation=True,
+        worker_id=worker_id,
     )
     deadline = time.monotonic() + (budget_s if budget_s is not None else _SEND_PREVIEW_MAX_WAIT_SEC)
     while True:
@@ -8726,7 +8727,7 @@ async def _scan_raw_candidates_for_source(
 
 async def _scan_and_validate_multi_source(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str, destination_group: str,
-    sources: List[Tuple[str, str]], total_budget_s: Optional[float] = None,
+    sources: List[Tuple[str, str]], total_budget_s: Optional[float] = None, worker_id: str = "default",
 ) -> Tuple[Optional["media_assignment.ValidationOutcome"], Optional[str]]:
     """The full mixed-source resolution pass (Production fix, 2026-09-08):
     scans EVERY configured source for this talent (group AND phone, when
@@ -8794,7 +8795,7 @@ async def _scan_and_validate_multi_source(
             talent_id=talent_id, talent_label=talent_label,
             project_id=project_id, project_label=project_label,
             source_type=source_type, group_name=group_name, destination_group=destination_group,
-            budget_s=min(_effective_per_source_budget, _remaining),
+            budget_s=min(_effective_per_source_budget, _remaining), worker_id=worker_id,
         )
         if candidates is not None:
             merged.extend(candidates)
@@ -8819,7 +8820,7 @@ async def _scan_and_validate_multi_source(
     # control flow (see mark_intent.observe_candidates' own docstring).
     await mark_intent.observe_candidates(
         merged, talent_id=talent_id, project_id=project_id, project_label=project_label,
-        projects=projects, source_chat_name=sources[0][1] if sources else "", worker_id="default",
+        projects=projects, source_chat_name=sources[0][1] if sources else "", worker_id=worker_id,
     )
     outcome = media_assignment.validate_candidates(
         merged, gunwanti_lid=(identity or {}).get("lid") or "",
@@ -8838,14 +8839,14 @@ async def _scan_and_validate_multi_source(
     # Never modifies validate_candidates' own decisions.
     outcome = await mark_intent.enrich_outcome_with_mark_intents(
         outcome, talent_id=talent_id, project_id=project_id, project_label=project_label,
-        source_chat_name=sources[0][1] if sources else "", worker_id="default",
+        source_chat_name=sources[0][1] if sources else "", worker_id=worker_id,
     )
     return outcome, None
 
 
 async def _preview_send_marks(
     *, talent_id: str, talent_label: str, project_id: str, project_label: str,
-    destination_group: str, sources: List[Tuple[str, str]],
+    destination_group: str, sources: List[Tuple[str, str]], worker_id: str = "default",
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     """SEND confirmation's own pre-approval media-identification pass
     (Production fix, 2026-09-03 — Part 10/11's explicit "show the admin
@@ -8872,7 +8873,7 @@ async def _preview_send_marks(
     outcome, error = await _scan_and_validate_multi_source(
         talent_id=talent_id, talent_label=talent_label,
         project_id=project_id, project_label=project_label, destination_group=destination_group,
-        sources=sources,
+        sources=sources, worker_id=worker_id,
     )
     if outcome is None:
         # Phase 7 (2026-09-20) — a pure timeout (error is None here; a real
@@ -9331,7 +9332,9 @@ def _send_approval_overrides(existing: Optional[Dict[str, Any]]) -> Dict[str, st
     return dict(existing.get("overrides") or {})
 
 
-async def _preview_one_bulk_target(target: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[List[Dict[str, Any]]], Optional[str]]:
+async def _preview_one_bulk_target(
+    target: Dict[str, Any], worker_id: str = "default",
+) -> Tuple[Dict[str, Any], Optional[List[Dict[str, Any]]], Optional[str]]:
     """One target's marked-media preview — identical logic to the single-
     send confirmation's own pre-approval scan (_preview_send_marks), and
     critically PERSISTED the same way (media_send.save_send_preview_cache)
@@ -9350,7 +9353,7 @@ async def _preview_one_bulk_target(target: Dict[str, Any]) -> Tuple[Dict[str, An
     assignments, marks_error = await _preview_send_marks(
         talent_id=talent_id, talent_label=target["authoritative_talent_label"],
         project_id=project_id, project_label=target["project"]["label"],
-        destination_group=destination_group, sources=target["all_sources"],
+        destination_group=destination_group, sources=target["all_sources"], worker_id=worker_id,
     )
     if not (assignments is None and marks_error is None):
         await media_send.save_send_preview_cache(
@@ -9388,7 +9391,9 @@ async def _bulk_target_form_message(target: Dict[str, Any]) -> str:
     return built["message"]
 
 
-async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected: dict) -> str:
+async def _build_bulk_send_confirmation(
+    pairs: List[Tuple[str, str]], collected: dict, worker_id: str = "default",
+) -> str:
     """Resolves every (talent, project) pair independently — a single
     ambiguous/unresolvable pair reports that exact problem and stops the
     ENTIRE bulk request (never dispatches the pairs that DID resolve while
@@ -9441,7 +9446,7 @@ async def _build_bulk_send_confirmation(pairs: List[Tuple[str, str]], collected:
             )
         resolved.append(target)
 
-    previews = await asyncio.gather(*(_preview_one_bulk_target(t) for t in resolved))
+    previews = await asyncio.gather(*(_preview_one_bulk_target(t, worker_id) for t in resolved))
 
     for target, assignments, marks_error in previews:
         if marks_error is not None:
@@ -9621,7 +9626,7 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
     silently dropping the ones that didn't)."""
     pairs = _send_selector_pairs(collected)
     if len(pairs) > 1:
-        return await _build_bulk_send_confirmation(pairs, collected)
+        return await _build_bulk_send_confirmation(pairs, collected, ctx.worker_id)
 
     target, err = await _resolve_send_target(collected)
     if err is not None:
@@ -9671,7 +9676,7 @@ async def _build_send_confirmation(collected: dict, ctx: ExecContext) -> str:
         assignments, marks_error = await _preview_send_marks(
             talent_id=talent_id, talent_label=talent_label,
             project_id=project_id, project_label=project["label"],
-            destination_group=destination_group, sources=target["all_sources"],
+            destination_group=destination_group, sources=target["all_sources"], worker_id=ctx.worker_id,
         )
         # A bare timeout (assignments=None, marks_error=None) is never
         # cached — it's an infrastructure hiccup, not a stable result;
@@ -10557,7 +10562,7 @@ async def _send_one_pair(
         fresh_assignments, fresh_error = await _preview_send_marks(
             talent_id=talent_id, talent_label=talent_label,
             project_id=project["id"], project_label=project["label"],
-            destination_group=destination_group, sources=target["all_sources"],
+            destination_group=destination_group, sources=target["all_sources"], worker_id=ctx.worker_id,
         )
         if fresh_assignments is not None or fresh_error is not None:
             await media_send.save_send_preview_cache(
@@ -10579,6 +10584,7 @@ async def _send_one_pair(
             destination_group=destination_group, assignments=preview_assignments,
             default_source_type=default_source_type, default_group_name=default_group_name,
             form_message=form_message, submission_id=submission["id"], content_hash=form_built["content_hash"],
+            worker_id=ctx.worker_id,
         )
         return ExecResult(
             ok=True,

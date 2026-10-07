@@ -441,3 +441,143 @@ async def test_the_instagram_share_executor_and_its_report_watcher_use_the_origi
     batch = await db.whatsapp_batches.find_one({"worker_id": w2}, {"_id": 0})
     assert batch is not None and batch["worker_id"] == w2
     assert watcher.call_args.kwargs["worker_id"] == w2          # the report back to the group stays on w2
+
+
+# ── SEND / marked-media preview / dispatch: the same worker, end to end ─────
+#
+# The SEND command's scan requests and its approved dispatch document are claimed by the worker
+# named in their `worker_id`; before this change the preview scans and the fast-path dispatch
+# were created without one (default worker), so a command issued through the second worker's
+# group queued its media work for the other, offline worker.
+
+class _Recorder:
+    """Wraps media_send.create_send_scan_request: calls the REAL function (real DB document) and
+    records the worker_id the document was actually written with."""
+    def __init__(self, monkeypatch):
+        from agents.modules import media_send
+        self.worker_ids: list = []
+        real = media_send.create_send_scan_request
+
+        async def wrapper(**kwargs):
+            req_id = await real(**kwargs)
+            doc = await db.whatsapp_scan_requests.find_one({"id": req_id}, {"_id": 0, "worker_id": 1})
+            self.worker_ids.append(doc["worker_id"])
+            return req_id
+        monkeypatch.setattr(media_send, "create_send_scan_request", wrapper)
+
+
+@pytest.mark.parametrize("worker, expected", [(None, "default"), ("param", "param")])
+async def test_the_marked_media_preview_scans_are_queued_for_the_originating_worker(monkeypatch, worker, expected):
+    monkeypatch.setattr(cp, "_SEND_PREVIEW_MAX_WAIT_SEC", 0.15)
+    monkeypatch.setattr(cp, "_SEND_PREVIEW_TOTAL_MAX_WAIT_SEC", 0.4)
+    rec = _Recorder(monkeypatch)
+    w = await _worker("QA Worker 2") if worker == "param" else None
+    kwargs = {"worker_id": w} if w else {}
+    outcome, err = await cp._preview_send_marks(
+        talent_id="zzz-tal", talent_label="QA", project_id="zzz-proj", project_label="QA Project",
+        destination_group="ZZZ Dest", sources=[("group", "ZZZ Source A"), ("phone", "ZZZ Source B")], **kwargs,
+    )
+    assert (outcome, err) == (None, None)                       # no worker is running: pure timeout, as in production
+    assert len(rec.worker_ids) == 2                             # one preview scan per configured source
+    assert set(rec.worker_ids) == {w if w else expected}
+
+
+async def test_the_bulk_send_preview_passes_the_originating_worker_down(monkeypatch):
+    seen = []
+
+    async def fake_preview(**kw):
+        seen.append(kw["worker_id"])
+        return None, None
+    monkeypatch.setattr(cp, "_preview_send_marks", fake_preview)
+    target = {
+        "authoritative_talent_id": "t", "authoritative_talent_label": "T", "project": {"id": "p", "label": "P"},
+        "destination_group": "D", "all_sources": [("group", "G")],
+    }
+    await cp._preview_one_bulk_target(target, "worker-x")
+    await cp._preview_one_bulk_target(target)
+    assert seen == ["worker-x", "default"]                      # unchanged for callers that pass nothing
+
+
+def _send_one_pair_stubs(monkeypatch, *, stale: bool):
+    """Drive the REAL _send_one_pair with only its I/O collaborators stubbed; capture the worker
+    that the preview refresh and the approved dispatch are given."""
+    from agents.modules import media_send
+    captured: dict = {"preview": [], "dispatch": []}
+    target = {
+        "authoritative_talent_id": "t", "authoritative_talent_label": "T", "project": {"id": "p", "label": "P"},
+        "destination_group": "D", "submission": {"id": "s"}, "project_doc": {}, "all_sources": [("group", "G")],
+    }
+    monkeypatch.setattr(cp, "_resolve_send_target", AsyncMock(return_value=(target, None)))
+    from datetime import datetime, timedelta, timezone
+    old = datetime.now(timezone.utc) - (timedelta(days=1) if stale else timedelta(seconds=1))
+    monkeypatch.setattr(media_send, "get_send_approval", AsyncMock(return_value={
+        "preview_assignments": [{"mark_intent_id": "m"}], "preview_computed_at": old,
+    }))
+    monkeypatch.setattr(media_send, "build_form_send_message", lambda *a, **k: {"message": "m", "content_hash": "h"})
+    for name in ("save_send_approval_draft", "approve_send_form", "record_form_send", "save_send_preview_cache"):
+        monkeypatch.setattr(media_send, name, AsyncMock())
+    monkeypatch.setattr(media_send, "already_sent_form", AsyncMock(return_value=True))
+
+    async def fake_preview(**kw):
+        captured["preview"].append(kw["worker_id"])
+        return [{"mark_intent_id": "m"}], None
+
+    async def fake_dispatch(**kw):
+        captured["dispatch"].append(kw["worker_id"])
+        return "req"
+    monkeypatch.setattr(cp, "_preview_send_marks", fake_preview)
+    monkeypatch.setattr(media_send, "create_send_dispatch_from_approved_plan", fake_dispatch)
+    return captured
+
+
+@pytest.mark.parametrize("stale", [False, True])
+@pytest.mark.parametrize("worker", ["worker-2-like", "default"])
+async def test_an_approved_send_dispatches_and_refreshes_its_preview_on_the_originating_worker(monkeypatch, worker, stale):
+    cap = _send_one_pair_stubs(monkeypatch, stale=stale)
+    ctx = ExecContext(agent_id=AGENT_ID, group_name="G", sender_phone="919999999999", worker_id=worker)
+    out = await cp._send_one_pair({}, ctx)
+    assert out.ok, out.message
+    assert cap["dispatch"] == [worker]                           # the approved SEND document
+    assert cap["preview"] == ([worker] if stale else [])         # the stale-preview refresh scan
+
+
+async def test_the_submission_action_queues_verification_scan_uses_the_actions_own_worker(monkeypatch):
+    from agents.modules import submission_action_queue as saq
+    seen = []
+
+    async def fake_scan(**kw):
+        seen.append(kw["worker_id"])
+        return None, "scan error (test)"
+    monkeypatch.setattr(cp, "_scan_and_validate_multi_source", fake_scan)
+
+    def action(**extra):
+        return {"id": f"zzz-test-ow-act-{uuid.uuid4().hex[:6]}", "state": "verifying", "source_group_name": "G",
+                "talent_id": "t", "talent_label": "T", "project_id": "p", "project_label": "P",
+                "destination_group": "D", "attempt_count": 0, **extra}
+    await saq.advance_send_action(action(worker_id="worker-2-like"))
+    await saq.advance_send_action(action())                      # legacy action without a worker
+    assert seen == ["worker-2-like", "default"]
+
+
+async def test_share_across_two_projects_makes_one_batch_per_project_all_on_the_originating_worker():
+    w2 = await _worker("QA Worker 2")
+    p1, l1 = await _project()
+    p2, l2 = await _project()
+    tid, tname = await _template()
+    tals = []
+    for _ in range(3):
+        t = await _talent(p1)
+        await _in_pipeline(p2, t)
+        tals.append(t)
+    resolved = cp._ShareResolution(
+        ok=True, template={"id": tid, "name": tname}, template_label=tname,
+        project_ids=[p1, p2], project_labels=[l1, l2], talent_ids=tals, talent_labels=["A", "B", "C"],
+    )
+    _lines, queued, batch_ids = await cp._run_share_sends(resolved, w2)
+    _batch_ids.extend(batch_ids)
+    jobs = await _jobs_for(batch_ids)
+    assert len(batch_ids) == 2 and queued == 6 and len(jobs) == 6
+    assert {j["worker_id"] for j in jobs} == {w2}
+    assert len({(j["talent_id"], j["source_id"]) for j in jobs}) == 6          # no duplicates
+    for b in await db.whatsapp_batches.find({"id": {"$in": batch_ids}}, {"_id": 0}).to_list(5):
+        assert b["worker_id"] == w2

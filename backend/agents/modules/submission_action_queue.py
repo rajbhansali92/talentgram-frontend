@@ -411,7 +411,7 @@ async def advance_send_action(action: Dict[str, Any]) -> bool:
         talent_id=action["talent_id"], talent_label=action["talent_label"],
         project_id=action["project_id"], project_label=action["project_label"],
         destination_group=action["destination_group"], sources=sources,
-        total_budget_s=SEND_VERIFY_SCAN_BUDGET_SEC,
+        total_budget_s=SEND_VERIFY_SCAN_BUDGET_SEC, worker_id=action.get("worker_id") or "default",
     )
     attempt_count = action.get("attempt_count", 0) + 1
 

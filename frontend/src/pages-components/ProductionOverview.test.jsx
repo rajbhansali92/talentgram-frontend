@@ -35,7 +35,7 @@ const OVERVIEW = {
     items: [row(), ROW_B], data: [], total: 2, page: 0, size: 20, limit: 20, pages: 1, has_more: false, today: "2026-10-08",
     summary: { projects: 2, locked_talents: 5, shooting_today: 1, upcoming_shoots: 1, client_outstanding: 90000, talent_pending: 116500, earnings: 72500, needs_attention: 2 },
     upcoming_shoots: [
-        { project_id: "p1", brand_name: "Hotel Brand Shoot", talent_id: "t1", talent_name: "Talent A", date: "2026-10-08", reporting_time: "08:00", call_time: "09:00", location: "Mehboob Studio", location_address: null, map_url: null, status: "scheduled" },
+        { project_id: "p1", brand_name: "Hotel Brand Shoot", talent_id: "t1", talent_name: "Talent A", date: "2026-10-08", reporting_time: "08:00", call_time: "09:00", location: "Mehboob Studio", location_address: "Mehboob Studio, Bandra West, Mumbai 400050", map_url: "https://www.google.com/maps/search/?api=1&query=19.05,72.83&query_place_id=ChIJabcdefghij", status: "scheduled" },
         { project_id: "p2", brand_name: "Project B", talent_id: "t9", talent_name: "Talent Z", date: "2026-10-10", reporting_time: "10:00", call_time: "11:00", location: "Film City", location_address: null, map_url: null, status: "scheduled" },
     ],
     facets: { clients: ["ABC Films", "XYZ"] },
@@ -129,7 +129,17 @@ describe("Global Production Desk", () => {
         const items = screen.getAllByTestId("po-upcoming-item");
         expect(items).toHaveLength(2);
         expect(items[0].textContent).toMatch(/Today/); expect(items[0].textContent).toMatch(/8:00 AM/); expect(items[0].textContent).toMatch(/9:00 AM/); expect(items[0].textContent).toMatch(/Mehboob Studio/);
-        expect(items[1].getAttribute("href")).toBe("/admin/projects/p2?tab=production");
+        expect(within(items[1]).getByText("Project B").closest("a").getAttribute("href")).toBe("/admin/projects/p2?tab=production");
+    });
+
+    it("upcoming-shoot locations are clickable Google Maps links: the stored place when one was selected, else a search for the typed text", async () => {
+        renderAt();
+        await waitFor(() => expect(screen.getByTestId("po-upcoming")).toBeTruthy());
+        const [stored, typed] = screen.getAllByTestId("po-upcoming-item").map((el) => el.querySelector('a[href*="google.com/maps"]'));
+        expect(stored.getAttribute("href")).toBe("https://www.google.com/maps/search/?api=1&query=19.05,72.83&query_place_id=ChIJabcdefghij");
+        expect(stored.textContent).toMatch(/Mehboob Studio, Bandra West, Mumbai 400050/);        // the exact selected address is shown
+        expect(typed.getAttribute("href")).toBe("https://www.google.com/maps/search/?api=1&query=Film%20City");
+        expect(typed.getAttribute("target")).toBe("_blank");
     });
 
     it("filters live in the URL: a deep link restores them and sends them to the server", async () => {

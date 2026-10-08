@@ -440,15 +440,15 @@ export default function ProductionOverview() {
                         </div>
                         <div className="space-y-1">
                             {visibleShoots.map((u) => (
-                                <Link key={`${u.project_id}-${u.talent_id}-${u.date}-${u.call_time}`} to={`/admin/projects/${u.project_id}?tab=production`}
+                                <div key={`${u.project_id}-${u.talent_id}-${u.date}-${u.call_time}`}
                                     className="grid grid-cols-[auto_1fr] md:grid-cols-[84px_minmax(0,1.3fr)_minmax(0,1fr)_120px_120px_minmax(0,1.2fr)] gap-x-3 gap-y-0.5 rounded-md px-2 py-1.5 hover:bg-slate-50 text-xs items-center" data-testid="po-upcoming-item">
                                     <span className={`font-medium ${u.date === data.today ? "text-red-600" : "text-black/75"}`}>{u.date === data.today ? "Today" : formatDate(u.date)}</span>
-                                    <span className="text-black/80 truncate">{u.brand_name}</span>
+                                    <Link to={`/admin/projects/${u.project_id}?tab=production`} className="text-black/80 truncate hover:underline">{u.brand_name}</Link>
                                     <span className="text-black/55 truncate col-span-2 md:col-span-1">{u.talent_name}</span>
                                     <span className="text-black/50"><span className="text-black/35">Report </span>{formatClock(u.reporting_time)}</span>
                                     <span className="text-black/50"><span className="text-black/35">Call </span>{formatClock(u.call_time)}</span>
-                                    <span className="text-black/55 truncate col-span-2 md:col-span-1">{u.location || "—"}</span>
-                                </Link>
+                                    <span className="text-black/55 truncate col-span-2 md:col-span-1 min-w-0"><LocationLink name={u.location} mapUrl={u.map_url} address={u.location_address} /></span>
+                                </div>
                             ))}
                         </div>
                     </CardContent>

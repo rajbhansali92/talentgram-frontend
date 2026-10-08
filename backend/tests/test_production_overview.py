@@ -340,3 +340,17 @@ async def test_today_follows_the_indian_calendar_date(client, headers, world, mo
     alpha = next(r for r in body["items"] if r["brand_name"].endswith("Alpha"))
     assert alpha["shoot"]["state"] == "today"
     assert [u["date"] for u in body["upcoming_shoots"]] == [target_iso]         # the earlier day is now past
+
+
+# ═══ Maps URLs — the selected place is preserved, opening needs no API key ═════
+
+def test_maps_url_preserves_the_selected_place_and_needs_no_key():
+    # coordinates + place id: opens exactly that place
+    assert pd.build_maps_url("ChIJabcdefghij", 19.05, 72.83, "Bandra West, Mumbai") == \
+        "https://www.google.com/maps/search/?api=1&query=19.05,72.83&query_place_id=ChIJabcdefghij"
+    # no coordinates: the formatted address is searched
+    assert pd.build_maps_url(None, None, None, "Film City, Goregaon East, Mumbai") == \
+        "https://www.google.com/maps/search/?api=1&query=Film+City%2C+Goregaon+East%2C+Mumbai"
+    # nothing selected: no URL is invented here (the UI falls back to a search of the typed text)
+    assert pd.build_maps_url(None, None, None, None) is None
+    assert pd.build_maps_url("ChIJabcdefghij", None, None, None) is None

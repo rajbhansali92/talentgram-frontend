@@ -93,19 +93,25 @@ export function openWhatsApp(phone, message) {
     window.open(`https://wa.me/${digits}?text=${encodeURIComponent(message)}`, "_blank");
 }
 
-// Lightest-possible "clickable location" (spec section 7/29) — a name plus
-// an optional Google Maps URL, never a maps-search integration.
+// Clickable location: the stored Maps URL when a place was selected, otherwise a plain Google Maps
+// *search* link built from the text that was typed (the Maps URLs API needs no key and no billing).
+export const mapsSearchUrl = (...parts) => {
+    const q = parts.filter(Boolean).join(", ").trim();
+    return q.length >= 3 ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}` : null;
+};
+
 export function LocationLink({ name, mapUrl, address }) {
     if (!name && !mapUrl) return <span className="text-black/30">—</span>;
     const addr = address && address !== name ? address : null;
+    mapUrl = mapUrl || mapsSearchUrl(name, addr);
     if (mapUrl) {
         return (
-            <a href={mapUrl} target="_blank" rel="noreferrer" className="inline-flex flex-col text-[#0c2340] hover:underline min-w-0" title={addr || undefined}>
-                <span className="inline-flex items-center gap-1 min-w-0">
+            <a href={mapUrl} target="_blank" rel="noreferrer" className="inline-flex flex-col max-w-full text-[#0c2340] hover:underline min-w-0" title={addr || undefined}>
+                <span className="inline-flex items-center gap-1 min-w-0 max-w-full">
                     <MapPin className="h-3 w-3 shrink-0" />
                     <span className="truncate">{name || "View on map"}</span>
                 </span>
-                {addr && <span className="text-[10px] text-black/40 truncate pl-4">{addr}</span>}
+                {addr && <span className="text-[10px] text-black/40 truncate pl-4 max-w-full">{addr}</span>}
             </a>
         );
     }

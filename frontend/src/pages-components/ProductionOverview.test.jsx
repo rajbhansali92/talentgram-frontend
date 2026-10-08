@@ -43,11 +43,12 @@ const OVERVIEW = {
 const DESK = {
     project: { id: "p1", brand_name: "Hotel Brand Shoot" },
     locked_talents: [
-        { talent_id: "t1", name: "Talent A", talent_agreed_rate: 50000, production_quote: 60000, commission_amount: 7500, spread: 10000, extra_hours_total: 3000, reimbursement_total: 0, talent_net_payable: 45500, payment_status: "pending",
+        { talent_id: "t1", name: "Talent A", talent_agreed_rate: 50000, production_quote: 60000, commission_amount: 7500, spread: 10000, quote_spread: 10000, extra_hours_total: 3000, production_overtime: 4000, ot_spread: 1000, reimbursement_total: 0, production_reimbursement_total: 0, reimbursement_spread: 0,
+          production_billable: 64000, talentgram_earning: 18500, talent_net_payable: 45500, payment_status: "pending",
           shoot_days: [{ id: "d1", date: "2026-10-08", reporting_time: "08:00", call_time: "09:00", location: "Mehboob Studio", location_address: "Bandra West, Mumbai", location_map_url: "https://maps.google.com/?cid=1" }] },
-        { talent_id: "t2", name: "Talent B", talent_agreed_rate: 30000, production_quote: null, commission_amount: 4500, spread: null, extra_hours_total: 0, reimbursement_total: 2000, talent_net_payable: 27500, payment_status: "cleared", shoot_days: [] },
+        { talent_id: "t2", name: "Talent B", talent_agreed_rate: 30000, production_quote: null, commission_amount: 4500, spread: null, quote_spread: null, extra_hours_total: 0, production_overtime: 0, ot_spread: 0, reimbursement_total: 2000, production_reimbursement_total: 2500, reimbursement_spread: 500, production_billable: null, talentgram_earning: 5000, talent_net_payable: 27500, payment_status: "cleared", shoot_days: [] },
     ],
-    summary: { talent_agreed_total: 80000, commission_gross: 12000, spread_total: 5000, production_overtime_total: 3000, production_reimbursements_total: 2000, talentgram_earnings_total: 17000,
+    summary: { talent_agreed_total: 80000, commission_gross: 12000, spread_total: 5000, ot_spread_total: 1000, reimbursement_spread_total: 500, extra_hours_total: 3000, reimbursements_total: 2000, talent_payable_total: 73000, production_overtime_total: 3000, production_reimbursements_total: 2000, talentgram_earnings_total: 17000,
                production_billable_total: 90000, client_received_total: 0, client_outstanding_total: 90000, talent_paid_total: 27500, talent_pending_total: 45500, production_basis: "per_talent" },
     tasks: { pending: [{ id: "k1" }], overdue: [] },
 };
@@ -203,13 +204,16 @@ describe("Global Production Desk", () => {
         await waitFor(() => expect(screen.getByTestId("po-detail-p1")).toBeTruthy());
         const t1 = screen.getByTestId("po-talent-t1").textContent;
         expect(t1).toMatch(/Talent A/); expect(t1).toMatch(/₹50,000/); expect(t1).toMatch(/₹60,000/); expect(t1).toMatch(/₹7,500/); expect(t1).toMatch(/₹10,000/); expect(t1).toMatch(/₹3,000/); expect(t1).toMatch(/Pending/);
+        // production OT is its own figure next to the talent's, with the OT spread between them
+        expect(t1).toMatch(/₹4,000/); expect(t1).toMatch(/₹1,000/); expect(t1).toMatch(/₹64,000/); expect(t1).toMatch(/₹18,500/);
         const t2 = screen.getByTestId("po-talent-t2").textContent;
         expect(t2).toMatch(/Not entered/); expect(t2).toMatch(/Cleared/);
         const sched = screen.getByTestId("po-schedule-p1");
         expect(sched.textContent).toMatch(/8:00 AM/); expect(sched.textContent).toMatch(/9:00 AM/); expect(sched.textContent).toMatch(/Bandra West, Mumbai/);
         expect(sched.querySelector('a[href="https://maps.google.com/?cid=1"]')).toBeTruthy();
         const fin = screen.getByTestId("po-financials-p1").textContent;
-        for (const v of ["₹85,000", "₹80,000", "₹12,000", "₹5,000", "₹17,000", "₹90,000", "₹27,500", "₹45,500"]) expect(fin).toContain(v);
+        for (const v of ["₹85,000", "₹80,000", "₹12,000", "₹5,000", "₹17,000", "₹90,000", "₹27,500", "₹45,500", "₹73,000", "₹1,000", "₹500"]) expect(fin).toContain(v);
+        for (const label of ["Production OT", "Talent OT", "Quote spread", "OT spread", "Reimbursement spread", "Talent net payable"]) expect(fin).toContain(label);
         fireEvent.click(screen.getByTestId("po-toggle-p1"));                              // collapses again
         expect(screen.queryByTestId("po-detail-p1")).toBeNull();
     });

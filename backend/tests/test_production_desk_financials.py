@@ -8,9 +8,10 @@ are removed afterwards.
 The principle every financial test pins:
 
     Talent rate  !=  Production quote
-    Commission        = commission % x (talent rate + overtime)        (never on the quote)
-    Spread            = production quote - talent rate
-    Talentgram earning = commission + spread
+    Commission        = commission % x talent agreed rate ONLY        (never on OT, reimbursements or the quote)
+    Spread            = production quote - talent rate (+ the OT and reimbursement spreads, see
+                        test_production_commercial_model.py)
+    Talentgram earning = commission + all spreads
     talent-facing math (invoice)   uses the talent rate only
     production-facing math (follow-up) uses the production quote only
 """
@@ -202,8 +203,8 @@ async def test_overtime_and_reimbursements_are_per_talent_and_never_double_count
     assert (ca["extra_hours_total"], ca["reimbursement_total"]) == (10000, 2000)
     assert (cb["extra_hours_total"], cb["reimbursement_total"]) == (0, 5000)
     assert (cc["extra_hours_total"], cc["reimbursement_total"]) == (10000, 0)
-    # commission is on rate + OT (never on reimbursements or the quote)
-    assert ca["commission_amount"] == round((50000 + 10000) * 0.15, 2)
+    # commission is on the agreed rate ONLY (never on OT, reimbursements or the quote)
+    assert ca["commission_amount"] == round(50000 * 0.15, 2)
     assert cb["commission_amount"] == round(50000 * 0.15, 2)
     s = body["summary"]
     assert s["production_overtime_total"] == 20000 and s["production_reimbursements_total"] == 7000
@@ -274,7 +275,7 @@ async def test_invoice_message_uses_the_talent_rate_never_the_production_quote(c
     body = r.json()
     text = body["message"]
     assert "Talent Fee: ₹50,000" in text
-    assert "Commission @ 15%: ₹7,500" in text
+    assert "Commission @ 15% on Talent Fee: ₹7,500" in text
     assert "Invoice Amount to Talentgram: ₹42,500" in text
     assert body["breakdown"]["invoice_amount"] == 42500
     # nothing of the production side may reach a talent-facing surface
@@ -290,10 +291,11 @@ async def test_invoice_includes_the_talents_own_overtime_and_reimbursement_only(
     await client.post(f"/api/projects/{pid}/production-desk/talents/{tid}/shoot-days", json={"date": "2026-10-10", "agreed_hours": 10, "actual_hours": 12}, headers=headers)
     await client.post(f"/api/projects/{pid}/production-desk/reimbursements", data={"talent_id": tid, "expense_type": "Travel", "amount": "2500", "date": "2026-10-10"}, headers=headers)
     body = (await client.get(f"/api/projects/{pid}/production-desk/talents/{tid}/invoice-message", headers=headers)).json()
-    # 50,000 + 10,000 OT = 60,000 commissionable; 15% = 9,000; invoice = 51,000 + 2,500 reimbursement
-    assert body["breakdown"]["commissionable"] == 60000
-    assert body["breakdown"]["commission_amount"] == 9000
-    assert body["breakdown"]["invoice_amount"] == 53500
+    # commission is 15% of the 50,000 rate only = 7,500 (the 10,000 OT is not commissionable);
+    # invoice = 50,000 + 10,000 OT − 7,500 + 2,500 reimbursement
+    assert body["breakdown"]["commissionable"] == 50000
+    assert body["breakdown"]["commission_amount"] == 7500
+    assert body["breakdown"]["invoice_amount"] == 55000
     assert "90,000" not in body["message"]                       # the quote is nowhere in it
 
 

@@ -386,23 +386,31 @@ async def _get_locked_pipeline_row(pid: str, talent_id: str) -> dict:
     return row
 
 
-def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float = 0.0) -> dict:
-    """One locked talent's Production Desk view — budget, commission,
-    overtime, reimbursements, payment. Effective shooting days/commission
-    fall back to the project-level value when the talent has no override,
-    and an explicitly-set budget_total is NEVER recomputed from
-    per-day × days (only used when total itself is absent).
+def _talent_card(
+    t: dict, row: dict, project: dict, reimbursement_total: float = 0.0, production_reimbursement_total: Optional[float] = None,
+) -> dict:
+    """One locked talent's Production Desk view — talent side, production side, Talentgram's margin.
+    Effective shooting days/commission fall back to the project-level value when the talent has no
+    override, and an explicitly-set budget_total is NEVER recomputed from per-day × days (only used
+    when total itself is absent).
 
-    V2 (talent-level shooting/overtime): when `pd_shoot_days` (the
-    structured per-day schedule) has any records, its length becomes the
-    authoritative `shooting_days` — the old manual `pd_shooting_days`
-    integer is only a fallback for talents that never adopted the new
-    per-day schedule, preserving old records unchanged (spec section 33).
+    V2 (talent-level shooting/overtime): when `pd_shoot_days` (the structured per-day schedule) has
+    any records, its length becomes the authoritative `shooting_days` — the old manual
+    `pd_shooting_days` integer is only a fallback for talents that never adopted the new per-day
+    schedule, preserving old records unchanged (spec section 33).
 
-    Commission formula (spec section 22): commission applies to
-    Base Fee + Extra Hours — reimbursements are a separate, non-
-    commissionable pass-through, exactly as before (reimbursement_total is
-    reported alongside but never folded into commissionable_amount)."""
+    THE COMMERCIAL MODEL (definitive):
+      TALENT      agreed rate + talent OT + talent reimbursements
+                  commission = agreed rate x commission %   — ONLY the rate; OT, reimbursements, the
+                  production quote and every production-side figure are never in the commission base
+                  net payable (invoice) = rate + talent OT − commission + talent reimbursements
+      PRODUCTION  quote + production OT + production reimbursements
+                  production OT / reimbursement default to the talent's own amount until a separate
+                  production amount is entered (pd_production_overtime / reimbursement.production_amount),
+                  so projects that never entered one keep their numbers exactly
+      TALENTGRAM  commission + quote spread + OT spread + reimbursement spread
+                  quote spread = quote − rate · OT spread = production OT − talent OT ·
+                  reimbursement spread = production reimbursements − talent reimbursements"""
     from routers.casting_pipeline import _talent_merge_fields
 
     merged = _talent_merge_fields(t)
@@ -431,21 +439,24 @@ def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float =
         budget_total = None
 
     extra_hours_total = _talent_extra_hours_total(per_day, shoot_days)
-    commissionable_amount = (
-        round((budget_total or 0) + extra_hours_total, 2)
-        if (budget_total is not None or extra_hours_total)
-        else None
-    )
+    # Commission is on the agreed rate ONLY (definitive rule): never on overtime, reimbursements,
+    # the production quote or any production-side amount.
+    commissionable_amount = round(budget_total, 2) if budget_total is not None else None
     commission_amount = (
         round(commissionable_amount * commission_fraction, 2)
         if commissionable_amount is not None and commission_fraction is not None
         else None
     )
-    # Talent invoice amount (spec section 24): commissionable minus
-    # commission, PLUS reimbursements added back uncommissioned.
+    # Talent invoice amount: what the talent invoices Talentgram = rate + talent OT − commission
+    # + talent reimbursements (reimbursements are added back uncommissioned, as before).
     invoice_amount = (
-        round((commissionable_amount - commission_amount) + reimbursement_total, 2)
+        round(commissionable_amount + extra_hours_total - commission_amount + reimbursement_total, 2)
         if commissionable_amount is not None and commission_amount is not None
+        else None
+    )
+    talent_gross_payable = (
+        round(commissionable_amount + extra_hours_total + reimbursement_total, 2)
+        if commissionable_amount is not None
         else None
     )
 
@@ -462,15 +473,22 @@ def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float =
         if production_quote is not None and budget_total is not None
         else None
     )
-    # Overtime and reimbursements are billed through to the production exactly as they are
-    # owed to the talent (no margin added on them) — see _financial_rollup's docstring.
+    # Production-side overtime / reimbursements: independent of the talent's. Until a separate
+    # production amount is entered they equal the talent's own (so nothing existing changes).
+    explicit_prod_ot = _num(row.get("pd_production_overtime"))
+    production_overtime = explicit_prod_ot if explicit_prod_ot is not None else extra_hours_total
+    production_reimbursement = (
+        production_reimbursement_total if production_reimbursement_total is not None else reimbursement_total
+    )
+    ot_spread = round(production_overtime - extra_hours_total, 2)
+    reimbursement_spread = round(production_reimbursement - reimbursement_total, 2)
     production_billable = (
-        round(production_quote + extra_hours_total + reimbursement_total, 2)
+        round(production_quote + production_overtime + production_reimbursement, 2)
         if production_quote is not None
         else None
     )
     talentgram_earning = (
-        round((commission_amount or 0.0) + (spread or 0.0), 2)
+        round((commission_amount or 0.0) + (spread or 0.0) + ot_spread + reimbursement_spread, 2)
         if commission_amount is not None or spread is not None
         else None
     )
@@ -497,8 +515,15 @@ def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float =
         # Production/client side (internal only) — see the block above.
         "talent_agreed_rate": budget_total,
         "talent_net_payable": invoice_amount,
+        "talent_gross_payable": talent_gross_payable,
         "production_quote": production_quote,
-        "spread": spread,
+        "spread": spread,                                  # quote spread (quote − talent rate)
+        "quote_spread": spread,
+        "production_overtime": round(production_overtime, 2),
+        "production_overtime_is_explicit": explicit_prod_ot is not None,
+        "production_reimbursement_total": round(production_reimbursement, 2),
+        "ot_spread": ot_spread,
+        "reimbursement_spread": reimbursement_spread,
         "production_billable": production_billable,
         "talentgram_earning": talentgram_earning,
         # V2 — Readings & Rehearsals (spec section 8).
@@ -529,7 +554,25 @@ def _talent_card(t: dict, row: dict, project: dict, reimbursement_total: float =
     }
 
 
-async def _locked_talent_cards(pid: str, project: dict, reimb_totals: Optional[Dict[str, float]] = None) -> List[dict]:
+def _reimbursement_production_amount(r: dict) -> float:
+    """What the PRODUCTION is billed for one reimbursement: its own production amount when one was
+    entered, otherwise the amount owed to the talent (so existing rows are unchanged)."""
+    prod = _num(r.get("production_amount"))
+    return prod if prod is not None else (_num(r.get("amount")) or 0.0)
+
+
+def _reimbursement_totals(reimbursements: List[dict]) -> Dict[str, tuple]:
+    """talent_id -> (talent-side total, production-side total) over the project's reimbursements."""
+    totals: Dict[str, tuple] = {}
+    for r in reimbursements:
+        tid = r.get("talent_id")
+        if tid:
+            t_amt, p_amt = totals.get(tid, (0.0, 0.0))
+            totals[tid] = (t_amt + (_num(r.get("amount")) or 0.0), p_amt + _reimbursement_production_amount(r))
+    return totals
+
+
+async def _locked_talent_cards(pid: str, project: dict, reimb_totals: Optional[Dict[str, tuple]] = None) -> List[dict]:
     rows = await db.casting_pipeline.find({"project_id": pid, "stage": "locked"}, {"_id": 0}).to_list(2000)
     if not rows:
         return []
@@ -543,7 +586,7 @@ async def _locked_talent_cards(pid: str, project: dict, reimb_totals: Optional[D
     return _cards_for_rows(rows, by_id, project, reimb_totals)
 
 
-def _cards_for_rows(rows: List[dict], talents_by_id: Dict[str, dict], project: dict, reimb_totals: Dict[str, float]) -> List[dict]:
+def _cards_for_rows(rows: List[dict], talents_by_id: Dict[str, dict], project: dict, reimb_totals: Dict[str, tuple]) -> List[dict]:
     """Locked casting_pipeline rows -> talent cards. The only place a card is built from a row, used by both
     the project page (one project) and the global Production Desk (many projects, batched loads)."""
     cards = []
@@ -551,7 +594,7 @@ def _cards_for_rows(rows: List[dict], talents_by_id: Dict[str, dict], project: d
         t = talents_by_id.get(row.get("talent_id"))
         if not t:
             continue
-        cards.append(_talent_card(t, row, project, reimb_totals.get(row.get("talent_id"), 0.0)))
+        cards.append(_talent_card(t, row, project, *reimb_totals.get(row.get("talent_id"), (0.0, 0.0))))
     return cards
 
 
@@ -645,27 +688,28 @@ def _bucket_tasks(tasks: List[dict], today_start: str, today_end: str) -> Dict[s
 
 
 def _financial_rollup(
-    locked: List[dict], project: dict, *, extra_hours_total: float, reimbursements_total: float,
+    locked: List[dict], project: dict, *, production_overtime_total: float, production_reimbursements_total: float,
+    ot_spread_total: float, reimbursement_spread_total: float,
     kickbacks_total: float, commission_gross: float, tranches: List[dict], tranches_received_total: float,
 ) -> Dict[str, Any]:
     """The ONE place the project-level money model is computed (the desk summary and the
     payment follow-up message both call this, so they can never disagree).
 
-      Talent rate         what the talent was told (pd_budget_*)           — talent-facing
-      Production quote    what the production is charged (pd_production_quote) — internal
-      Commission          commission % x (talent rate + overtime)          — never on the quote
-      Spread              production quote - talent rate (only where a quote exists)
-      Talentgram earning  commission + spread
-      Talent net payable  talent rate + overtime - commission + reimbursements
-      Production billable production quote + overtime + reimbursements
-      Client outstanding  production billable - amount received
+      TALENT      agreed rate + talent OT + talent reimbursements
+                  commission = commission % x talent rate ONLY
+                  net payable = rate + talent OT − commission + talent reimbursements
+      PRODUCTION  quote + production OT + production reimbursements   (internal; never shown to talent)
+                  client outstanding = that total − amount received
+      TALENTGRAM  commission + quote spread + OT spread + reimbursement spread
+                  quote spread = quote − talent rate · OT spread = production OT − talent OT ·
+                  reimbursement spread = production reimbursements − talent reimbursements
 
-    Overtime and reimbursements are passed through to the production at the same amount owed
-    to the talent. Nothing here invents a number: a talent with no production quote contributes
-    no spread, and a project whose quotes are only partly entered reports `partial` rather than a
-    misleading total. Legacy projects that only ever had the single project-level production
-    budget (`pd_production_budget_total`) keep using it (`project_budget` basis) until per-talent
-    quotes are entered."""
+    Production OT / reimbursements equal the talent's until a separate production amount is entered,
+    so existing projects keep their totals. Nothing here invents a number: a talent with no
+    production quote contributes no quote spread, and a project whose quotes are only partly
+    entered reports `partial` rather than a misleading total. Legacy projects that only ever had
+    the single project-level production budget (`pd_production_budget_total`) keep using it
+    (`project_budget` basis) until per-talent quotes are entered."""
     quotes = [c["production_quote"] for c in locked if c.get("production_quote") is not None]
     missing = len(locked) - len(quotes)
     legacy_total = _num(project.get("pd_production_budget_total"))
@@ -683,7 +727,7 @@ def _financial_rollup(
     else:
         basis, base = "none", None
 
-    billable = round(base + extra_hours_total + reimbursements_total, 2) if base is not None else None
+    billable = round(base + production_overtime_total + production_reimbursements_total, 2) if base is not None else None
 
     if tranches:
         received = float(tranches_received_total)
@@ -700,6 +744,7 @@ def _financial_rollup(
 
     spreads = [c["spread"] for c in locked if c.get("spread") is not None]
     spread_total = round(sum(spreads), 2)
+    earnings = commission_gross + spread_total + ot_spread_total + reimbursement_spread_total
     nets = [c["talent_net_payable"] for c in locked if c.get("talent_net_payable") is not None]
     return {
         "production_basis": basis,
@@ -707,13 +752,16 @@ def _financial_rollup(
         "production_quotes_set": len(quotes),
         "production_quotes_missing": missing,
         "production_billable_total": billable,
-        "production_overtime_total": round(extra_hours_total, 2),
-        "production_reimbursements_total": round(reimbursements_total, 2),
+        "production_overtime_total": round(production_overtime_total, 2),
+        "production_reimbursements_total": round(production_reimbursements_total, 2),
         "talent_agreed_total": round(sum(c["talent_agreed_rate"] for c in locked if c.get("talent_agreed_rate") is not None), 2),
         "talent_payable_total": round(sum(nets), 2),
-        "spread_total": spread_total,
-        "talentgram_earnings_total": round(commission_gross + spread_total, 2),
-        "talentgram_earnings_net_of_kickbacks": round(commission_gross + spread_total - kickbacks_total, 2),
+        "spread_total": spread_total,                      # quote spread
+        "quote_spread_total": spread_total,
+        "ot_spread_total": round(ot_spread_total, 2),
+        "reimbursement_spread_total": round(reimbursement_spread_total, 2),
+        "talentgram_earnings_total": round(earnings, 2),
+        "talentgram_earnings_net_of_kickbacks": round(earnings - kickbacks_total, 2),
         "client_received_total": round(received, 2),
         "client_outstanding_total": outstanding,
     }
@@ -744,6 +792,8 @@ def _desk_summary(locked: List[dict], project: dict, reimbursements: List[dict],
     kickbacks_total = sum(_num(k.get("amount")) or 0 for k in kickbacks)
     commission_net = commission_gross - kickbacks_total
     reimbursements_total_all = round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2)
+    production_reimbursements_total_all = round(sum(_reimbursement_production_amount(r) for r in reimbursements), 2)
+    production_overtime_total_all = round(sum(c["production_overtime"] for c in locked), 2)
     tranches_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches), 2)
     tranches_received_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches if t.get("payment_status") == "received"), 2)
     # What Talentgram actually owes the talents: their NET payable (rate + overtime - commission +
@@ -770,7 +820,10 @@ def _desk_summary(locked: List[dict], project: dict, reimbursements: List[dict],
         "talent_paid_total": talent_paid_total,
         "talent_pending_total": talent_pending_total,
         **_financial_rollup(
-            locked, project, extra_hours_total=extra_hours_total_all, reimbursements_total=reimbursements_total_all,
+            locked, project, production_overtime_total=production_overtime_total_all,
+            production_reimbursements_total=production_reimbursements_total_all,
+            ot_spread_total=sum(c["ot_spread"] for c in locked),
+            reimbursement_spread_total=production_reimbursements_total_all - reimbursements_total_all,
             kickbacks_total=kickbacks_total, commission_gross=commission_gross,
             tranches=tranches, tranches_received_total=tranches_received_total,
         ),
@@ -854,11 +907,7 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     # reimbursement_total — same underlying db.project_reimbursements
     # collection/query, just reordered.
     reimbursements = await db.project_reimbursements.find({"project_id": pid}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    reimb_totals: Dict[str, float] = {}
-    for r in reimbursements:
-        tid = r.get("talent_id")
-        if tid:
-            reimb_totals[tid] = reimb_totals.get(tid, 0.0) + (_num(r.get("amount")) or 0.0)
+    reimb_totals = _reimbursement_totals(reimbursements)
 
     locked = await _locked_talent_cards(pid, project, reimb_totals)
 
@@ -1263,6 +1312,9 @@ class TalentProductionPatch(BaseModel):
     # What the PRODUCTION is quoted for this talent (internal; the talent never sees it).
     # Independent of budget_total, which is the talent-facing agreed rate. null clears it.
     production_quote: Optional[float] = Field(None, ge=0)
+    # What the PRODUCTION is billed for this talent's overtime — independent of the talent's own OT
+    # (computed from the shoot-day hours). null clears it, which makes it follow the talent's OT again.
+    production_overtime: Optional[float] = Field(None, ge=0)
     shooting_days: Optional[int] = None
     commission_percent: Optional[float] = None
     payment_status: Optional[str] = None
@@ -1301,6 +1353,7 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
         "budget_per_day": "pd_budget_per_day",
         "budget_total": "pd_budget_total",
         "production_quote": "pd_production_quote",
+        "production_overtime": "pd_production_overtime",
         "shooting_days": "pd_shooting_days",
         "commission_percent": "pd_commission_percent",
         "payment_status": "pd_payment_status",
@@ -1636,6 +1689,9 @@ async def add_reimbursement(
     talent_id: str = Form(...),
     expense_type: str = Form(...),
     amount: float = Form(...),
+    # What the PRODUCTION is billed for this expense, when it differs from what the talent is owed.
+    # Omitted = the same as `amount`.
+    production_amount: Optional[float] = Form(None, ge=0),
     date: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
@@ -1660,6 +1716,7 @@ async def add_reimbursement(
         "talent_id": talent_id,
         "expense_type": expense_type,
         "amount": amount,
+        "production_amount": production_amount,
         "date": date,
         "notes": notes,
         "status": "pending",
@@ -1671,21 +1728,35 @@ async def add_reimbursement(
     return await get_production_desk(pid, admin)
 
 
-class ReimbursementStatusPatch(BaseModel):
-    status: str
+class ReimbursementPatch(BaseModel):
+    status: Optional[str] = None
+    # What the PRODUCTION is billed for this one expense. null clears it (the production is billed the
+    # same as the talent is owed again); the talent's own `amount` is never touched from here.
+    production_amount: Optional[float] = Field(None, ge=0)
 
 
 @router.patch("/{pid}/production-desk/reimbursements/{reimbursement_id}")
-async def update_reimbursement_status(pid: str, reimbursement_id: str, payload: ReimbursementStatusPatch, admin: dict = Depends(current_team_or_admin)):
-    if payload.status not in REIMBURSEMENT_STATUSES:
-        raise HTTPException(400, f"status must be one of {sorted(REIMBURSEMENT_STATUSES)}")
-    res = await db.project_reimbursements.update_one(
-        {"id": reimbursement_id, "project_id": pid},
-        {"$set": {"status": payload.status, "updated_at": _now()}},
-    )
+async def update_reimbursement(pid: str, reimbursement_id: str, payload: ReimbursementPatch, admin: dict = Depends(current_team_or_admin)):
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(400, "Nothing to update")
+    updates: Dict[str, Any] = {}
+    if "status" in changes:
+        if changes["status"] not in REIMBURSEMENT_STATUSES:
+            raise HTTPException(400, f"status must be one of {sorted(REIMBURSEMENT_STATUSES)}")
+        updates["status"] = changes["status"]
+    if "production_amount" in changes:
+        updates["production_amount"] = changes["production_amount"]
+    updates["updated_at"] = _now()
+    res = await db.project_reimbursements.update_one({"id": reimbursement_id, "project_id": pid}, {"$set": updates})
     if not res.matched_count:
         raise HTTPException(404, "Reimbursement not found")
     return await get_production_desk(pid, admin)
+
+
+# The status-only names are still imported by the Management Agent (marks a reimbursement paid).
+ReimbursementStatusPatch = ReimbursementPatch
+update_reimbursement_status = update_reimbursement
 
 
 @router.delete("/{pid}/production-desk/reimbursements/{reimbursement_id}")
@@ -2088,18 +2159,18 @@ async def _financial_context(pid: str, project: dict) -> tuple:
     """(locked cards, rollup) for the message builders — the same numbers GET
     /production-desk puts in `summary`, computed from the same helpers."""
     reimbursements = await db.project_reimbursements.find({"project_id": pid}, {"_id": 0}).to_list(500)
-    reimb_totals: Dict[str, float] = {}
-    for r in reimbursements:
-        tid = r.get("talent_id")
-        if tid:
-            reimb_totals[tid] = reimb_totals.get(tid, 0.0) + (_num(r.get("amount")) or 0.0)
+    reimb_totals = _reimbursement_totals(reimbursements)
     locked = await _locked_talent_cards(pid, project, reimb_totals)
     kickbacks = await db.project_kickbacks.find({"project_id": pid}, {"_id": 0}).to_list(500)
     tranches = await db.project_payment_tranches.find({"project_id": pid}, {"_id": 0}).to_list(200)
+    reimbursements_total = round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2)
+    production_reimbursements_total = round(sum(_reimbursement_production_amount(r) for r in reimbursements), 2)
     rollup = _financial_rollup(
         locked, project,
-        extra_hours_total=sum(c["extra_hours_total"] for c in locked),
-        reimbursements_total=round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2),
+        production_overtime_total=round(sum(c["production_overtime"] for c in locked), 2),
+        production_reimbursements_total=production_reimbursements_total,
+        ot_spread_total=sum(c["ot_spread"] for c in locked),
+        reimbursement_spread_total=production_reimbursements_total - reimbursements_total,
         kickbacks_total=sum(_num(k.get("amount")) or 0 for k in kickbacks),
         commission_gross=sum(c["commission_amount"] for c in locked if c["commission_amount"] is not None),
         tranches=tranches,
@@ -2225,17 +2296,11 @@ def _build_invoice_message(project: dict, card: dict) -> Dict[str, Any]:
     ]
     commission_pct = card["commission_percent"]
     commission_pct_label = f"{commission_pct:g}%" if commission_pct is not None else ""
+    # Talent-facing: the fee, the talent's own overtime, and the commission on the FEE only.
     if has_extra_hours:
-        # V2 polish (spec section 18) — only mention overtime/commissionable
-        # breakdown when overtime actually happened; a flat fee with no
-        # extra hours never mentions "Commissionable Amount" at all (spec
-        # section 17), since it would just equal the Talent Fee.
         hours_label = f"{extra_hours_count:g} hour{'s' if extra_hours_count != 1 else ''}"
         lines.append(f"Extra Hours: {hours_label} — ₹{_fmt_inr(card['extra_hours_total'])}")
-        lines.append(f"Commissionable Amount: ₹{_fmt_inr(card['commissionable_amount'])}")
-        lines.append(f"Commission @ {commission_pct_label}: ₹{_fmt_inr(card['commission_amount'])}")
-    else:
-        lines.append(f"Commission @ {commission_pct_label}: ₹{_fmt_inr(card['commission_amount'])}")
+    lines.append(f"Commission @ {commission_pct_label} on Talent Fee: ₹{_fmt_inr(card['commission_amount'])}")
     if has_reimbursement:
         lines.append(f"Reimbursements: ₹{_fmt_inr(card['reimbursement_total'])}")
     lines += [
@@ -2493,7 +2558,7 @@ async def production_overview(
         return out
 
     reimbursements = by_project(await db.project_reimbursements.find(
-        {"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "talent_id": 1, "amount": 1, "status": 1, "material_id": 1}).to_list(20000))
+        {"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "talent_id": 1, "amount": 1, "production_amount": 1, "status": 1, "material_id": 1}).to_list(20000))
     kickbacks = by_project(await db.project_kickbacks.find({"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "amount": 1}).to_list(20000))
     tranches = by_project(await db.project_payment_tranches.find(
         {"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "amount": 1, "payment_status": 1}).to_list(20000))
@@ -2513,10 +2578,7 @@ async def production_overview(
     for project in projects:
         pid = project["id"]
         p_reimb = reimbursements.get(pid, [])
-        reimb_totals: Dict[str, float] = {}
-        for r in p_reimb:
-            if r.get("talent_id"):
-                reimb_totals[r["talent_id"]] = reimb_totals.get(r["talent_id"], 0.0) + (_num(r.get("amount")) or 0.0)
+        reimb_totals = _reimbursement_totals(p_reimb)
         cards = _cards_for_rows(rows_by_project[pid], talents_by_id, project, reimb_totals)
         if not cards:
             continue
@@ -2548,8 +2610,12 @@ async def production_overview(
                 "talent_payable_total": summary["talent_payable_total"],
                 "commission": summary["commission_gross"],
                 "spread": summary["spread_total"],
+                "ot_spread": summary["ot_spread_total"],
+                "reimbursement_spread": summary["reimbursement_spread_total"],
                 "overtime": summary["production_overtime_total"],
                 "reimbursements": summary["production_reimbursements_total"],
+                "talent_overtime": summary["extra_hours_total"],
+                "talent_reimbursements": summary["reimbursements_total"],
                 "earnings": summary["talentgram_earnings_total"],
             },
             "client_payment": {

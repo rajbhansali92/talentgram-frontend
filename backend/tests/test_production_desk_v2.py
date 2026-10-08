@@ -188,7 +188,7 @@ async def test_different_talents_different_rates_and_overtime(client, headers):
 
 
 @_aio
-async def test_commission_includes_overtime(client, headers):
+async def test_commission_is_on_the_agreed_rate_only_never_on_overtime(client, headers):
     pid = await _make_project()
     tid = await _make_talent()
     await _add_to_pipeline(pid, tid)
@@ -196,12 +196,12 @@ async def test_commission_includes_overtime(client, headers):
         await client.patch(f"/api/projects/{pid}/production-desk/talents/{tid}", json={"budget_per_day": 100000, "shooting_days": 1, "commission_percent": 20}, headers=headers)
         r = await client.post(f"/api/projects/{pid}/production-desk/talents/{tid}/shoot-days", json={"date": "2026-09-21", "agreed_hours": 12, "actual_hours": 14}, headers=headers)
         card = _find_talent(r.json(), tid)
-        # budget_total=100000 (shoot_days array len=1 -> shooting_days=1),
-        # extra = 100000/12*2 = 16666.67, commissionable = 116666.67
+        # budget_total=100000 (shoot_days array len=1 -> shooting_days=1), extra = 100000/12*2 = 16666.67.
+        # Definitive rule: commission = agreed rate x % ONLY — the overtime is paid but not commissionable.
         assert card["budget_total"] == 100000
         assert card["extra_hours_total"] == pytest.approx(16666.67, abs=0.01)
-        assert card["commissionable_amount"] == pytest.approx(116666.67, abs=0.01)
-        assert card["commission_amount"] == pytest.approx(23333.33, abs=0.02)
+        assert card["commissionable_amount"] == 100000
+        assert card["commission_amount"] == 20000
     finally:
         await _cleanup(pid, [tid])
 
@@ -577,8 +577,8 @@ async def test_payment_followup_message_requires_contact(client, headers):
 @_aio
 async def test_talent_invoice_message_calculation_matches_spec_example(client, headers):
     """Reproduces the master prompt's own section 24 worked example
-    exactly: fee 1,00,000 / commission 20% / extra hours 10,000 /
-    reimbursement 2,500 -> invoice amount 90,500."""
+    inputs (fee 1,00,000 / commission 20% / extra hours 10,000 / reimbursement 2,500) under the
+    definitive rule: commission is on the FEE only (20,000), so the invoice is 92,500."""
     pid = await _make_project(commission_percent="20%")
     tid = await _make_talent("ZZZ_TEST_PDV2_Invoice_Talent", "+911112223334")
     await _add_to_pipeline(pid, tid)
@@ -597,16 +597,16 @@ async def test_talent_invoice_message_calculation_matches_spec_example(client, h
         breakdown = r.json()["breakdown"]
         assert breakdown["talent_fee"] == 100000
         assert breakdown["extra_hours"] == 10000
-        assert breakdown["commissionable"] == 110000
-        assert breakdown["commission_amount"] == 22000
+        assert breakdown["commissionable"] == 100000
+        assert breakdown["commission_amount"] == 20000
         assert breakdown["reimbursements"] == 2500
-        assert breakdown["invoice_amount"] == 90500
+        assert breakdown["invoice_amount"] == 92500
         assert breakdown["extra_hours_count"] == 1
         message = r.json()["message"]
-        assert "90,500" in message
+        assert "92,500" in message
         assert "Extra Hours: 1 hour — ₹10,000" in message
-        assert "Commissionable Amount: ₹1,10,000" in message
-        assert "Commission @ 20%: ₹22,000" in message
+        assert "Commissionable Amount" not in message
+        assert "Commission @ 20% on Talent Fee: ₹20,000" in message
         assert "Reimbursements: ₹2,500" in message
         assert "Billing Details:" in message
         assert "Talentgram Agency LLP" in message
@@ -636,7 +636,7 @@ async def test_talent_invoice_message_no_overtime_no_reimbursement_omits_lines(c
         assert "Extra Hours" not in message
         assert "Commissionable Amount" not in message
         assert "Reimbursements" not in message
-        assert "Commission @ 15%: ₹7,500" in message
+        assert "Commission @ 15% on Talent Fee: ₹7,500" in message
         assert "Invoice Amount to Talentgram: ₹42,500" in message
         assert "Billing Details:" in message
         assert body["destination_type"] == "phone"

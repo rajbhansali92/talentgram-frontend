@@ -2165,6 +2165,7 @@ async def _add_executor(collected: dict, ctx: ExecContext) -> ExecResult:
             talent_id=tid,
             expense_type=collected.get("reason") or "expense",
             amount=float(collected.get("amount") or 0),
+            production_amount=None,                      # billed to the production at the same amount until set on the desk
             date=None,
             notes=f"Added via {AGENT_ID} WhatsApp command.",
             file=None,

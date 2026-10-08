@@ -1103,7 +1103,9 @@ describe("ProductionDesk V2 final polish", () => {
             const content = screen.getByTestId("pd-overview-content").textContent;
             for (const group of ["Production", "Talent", "Talentgram", "Payments"]) expect(content).toMatch(new RegExp(group));
             expect(content).toMatch(/Client Outstanding/);
-            expect(content).toMatch(/Additional Spread/);
+            expect(content).toMatch(/Quote Spread/);
+            expect(content).toMatch(/OT Spread/);
+            expect(content).toMatch(/Reimbursement Spread/);
         });
 
         it("the Schedule section stays compact (a single muted line) for an empty Today/Upcoming/Completed", async () => {
@@ -1167,7 +1169,9 @@ describe("Production Financials", () => {
         ...TALENT, talent_id: id, name, budget_per_day: rate, budget_total: rate, talent_agreed_rate: rate,
         commission_percent: 15, commission_amount: commission, production_quote: quote,
         spread: quote === null ? null : quote - rate, talent_net_payable: rate - commission,
-        talentgram_earning: commission + (quote === null ? 0 : quote - rate), extra_hours_total: 0, reimbursement_total: 0, ...extra,
+        talentgram_earning: commission + (quote === null ? 0 : quote - rate), extra_hours_total: 0, reimbursement_total: 0,
+        quote_spread: quote === null ? null : quote - rate, production_overtime: 0, production_overtime_is_explicit: false,
+        production_reimbursement_total: 0, ot_spread: 0, reimbursement_spread: 0, production_billable: quote, ...extra,
     });
     const THREE = [
         talentCard("ta", "Talent A", 50000, 60000, 7500),
@@ -1260,14 +1264,65 @@ describe("Production Financials", () => {
         );
     });
 
-    it("the talent-facing Talent Financials card never shows the production quote or the spread", async () => {
+    it("each talent's card has separate Talent / Production / Talentgram columns, and the Talent column never shows a production number", async () => {
         load({ ...BASE_DATA, locked_talents: [THREE[0]], summary: { ...SUMMARY, locked_count: 1 } });
-        await waitFor(() => expect(screen.getByTestId(`pd-financial-${THREE[0].talent_id}`)).toBeTruthy());
-        const card = screen.getByTestId(`pd-financial-${THREE[0].talent_id}`).textContent;
-        expect(card).toMatch(/Invoice Amount/);
-        expect(card).not.toMatch(/Production Quote/i);
-        expect(card).not.toMatch(/Spread/i);
-        expect(card).not.toMatch(/60,000/);
+        const id = THREE[0].talent_id;
+        await waitFor(() => expect(screen.getByTestId(`pd-financial-${id}`)).toBeTruthy());
+        const talent = screen.getByTestId(`pd-fin-talent-col-${id}`).textContent;
+        expect(talent).toMatch(/Agreed rate/); expect(talent).toMatch(/Net payable/);
+        expect(talent).not.toMatch(/quote/i); expect(talent).not.toMatch(/spread/i); expect(talent).not.toMatch(/Production/i);
+        expect(talent).not.toMatch(/60,000/);
+        expect(screen.getByTestId(`pd-fin-prod-col-${id}`).textContent).toMatch(/Production quote/);
+        expect(screen.getByTestId(`pd-fin-tg-col-${id}`).textContent).toMatch(/Quote spread/);
+        expect(screen.getByTestId(`pd-fin-tg-col-${id}`).textContent).toMatch(/OT spread/);
+        expect(screen.getByTestId(`pd-fin-tg-col-${id}`).textContent).toMatch(/Reimbursement spread/);
+    });
+
+    it("shows the worked example per talent: separate production OT and reimbursement, three spreads, one earnings figure", async () => {
+        const a = talentCard("ta", "Talent A", 50000, 60000, 7500, {
+            extra_hours_total: 5000, production_overtime: 7000, production_overtime_is_explicit: true, ot_spread: 2000,
+            reimbursement_total: 2000, production_reimbursement_total: 3000, reimbursement_spread: 1000,
+            talent_net_payable: 49500, production_billable: 70000, talentgram_earning: 20500,
+        });
+        load({ ...BASE_DATA, locked_talents: [a], summary: { ...SUMMARY, locked_count: 1, commission_gross: 7500, spread_total: 10000, ot_spread_total: 2000, reimbursement_spread_total: 1000, talentgram_earnings_total: 20500, production_billable_total: 70000, production_overtime_total: 7000, production_reimbursements_total: 3000, talent_payable_total: 49500, extra_hours_total: 5000, reimbursements_total: 2000 } });
+        await waitFor(() => expect(screen.getByTestId("pd-fin-ta-earning")).toBeTruthy());
+        const t = (k) => screen.getByTestId(`pd-fin-ta-${k}`).textContent;
+        expect([t("rate"), t("commission"), t("talent-ot"), t("talent-reimb"), t("net")]).toEqual(["₹50,000", "₹7,500", "₹5,000", "₹2,000", "₹49,500"]);
+        expect([t("quote"), t("prod-ot"), t("prod-reimb"), t("prod-total")]).toEqual(["₹60,000", "₹7,000", "₹3,000", "₹70,000"]);
+        expect([t("quote-spread"), t("ot-spread"), t("reimb-spread"), t("earning")]).toEqual(["₹10,000", "₹2,000", "₹1,000", "₹20,500"]);
+        expect(screen.getByTestId("pd-fin-ot-spread").textContent).toBe("₹2,000");
+        expect(screen.getByTestId("pd-fin-reimb-spread").textContent).toBe("₹1,000");
+        expect(screen.getByTestId("pd-fin-earnings").textContent).toBe("₹20,500");
+        expect(screen.getByTestId("pd-fin-reconcile").textContent).toMatch(/₹70,000 = talent net ₹49,500 \+ commission ₹7,500 \+ spreads ₹13,000/);
+    });
+
+    it("production OT is its own editable field (empty = follows the talent's OT) and saves separately", async () => {
+        const a = talentCard("ta", "Talent A", 50000, 60000, 7500, { extra_hours_total: 5000 });
+        load({ ...BASE_DATA, locked_talents: [a], summary: { ...SUMMARY, locked_count: 1 } });
+        await waitFor(() => expect(screen.getByTestId("pd-prod-ot-ta")).toBeTruthy());
+        const input = screen.getByTestId("pd-prod-ot-ta").querySelector("input");
+        expect(input.getAttribute("placeholder")).toBe("5000");                 // empty -> same as the talent's OT
+        fireEvent.change(input, { target: { value: "7000" } });
+        fireEvent.blur(input);
+        await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalledWith("/projects/proj-1/production-desk/talents/ta", { production_overtime: 7000 }));
+    });
+
+    it("each reimbursement has its own editable production amount, saved without touching the talent amount", async () => {
+        const reimb = { id: "r1", talent_id: "ta", talent_name: "Talent A", expense_type: "Travel", amount: 2000, production_amount: null, status: "pending", material_id: "m1" };
+        load({ ...BASE_DATA, locked_talents: [THREE[0]], reimbursements: [reimb], summary: { ...SUMMARY, locked_count: 1 } });
+        await waitFor(() => expect(screen.getByTestId("pd-reimbursement-prod-r1")).toBeTruthy());
+        const input = screen.getByTestId("pd-reimbursement-prod-r1").querySelector("input");
+        expect(input.getAttribute("placeholder")).toBe("2000");
+        fireEvent.change(input, { target: { value: "3000" } });
+        fireEvent.blur(input);
+        await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalledWith("/projects/proj-1/production-desk/reimbursements/r1", { production_amount: 3000 }));
+    });
+
+    it("the old duplicate 'Talent Financials' section is gone — one Financials section holds it all", async () => {
+        load({ ...BASE_DATA, locked_talents: THREE, summary: SUMMARY });
+        await waitFor(() => expect(screen.getByTestId("pd-production-financials")).toBeTruthy());
+        expect(screen.queryByTestId("pd-talent-financials")).toBeNull();
+        expect(screen.getByTestId("pd-production-financials").textContent).toMatch(/Ask to Raise Invoice/);
     });
 });
 

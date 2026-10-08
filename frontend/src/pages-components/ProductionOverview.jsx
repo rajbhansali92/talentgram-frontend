@@ -185,21 +185,34 @@ function ProjectDetail({ project, onFollowUp }) {
                 <div className="hidden lg:block overflow-x-auto rounded-md border border-black/[0.06]">
                     <table className="w-full text-xs">
                         <thead className="bg-slate-50/70 text-black/45">
-                            <tr>{["Talent", "Talent rate", "Production quote", "Commission", "Spread", "OT", "Reimb.", "Talent net", "Payment", ""].map((h) => <th key={h} className="px-2.5 py-1.5 text-left font-medium whitespace-nowrap">{h}</th>)}</tr>
+                            <tr className="text-[10px] uppercase tracking-wide">
+                                <th />
+                                <th colSpan={5} className="px-2.5 pt-1.5 text-left font-semibold text-emerald-700">Talent</th>
+                                <th colSpan={4} className="px-2.5 pt-1.5 text-left font-semibold text-sky-700">Production</th>
+                                <th colSpan={4} className="px-2.5 pt-1.5 text-left font-semibold text-amber-700">Talentgram</th>
+                                <th colSpan={2} />
+                            </tr>
+                            <tr>{["Talent", "Rate", "Commission", "OT", "Reimb.", "Net payable", "Quote", "OT", "Reimb.", "Total", "Quote spread", "OT spread", "Reimb. spread", "Earnings", "Payment", ""].map((h, i) => <th key={`${h}-${i}`} className="px-2.5 py-1.5 text-left font-medium whitespace-nowrap">{h}</th>)}</tr>
                         </thead>
                         <tbody>
                             {talents.map((t) => (
                                 <tr key={t.talent_id} className="border-t border-black/[0.05]" data-testid={`po-talent-${t.talent_id}`}>
                                     <td className="px-2.5 py-1.5 font-medium text-black/80">{t.name}</td>
                                     <td className="px-2.5 py-1.5">{dash(t.talent_agreed_rate)}</td>
-                                    <td className="px-2.5 py-1.5">{t.production_quote == null ? <span className="text-amber-700">Not entered</span> : formatCurrency(t.production_quote)}</td>
                                     <td className="px-2.5 py-1.5">{dash(t.commission_amount)}</td>
-                                    <td className={`px-2.5 py-1.5 ${t.spread < 0 ? "text-red-600" : ""}`}>{dash(t.spread)}</td>
                                     <td className="px-2.5 py-1.5">{formatCurrency(t.extra_hours_total || 0)}</td>
                                     <td className="px-2.5 py-1.5">{formatCurrency(t.reimbursement_total || 0)}</td>
-                                    <td className="px-2.5 py-1.5">{dash(t.talent_net_payable)}</td>
+                                    <td className="px-2.5 py-1.5 font-medium">{dash(t.talent_net_payable)}</td>
+                                    <td className="px-2.5 py-1.5">{t.production_quote == null ? <span className="text-amber-700">Not entered</span> : formatCurrency(t.production_quote)}</td>
+                                    <td className="px-2.5 py-1.5">{formatCurrency(t.production_overtime || 0)}</td>
+                                    <td className="px-2.5 py-1.5">{formatCurrency(t.production_reimbursement_total || 0)}</td>
+                                    <td className="px-2.5 py-1.5 font-medium">{dash(t.production_billable)}</td>
+                                    <td className={`px-2.5 py-1.5 ${t.quote_spread < 0 ? "text-red-600" : ""}`}>{dash(t.quote_spread)}</td>
+                                    <td className={`px-2.5 py-1.5 ${t.ot_spread < 0 ? "text-red-600" : ""}`}>{formatCurrency(t.ot_spread || 0)}</td>
+                                    <td className={`px-2.5 py-1.5 ${t.reimbursement_spread < 0 ? "text-red-600" : ""}`}>{formatCurrency(t.reimbursement_spread || 0)}</td>
+                                    <td className="px-2.5 py-1.5 font-semibold">{dash(t.talentgram_earning)}</td>
                                     <td className="px-2.5 py-1.5"><Pill cls={t.payment_status === "cleared" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-800 border-amber-200"}>{t.payment_status === "cleared" ? "Cleared" : "Pending"}</Pill></td>
-                                    <td className="px-2.5 py-1.5 text-right"><Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={() => askTalentToRaiseInvoice(project.project_id, t.talent_id)} data-testid={`po-invoice-${t.talent_id}`}><Receipt className="h-3 w-3 mr-1" /> Ask to Raise Invoice</Button></td>
+                                    <td className="px-2.5 py-1.5 text-right"><Button size="sm" variant="ghost" className="h-7 text-[11px] whitespace-nowrap" onClick={() => askTalentToRaiseInvoice(project.project_id, t.talent_id)} data-testid={`po-invoice-${t.talent_id}`}><Receipt className="h-3 w-3 mr-1" /> Ask to Raise Invoice</Button></td>
                                 </tr>
                             ))}
                         </tbody>
@@ -212,13 +225,29 @@ function ProjectDetail({ project, onFollowUp }) {
                                 <span className="font-medium text-black/80 truncate">{t.name}</span>
                                 <Pill cls={t.payment_status === "cleared" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-800 border-amber-200"}>{t.payment_status === "cleared" ? "Cleared" : "Pending"}</Pill>
                             </div>
-                            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-                                <div><span className="text-black/40">Rate </span>{dash(t.talent_agreed_rate)}</div>
-                                <div><span className="text-black/40">Quote </span>{t.production_quote == null ? <span className="text-amber-700">Not entered</span> : formatCurrency(t.production_quote)}</div>
-                                <div><span className="text-black/40">Commission </span>{dash(t.commission_amount)}</div>
-                                <div><span className="text-black/40">Spread </span>{dash(t.spread)}</div>
-                                <div><span className="text-black/40">OT </span>{formatCurrency(t.extra_hours_total || 0)}</div>
-                                <div><span className="text-black/40">Reimb. </span>{formatCurrency(t.reimbursement_total || 0)}</div>
+                            <div className="space-y-1.5 text-[11px]">
+                                <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                                    <div className="col-span-2 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Talent</div>
+                                    <div><span className="text-black/40">Rate </span>{dash(t.talent_agreed_rate)}</div>
+                                    <div><span className="text-black/40">Commission </span>{dash(t.commission_amount)}</div>
+                                    <div><span className="text-black/40">OT </span>{formatCurrency(t.extra_hours_total || 0)}</div>
+                                    <div><span className="text-black/40">Reimb. </span>{formatCurrency(t.reimbursement_total || 0)}</div>
+                                    <div className="col-span-2 font-medium"><span className="text-black/40 font-normal">Net payable </span>{dash(t.talent_net_payable)}</div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                                    <div className="col-span-2 text-[10px] font-semibold uppercase tracking-wide text-sky-700">Production</div>
+                                    <div><span className="text-black/40">Quote </span>{t.production_quote == null ? <span className="text-amber-700">Not entered</span> : formatCurrency(t.production_quote)}</div>
+                                    <div><span className="text-black/40">OT </span>{formatCurrency(t.production_overtime || 0)}</div>
+                                    <div><span className="text-black/40">Reimb. </span>{formatCurrency(t.production_reimbursement_total || 0)}</div>
+                                    <div className="font-medium"><span className="text-black/40 font-normal">Total </span>{dash(t.production_billable)}</div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+                                    <div className="col-span-2 text-[10px] font-semibold uppercase tracking-wide text-amber-700">Talentgram</div>
+                                    <div><span className="text-black/40">Quote spread </span>{dash(t.quote_spread)}</div>
+                                    <div><span className="text-black/40">OT spread </span>{formatCurrency(t.ot_spread || 0)}</div>
+                                    <div><span className="text-black/40">Reimb. spread </span>{formatCurrency(t.reimbursement_spread || 0)}</div>
+                                    <div className="font-semibold"><span className="text-black/40 font-normal">Earnings </span>{dash(t.talentgram_earning)}</div>
+                                </div>
                             </div>
                             <Button size="sm" variant="outline" className="h-7 text-[11px] mt-2" onClick={() => askTalentToRaiseInvoice(project.project_id, t.talent_id)}><Receipt className="h-3 w-3 mr-1" /> Ask to Raise Invoice</Button>
                         </div>
@@ -247,12 +276,15 @@ function ProjectDetail({ project, onFollowUp }) {
                 <div className="text-[10px] font-semibold uppercase tracking-wide text-black/40 mb-1.5">Financial summary</div>
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-1">
                     {[
-                        ["Production quote", dash(project.money.production_quote)], ["Talent agreed rates", dash(s.talent_agreed_total)],
-                        ["Commission", dash(s.commission_gross)], ["Additional spread", dash(s.spread_total)],
-                        ["Overtime", dash(s.production_overtime_total)], ["Reimbursements", dash(s.production_reimbursements_total)],
-                        ["Talentgram earnings", dash(s.talentgram_earnings_total)], ["Client total", dash(s.production_billable_total)],
+                        ["Production quote", dash(project.money.production_quote)], ["Production OT", dash(s.production_overtime_total)],
+                        ["Production reimbursements", dash(s.production_reimbursements_total)], ["Client total", dash(s.production_billable_total)],
                         ["Client received", dash(s.client_received_total)], ["Client outstanding", s.production_basis === "partial" ? "Incomplete" : dash(s.client_outstanding_total)],
-                        ["Talent paid", dash(s.talent_paid_total)], ["Talent pending", dash(s.talent_pending_total)],
+                        ["Talent agreed rates", dash(s.talent_agreed_total)], ["Commission (on rate)", dash(s.commission_gross)],
+                        ["Talent OT", dash(s.extra_hours_total)], ["Talent reimbursements", dash(s.reimbursements_total)],
+                        ["Talent net payable", dash(s.talent_payable_total)], ["Talent paid", dash(s.talent_paid_total)],
+                        ["Talent pending", dash(s.talent_pending_total)], ["Quote spread", dash(s.spread_total)],
+                        ["OT spread", dash(s.ot_spread_total)], ["Reimbursement spread", dash(s.reimbursement_spread_total)],
+                        ["Talentgram earnings", dash(s.talentgram_earnings_total)],
                     ].map(([k, v]) => (
                         <div key={k} className="flex items-baseline justify-between gap-2"><span className="text-black/45">{k}</span><span className="font-medium text-black/80">{v}</span></div>
                     ))}

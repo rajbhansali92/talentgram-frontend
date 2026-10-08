@@ -394,105 +394,115 @@ function FinGroup({ title, tag, tagClass, children, testId }) {
 }
 
 const moneyOrDash = (v) => (v === null || v === undefined ? "—" : formatCurrency(v));
+const spreadTone = (v) => (v < 0 ? "bad" : undefined);
 
-function ProductionFinancials({ project: p, talents, summary: s, onSaveProject }) {
+// One talent's complete money picture, three columns that reconcile:
+//   TALENT      what the talent was told and is paid  (rate, commission on the RATE only, OT, reimbursements, net)
+//   PRODUCTION  what the production is quoted and owes (quote, production OT, production reimbursements)
+//   TALENTGRAM  commission + quote spread + OT spread + reimbursement spread
+// Every number is the server's `_talent_card` value — nothing is calculated here.
+function TalentFinancialCard({ talent: t, onAskInvoice }) {
+    const id = t.talent_id;
+    const noQuote = t.production_quote === null || t.production_quote === undefined;
+    return (
+        <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-financial-${id}`}>
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 mb-2">
+                <span className="text-xs font-semibold text-black/80">{t.name || "Untitled"}</span>
+                <Button
+                    size="sm" variant="outline" className="h-6 text-[10px] px-2 self-start lg:self-auto shrink-0"
+                    onClick={onAskInvoice}
+                    data-testid={`pd-ask-invoice-${id}`}
+                    title={t.whatsapp_group_name
+                        ? `Sends to the "${t.whatsapp_group_name}" WhatsApp group — you'll be asked to confirm the message first`
+                        : "Opens WhatsApp with the message pre-filled — you review and send it yourself"}
+                >
+                    <MessageCircle className="h-3 w-3 mr-1" /> Ask to Raise Invoice
+                    <span className="text-black/40 ml-1" data-testid={`pd-whatsapp-destination-${id}`}>
+                        · WhatsApp{t.whatsapp_group_name ? " Group" : ""}
+                    </span>
+                </Button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3" data-testid={`pd-fin-row-${id}`}>
+                <FinGroup title="Talent" tag="Talent-facing" tagClass="bg-emerald-50 text-emerald-700 border-emerald-200" testId={`pd-fin-talent-col-${id}`}>
+                    <FinLine label="Agreed rate" value={moneyOrDash(t.talent_agreed_rate)} testId={`pd-fin-${id}-rate`} />
+                    <FinLine label={`Commission (${t.commission_percent ?? "—"}% of rate)`} value={moneyOrDash(t.commission_amount)} testId={`pd-fin-${id}-commission`} />
+                    <FinLine label="Talent OT" value={formatCurrency(t.extra_hours_total || 0)} testId={`pd-fin-${id}-talent-ot`} />
+                    <FinLine label="Talent reimbursements" value={formatCurrency(t.reimbursement_total || 0)} testId={`pd-fin-${id}-talent-reimb`} />
+                    <FinLine label="Net payable (invoice)" value={moneyOrDash(t.talent_net_payable)} strong testId={`pd-fin-${id}-net`} />
+                </FinGroup>
+                <FinGroup title="Production" tag="Client" tagClass="bg-sky-50 text-sky-700 border-sky-200" testId={`pd-fin-prod-col-${id}`}>
+                    <FinLine label="Production quote" value={noQuote ? "Not entered" : formatCurrency(t.production_quote)} tone={noQuote ? "warn" : undefined} testId={`pd-fin-${id}-quote`} />
+                    <FinLine label="Production OT" value={formatCurrency(t.production_overtime || 0)} testId={`pd-fin-${id}-prod-ot`} />
+                    <FinLine label="Production reimbursements" value={formatCurrency(t.production_reimbursement_total || 0)} testId={`pd-fin-${id}-prod-reimb`} />
+                    <FinLine label="Production total" value={moneyOrDash(t.production_billable)} strong testId={`pd-fin-${id}-prod-total`} />
+                </FinGroup>
+                <FinGroup title="Talentgram" tag="Internal only" tagClass="bg-amber-50 text-amber-800 border-amber-200" testId={`pd-fin-tg-col-${id}`}>
+                    <FinLine label="Commission" value={moneyOrDash(t.commission_amount)} />
+                    <FinLine label="Quote spread" value={moneyOrDash(t.quote_spread)} tone={spreadTone(t.quote_spread)} testId={`pd-fin-${id}-quote-spread`} />
+                    <FinLine label="OT spread" value={formatCurrency(t.ot_spread || 0)} tone={spreadTone(t.ot_spread)} testId={`pd-fin-${id}-ot-spread`} />
+                    <FinLine label="Reimbursement spread" value={formatCurrency(t.reimbursement_spread || 0)} tone={spreadTone(t.reimbursement_spread)} testId={`pd-fin-${id}-reimb-spread`} />
+                    <FinLine label="Total earnings" value={moneyOrDash(t.talentgram_earning)} strong testId={`pd-fin-${id}-earning`} />
+                </FinGroup>
+            </div>
+        </div>
+    );
+}
+
+function ProductionFinancials({ project: p, talents, summary: s, onSaveProject, onAskInvoice }) {
     const [showLegacy, setShowLegacy] = useState(false);
     const billable = s.production_billable_total;
     const quoteBase = billable === null || billable === undefined ? null : billable - (s.production_overtime_total || 0) - (s.production_reimbursements_total || 0);
     const incomplete = s.production_basis === "partial";
     const missing = s.production_quotes_missing || 0;
+    const reconciles = s.production_basis === "per_talent" && billable !== null && billable !== undefined;
 
     return (
-        <SectionCard title="Production Financials" icon={Wallet} testId="pd-production-financials">
+        <SectionCard title="Financials" icon={Wallet} testId="pd-production-financials">
             <div className="space-y-4" data-testid="pd-production-budget">
                 <p className="text-[11px] text-black/40 -mt-1" data-testid="pd-fin-basis-note">{BASIS_NOTE[s.production_basis] || ""}
                     {missing > 0 && s.production_basis !== "none" && s.production_basis !== "project_budget" && ` (${missing} talent${missing !== 1 ? "s" : ""} without a quote)`}
                 </p>
 
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                    <FinGroup title="Production / Client" tag="Client" tagClass="bg-sky-50 text-sky-700 border-sky-200" testId="pd-fin-client">
-                        <FinLine label="Production Quote" value={moneyOrDash(quoteBase)} testId="pd-fin-quote" />
-                        <FinLine label="Overtime" value={formatCurrency(s.production_overtime_total || 0)} />
-                        <FinLine label="Reimbursements" value={formatCurrency(s.production_reimbursements_total || 0)} />
-                        <FinLine label="Total to bill production" value={moneyOrDash(billable)} strong testId="pd-fin-billable" />
-                        <FinLine label="Received" value={formatCurrency(s.client_received_total || 0)} tone="good" />
-                        <FinLine label="Outstanding" value={incomplete ? "Incomplete" : moneyOrDash(s.client_outstanding_total)} strong tone={s.client_outstanding_total > 0 ? "warn" : "good"} testId="pd-fin-outstanding" />
-                        <div className="pt-2">
-                            <Label className="text-[11px] text-black/40">Shooting Days</Label>
-                            <InlineNumber value={p.pd_shooting_days} className="mt-1" onSave={(v) => onSaveProject({ shooting_days: v })} />
-                        </div>
-                    </FinGroup>
+                {talents.length > 0 && (
+                    <div className="space-y-2" data-testid="pd-fin-table">
+                        {talents.map((t) => <TalentFinancialCard key={t.talent_id} talent={t} onAskInvoice={() => onAskInvoice(t.talent_id)} />)}
+                    </div>
+                )}
 
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-black/40 pt-1">Project totals</div>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
                     <FinGroup title="Talent" tag="Talent-facing" tagClass="bg-emerald-50 text-emerald-700 border-emerald-200" testId="pd-fin-talent">
                         <FinLine label="Locked talents" value={s.locked_count} />
                         <FinLine label="Talent agreed rates" value={formatCurrency(s.talent_agreed_total || 0)} testId="pd-fin-talent-rates" />
-                        <FinLine label="Commission (on talent rate)" value={formatCurrency(s.commission_gross || 0)} />
-                        <FinLine label="Overtime" value={formatCurrency(s.extra_hours_total || 0)} />
-                        <FinLine label="Reimbursements" value={formatCurrency(s.reimbursements_total || 0)} />
+                        <FinLine label="Commission (on talent rate)" value={formatCurrency(s.commission_gross || 0)} testId="pd-fin-talent-commission" />
+                        <FinLine label="Talent OT" value={formatCurrency(s.extra_hours_total || 0)} testId="pd-fin-talent-ot" />
+                        <FinLine label="Talent reimbursements" value={formatCurrency(s.reimbursements_total || 0)} testId="pd-fin-talent-reimb" />
                         <FinLine label="Total talent net payable" value={formatCurrency(s.talent_payable_total || 0)} strong testId="pd-fin-talent-payable" />
+                    </FinGroup>
+
+                    <FinGroup title="Production / Client" tag="Client" tagClass="bg-sky-50 text-sky-700 border-sky-200" testId="pd-fin-client">
+                        <FinLine label="Production Quote" value={moneyOrDash(quoteBase)} testId="pd-fin-quote" />
+                        <FinLine label="Production OT" value={formatCurrency(s.production_overtime_total || 0)} testId="pd-fin-prod-ot" />
+                        <FinLine label="Production reimbursements" value={formatCurrency(s.production_reimbursements_total || 0)} testId="pd-fin-prod-reimb" />
+                        <FinLine label="Total to bill production" value={moneyOrDash(billable)} strong testId="pd-fin-billable" />
+                        <FinLine label="Received" value={formatCurrency(s.client_received_total || 0)} tone="good" />
+                        <FinLine label="Outstanding" value={incomplete ? "Incomplete" : moneyOrDash(s.client_outstanding_total)} strong tone={s.client_outstanding_total > 0 ? "warn" : "good"} testId="pd-fin-outstanding" />
                     </FinGroup>
 
                     <FinGroup title="Talentgram" tag="Internal only" tagClass="bg-amber-50 text-amber-800 border-amber-200" testId="pd-fin-internal">
                         <FinLine label="Commission" value={formatCurrency(s.commission_gross || 0)} />
-                        <FinLine label="Additional spread (quote − rate)" value={formatCurrency(s.spread_total || 0)} tone={s.spread_total < 0 ? "bad" : undefined} testId="pd-fin-spread" />
+                        <FinLine label="Quote spread (quote − rate)" value={formatCurrency(s.spread_total || 0)} tone={spreadTone(s.spread_total)} testId="pd-fin-spread" />
+                        <FinLine label="OT spread (production OT − talent OT)" value={formatCurrency(s.ot_spread_total || 0)} tone={spreadTone(s.ot_spread_total)} testId="pd-fin-ot-spread" />
+                        <FinLine label="Reimbursement spread" value={formatCurrency(s.reimbursement_spread_total || 0)} tone={spreadTone(s.reimbursement_spread_total)} testId="pd-fin-reimb-spread" />
                         <FinLine label="Total Talentgram earnings" value={formatCurrency(s.talentgram_earnings_total || 0)} strong testId="pd-fin-earnings" />
                         {s.kickbacks_total > 0 && <FinLine label="After kickbacks" value={formatCurrency(s.talentgram_earnings_net_of_kickbacks || 0)} />}
                     </FinGroup>
                 </div>
 
-                {talents.length > 0 && (
-                    <div data-testid="pd-fin-table">
-                        <div className="hidden lg:block overflow-x-auto">
-                            <Table>
-                                <TableHeader>
-                                    <TableRow>
-                                        <TableHead className="text-xs">Talent</TableHead>
-                                        <TableHead className="text-xs">Talent Rate</TableHead>
-                                        <TableHead className="text-xs">Production Quote</TableHead>
-                                        <TableHead className="text-xs">Comm %</TableHead>
-                                        <TableHead className="text-xs">Commission</TableHead>
-                                        <TableHead className="text-xs">Spread</TableHead>
-                                        <TableHead className="text-xs">OT</TableHead>
-                                        <TableHead className="text-xs">Reimb.</TableHead>
-                                        <TableHead className="text-xs">Talent Net</TableHead>
-                                        <TableHead className="text-xs">TG Earning</TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {talents.map((t) => (
-                                        <TableRow key={t.talent_id} data-testid={`pd-fin-row-${t.talent_id}`}>
-                                            <TableCell className="text-xs font-medium text-black/80">{t.name || "Untitled"}</TableCell>
-                                            <TableCell className="text-xs">{moneyOrDash(t.talent_agreed_rate)}</TableCell>
-                                            <TableCell className="text-xs">{t.production_quote === null || t.production_quote === undefined ? <span className="text-amber-700">Not entered</span> : formatCurrency(t.production_quote)}</TableCell>
-                                            <TableCell className="text-xs">{t.commission_percent === null || t.commission_percent === undefined ? "—" : `${t.commission_percent}%`}</TableCell>
-                                            <TableCell className="text-xs">{moneyOrDash(t.commission_amount)}</TableCell>
-                                            <TableCell className={`text-xs ${t.spread < 0 ? "text-red-600" : ""}`}>{moneyOrDash(t.spread)}</TableCell>
-                                            <TableCell className="text-xs">{formatCurrency(t.extra_hours_total || 0)}</TableCell>
-                                            <TableCell className="text-xs">{formatCurrency(t.reimbursement_total || 0)}</TableCell>
-                                            <TableCell className="text-xs">{moneyOrDash(t.talent_net_payable)}</TableCell>
-                                            <TableCell className="text-xs font-semibold">{moneyOrDash(t.talentgram_earning)}</TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </div>
-                        <div className="lg:hidden space-y-2">
-                            {talents.map((t) => (
-                                <div key={t.talent_id} className="rounded-md border border-black/[0.06] p-3" data-testid={`pd-fin-row-mobile-${t.talent_id}`}>
-                                    <div className="text-xs font-medium text-black/80 mb-2">{t.name || "Untitled"}</div>
-                                    <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
-                                        <div><span className="text-black/40 block">Talent Rate</span>{moneyOrDash(t.talent_agreed_rate)}</div>
-                                        <div><span className="text-black/40 block">Production Quote</span>{t.production_quote === null || t.production_quote === undefined ? <span className="text-amber-700">Not entered</span> : formatCurrency(t.production_quote)}</div>
-                                        <div><span className="text-black/40 block">Commission</span>{moneyOrDash(t.commission_amount)}</div>
-                                        <div><span className="text-black/40 block">Spread</span><span className={t.spread < 0 ? "text-red-600" : ""}>{moneyOrDash(t.spread)}</span></div>
-                                        <div><span className="text-black/40 block">OT / Reimb.</span>{formatCurrency(t.extra_hours_total || 0)} / {formatCurrency(t.reimbursement_total || 0)}</div>
-                                        <div><span className="text-black/40 block">Talent Net</span>{moneyOrDash(t.talent_net_payable)}</div>
-                                        <div className="col-span-2 font-semibold"><span className="text-black/40 font-normal block">TG Earning</span>{moneyOrDash(t.talentgram_earning)}</div>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
+                {reconciles && (
+                    <p className="text-[11px] text-black/40" data-testid="pd-fin-reconcile">
+                        Production total {formatCurrency(billable)} = talent net {formatCurrency(s.talent_payable_total || 0)} + commission {formatCurrency(s.commission_gross || 0)} + spreads {formatCurrency((s.spread_total || 0) + (s.ot_spread_total || 0) + (s.reimbursement_spread_total || 0))}
+                    </p>
                 )}
 
                 <div className="pt-1 border-t border-black/[0.06]">
@@ -500,9 +510,9 @@ function ProductionFinancials({ project: p, talents, summary: s, onSaveProject }
                         <History className="h-3 w-3" /> {showLegacy ? "Hide" : "Show"} project-level production budget
                     </button>
                     {showLegacy && (
-                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3" data-testid="pd-fin-legacy">
-                            <p className="sm:col-span-2 text-[11px] text-black/35">
-                                The single project-wide production budget from before per-talent quotes. It is used only while no talent has a quote; once quotes are entered they replace it.
+                        <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-3" data-testid="pd-fin-legacy">
+                            <p className="sm:col-span-3 text-[11px] text-black/35">
+                                Project-wide defaults from before per-talent quotes. The production budget is used only while no talent has a quote; the shooting days are the default for talents without their own schedule.
                             </p>
                             <div>
                                 <Label className="text-[11px] text-black/40">Budget / Day</Label>
@@ -511,6 +521,10 @@ function ProductionFinancials({ project: p, talents, summary: s, onSaveProject }
                             <div>
                                 <Label className="text-[11px] text-black/40">Total Budget</Label>
                                 <InlineNumber value={p.pd_production_budget_total} className="mt-1" onSave={(v) => onSaveProject({ production_budget_total: v })} />
+                            </div>
+                            <div>
+                                <Label className="text-[11px] text-black/40">Shooting Days</Label>
+                                <InlineNumber value={p.pd_shooting_days} className="mt-1" onSave={(v) => onSaveProject({ shooting_days: v })} />
                             </div>
                         </div>
                     )}
@@ -584,7 +598,9 @@ function OverviewDashboard({ project: p, summary, needsAttention, today, upcomin
     ];
     const earningsMetrics = [
         { label: "Commission", value: formatCurrency(summary.commission_gross || 0) },
-        { label: "Additional Spread", value: formatCurrency(summary.spread_total || 0), tone: summary.spread_total < 0 ? "warn" : "neutral" },
+        { label: "Quote Spread", value: formatCurrency(summary.spread_total || 0), tone: summary.spread_total < 0 ? "warn" : "neutral" },
+        { label: "OT Spread", value: formatCurrency(summary.ot_spread_total || 0), tone: summary.ot_spread_total < 0 ? "warn" : "neutral" },
+        { label: "Reimbursement Spread", value: formatCurrency(summary.reimbursement_spread_total || 0), tone: summary.reimbursement_spread_total < 0 ? "warn" : "neutral" },
         { label: "Total Earnings", value: formatCurrency(summary.talentgram_earnings_total || 0), tone: "good" },
         ...(summary.kickbacks_total > 0 ? [{ label: "After Kickbacks", value: formatCurrency(summary.talentgram_earnings_net_of_kickbacks || 0) }] : []),
     ];
@@ -951,6 +967,16 @@ export default function ProductionDesk({ projectId, project }) {
         }
     }, [projectId]);
 
+    // The amount the PRODUCTION is billed for this one expense (empty = same as the talent's amount).
+    const updateReimbursementProductionAmount = useCallback(async (id, production_amount) => {
+        try {
+            const { data } = await adminApi.patch(`/projects/${projectId}/production-desk/reimbursements/${id}`, { production_amount });
+            setData(data);
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || "Update failed");
+        }
+    }, [projectId]);
+
     const deleteReimbursement = useCallback(async (id) => {
         try {
             const { data } = await adminApi.delete(`/projects/${projectId}/production-desk/reimbursements/${id}`);
@@ -1148,6 +1174,7 @@ export default function ProductionDesk({ projectId, project }) {
                                         <TableHead className="text-xs">Shoot Days</TableHead>
                                         <TableHead className="text-xs">Talent Rate (Total)</TableHead>
                                         <TableHead className="text-xs">Production Quote</TableHead>
+                                        <TableHead className="text-xs" title="Overtime billed to the production. Leave empty to bill the talent's own overtime.">Production OT</TableHead>
                                         <TableHead className="text-xs">Commission %</TableHead>
                                         <TableHead className="text-xs">Commission ₹</TableHead>
                                         <TableHead className="text-xs">Payment</TableHead>
@@ -1182,6 +1209,9 @@ export default function ProductionDesk({ projectId, project }) {
                                             </TableCell>
                                             <TableCell>
                                                 <InlineNumber value={t.production_quote} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { production_quote: v })} />
+                                            </TableCell>
+                                            <TableCell data-testid={`pd-prod-ot-${t.talent_id}`}>
+                                                <InlineNumber value={t.production_overtime_is_explicit ? t.production_overtime : null} placeholder={String(t.extra_hours_total || 0)} className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { production_overtime: v })} />
                                             </TableCell>
                                             <TableCell>
                                                 <InlineNumber value={t.commission_percent} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { commission_percent: v })} />
@@ -1220,6 +1250,7 @@ export default function ProductionDesk({ projectId, project }) {
                                         <div><span className="text-black/40 block mb-0.5">Shoot Days</span><InlineNumber value={t.shooting_days} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { shooting_days: v })} /></div>
                                         <div><span className="text-black/40 block mb-0.5">Talent Rate (Total)</span><InlineNumber value={t.budget_total} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { budget_total: v })} /></div>
                                         <div><span className="text-black/40 block mb-0.5">Production Quote</span><InlineNumber value={t.production_quote} placeholder="—" className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { production_quote: v })} /></div>
+                                        <div data-testid={`pd-prod-ot-mobile-${t.talent_id}`}><span className="text-black/40 block mb-0.5" title="Overtime billed to the production. Leave empty to bill the talent's own overtime.">Production OT</span><InlineNumber value={t.production_overtime_is_explicit ? t.production_overtime : null} placeholder={String(t.extra_hours_total || 0)} className="min-w-[92px]" onSave={(v) => patchTalent(t.talent_id, { production_overtime: v })} /></div>
                                         <div><span className="text-black/40 block mb-0.5">Commission %</span><InlineNumber value={t.commission_percent} placeholder="—" onSave={(v) => patchTalent(t.talent_id, { commission_percent: v })} /></div>
                                         <div><span className="text-black/40 block mb-0.5">Commission ₹</span><span className="text-black/60">{formatCurrency(t.commission_amount)}</span></div>
                                         <div>
@@ -1274,20 +1305,6 @@ export default function ProductionDesk({ projectId, project }) {
                 </SectionCard>
             )}
 
-            {/* V2 — Talent Financials (spec sections 21-25): the exact
-                Fee / Extra Hours / Commissionable / Commission /
-                Reimbursements / Invoice Amount breakdown, all computed
-                server-side in _talent_card — never re-derived here. */}
-            {talents.length > 0 && (
-                <SectionCard title="Talent Financials" icon={IndianRupee} testId="pd-talent-financials">
-                    <div className="space-y-2">
-                        {talents.map((t) => (
-                            <TalentFinancialCard key={t.talent_id} talent={t} onAskInvoice={() => askTalentToRaiseInvoice(projectId, t.talent_id)} />
-                        ))}
-                    </div>
-                </SectionCard>
-            )}
-
             {/* Tasks — the SAME db.workflow_tasks the Management Agent and
                 the admin Workflow page read/write. */}
             <SectionCard
@@ -1322,7 +1339,7 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
-            <ProductionFinancials project={p} talents={talents} summary={summary} onSaveProject={patchProject} />
+            <ProductionFinancials project={p} talents={talents} summary={summary} onSaveProject={patchProject} onAskInvoice={(talentId) => askTalentToRaiseInvoice(projectId, talentId)} />
 
             {/* V2 polish (spec section 3/4/6) — Shoot Details now holds
                 BOTH the project-level shoot info AND every locked talent's
@@ -1443,15 +1460,21 @@ export default function ProductionDesk({ projectId, project }) {
                 ) : (
                     <div className="space-y-1.5">
                         {reimbursements.map((r) => (
-                            <div key={r.id} className="flex items-center justify-between text-xs border-t border-black/[0.05] pt-1.5" data-testid={`pd-reimbursement-${r.id}`}>
+                            <div key={r.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-xs border-t border-black/[0.05] pt-1.5" data-testid={`pd-reimbursement-${r.id}`}>
                                 <div className="flex items-center gap-2 flex-wrap">
-                                    <span className="font-medium text-black/70">{formatCurrency(r.amount)}</span>
+                                    <span className="font-medium text-black/70" title="Owed to the talent">{formatCurrency(r.amount)}</span>
                                     <span className="text-black/50">{r.expense_type}</span>
                                     <span className="text-black/40">— {r.talent_name}</span>
                                     {r.date && <span className="text-black/30">{r.date}</span>}
                                     {!r.material_id && <Badge variant="outline" className="text-[10px] text-amber-700 border-amber-300">No bill</Badge>}
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <label className="flex items-center gap-1 text-[10px] text-black/40" title="What the production is billed for this expense. Leave empty to bill the same amount the talent is owed.">
+                                        Production ₹
+                                        <span data-testid={`pd-reimbursement-prod-${r.id}`} className="w-[84px]">
+                                            <InlineNumber value={r.production_amount ?? null} placeholder={String(r.amount)} onSave={(v) => updateReimbursementProductionAmount(r.id, v)} />
+                                        </span>
+                                    </label>
                                     <Select value={r.status} onValueChange={(v) => updateReimbursementStatus(r.id, v)}>
                                         <SelectTrigger className={`h-6 text-[11px] w-[90px] ${r.status === "paid" ? "text-emerald-700" : "text-amber-700"}`}>
                                             <SelectValue />
@@ -1655,6 +1678,7 @@ export default function ProductionDesk({ projectId, project }) {
                                 fd.append("talent_id", form.talentId);
                                 fd.append("expense_type", form.expenseType);
                                 fd.append("amount", form.amount);
+                                if (form.productionAmount !== "" && form.productionAmount != null) fd.append("production_amount", form.productionAmount);
                                 if (form.date) fd.append("date", form.date);
                                 if (form.notes) fd.append("notes", form.notes);
                                 if (form.file) fd.append("file", form.file);
@@ -2498,46 +2522,6 @@ function TalentReadingsRehearsals({ talent, knownLocations, onAdd, onUpdate, onD
 }
 
 // ============================================================================
-// V2 — Talent Financials (spec sections 21-25). Every number here comes
-// straight from the server's already-computed _talent_card fields — no
-// arithmetic happens in this component.
-// ============================================================================
-function TalentFinancialCard({ talent, onAskInvoice }) {
-    return (
-        <div className="rounded-lg border border-black/[0.08] p-3" data-testid={`pd-financial-${talent.talent_id}`}>
-            {/* UI audit fix — the talent name used to truncate to "ZZ…" on
-                mobile/tablet because it shared one row with the (long)
-                invoice button; stacking below lg: gives the name its own
-                line at every width narrower than genuine desktop. */}
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 mb-2">
-                <span className="text-xs font-semibold text-black/80">{talent.name}</span>
-                <Button
-                    size="sm" variant="outline" className="h-6 text-[10px] px-2 self-start lg:self-auto shrink-0"
-                    onClick={onAskInvoice}
-                    data-testid={`pd-ask-invoice-${talent.talent_id}`}
-                    title={talent.whatsapp_group_name
-                        ? `Sends to the "${talent.whatsapp_group_name}" WhatsApp group — you'll be asked to confirm the message first`
-                        : "Opens WhatsApp with the message pre-filled — you review and send it yourself"}
-                >
-                    <MessageCircle className="h-3 w-3 mr-1" /> Ask to Raise Invoice
-                    <span className="text-black/40 ml-1" data-testid={`pd-whatsapp-destination-${talent.talent_id}`}>
-                        · WhatsApp{talent.whatsapp_group_name ? " Group" : ""}
-                    </span>
-                </Button>
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-[11px]">
-                <div className="flex justify-between sm:block"><span className="text-black/40">Talent Fee</span><span className="text-black/70 font-medium">{formatCurrency(talent.budget_total)}</span></div>
-                <div className="flex justify-between sm:block"><span className="text-black/40">Extra Hours</span><span className="text-black/70 font-medium">{formatCurrency(talent.extra_hours_total)}</span></div>
-                <div className="flex justify-between sm:block"><span className="text-black/40">Commissionable</span><span className="text-black/70 font-medium">{formatCurrency(talent.commissionable_amount)}</span></div>
-                <div className="flex justify-between sm:block"><span className="text-black/40">Commission ({talent.commission_percent ?? "—"}%)</span><span className="text-black/70 font-medium">{formatCurrency(talent.commission_amount)}</span></div>
-                <div className="flex justify-between sm:block"><span className="text-black/40">Reimbursements</span><span className="text-black/70 font-medium">{formatCurrency(talent.reimbursement_total)}</span></div>
-                <div className="flex justify-between sm:block"><span className="text-[#0c2340] font-semibold">Invoice Amount</span><span className="text-[#0c2340] font-bold">{formatCurrency(talent.invoice_amount)}</span></div>
-            </div>
-        </div>
-    );
-}
-
-// ============================================================================
 // V2 — Payment Tranches / Billing Milestones (spec sections 19-20). An
 // operational billing tracker, deliberately not an accounting system.
 // ============================================================================
@@ -2720,6 +2704,7 @@ function ReimbursementForm({ talents, onSubmit }) {
     const [talentId, setTalentId] = useState(talents[0]?.talent_id || "");
     const [expenseType, setExpenseType] = useState("");
     const [amount, setAmount] = useState("");
+    const [productionAmount, setProductionAmount] = useState("");
     const [date, setDate] = useState("");
     const [notes, setNotes] = useState("");
     const [file, setFile] = useState(null);
@@ -2737,8 +2722,9 @@ function ReimbursementForm({ talents, onSubmit }) {
             </div>
             <div><Label className="text-xs">Expense Type / Reason</Label><Input value={expenseType} onChange={(e) => setExpenseType(e.target.value)} placeholder="e.g. Travel, Food" className="h-8 text-xs mt-1" /></div>
             <div className="grid grid-cols-2 gap-2">
-                <div><Label className="text-xs">Amount</Label><Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className="h-8 text-xs mt-1" /></div>
-                <div><Label className="text-xs">Date</Label><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="h-8 text-xs mt-1" /></div>
+                <div><Label className="text-xs">Talent amount</Label><Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className="h-8 text-xs mt-1" data-testid="pd-reimb-amount" /></div>
+                <div><Label className="text-xs" title="Only if the production is billed a different amount">Production amount (optional)</Label><Input type="number" value={productionAmount} onChange={(e) => setProductionAmount(e.target.value)} placeholder="same as talent" className="h-8 text-xs mt-1" data-testid="pd-reimb-production-amount" /></div>
+                <div className="col-span-2"><Label className="text-xs">Date</Label><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="h-8 text-xs mt-1" /></div>
             </div>
             <div><Label className="text-xs">Notes</Label><Textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="text-xs mt-1" /></div>
             <div>
@@ -2749,7 +2735,7 @@ function ReimbursementForm({ talents, onSubmit }) {
                 <Button
                     size="sm"
                     disabled={!talentId || !expenseType || !amount || saving}
-                    onClick={async () => { setSaving(true); await onSubmit({ talentId, expenseType, amount, date, notes, file }); setSaving(false); }}
+                    onClick={async () => { setSaving(true); await onSubmit({ talentId, expenseType, amount, productionAmount, date, notes, file }); setSaving(false); }}
                 >
                     {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Add Reimbursement"}
                 </Button>

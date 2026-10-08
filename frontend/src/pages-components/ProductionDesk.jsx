@@ -53,73 +53,11 @@ import {
     Layers, X, Pencil, ChevronDown, ChevronUp, Phone, Mail,
     Building2, History,
 } from "lucide-react";
-
-// Same INR formatter MarketingHub already uses — no second money formatter.
-const formatCurrency = (val) => {
-    if (val === undefined || val === null || val === "") return "—";
-    try {
-        return new Intl.NumberFormat("en-IN", {
-            style: "currency",
-            currency: "INR",
-            maximumFractionDigits: 0,
-        }).format(val);
-    } catch {
-        return `₹${val}`;
-    }
-};
-
-// due_at / pd_*_at fields are stored as full ISO datetimes (matching
-// core._now()'s own shape); a plain <input type="date"> only round-trips
-// the date part, so these convert at the UI boundary — noon UTC is the
-// same default time the Management Agent's own date parsing uses.
-// Business timezone: Asia/Kolkata (IST). Every date/time this screen shows or
-// reads is the IST calendar value — never the browser's own timezone, so a
-// viewer in another country (or a laptop clock set wrong) sees the same day
-// the backend and the reminder worker use. Date-only fields are stored at
-// noon UTC (= 17:30 IST, the same calendar date in both zones), so they can
-// never slide across a day boundary in either direction.
-const IST_TZ = "Asia/Kolkata";
-const istDateParts = (d) => new Intl.DateTimeFormat("en-CA", { timeZone: IST_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
-
-const toDateInputValue = (iso) => {
-    if (!iso) return "";
-    try {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
-        return istDateParts(new Date(iso));
-    } catch { return ""; }
-};
-const fromDateInputValue = (dateStr) => (dateStr ? `${dateStr}T12:00:00.000Z` : null);
-
-const formatDate = (iso) => {
-    if (!iso) return "—";
-    try {
-        // A bare YYYY-MM-DD (shoot-day dates) is a calendar date, not an instant.
-        const d = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T12:00:00.000Z`) : new Date(iso);
-        return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: IST_TZ });
-    } catch {
-        return iso;
-    }
-};
-
-// Call / reporting times are stored as "HH:MM" (24h, IST wall-clock) and shown
-// as "9:30 AM". Legacy free-text values ("9 AM", "morning") pass through as-is.
-const formatClock = (v) => {
-    if (!v) return "—";
-    const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(v).trim());
-    if (!m) return v;
-    const h = Number(m[1]);
-    return `${h % 12 || 12}:${m[2]} ${h >= 12 ? "PM" : "AM"}`;
-};
-// Input value for <input type="time">: only a canonical HH:MM round-trips; legacy text is shown read-only.
-const clockInputValue = (v) => (v && /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v).trim()) ? String(v).trim() : "");
-const clockMinutes = (v) => {
-    const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(v || "").trim());
-    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
-};
-const reportingAfterCall = (reporting, call) => {
-    const r = clockMinutes(reporting); const c = clockMinutes(call);
-    return r !== null && c !== null && r > c;
-};
+import {
+    formatCurrency, IST_TZ, toDateInputValue, fromDateInputValue, formatDate, formatClock, clockInputValue,
+    clockMinutes, reportingAfterCall, openWhatsApp, LocationLink, askTalentToRaiseInvoice, usePaymentFollowUp,
+    PaymentRecipientSelect, FollowUpReviewDialog,
+} from "@/lib/productionDesk";
 
 const DOCUMENT_CATEGORIES = [
     { value: "client_confirmation", label: "Client Confirmation" },
@@ -179,44 +117,6 @@ const TRANCHE_PAYMENT_STATUSES = [
     { value: "pending", label: "Pending" },
     { value: "received", label: "Received" },
 ];
-
-// Opens the SAME wa.me deep-link pattern MarketingHub.jsx's own
-// handleShare() already uses for one-off admin-triggered WhatsApp
-// messages — the admin still taps Send inside WhatsApp themselves, so
-// this never auto-sends anything (spec: "do not create a new WhatsApp
-// sender/worker").
-function openWhatsApp(phone, message) {
-    const digits = (phone || "").replace(/[^0-9]/g, "");
-    if (!digits) {
-        toast.error("No phone number on file");
-        return;
-    }
-    window.open(`https://wa.me/${digits}?text=${encodeURIComponent(message)}`, "_blank");
-}
-
-// Lightest-possible "clickable location" (spec section 7/29) — a name plus
-// an optional Google Maps URL, never a maps-search integration.
-function LocationLink({ name, mapUrl, address }) {
-    if (!name && !mapUrl) return <span className="text-black/30">—</span>;
-    const addr = address && address !== name ? address : null;
-    if (mapUrl) {
-        return (
-            <a href={mapUrl} target="_blank" rel="noreferrer" className="inline-flex flex-col text-[#0c2340] hover:underline min-w-0" title={addr || undefined}>
-                <span className="inline-flex items-center gap-1 min-w-0">
-                    <MapPin className="h-3 w-3 shrink-0" />
-                    <span className="truncate">{name || "View on map"}</span>
-                </span>
-                {addr && <span className="text-[10px] text-black/40 truncate pl-4">{addr}</span>}
-            </a>
-        );
-    }
-    return (
-        <span className="inline-flex flex-col min-w-0">
-            <span className="text-black/70 truncate">{name}</span>
-            {addr && <span className="text-[10px] text-black/40 truncate">{addr}</span>}
-        </span>
-    );
-}
 
 // {projectId, enabled} for the server-side Google Maps place search (the Maps key
 // never reaches the browser — see production_desk.py's /places/* endpoints).
@@ -706,8 +606,10 @@ function OverviewDashboard({ project: p, summary, needsAttention, today, upcomin
             value: `${summary.payments_cleared}/${summary.payments_total} Cleared`,
             tone: summary.payments_cleared === summary.payments_total && summary.payments_total > 0 ? "good" : "warn",
         },
-        ...(summary.payments_pending_amount > 0
-            ? [{ label: "Talent Pending Amount", value: formatCurrency(summary.payments_pending_amount), tone: "warn" }]
+        // What Talentgram still owes the talents = their NET payable (after commission), the same figure the
+        // global Production Desk shows. Older payloads without it fall back to the previous gross figure.
+        ...((summary.talent_pending_total ?? summary.payments_pending_amount) > 0
+            ? [{ label: "Talent Pending Amount", value: formatCurrency(summary.talent_pending_total ?? summary.payments_pending_amount), tone: "warn" }]
             : []),
     ];
 
@@ -1156,48 +1058,16 @@ export default function ProductionDesk({ projectId, project }) {
     // source of truth for the financial formula); this just opens the
     // SAME wa.me deep link every other one-off admin WhatsApp send in
     // this codebase already uses — see openWhatsApp() above.
-    // Payment follow-up: pick WHO it goes to (CRM contacts tied to this project — crew, the saved
-    // concerned person, and same-company contacts), then REVIEW the exact message and recipient in
-    // a dialog; only the dialog's confirm button opens WhatsApp (the admin still taps Send there).
-    const [followupContacts, setFollowupContacts] = useState([]);
-    const [followupContactId, setFollowupContactId] = useState("");
-    const [followupPreview, setFollowupPreview] = useState(null);
+    // Payment follow-up (shared with the global Production Desk): choose WHO it goes to among the
+    // project's own CRM contacts, then REVIEW the exact message and recipient in a dialog; only the
+    // dialog's confirm opens WhatsApp (the admin still taps Send there).
     const crewCount = data?.crew?.length ?? 0;
     const defaultContactId = data?.project?.pd_production_contact?.client_id || "";
-    useEffect(() => {
-        let cancelled = false;
-        adminApi.get(`/projects/${projectId}/production-desk/payment-followup-contacts`).then(({ data: d }) => {
-            if (cancelled) return;
-            const list = Array.isArray(d?.contacts) ? d.contacts : [];
-            setFollowupContacts(list);
-            setFollowupContactId((cur) => {
-                if (cur && list.some((c) => c.client_id === cur && c.has_phone)) return cur;
-                const pick = list.find((c) => c.is_default && c.has_phone) || list.find((c) => c.has_phone);
-                return pick ? pick.client_id : "";
-            });
-        }).catch(() => { if (!cancelled) setFollowupContacts([]); });
-        return () => { cancelled = true; };
-    }, [projectId, crewCount, defaultContactId]);
-
-    const sendPaymentFollowUp = useCallback(async () => {
-        try {
-            const { data: msg } = await adminApi.get(
-                `/projects/${projectId}/production-desk/payment-followup-message`,
-                followupContactId ? { params: { contact_id: followupContactId } } : undefined,
-            );
-            setFollowupPreview(msg);
-        } catch (err) {
-            toast.error(formatErrorDetail(err) || "Could not build follow-up message");
-        }
-    }, [projectId, followupContactId]);
-
-    const confirmPaymentFollowUp = useCallback(async () => {
-        const msg = followupPreview;
-        if (!msg) return;
-        setFollowupPreview(null);
-        openWhatsApp(msg.phone, msg.message);
-        await patchProject({ last_follow_up_at: new Date().toISOString() });
-    }, [followupPreview, patchProject]);
+    const followup = usePaymentFollowUp(projectId, {
+        defaultContactId, refreshKey: crewCount,
+        onConfirmed: () => patchProject({ last_follow_up_at: new Date().toISOString() }),
+    });
+    const sendPaymentFollowUp = followup.requestPreview;
 
     // V2 polish (spec sections 22-25) — destination_type is "group" when
     // this talent has a whatsapp_group_name on file (the SAME field the
@@ -1216,28 +1086,6 @@ export default function ProductionDesk({ projectId, project }) {
     // Engine's own broadcast page already uses.
     // destination_type === "phone": unchanged — opens wa.me with the
     // message pre-filled, admin reviews and sends manually inside WhatsApp.
-    const askTalentToRaiseInvoice = useCallback(async (talentId) => {
-        try {
-            const { data } = await adminApi.get(`/projects/${projectId}/production-desk/talents/${talentId}/invoice-message`);
-            if (data.destination_type === "group") {
-                const confirmed = window.confirm(
-                    `Send this invoice request to ${data.talent_name}'s WhatsApp group "${data.whatsapp_group_name}"?\n\n${data.message}`,
-                );
-                if (!confirmed) return;
-                try {
-                    await adminApi.post(`/projects/${projectId}/production-desk/talents/${talentId}/invoice-message/send-to-group`);
-                    toast.success(`Sent to ${data.whatsapp_group_name}`);
-                } catch (sendErr) {
-                    toast.error(formatErrorDetail(sendErr) || "Could not send to the WhatsApp group");
-                }
-                return;
-            }
-            openWhatsApp(data.phone, data.message);
-        } catch (err) {
-            toast.error(formatErrorDetail(err) || "Could not build invoice request");
-        }
-    }, [projectId]);
-
     // Tasks — the SAME db.workflow_tasks the admin Workflow page and the
     // Management Agent read/write (routers/workflow.py). Not a
     // Production-Desk-only task store.
@@ -1434,7 +1282,7 @@ export default function ProductionDesk({ projectId, project }) {
                 <SectionCard title="Talent Financials" icon={IndianRupee} testId="pd-talent-financials">
                     <div className="space-y-2">
                         {talents.map((t) => (
-                            <TalentFinancialCard key={t.talent_id} talent={t} onAskInvoice={() => askTalentToRaiseInvoice(t.talent_id)} />
+                            <TalentFinancialCard key={t.talent_id} talent={t} onAskInvoice={() => askTalentToRaiseInvoice(projectId, t.talent_id)} />
                         ))}
                     </div>
                 </SectionCard>
@@ -1527,30 +1375,8 @@ export default function ProductionDesk({ projectId, project }) {
                     Opens WhatsApp with the message pre-filled. Nothing is sent automatically — you review and tap Send yourself.
                 </p>
                 <PaymentFollowUpBlock project={p} clients={clients} onContactCreated={(c) => setClients((prev) => [c, ...prev])} onSave={patchProject}
-                    contacts={followupContacts} selectedContactId={followupContactId} onSelectContact={setFollowupContactId} />
-                <Dialog open={!!followupPreview} onOpenChange={(o) => { if (!o) setFollowupPreview(null); }}>
-                    <DialogContent className="max-w-lg" data-testid="pd-followup-dialog">
-                        <DialogHeader><DialogTitle>Review payment follow-up</DialogTitle></DialogHeader>
-                        {followupPreview && (
-                            <div className="space-y-3 text-xs">
-                                <div data-testid="pd-followup-recipient-summary">
-                                    <span className="text-black/40">To: </span>
-                                    <span className="font-medium text-black/80">{followupPreview.contact_name || "—"}</span>
-                                    <span className="text-black/40"> · {followupPreview.phone}</span>
-                                </div>
-                                {(followupPreview.warnings || []).map((w) => (
-                                    <div key={w} className="rounded-md bg-amber-50 border border-amber-200 px-2.5 py-1.5 text-amber-800" data-testid="pd-followup-warning">{w}</div>
-                                ))}
-                                <pre className="whitespace-pre-wrap rounded-md border border-black/[0.08] bg-slate-50 p-3 text-[11px] text-black/75 max-h-72 overflow-auto font-sans" data-testid="pd-followup-message">{followupPreview.message}</pre>
-                                <p className="text-[11px] text-black/40">Nothing is sent from here — this opens WhatsApp with the text pre-filled and you tap Send yourself.</p>
-                            </div>
-                        )}
-                        <DialogFooter>
-                            <Button variant="ghost" size="sm" onClick={() => setFollowupPreview(null)}>Cancel</Button>
-                            <Button size="sm" onClick={confirmPaymentFollowUp} data-testid="pd-followup-confirm"><MessageCircle className="h-3 w-3 mr-1" /> Open WhatsApp</Button>
-                        </DialogFooter>
-                    </DialogContent>
-                </Dialog>
+                    contacts={followup.contacts} selectedContactId={followup.contactId} onSelectContact={followup.setContactId} />
+                <FollowUpReviewDialog preview={followup.preview} onCancel={followup.cancel} onConfirm={followup.confirm} />
             </SectionCard>
 
             {/* V2 — Payment Tranches / Billing Milestones (spec sections
@@ -2030,20 +1856,7 @@ function PaymentFollowUpBlock({ project: p, clients, onContactCreated, onSave, c
                     <div><span className="text-black/40 block">Concerned Person</span><span className="text-black/70">{p.pd_production_contact?.name || "—"}</span></div>
                     <div className="sm:col-span-2" data-testid="pd-followup-recipient">
                         <span className="text-black/40 block mb-1">Send follow-up to</span>
-                        {contacts.length === 0 ? (
-                            <span className="text-black/35">No CRM contacts on this project yet — set a Concerned Person below or add someone under Crew.</span>
-                        ) : (
-                            <Select value={selectedContactId || undefined} onValueChange={onSelectContact}>
-                                <SelectTrigger className="h-8 text-xs w-full sm:w-[360px]" data-testid="pd-followup-recipient-select"><SelectValue placeholder="Choose who to follow up with" /></SelectTrigger>
-                                <SelectContent>
-                                    {contacts.map((c) => (
-                                        <SelectItem key={c.client_id} value={c.client_id} disabled={!c.has_phone} data-testid={`pd-followup-contact-${c.client_id}`}>
-                                            {c.name || "Unnamed"}{c.role ? ` · ${c.role}` : (c.designation ? ` · ${c.designation}` : "")}{c.company_name ? ` · ${c.company_name}` : ""}{!c.has_phone ? " (no phone)" : ""}
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
-                        )}
+                        <PaymentRecipientSelect contacts={contacts} value={selectedContactId} onChange={onSelectContact} />
                     </div>
                     <div><span className="text-black/40 block">Status</span><Badge variant="outline" className="text-[10px] capitalize">{(p.pd_payment_followup_status || "not_due").replace("_", " ")}</Badge></div>
                     <div><span className="text-black/40 block">Next Follow-up</span><span className="text-black/70">{formatDate(p.pd_next_follow_up_at)}</span></div>

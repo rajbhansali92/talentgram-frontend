@@ -8,6 +8,7 @@ import TalentList from "@/pages/TalentList";
 import TalentEdit from "@/pages/TalentEdit";
 import ProjectList from "@/pages/ProjectList";
 import ProjectEdit from "@/pages/ProjectEdit";
+import ProductionOverview from "@/pages/ProductionOverview";
 import SubmissionReviewCenter from "@/pages/SubmissionReviewCenter";
 import LinkHistory from "@/pages/LinkHistory";
 import LinkGenerator from "@/pages/LinkGenerator";
@@ -51,6 +52,7 @@ export default function AdminApp() {
                     <Route path="projects/new" element={<ProjectEdit />} />
                     <Route path="projects/:id" element={<ProjectEdit />} />
                     <Route path="projects/:id/submissions" element={<SubmissionReviewCenter />} />
+                    <Route path="production" element={<ProductionOverview />} />
                     <Route path="links" element={<LinkHistory />} />
                     <Route path="links/new" element={<LinkGenerator />} />
                     <Route path="links/:id/results" element={<LinkResults />} />

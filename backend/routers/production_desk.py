@@ -125,6 +125,10 @@ from notifications import fanout as notify_fanout
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["Production Desk"])
+# The global Production Desk (all locked projects at a glance). Same module, same helpers: it
+# only batches the loads and filters/sorts/paginates — every number comes from _talent_card /
+# _desk_summary / _needs_attention, the exact functions the per-project desk uses.
+overview_router = APIRouter(prefix="/api/production", tags=["Production Desk"])
 
 # Zoho Books integration does not exist anywhere in this codebase (see
 # module docstring). This is a literal, static, honest state — never
@@ -536,9 +540,15 @@ async def _locked_talent_cards(pid: str, project: dict, reimb_totals: Optional[D
         {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "cover_media_id": 1, "media": 1, "whatsapp_group_name": 1},
     ).to_list(len(talent_ids))
     by_id = {t["id"]: t for t in talents}
+    return _cards_for_rows(rows, by_id, project, reimb_totals)
+
+
+def _cards_for_rows(rows: List[dict], talents_by_id: Dict[str, dict], project: dict, reimb_totals: Dict[str, float]) -> List[dict]:
+    """Locked casting_pipeline rows -> talent cards. The only place a card is built from a row, used by both
+    the project page (one project) and the global Production Desk (many projects, batched loads)."""
     cards = []
     for row in rows:
-        t = by_id.get(row.get("talent_id"))
+        t = talents_by_id.get(row.get("talent_id"))
         if not t:
             continue
         cards.append(_talent_card(t, row, project, reimb_totals.get(row.get("talent_id"), 0.0)))
@@ -709,6 +719,129 @@ def _financial_rollup(
     }
 
 
+def _followup_flags(project: dict, today_start: str, today_end: str) -> tuple:
+    """(due_today, overdue, upcoming) for the project's payment follow-up date."""
+    next_follow_up = project.get("pd_next_follow_up_at")
+    followup_status = project.get("pd_payment_followup_status") or "not_due"
+    due_today = bool(next_follow_up and followup_status != "done" and today_start <= next_follow_up < today_end)
+    overdue = bool(next_follow_up and followup_status != "done" and next_follow_up < today_start)
+    upcoming = bool(next_follow_up and followup_status != "done" and next_follow_up >= today_end)
+    return due_today, overdue, upcoming
+
+
+def _desk_summary(locked: List[dict], project: dict, reimbursements: List[dict], kickbacks: List[dict], tranches: List[dict]) -> Dict[str, Any]:
+    """Every project-level money number the desk shows (the `summary` object of GET /production-desk).
+    A pure function of already-loaded rows, shared by the project page and the global Production Desk
+    list so the two can never disagree — there is exactly one definition of each figure."""
+    talent_budget_total = sum(c["budget_total"] for c in locked if c["budget_total"] is not None)
+    extra_hours_total_all = sum(c["extra_hours_total"] for c in locked)
+    commission_gross = sum(c["commission_amount"] for c in locked if c["commission_amount"] is not None)
+    cleared = sum(1 for c in locked if c["payment_status"] == "cleared")
+    pending_amount = sum(
+        c["budget_total"] for c in locked
+        if c["payment_status"] == "pending" and c["budget_total"] is not None
+    )
+    kickbacks_total = sum(_num(k.get("amount")) or 0 for k in kickbacks)
+    commission_net = commission_gross - kickbacks_total
+    reimbursements_total_all = round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2)
+    tranches_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches), 2)
+    tranches_received_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches if t.get("payment_status") == "received"), 2)
+    # What Talentgram actually owes the talents: their NET payable (rate + overtime - commission +
+    # reimbursements), split by the payment status already tracked per talent.
+    talent_paid_total = round(sum(c["talent_net_payable"] for c in locked if c["payment_status"] == "cleared" and c.get("talent_net_payable") is not None), 2)
+    talent_pending_total = round(sum(c["talent_net_payable"] for c in locked if c["payment_status"] != "cleared" and c.get("talent_net_payable") is not None), 2)
+    return {
+        "locked_count": len(locked),
+        "shoot_days": project.get("pd_shooting_days"),
+        "talent_budget_total": talent_budget_total,
+        "extra_hours_total": round(extra_hours_total_all, 2),
+        "reimbursements_total": reimbursements_total_all,
+        "production_budget_total": _num(project.get("pd_production_budget_total")),
+        # V2 (spec section 21) — auto-aggregated, never manually typed.
+        "total_talent_and_overtime_and_reimbursements": round(talent_budget_total + extra_hours_total_all + reimbursements_total_all, 2),
+        "commission_gross": round(commission_gross, 2),
+        "kickbacks_total": round(kickbacks_total, 2),
+        "commission_net": round(commission_net, 2),
+        "payments_cleared": cleared,
+        "payments_total": len(locked),
+        "payments_pending_amount": round(pending_amount, 2),
+        "tranches_total": tranches_total,
+        "tranches_received_total": tranches_received_total,
+        "talent_paid_total": talent_paid_total,
+        "talent_pending_total": talent_pending_total,
+        **_financial_rollup(
+            locked, project, extra_hours_total=extra_hours_total_all, reimbursements_total=reimbursements_total_all,
+            kickbacks_total=kickbacks_total, commission_gross=commission_gross,
+            tranches=tranches, tranches_received_total=tranches_received_total,
+        ),
+    }
+
+
+def _needs_attention(
+    project: dict, locked: List[dict], reimbursements: List[dict], documents: List[dict], overdue_task_count: int,
+    *, followup_due_today: bool, followup_overdue: bool,
+) -> List[str]:
+    """The ONE Needs Attention definition — the project page and the global Production Desk both call it."""
+    cleared = sum(1 for c in locked if c["payment_status"] == "cleared")
+    payment_followup_due_today, payment_followup_overdue = followup_due_today, followup_overdue
+    needs_attention: List[str] = []
+    if not project.get("pd_confirmation_mail_received"):
+        needs_attention.append("Confirmation mail pending")
+    if not project.get("pd_invoice_raised"):
+        needs_attention.append("Invoice not raised")
+    elif not project.get("pd_invoice_sent"):
+        # Only surface "not sent" once "raised" is already true — an
+        # invoice that hasn't been raised yet obviously hasn't been sent
+        # either; showing both would just be noise.
+        needs_attention.append("Invoice not sent")
+    if not project.get("pd_payment_in_received"):
+        needs_attention.append("Client payment pending")
+    if not project.get("pd_gst_component_received"):
+        needs_attention.append("GST component pending")
+    pending_talent_payments = len(locked) - cleared
+    if pending_talent_payments > 0:
+        needs_attention.append(f"{pending_talent_payments} talent payment{'s' if pending_talent_payments != 1 else ''} pending")
+    if not any(m.get("category") == "call_sheet" for m in documents):
+        needs_attention.append("Call sheet missing")
+    reimbursements_pending = sum(1 for r in reimbursements if r.get("status") == "pending")
+    if reimbursements_pending:
+        needs_attention.append(f"{reimbursements_pending} reimbursement{'s' if reimbursements_pending != 1 else ''} pending")
+    missing_bills = sum(1 for r in reimbursements if not r.get("material_id"))
+    if missing_bills:
+        needs_attention.append(f"{missing_bills} reimbursement bill{'s' if missing_bills != 1 else ''} missing")
+    if overdue_task_count:
+        n = overdue_task_count
+        needs_attention.append(f"{n} task{'s' if n != 1 else ''} overdue")
+    if payment_followup_overdue:
+        needs_attention.append("Payment follow-up overdue")
+    elif payment_followup_due_today:
+        needs_attention.append("Payment follow-up due today")
+    # The Talent Shooting Schedule is the source of truth for shoot dates/times/places, so the
+    # project-level "Shoot Info" defaults no longer have to be filled in once every locked talent
+    # has at least one fully specified day (date + call time + location).
+    talent_schedules_complete = bool(locked) and all(
+        any(d.get("date") and d.get("call_time") and d.get("location") for d in (c.get("shoot_days") or []))
+        for c in locked
+    )
+    if locked and not (project.get("pd_shoot_location") or project.get("pd_call_time") or talent_schedules_complete):
+        needs_attention.append("Shoot details incomplete")
+    # Financial completeness — flagged, never guessed. A talent whose agreed rate is entered but
+    # whose production quote is not has no spread/earning yet (legacy rows land here until completed).
+    unquoted = [c["name"] for c in locked if c.get("production_quote") is None and c.get("talent_agreed_rate") is not None]
+    if unquoted:
+        needs_attention.append(f"Production quote missing for {len(unquoted)} talent{'s' if len(unquoted) != 1 else ''}")
+    below_cost = [c["name"] for c in locked if c.get("spread") is not None and c["spread"] < 0]
+    if below_cost:
+        needs_attention.append(f"Production quote below talent rate: {', '.join(below_cost)}")
+    # Only nags when the admin has explicitly marked it pending — an unset
+    # (None) agreement_status never surfaces here, so old projects that
+    # never touched this new field aren't retroactively flagged.
+    if project.get("pd_agreement_status") == "pending":
+        needs_attention.append("Agreement not signed")
+
+    return needs_attention
+
+
 # ---------------------------------------------------------------------------
 # GET /projects/{pid}/production-desk — the consolidated view
 # ---------------------------------------------------------------------------
@@ -729,20 +862,7 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
 
     locked = await _locked_talent_cards(pid, project, reimb_totals)
 
-    talent_budget_total = sum(c["budget_total"] for c in locked if c["budget_total"] is not None)
-    extra_hours_total_all = sum(c["extra_hours_total"] for c in locked)
-    commission_gross = sum(c["commission_amount"] for c in locked if c["commission_amount"] is not None)
-    cleared = sum(1 for c in locked if c["payment_status"] == "cleared")
-    pending_amount = sum(
-        c["budget_total"] for c in locked
-        if c["payment_status"] == "pending" and c["budget_total"] is not None
-    )
-
     kickbacks = await db.project_kickbacks.find({"project_id": pid}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    kickbacks_total = sum(_num(k.get("amount")) or 0 for k in kickbacks)
-    commission_net = commission_gross - kickbacks_total
-
-    reimbursements_total_all = round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2)
     # Checklist reimbursement status (spec section 11) — computed, never
     # stored: N/A when the project genuinely has none, complete only once
     # every one of them is "paid", otherwise pending. Never a false
@@ -755,8 +875,6 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
         reimbursement_checklist_status = "pending"
 
     tranches = await db.project_payment_tranches.find({"project_id": pid}, {"_id": 0}).sort("created_at", 1).to_list(200)
-    tranches_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches), 2)
-    tranches_received_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches if t.get("payment_status") == "received"), 2)
 
     crew = await db.project_crew.find({"project_id": pid}, {"_id": 0}).sort("created_at", 1).to_list(200)
 
@@ -848,70 +966,12 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
 
     next_follow_up = project.get("pd_next_follow_up_at")
     followup_status = project.get("pd_payment_followup_status") or "not_due"
-    payment_followup_due_today = bool(
-        next_follow_up and followup_status != "done" and today_start <= next_follow_up < today_end
-    )
-    payment_followup_overdue = bool(
-        next_follow_up and followup_status != "done" and next_follow_up < today_start
-    )
-    payment_followup_upcoming = bool(
-        next_follow_up and followup_status != "done" and next_follow_up >= today_end
-    )
+    payment_followup_due_today, payment_followup_overdue, payment_followup_upcoming = _followup_flags(project, today_start, today_end)
 
-    needs_attention: List[str] = []
-    if not project.get("pd_confirmation_mail_received"):
-        needs_attention.append("Confirmation mail pending")
-    if not project.get("pd_invoice_raised"):
-        needs_attention.append("Invoice not raised")
-    elif not project.get("pd_invoice_sent"):
-        # Only surface "not sent" once "raised" is already true — an
-        # invoice that hasn't been raised yet obviously hasn't been sent
-        # either; showing both would just be noise.
-        needs_attention.append("Invoice not sent")
-    if not project.get("pd_payment_in_received"):
-        needs_attention.append("Client payment pending")
-    if not project.get("pd_gst_component_received"):
-        needs_attention.append("GST component pending")
-    pending_talent_payments = len(locked) - cleared
-    if pending_talent_payments > 0:
-        needs_attention.append(f"{pending_talent_payments} talent payment{'s' if pending_talent_payments != 1 else ''} pending")
-    if not any(m.get("category") == "call_sheet" for m in documents):
-        needs_attention.append("Call sheet missing")
-    reimbursements_pending = sum(1 for r in reimbursements if r.get("status") == "pending")
-    if reimbursements_pending:
-        needs_attention.append(f"{reimbursements_pending} reimbursement{'s' if reimbursements_pending != 1 else ''} pending")
-    missing_bills = sum(1 for r in reimbursements if not r.get("material_id"))
-    if missing_bills:
-        needs_attention.append(f"{missing_bills} reimbursement bill{'s' if missing_bills != 1 else ''} missing")
-    if task_buckets["overdue"]:
-        n = len(task_buckets["overdue"])
-        needs_attention.append(f"{n} task{'s' if n != 1 else ''} overdue")
-    if payment_followup_overdue:
-        needs_attention.append("Payment follow-up overdue")
-    elif payment_followup_due_today:
-        needs_attention.append("Payment follow-up due today")
-    # The Talent Shooting Schedule is the source of truth for shoot dates/times/places, so the
-    # project-level "Shoot Info" defaults no longer have to be filled in once every locked talent
-    # has at least one fully specified day (date + call time + location).
-    talent_schedules_complete = bool(locked) and all(
-        any(d.get("date") and d.get("call_time") and d.get("location") for d in (c.get("shoot_days") or []))
-        for c in locked
+    needs_attention = _needs_attention(
+        project, locked, reimbursements, documents, len(task_buckets["overdue"]),
+        followup_due_today=payment_followup_due_today, followup_overdue=payment_followup_overdue,
     )
-    if locked and not (project.get("pd_shoot_location") or project.get("pd_call_time") or talent_schedules_complete):
-        needs_attention.append("Shoot details incomplete")
-    # Financial completeness — flagged, never guessed. A talent whose agreed rate is entered but
-    # whose production quote is not has no spread/earning yet (legacy rows land here until completed).
-    unquoted = [c["name"] for c in locked if c.get("production_quote") is None and c.get("talent_agreed_rate") is not None]
-    if unquoted:
-        needs_attention.append(f"Production quote missing for {len(unquoted)} talent{'s' if len(unquoted) != 1 else ''}")
-    below_cost = [c["name"] for c in locked if c.get("spread") is not None and c["spread"] < 0]
-    if below_cost:
-        needs_attention.append(f"Production quote below talent rate: {', '.join(below_cost)}")
-    # Only nags when the admin has explicitly marked it pending — an unset
-    # (None) agreement_status never surfaces here, so old projects that
-    # never touched this new field aren't retroactively flagged.
-    if project.get("pd_agreement_status") == "pending":
-        needs_attention.append("Agreement not signed")
 
     # V2 polish (spec section 32) — "recently completed", using each
     # record's own updated_at (already set by every status-changing PATCH
@@ -1002,33 +1062,7 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
         # actually has a key, so an unconfigured environment never makes (or logs) a failing request.
         "capabilities": {"places_search": bool((os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip())},
         "locked_talents": locked,
-        "summary": {
-            "locked_count": len(locked),
-            "shoot_days": project.get("pd_shooting_days"),
-            "talent_budget_total": talent_budget_total,
-            "extra_hours_total": round(extra_hours_total_all, 2),
-            "reimbursements_total": reimbursements_total_all,
-            "production_budget_total": _num(project.get("pd_production_budget_total")),
-            # V2 (spec section 21) — auto-aggregated, never manually typed.
-            # The pre-existing pd_production_budget_total (manual line
-            # above) is left untouched/still editable; this is a SEPARATE,
-            # additive, fully-derived total so nothing prior silently
-            # changes meaning.
-            "total_talent_and_overtime_and_reimbursements": round(talent_budget_total + extra_hours_total_all + reimbursements_total_all, 2),
-            "commission_gross": round(commission_gross, 2),
-            "kickbacks_total": round(kickbacks_total, 2),
-            "commission_net": round(commission_net, 2),
-            "payments_cleared": cleared,
-            "payments_total": len(locked),
-            "payments_pending_amount": round(pending_amount, 2),
-            "tranches_total": tranches_total,
-            "tranches_received_total": tranches_received_total,
-            **_financial_rollup(
-                locked, project, extra_hours_total=extra_hours_total_all, reimbursements_total=reimbursements_total_all,
-                kickbacks_total=kickbacks_total, commission_gross=commission_gross,
-                tranches=tranches, tranches_received_total=tranches_received_total,
-            ),
-        },
+        "summary": _desk_summary(locked, project, reimbursements, kickbacks, tranches),
         "needs_attention": needs_attention,
         "kickbacks": kickbacks,
         "reimbursements": reimbursements,
@@ -2313,4 +2347,316 @@ async def send_talent_invoice_to_group(pid: str, talent_id: str, admin: dict = D
         "job_ids": [j["id"] for j in jobs],
         "whatsapp_group_name": group_name,
         "talent_name": card["name"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/production/overview — the global Production Desk
+#
+# One row per project that has at least one LOCKED talent (casting_pipeline.stage == "locked" —
+# the same definition the project page uses), with server-side filtering, sorting and pagination.
+# It loads each collection ONCE for all candidate projects ($in) instead of running the per-project
+# desk N times, and returns lightweight summaries only: no media, no document lists, no task lists,
+# no per-talent cards. The full detail of one project is the existing GET /projects/{pid}/production-desk,
+# fetched by the UI only when a row is expanded.
+# ---------------------------------------------------------------------------
+PROJECT_STATUSES = ["ongoing", "hold", "complete", "locked"]
+SHOOT_STATES = ["not_scheduled", "scheduled", "today", "completed"]
+OVERVIEW_SORTS = ["priority", "name", "shoot", "outstanding", "earnings"]
+_PROJECT_LIGHT_PROJECTION = {
+    "_id": 0, "submission_requirements": 0, "custom_questions": 0, "video_links": 0, "additional_details": 0,
+}
+
+
+def _shoot_info(project: dict, cards: List[dict], today: str) -> Dict[str, Any]:
+    """Shoot state/dates for one project from the canonical Talent Shooting Schedule (+ the manual
+    shoot status the desk already stores). Precedence: today > scheduled > completed > not scheduled."""
+    days = []
+    for c in cards:
+        for d in (c.get("shoot_days") or []):
+            if d.get("date") and d.get("shoot_status") != "cancelled":
+                days.append((d["date"], d.get("call_time") or "", c, d))
+    days.sort(key=lambda x: (x[0], x[1]))
+    open_days = [x for x in days if x[3].get("shoot_status") != "completed"]
+    manual = project.get("pd_shoot_status") or "not_scheduled"
+    if any(x[0] == today for x in open_days) or manual == "today":
+        state = "today"
+    elif any(x[0] > today for x in open_days) or manual == "scheduled":
+        state = "scheduled"
+    elif manual == "completed" or (days and not open_days) or (days and all(x[0] < today for x in days)):
+        state = "completed"
+    else:
+        state = "not_scheduled"
+    upcoming = [x for x in days if x[0] >= today and x[3].get("shoot_status") != "completed"]
+    nxt = upcoming[0] if upcoming else None
+    return {
+        "state": state,
+        "next_date": nxt[0] if nxt else None,
+        "next_location": (nxt[3].get("location") if nxt else None),
+        "next_map_url": (nxt[3].get("location_map_url") if nxt else None),
+        "first_date": days[0][0] if days else None,
+        "last_date": days[-1][0] if days else None,
+        "days_count": len(days),
+        "_upcoming": upcoming,
+    }
+
+
+def _client_payment_state(summary: dict) -> str:
+    billable, outstanding = summary.get("production_billable_total"), summary.get("client_outstanding_total")
+    if billable is None or summary.get("production_basis") == "partial" or outstanding is None:
+        return "unknown"
+    if billable > 0 and outstanding == 0:
+        return "received"
+    return "partial" if (summary.get("client_received_total") or 0) > 0 else "pending"
+
+
+def _priority_rank(row: dict, today: str, soon: str) -> tuple:
+    """Operational urgency, from data the desk already holds (no invented scoring):
+    0 shooting today · 1 shoot within 7 days · 2 client still owes money · 3 talents still unpaid ·
+    4 anything flagged · 5 the rest — then soonest shoot, then most attention items, then name."""
+    shoot = row["shoot"]
+    if shoot["state"] == "today":
+        rank = 0
+    elif shoot["next_date"] and shoot["next_date"] <= soon:
+        rank = 1
+    elif row["client_payment"]["state"] in ("pending", "partial"):
+        rank = 2
+    elif row["talent_payment"]["cleared"] < row["talent_payment"]["total"]:
+        rank = 3
+    elif row["attention_count"] > 0:
+        rank = 4
+    else:
+        rank = 5
+    return (rank, shoot["next_date"] or "9999-99-99", -row["attention_count"], (row["brand_name"] or "").lower())
+
+
+@overview_router.get("/overview")
+async def production_overview(
+    q: Optional[str] = Query(None, max_length=120),
+    client: Optional[str] = Query(None, max_length=120),
+    status: str = Query("active", description="active (default: not complete) | all | ongoing | hold | complete | locked"),
+    stage: Optional[str] = Query(None, description="the project's own production stage (pd_production_status)"),
+    shoot_state: Optional[str] = Query(None, description="not_scheduled | scheduled | today | completed"),
+    shoot_date: Optional[str] = Query(None, description="today | upcoming | past | none"),
+    payment: Optional[str] = Query(None, description="client_pending | client_partial | client_received | talent_pending | talent_done"),
+    attention: Optional[str] = Query(None, description="needs | clear"),
+    sort: str = Query("priority"),
+    page: int = Query(0, ge=0),
+    size: int = Query(20, ge=1, le=100),
+    admin: dict = Depends(current_team_or_admin),
+):
+    from core import _paginated, active_only
+
+    if status not in ("active", "all", *PROJECT_STATUSES):
+        raise HTTPException(400, f"status must be active, all or one of {PROJECT_STATUSES}")
+    if shoot_state is not None and shoot_state not in SHOOT_STATES:
+        raise HTTPException(400, f"shoot_state must be one of {SHOOT_STATES}")
+    if shoot_date is not None and shoot_date not in ("today", "upcoming", "past", "none"):
+        raise HTTPException(400, "shoot_date must be today, upcoming, past or none")
+    if payment is not None and payment not in ("client_pending", "client_partial", "client_received", "talent_pending", "talent_done"):
+        raise HTTPException(400, "invalid payment filter")
+    if attention is not None and attention not in ("needs", "clear"):
+        raise HTTPException(400, "attention must be needs or clear")
+    if stage is not None and stage not in PRODUCTION_STATUS_OPTIONS:
+        raise HTTPException(400, f"stage must be one of {PRODUCTION_STATUS_OPTIONS}")
+    if sort not in OVERVIEW_SORTS:
+        raise HTTPException(400, f"sort must be one of {OVERVIEW_SORTS}")
+
+    # ── batched loads: each collection ONCE for every candidate project ──────────────────────
+    locked_rows = await db.casting_pipeline.find({"stage": "locked"}, {"_id": 0}).to_list(20000)
+    rows_by_project: Dict[str, List[dict]] = {}
+    for r in locked_rows:
+        if r.get("project_id"):
+            rows_by_project.setdefault(r["project_id"], []).append(r)
+    pids = list(rows_by_project)
+    if not pids:
+        return {**_paginated([], 0, page, size), "summary": _overview_summary([]), "upcoming_shoots": [], "facets": {"clients": []}}
+
+    # soft-deleted projects never appear; the status filter is applied right here
+    all_projects = await db.projects.find(active_only({"id": {"$in": pids}}), _PROJECT_LIGHT_PROJECTION).to_list(5000)
+    projects = [p for p in all_projects if (status == "all") or (status == "active" and p.get("status") != "complete") or (p.get("status") == status)]
+    pid_list = [p["id"] for p in projects]
+    pid_set = set(pid_list)
+
+    talent_ids = sorted({r["talent_id"] for pid in pid_list for r in rows_by_project[pid] if r.get("talent_id")})
+    talents = await db.talents.find(
+        {"id": {"$in": talent_ids}},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "whatsapp_group_name": 1},
+    ).to_list(len(talent_ids) or 1) if talent_ids else []
+    talents_by_id = {t["id"]: t for t in talents}
+
+    def by_project(docs):
+        out: Dict[str, List[dict]] = {}
+        for d in docs:
+            if d.get("project_id") in pid_set:
+                out.setdefault(d["project_id"], []).append(d)
+        return out
+
+    reimbursements = by_project(await db.project_reimbursements.find(
+        {"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "talent_id": 1, "amount": 1, "status": 1, "material_id": 1}).to_list(20000))
+    kickbacks = by_project(await db.project_kickbacks.find({"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "amount": 1}).to_list(20000))
+    tranches = by_project(await db.project_payment_tranches.find(
+        {"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "amount": 1, "payment_status": 1}).to_list(20000))
+    task_docs = await db.workflow_tasks.find(
+        {"$or": [{"project_id": {"$in": pid_list}}, {"talent_id": {"$in": talent_ids}}], "status": {"$in": _ACTIVE_TASK_STATUSES}},
+        {"_id": 0, "project_id": 1, "talent_id": 1, "status": 1, "due_at": 1},
+    ).to_list(20000)
+    contact_ids = [p.get("pd_production_contact_client_id") for p in projects]
+    name_map = await _client_name_map(contact_ids)
+
+    today_start, today_end = ist_day_bounds_utc()
+    today = ist_today().isoformat()
+    soon = (ist_today() + timedelta(days=7)).isoformat()
+
+    # ── per project: the SAME helpers the project page uses ────────────────────────────────
+    rows: List[dict] = []
+    for project in projects:
+        pid = project["id"]
+        p_reimb = reimbursements.get(pid, [])
+        reimb_totals: Dict[str, float] = {}
+        for r in p_reimb:
+            if r.get("talent_id"):
+                reimb_totals[r["talent_id"]] = reimb_totals.get(r["talent_id"], 0.0) + (_num(r.get("amount")) or 0.0)
+        cards = _cards_for_rows(rows_by_project[pid], talents_by_id, project, reimb_totals)
+        if not cards:
+            continue
+        summary = _desk_summary(cards, project, p_reimb, kickbacks.get(pid, []), tranches.get(pid, []))
+        card_talents = {c["talent_id"] for c in cards}
+        p_tasks = [t for t in task_docs if t.get("project_id") == pid or t.get("talent_id") in card_talents]
+        overdue = _bucket_tasks(p_tasks, today_start, today_end)["overdue"]
+        documents = [m for m in (project.get("materials") or []) if m.get("category") in PRODUCTION_DESK_DOCUMENT_CATEGORIES]
+        due_today, overdue_fu, _upcoming_fu = _followup_flags(project, today_start, today_end)
+        attention_items = _needs_attention(project, cards, p_reimb, documents, len(overdue), followup_due_today=due_today, followup_overdue=overdue_fu)
+        shoot = _shoot_info(project, cards, today)
+        contact = name_map.get(project.get("pd_production_contact_client_id")) or {}
+        client_label = (contact.get("company_name") or project.get("production_house") or "").strip() or None
+        billable = summary["production_billable_total"]
+        quote_base = None if billable is None else round(billable - summary["production_overtime_total"] - summary["production_reimbursements_total"], 2)
+        rows.append({
+            "project_id": pid,
+            "brand_name": project.get("brand_name"),
+            "status": project.get("status"),
+            "stage": project.get("pd_production_status") or "not_started",
+            "client": {"label": client_label, "contact_name": contact.get("name") or None},
+            "locked_count": len(cards),
+            "shoot": {k: v for k, v in shoot.items() if k != "_upcoming"},
+            "money": {
+                "production_quote": quote_base,
+                "production_basis": summary["production_basis"],
+                "production_total": billable,
+                "talent_agreed_total": summary["talent_agreed_total"],
+                "talent_payable_total": summary["talent_payable_total"],
+                "commission": summary["commission_gross"],
+                "spread": summary["spread_total"],
+                "overtime": summary["production_overtime_total"],
+                "reimbursements": summary["production_reimbursements_total"],
+                "earnings": summary["talentgram_earnings_total"],
+            },
+            "client_payment": {
+                "state": _client_payment_state(summary),
+                "total": billable, "received": summary["client_received_total"], "outstanding": summary["client_outstanding_total"],
+            },
+            "talent_payment": {
+                "cleared": summary["payments_cleared"], "total": summary["payments_total"],
+                "paid": summary["talent_paid_total"], "pending": summary["talent_pending_total"],
+            },
+            "attention": attention_items,
+            "attention_count": len(attention_items),
+            "_upcoming": [
+                {"project_id": pid, "brand_name": project.get("brand_name"), "talent_id": x[2]["talent_id"], "talent_name": x[2]["name"],
+                 "date": x[0], "reporting_time": x[3].get("reporting_time"), "call_time": x[3].get("call_time"),
+                 "location": x[3].get("location"), "location_address": x[3].get("location_address"),
+                 "map_url": x[3].get("location_map_url"), "status": x[3].get("shoot_status")}
+                for x in shoot["_upcoming"]
+            ],
+        })
+
+    clients_facet = sorted({r["client"]["label"] for r in rows if r["client"]["label"]}, key=str.lower)
+
+    # ── filters (server side) ────────────────────────────────────────────────────────────────
+    def keep(r: dict) -> bool:
+        if q:
+            needle = q.strip().lower()
+            if needle not in (r["brand_name"] or "").lower() and needle not in (r["client"]["label"] or "").lower() and needle not in (r["client"]["contact_name"] or "").lower():
+                return False
+        if client and client.strip().lower() not in (r["client"]["label"] or "").lower():
+            return False
+        if stage and r["stage"] != stage:
+            return False
+        if shoot_state and r["shoot"]["state"] != shoot_state:
+            return False
+        if shoot_date:
+            sh = r["shoot"]
+            has_dates = sh["days_count"] > 0
+            if shoot_date == "none" and has_dates:
+                return False
+            if shoot_date == "today" and sh["state"] != "today":
+                return False
+            if shoot_date == "upcoming" and not sh["next_date"]:
+                return False
+            if shoot_date == "past" and not (has_dates and not sh["next_date"]):
+                return False
+        if payment:
+            cp, tp = r["client_payment"]["state"], r["talent_payment"]
+            if payment == "client_pending" and cp != "pending":
+                return False
+            if payment == "client_partial" and cp != "partial":
+                return False
+            if payment == "client_received" and cp != "received":
+                return False
+            if payment == "talent_pending" and tp["cleared"] >= tp["total"]:
+                return False
+            if payment == "talent_done" and not (tp["total"] > 0 and tp["cleared"] >= tp["total"]):
+                return False
+        if attention == "needs" and r["attention_count"] == 0:
+            return False
+        if attention == "clear" and r["attention_count"] > 0:
+            return False
+        return True
+
+    rows = [r for r in rows if keep(r)]
+    if sort == "priority":
+        rows.sort(key=lambda r: _priority_rank(r, today, soon))
+    elif sort == "name":
+        rows.sort(key=lambda r: (r["brand_name"] or "").lower())
+    elif sort == "shoot":
+        rows.sort(key=lambda r: (r["shoot"]["next_date"] is None, r["shoot"]["next_date"] or "", (r["brand_name"] or "").lower()))
+    elif sort == "outstanding":
+        rows.sort(key=lambda r: (-(r["client_payment"]["outstanding"] or 0), (r["brand_name"] or "").lower()))
+    elif sort == "earnings":
+        rows.sort(key=lambda r: (-(r["money"]["earnings"] or 0), (r["brand_name"] or "").lower()))
+
+    summary_all = _overview_summary(rows, today)
+    upcoming: List[dict] = []
+    for r in rows:
+        upcoming.extend(r["_upcoming"])
+    upcoming.sort(key=lambda u: (u["date"], u["call_time"] or "", u["brand_name"] or ""))
+
+    total = len(rows)
+    skip = page * size
+    page_rows = [{k: v for k, v in r.items() if k != "_upcoming"} for r in rows[skip: skip + size]]
+    return {
+        **_paginated(page_rows, total, page, size),
+        "summary": summary_all,
+        "upcoming_shoots": upcoming[:20],
+        "facets": {"clients": clients_facet},
+        "today": today,
+    }
+
+
+def _overview_summary(rows: List[dict], today: Optional[str] = None) -> Dict[str, Any]:
+    """Header totals over the FILTERED set — sums of the per-project figures above, nothing stored."""
+    def total(getter):
+        return round(sum((getter(r) or 0) for r in rows), 2)
+    return {
+        "projects": len(rows),
+        "locked_talents": sum(r["locked_count"] for r in rows),
+        "shooting_today": sum(1 for r in rows if r["shoot"]["state"] == "today"),
+        # upcoming shoot DAYS (a talent's scheduled day after today), not projects — a project shooting
+        # today can still have more days ahead
+        "upcoming_shoots": sum(1 for r in rows for u in r.get("_upcoming", []) if today and u["date"] > today),
+        "client_outstanding": total(lambda r: r["client_payment"]["outstanding"]),
+        "talent_pending": total(lambda r: r["talent_payment"]["pending"]),
+        "earnings": total(lambda r: r["money"]["earnings"]),
+        "needs_attention": sum(1 for r in rows if r["attention_count"] > 0),
     }

@@ -21,35 +21,36 @@ collections of its own:
                                        recording a call never changes who
                                        it's assigned to.
 
-The "latest call" and "current pipeline stage" shown in the list are
-ALWAYS derived live (an aggregation over talent_project_calls sorted by
-called_at, and a direct read of db.casting_pipeline respectively) — never
-duplicated/cached state that could drift from the source of truth. This
-mirrors the brief's own explicit instruction and the same "read-only
-join over existing collections" shape
-routers.whatsapp._compute_ongoing_pipeline_reminders already uses for its
-own "Ongoing Project Talents" list (same query shape: db.projects
-{status: "ongoing"} -> db.casting_pipeline scoped to those project ids ->
-db.talents) — not reused directly (that function's own eligibility rule
-is narrower, follow_up-only), but the same proven pattern.
+Per-project call state is ALWAYS derived live — latest call, pipeline stage (and the derived Follow-up
+lane), call state (pending / attempted / completed), "new" — never cached state that could drift. The
+rules live in workflow_calls_logic.py. Nothing in this file ever writes to db.casting_pipeline, and a
+call's `update_status` ("Sending"/"Not Sending"/"Not Interested") is NEVER written back to a pipeline
+stage: a call outcome and a project's casting decision are different things.
 
-A call's `update_status` ("Sending"/"Not Sending"/"Not Interested") is
-NEVER written back to db.casting_pipeline.stage — see the brief's own
-explicit "Call Update vs Pipeline" requirement. Nothing in this file ever
-calls agents/modules/casting_pipeline.py's pipeline-mutation functions or
-touches the casting_pipeline collection with a write of any kind.
+Shared call outcome (2026-10): a call is one phone conversation with one talent, so recording it ALSO
+appends a clearly marked entry (`synced_from_call_id` / `synced_from_project_id`, id derived from the
+source call + project so a retry is a no-op) to the same canonical talent's OTHER ongoing-project call
+histories. Only call history is shared; stage, approval, availability and assignment stay per project.
+
+Assignment docs hold the current owner, `assigned_at` (when THAT assignee took it), `priority`
+(urgent / semi_urgent / normal, default normal) and an append-only `assignment_history`.
+
+Talent identity is canonical: a talent absorbed into another by a merge keeps old ids in some
+collections, so every read/write resolves ids through `_Identity` (canonical id + absorbed aliases).
 """
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pymongo.errors import DuplicateKeyError
 
 from core import db, current_team_or_admin, require_role, _now, active_only
 from routers.casting_pipeline import _normalise_stage, PIPELINE_STAGE_ORDER
-from .workflow_calls_schemas import CallIn, AssignIn, CALL_RESULTS, UPDATE_STATUSES
+from .workflow_calls_schemas import CallIn, AssignIn, PriorityIn, CALL_RESULTS, UPDATE_STATUSES
+from . import workflow_calls_logic as L
 # Workflow -> WhatsApp notifications (2026-09-28 refinement pass, PART 4-8):
 # reuses the EXACT same shared formatter/enqueue infrastructure
 # routers.workflow already built for Tasks — same whatsapp_batches/
@@ -190,22 +191,61 @@ async def _ongoing_project_map(project_ids: Optional[List[str]] = None) -> Dict[
     return {p["id"]: p for p in docs}
 
 
-async def _latest_calls_by_pair(pairs: List[tuple]) -> Dict[tuple, Dict[str, Any]]:
-    """(talent_id, project_id) -> its most recent call row, in ONE
-    aggregation (never loads full history into the app — see the brief's
-    own performance requirement). Empty input -> empty result, no query."""
-    if not pairs:
+class _Identity:
+    """Canonical talent identity. A merged ("absorbed") talent keeps its old id in some collections (the
+    merge executor repoints pipeline rows but not the call tables), so every read resolves an id to its
+    surviving canonical talent and treats the canonical id plus every id absorbed into it as one person."""
+
+    def __init__(self, parent: Dict[str, str]):
+        self._canon: Dict[str, str] = {}
+        for a in parent:
+            t, hops = a, 0
+            while t in parent and hops < 8:
+                t, hops = parent[t], hops + 1
+            self._canon[a] = t
+        self._aliases: Dict[str, set] = {}
+        for a, c in self._canon.items():
+            self._aliases.setdefault(c, {c}).add(a)
+
+    def canon(self, talent_id: str) -> str:
+        return self._canon.get(talent_id, talent_id)
+
+    def alias_ids(self, canon_id: str) -> set:
+        return set(self._aliases.get(canon_id, {canon_id}))
+
+    def all_ids(self, canon_ids: Iterable[str]) -> List[str]:
+        out: set = set()
+        for c in canon_ids:
+            out |= self.alias_ids(c)
+        return sorted(out)
+
+
+async def _identity() -> _Identity:
+    docs = await db.talents.find({"status": "MERGED", "merged_into": {"$ne": None}}, {"_id": 0, "id": 1, "merged_into": 1}).to_list(5000)
+    return _Identity({d["id"]: d["merged_into"] for d in docs})
+
+
+def _pick_later(a: Optional[Dict[str, Any]], b: Dict[str, Any], key: str) -> Dict[str, Any]:
+    return b if a is None or (b.get(key) or "") > (a.get(key) or "") else a
+
+
+async def _latest_calls_by_pair(talent_ids: List[str], project_ids: List[str], identity: _Identity) -> Dict[tuple, Dict[str, Any]]:
+    """(canonical talent, project) -> {latest: its most recent call row, count: attempts}, in ONE aggregation
+    over the (talent ids x project ids) the page needs — never the full history, never one query per pair."""
+    if not talent_ids or not project_ids:
         return {}
-    or_clauses = [{"talent_id": t, "project_id": p} for t, p in pairs]
     cursor = db[CALLS_COLLECTION].aggregate([
-        {"$match": {"$or": or_clauses}},
+        {"$match": {"talent_id": {"$in": talent_ids}, "project_id": {"$in": project_ids}}},
         {"$sort": {"called_at": -1}},
-        {"$group": {"_id": {"talent_id": "$talent_id", "project_id": "$project_id"}, "latest": {"$first": "$$ROOT"}}},
+        {"$group": {"_id": {"talent_id": "$talent_id", "project_id": "$project_id"}, "latest": {"$first": "$$ROOT"}, "count": {"$sum": 1}}},
     ])
     out: Dict[tuple, Dict[str, Any]] = {}
     async for doc in cursor:
         row = doc["latest"]
-        out[(row["talent_id"], row["project_id"])] = row
+        key = (identity.canon(row["talent_id"]), row["project_id"])
+        prev = out.get(key)
+        merged = {"latest": _pick_later(prev["latest"] if prev else None, row, "called_at"), "count": doc["count"] + (prev["count"] if prev else 0)}
+        out[key] = merged
     return out
 
 
@@ -231,160 +271,245 @@ def _call_status_bucket(called_at: Optional[str]) -> str:
     return "stale"
 
 
+async def _load_call_rows(identity: _Identity, talent_scope: Optional[List[str]] = None, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Every (canonical talent, ongoing project) call row, fully derived, in a fixed handful of queries
+    regardless of how many rows there are (projects, pipeline, submissions, talents, assignments, latest
+    calls, users). `talent_scope` (canonical ids) narrows the load to one person for the call-detail view."""
+    now = now or datetime.now(timezone.utc)
+    project_map = await _ongoing_project_map()
+    if not project_map:
+        return {"rows": [], "project_map": {}}
+    query: Dict[str, Any] = {"project_id": {"$in": list(project_map.keys())}}
+    if talent_scope:
+        query["talent_id"] = {"$in": identity.all_ids(talent_scope)}
+    pipeline_rows = await db.casting_pipeline.find(
+        active_only(query), {"_id": 0, "project_id": 1, "talent_id": 1, "stage": 1, "created_at": 1},
+    ).sort("created_at", 1).to_list(20000)
+    if not pipeline_rows:
+        return {"rows": [], "project_map": project_map}
+
+    # one row per (canonical talent, project) — a merged duplicate must not show a person twice
+    pairs: Dict[tuple, Dict[str, Any]] = {}
+    for r in pipeline_rows:
+        key = (identity.canon(r["talent_id"]), r["project_id"])
+        if key not in pairs:
+            pairs[key] = r
+    canon_ids = sorted({t for t, _ in pairs})
+    all_ids = identity.all_ids(canon_ids)
+    project_ids = sorted({p for _, p in pairs})
+
+    subs, talent_docs, assignment_docs, call_info = await asyncio.gather(
+        db.submissions.find(active_only({"project_id": {"$in": project_ids}, "talent_id": {"$in": all_ids}}), {"_id": 0, "project_id": 1, "talent_id": 1}).to_list(None),
+        db.talents.find(active_only({"id": {"$in": canon_ids}}, exclude_archived=True), {"_id": 0, "id": 1, "name": 1, "phone": 1}).to_list(len(canon_ids)),
+        db[ASSIGNMENTS_COLLECTION].find({"talent_id": {"$in": all_ids}, "project_id": {"$in": project_ids}}, {"_id": 0, "assignment_history": 0}).to_list(None),
+        _latest_calls_by_pair(all_ids, project_ids, identity),
+    )
+    submitted = {(p, identity.canon(t)) for s in subs for p, t in [(s.get("project_id"), s.get("talent_id"))] if p and t}
+    talent_by_id = {t["id"]: t for t in talent_docs}
+    assignment_by_pair: Dict[tuple, Dict[str, Any]] = {}
+    for a in assignment_docs:
+        key = (identity.canon(a["talent_id"]), a["project_id"])
+        assignment_by_pair[key] = _pick_later(assignment_by_pair.get(key), a, "updated_at")
+
+    user_ids = {a.get("assigned_to_id") for a in assignment_by_pair.values()} | {a.get("assigned_by") for a in assignment_by_pair.values()}
+    user_ids |= {c["latest"].get("called_by") for c in call_info.values()}
+    user_ids.discard(None)
+    users_by_id: Dict[str, Dict[str, Any]] = {}
+    if user_ids:
+        users_by_id = {u["id"]: u for u in await db.users.find({"id": {"$in": sorted(user_ids)}}, {"_id": 0, "id": 1, "name": 1, "email": 1}).to_list(len(user_ids))}
+
+    per_talent: Dict[str, int] = {}
+    for t, _ in pairs:
+        per_talent[t] = per_talent.get(t, 0) + 1
+
+    rows: List[Dict[str, Any]] = []
+    for (canon_id, project_id), pr in pairs.items():
+        talent = talent_by_id.get(canon_id)
+        if not talent:
+            continue  # talent record missing/deleted — never fabricate a row for it
+        raw_stage = _normalise_stage(pr.get("stage")) or pr.get("stage")
+        stage = L.derive_stage(raw_stage, (project_id, canon_id) in submitted)
+        asg = assignment_by_pair.get((canon_id, project_id)) or {}
+        assigned_to_id = asg.get("assigned_to_id")
+        assigned_at = asg.get("assigned_at") if assigned_to_id else None
+        info = call_info.get((canon_id, project_id))
+        latest = (info or {}).get("latest")
+        state = L.call_state(latest, assigned_at)
+        project = project_map[project_id]
+        activity = max([x for x in ((latest or {}).get("called_at"), assigned_at) if x], default=None)
+        src_pid = (latest or {}).get("synced_from_project_id")
+        rows.append({
+            "talent_id": canon_id,
+            "talent_name": talent.get("name") or "Unnamed",
+            "talent_phone": talent.get("phone") or None,
+            "project_id": project_id,
+            "project_name": project.get("brand_name") or "Untitled Project",
+            "pipeline_stage": stage,
+            "raw_stage": raw_stage,
+            "is_follow_up": stage == "follow_up",
+            "assigned_to_id": assigned_to_id,
+            "assigned_to_name": _user_label(users_by_id.get(assigned_to_id)) if assigned_to_id else None,
+            "assigned_by_name": _user_label(users_by_id.get(asg.get("assigned_by"))) if assigned_to_id else None,
+            "assigned_at": assigned_at,
+            "priority": L.clean_priority(asg.get("priority")),
+            "call_state": state,
+            "is_new": L.is_new_assignment(state, assigned_to_id, assigned_at, now),
+            "call_count": (info or {}).get("count", 0),
+            "last_call_at": (latest or {}).get("called_at"),
+            "last_call_result": (latest or {}).get("call_result"),
+            "last_update_status": (latest or {}).get("update_status"),
+            "last_update_text": (latest or {}).get("update_text"),
+            "last_call_by_name": _user_label(users_by_id.get((latest or {}).get("called_by"))) if latest else None,
+            "last_call_synced": bool((latest or {}).get("synced_from_call_id")),
+            "last_call_source_project": (project_map.get(src_pid) or {}).get("brand_name") if src_pid else None,
+            "last_activity_at": activity,
+            "call_status_bucket": _call_status_bucket((latest or {}).get("called_at")),
+            "other_projects_count": per_talent.get(canon_id, 1) - 1,
+        })
+    return {"rows": rows, "project_map": project_map}
+
+
+def _apply_filters(rows: List[Dict[str, Any]], *, viewer_id: Optional[str], project_ids: List[str], talent_id: Optional[str], assignment: Optional[str],
+                   assigned_to_id: Optional[str], stages: set, call_status: Optional[str], call_state: Optional[str],
+                   priority: Optional[str], search: Optional[str], identity: _Identity) -> List[Dict[str, Any]]:
+    wanted_talent = identity.canon(talent_id) if talent_id else None
+    needle = (search or "").strip().lower()
+    out = []
+    for r in rows:
+        if project_ids and r["project_id"] not in project_ids:
+            continue
+        if wanted_talent and r["talent_id"] != wanted_talent:
+            continue
+        if stages and r["pipeline_stage"] not in stages and r["raw_stage"] not in stages:
+            continue
+        a = r["assigned_to_id"]
+        if assignment == "mine" and a != viewer_id:
+            continue
+        if assignment == "unassigned" and a:
+            continue
+        if assignment == "assigned" and not a:
+            continue
+        if assigned_to_id:
+            if assigned_to_id == "unassigned":
+                if a:
+                    continue
+            elif a != assigned_to_id:
+                continue
+        if call_status and call_status != r["call_status_bucket"]:
+            continue
+        if call_state and call_state != "all" and call_state != r["call_state"]:
+            continue
+        if priority and priority != r["priority"]:
+            continue
+        if needle and needle not in f"{r['talent_name']} {r['project_name']} {r['talent_phone'] or ''}".lower():
+            continue
+        out.append(r)
+    return out
+
+
 @router.get("")
 async def list_calls(
     project_ids: Optional[str] = None,  # comma-separated
     talent_id: Optional[str] = None,
     assignment: Optional[str] = None,  # all | mine | unassigned | assigned
-    assigned_to_id_filter: Optional[str] = Query(None, alias="assigned_to_id"),  # exact team member id, or "unassigned" — the "Assigned To" filter (2026-09-28)
-    pipeline: Optional[str] = None,  # comma-separated stage keys
+    assigned_to_id_filter: Optional[str] = Query(None, alias="assigned_to_id"),  # exact team member id, or "unassigned"
+    pipeline: Optional[str] = None,  # comma-separated stage keys (follow_up included)
     call_status: Optional[str] = None,  # never | today | recent | stale
+    call_state: Optional[str] = None,  # pending | attempted | completed | all
+    priority: Optional[str] = None,  # urgent | semi_urgent | normal
     search: Optional[str] = None,
+    include_facets: bool = True,  # the filter dropdowns' option lists; the UI asks once, not on every filter change
+    view: str = Query("list", pattern="^(list|grouped)$"),
+    page: int = Query(0, ge=0),
+    size: Optional[int] = Query(None, ge=1, le=200),  # list: rows per page · grouped: projects per page · omitted: everything
     user: Dict[str, Any] = Depends(current_team_or_admin),
 ):
-    """One row per (talent, project) currently in the pipeline of an
-    ONGOING project — never a talent with no ongoing-project pipeline
-    membership, never a completed/hold/locked project's rows (brief
-    section 3/15, a hard requirement).
+    """One row per (canonical talent, project) in the pipeline of an ONGOING project — never a project
+    that is not ongoing (a hard requirement).
 
-    Visibility (2026-09-28 — see this task's own audit/report): a "team"
-    role user sees the SAME set of calls an admin's default view would —
-    every ongoing-project pipeline row, not just rows assigned to them.
-    This was a deliberate broadening (previously team members were hard-
-    scoped server-side to their own assigned queue only, which made
-    "record a call not assigned to you" unreachable through the UI at
-    all, since that row was never even visible). Assignment itself
-    (POST /assign, reassigning who a call belongs to) remains admin-only
-    — this endpoint only ever reads, never writes, `assigned_to_id`.
-    `assignment`/`assigned_to_id` are optional narrowing filters
-    available to every caller now, not an admin-only capability — a team
-    member can equally filter down to "My Calls" or a specific
-    colleague's queue within the now-broader set they can see.
-    """
+    Everything is derived live, never cached (stage from casting_pipeline, Follow-up by the Casting
+    Pipeline board's own rule, call state from the latest call versus the assignment). Rows come back in
+    ONE queue order (workflow_calls_logic.queue_key) for the viewer: admins and team members see the same
+    set of calls (assignment itself stays admin-only), ordered for their own role.
 
-    project_id_list = [p for p in (project_ids.split(",") if project_ids else []) if p]
-    project_map = await _ongoing_project_map(project_id_list or None)
-    if not project_map:
-        return {"rows": []}
+      view=list     flat rows, optionally paginated (page/size)
+      view=grouped  project → pipeline → rows, paginated by PROJECT (page/size)
 
-    pipeline_query: Dict[str, Any] = {"project_id": {"$in": list(project_map.keys())}}
-    if talent_id:
-        pipeline_query["talent_id"] = talent_id
-    pipeline_rows = await db.casting_pipeline.find(
-        active_only(pipeline_query), {"_id": 0, "project_id": 1, "talent_id": 1, "stage": 1},
-    ).to_list(20000)
-    if not pipeline_rows:
-        return {"rows": []}
+    `summary`, `facets` and `next_up` always describe the whole filtered set, not just the page."""
+    identity = await _identity()
+    loaded = await _load_call_rows(identity)
+    all_rows = loaded["rows"]
+    viewer_id, viewer_is_admin = user.get("id"), user.get("role") == "admin"
+    pid_list = [p for p in (project_ids.split(",") if project_ids else []) if p]
+    stages = {s for s in (pipeline.split(",") if pipeline else []) if s}
 
-    stage_filter = set(s for s in (pipeline.split(",") if pipeline else []) if s)
-    filtered_rows = []
-    for r in pipeline_rows:
-        stage = _normalise_stage(r.get("stage")) or r.get("stage")
-        if stage_filter and stage not in stage_filter:
-            continue
-        filtered_rows.append((r["talent_id"], r["project_id"], stage))
-    if not filtered_rows:
-        return {"rows": []}
+    facets = None
+    if include_facets:
+        facets = {
+            "projects": sorted({(r["project_id"], r["project_name"]) for r in all_rows}, key=lambda x: x[1].lower()),
+            "talents": sorted({(r["talent_id"], r["talent_name"]) for r in all_rows}, key=lambda x: x[1].lower()),
+            "assignees": sorted({(r["assigned_to_id"], r["assigned_to_name"] or r["assigned_to_id"]) for r in all_rows if r["assigned_to_id"]}, key=lambda x: x[1].lower()),
+        }
+        facets = {k: [{"id": i, "label": l} for i, l in v] for k, v in facets.items()}
 
-    talent_ids = sorted({t for t, _, _ in filtered_rows})
-    talent_docs = await db.talents.find(
-        active_only({"id": {"$in": talent_ids}}, exclude_archived=True), {"_id": 0, "id": 1, "name": 1, "phone": 1},
-    ).to_list(len(talent_ids))
-    talent_by_id = {t["id"]: t for t in talent_docs}
+    rows = _apply_filters(
+        all_rows, viewer_id=viewer_id, project_ids=pid_list, talent_id=talent_id, assignment=assignment,
+        assigned_to_id=assigned_to_id_filter, stages=stages, call_status=call_status, call_state=call_state,
+        priority=priority, search=search, identity=identity,
+    )
+    rows = L.sort_rows(rows, viewer_id, viewer_is_admin)
+    out: Dict[str, Any] = {
+        "pipeline_stages": L.STAGE_DISPLAY_ORDER, "summary": L.counts(rows),
+        "next_up": [r for r in rows if r["call_state"] != "completed"][:5],
+        "viewer": {"id": viewer_id, "is_admin": viewer_is_admin},
+    }
+    if facets is not None:
+        out["facets"] = facets
+    if view == "grouped":
+        groups = L.group_by_project(rows)
+        if size:
+            total = len(groups)
+            groups = groups[page * size:(page + 1) * size]
+            out.update({"total_projects": total, "page": page, "size": size, "has_more": (page + 1) * size < total})
+        out["projects"] = groups
+    else:
+        total = len(rows)
+        if size:
+            rows = rows[page * size:(page + 1) * size]
+            out.update({"page": page, "size": size, "has_more": (page + 1) * size < total})
+        out["total"] = total
+        out["rows"] = rows
+    return out
 
-    pairs = [(t, p) for t, p, _ in filtered_rows]
-    assignment_docs = await db[ASSIGNMENTS_COLLECTION].find(
-        {"$or": [{"talent_id": t, "project_id": p} for t, p in pairs]}, {"_id": 0},
-    ).to_list(len(pairs)) if pairs else []
-    assignment_by_pair = {(a["talent_id"], a["project_id"]): a for a in assignment_docs}
 
-    latest_call_by_pair = await _latest_calls_by_pair(pairs)
-
-    assigned_user_ids = sorted({a["assigned_to_id"] for a in assignment_docs if a.get("assigned_to_id")})
-    called_by_ids = sorted({c.get("called_by") for c in latest_call_by_pair.values() if c.get("called_by")})
-    user_ids_needed = sorted(set(assigned_user_ids) | set(called_by_ids))
-    users_by_id: Dict[str, Dict[str, Any]] = {}
-    if user_ids_needed:
-        user_docs = await db.users.find(
-            {"id": {"$in": user_ids_needed}}, {"_id": 0, "id": 1, "name": 1, "email": 1},
-        ).to_list(len(user_ids_needed))
-        users_by_id = {u["id"]: u for u in user_docs}
-
-    search_lower = (search or "").strip().lower()
-    rows: List[Dict[str, Any]] = []
-    for talent_id_, project_id_, stage in filtered_rows:
-        talent = talent_by_id.get(talent_id_)
-        if not talent:
-            continue  # talent record missing/deleted — never fabricate a row for it
-        assignment_doc = assignment_by_pair.get((talent_id_, project_id_))
-        assigned_to_id = (assignment_doc or {}).get("assigned_to_id")
-
-        if assignment and assignment != "all":
-            if assignment == "mine" and assigned_to_id != user.get("id"):
-                continue
-            if assignment == "unassigned" and assigned_to_id:
-                continue
-            if assignment == "assigned" and not assigned_to_id:
-                continue
-
-        if assigned_to_id_filter:
-            if assigned_to_id_filter == "unassigned":
-                if assigned_to_id:
-                    continue
-            elif assigned_to_id != assigned_to_id_filter:
-                continue
-
-        latest_call = latest_call_by_pair.get((talent_id_, project_id_))
-        bucket = _call_status_bucket((latest_call or {}).get("called_at"))
-        if call_status and call_status != bucket:
-            continue
-
-        project = project_map[project_id_]
-        if search_lower:
-            haystack = f"{talent.get('name') or ''} {project.get('brand_name') or ''} {talent.get('phone') or ''}".lower()
-            if search_lower not in haystack:
-                continue
-
-        rows.append({
-            "talent_id": talent_id_,
-            "talent_name": talent.get("name") or "Unnamed",
-            # Primary number only — enough for an instant tel: Call button.
-            # Alternate number/email are intentionally NOT included here;
-            # the profile drawer fetches the full talent record on demand
-            # (GET /talents/{id}, same endpoint TalentPreviewDrawer already
-            # uses) instead of bloating every list row with fields most
-            # rows will never need.
-            "talent_phone": talent.get("phone") or None,
-            "project_id": project_id_,
-            "project_name": project.get("brand_name") or "Untitled Project",
-            "pipeline_stage": stage,
-            "assigned_to_id": assigned_to_id,
-            "assigned_to_name": _user_label(users_by_id.get(assigned_to_id)) if assigned_to_id else None,
-            "last_call_at": (latest_call or {}).get("called_at"),
-            "last_call_result": (latest_call or {}).get("call_result"),
-            "last_update_status": (latest_call or {}).get("update_status"),
-            "last_update_text": (latest_call or {}).get("update_text"),
-            "last_call_by_name": _user_label(users_by_id.get((latest_call or {}).get("called_by"))) if latest_call else None,
-            "call_status_bucket": bucket,
-        })
-
-    rows.sort(key=lambda r: (r["last_call_at"] or ""), reverse=False)  # never-called first, oldest-called next
-    return {"rows": rows, "pipeline_stages": PIPELINE_STAGE_ORDER}
+@router.get("/{talent_id}/{project_id}/context")
+async def call_context(talent_id: str, project_id: str, user: Dict[str, Any] = Depends(current_team_or_admin)):
+    """What the caller needs before dialling: this talent's call row and every OTHER ongoing project the
+    same canonical person is in (stage, call state, owner, latest outcome) — so nobody makes a redundant
+    call. One batched load for the one person; never a query per project."""
+    identity = await _identity()
+    canon_id = identity.canon(talent_id)
+    loaded = await _load_call_rows(identity, [canon_id])
+    rows = loaded["rows"]
+    current = next((r for r in rows if r["project_id"] == project_id), None)
+    if not current:
+        raise HTTPException(404, "This talent is not in that ongoing project's pipeline")
+    others = sorted((r for r in rows if r["project_id"] != project_id), key=lambda r: r["project_name"].lower())
+    return {"talent_id": canon_id, "current": current, "other_projects": others}
 
 
 @router.get("/{talent_id}/{project_id}/history")
 async def call_history(
     talent_id: str, project_id: str, user: Dict[str, Any] = Depends(current_team_or_admin),
 ):
-    """No ownership check — history visibility now matches list_calls'
-    own broadened visibility (2026-09-28): any authenticated team/admin
-    user can view history for any (talent, project) pair, the same set
-    list_calls already shows them. Keeping an independent "assigned to
-    you" 403 here after broadening the list would have made the History
-    button silently fail for rows a team member can now see but isn't
-    assigned to — the same reachability gap this whole change closes."""
+    """No ownership check — history visibility matches list_calls' own visibility: any authenticated
+    team/admin user can view history for any (talent, project) pair they can see in the list. Includes
+    entries recorded under an id later absorbed into this talent by a merge, and flags entries that were
+    synced here from another project's call (`synced_from_project_name`) so the audit trail is explicit."""
+    identity = await _identity()
+    ids = sorted(identity.alias_ids(identity.canon(talent_id)))
     docs = await db[CALLS_COLLECTION].find(
-        {"talent_id": talent_id, "project_id": project_id}, {"_id": 0},
+        {"talent_id": {"$in": ids}, "project_id": project_id}, {"_id": 0},
     ).sort("called_at", -1).to_list(500)
 
     caller_ids = sorted({d.get("called_by") for d in docs if d.get("called_by")})
@@ -394,144 +519,213 @@ async def call_history(
             {"id": {"$in": caller_ids}}, {"_id": 0, "id": 1, "name": 1, "email": 1},
         ).to_list(len(caller_ids))
         users_by_id = {u["id"]: u for u in user_docs}
+    src_ids = sorted({d["synced_from_project_id"] for d in docs if d.get("synced_from_project_id")})
+    src_names: Dict[str, str] = {}
+    if src_ids:
+        src_names = {p["id"]: p.get("brand_name") for p in await db.projects.find({"id": {"$in": src_ids}}, {"_id": 0, "id": 1, "brand_name": 1}).to_list(len(src_ids))}
 
     for d in docs:
         d["called_by_name"] = _user_label(users_by_id.get(d.get("called_by")))
+        d["synced_from_project_name"] = src_names.get(d.get("synced_from_project_id"))
     return {"history": docs}
+
+
+async def _sync_call_to_other_projects(call: Dict[str, Any], identity: _Identity) -> List[Dict[str, Any]]:
+    """Record the same call outcome against the talent's OTHER ongoing-project calls.
+
+    Only the call-history side is touched: each target gets one APPEND-ONLY entry marked
+    `synced_from_call_id` / `synced_from_project_id`. Pipeline stages, approval/rejection, availability and
+    assignments are never read-modified-written here — they are project decisions. Idempotent: the entry's
+    id is derived from the source call id and the target project, so the unique index on `id` makes a retry
+    (or a replay after a partial failure) a no-op that still returns the full list of affected projects."""
+    canon_id = identity.canon(call["talent_id"])
+    project_map = await _ongoing_project_map()
+    target_ids = [p for p in project_map if p != call["project_id"]]
+    if not target_ids:
+        return []
+    rows = await db.casting_pipeline.find(
+        active_only({"talent_id": {"$in": sorted(identity.alias_ids(canon_id))}, "project_id": {"$in": target_ids}}),
+        {"_id": 0, "project_id": 1},
+    ).to_list(500)
+    affected = []
+    for pid in sorted({r["project_id"] for r in rows}):
+        entry = {
+            "id": f"{call['id']}:{pid}", "talent_id": canon_id, "project_id": pid,
+            "called_by": call.get("called_by"), "called_at": call["called_at"],
+            "call_result": call["call_result"], "update_status": call.get("update_status"), "update_text": call.get("update_text"),
+            "created_at": _now(),
+            "synced_from_call_id": call["id"], "synced_from_project_id": call["project_id"],
+        }
+        try:
+            await db[CALLS_COLLECTION].insert_one(entry)
+        except DuplicateKeyError:
+            pass  # already synced by an earlier attempt
+        affected.append({"project_id": pid, "project_name": project_map[pid].get("brand_name") or "Untitled Project"})
+    return affected
 
 
 @router.post("")
 async def create_call(payload: CallIn, user: Dict[str, Any] = Depends(current_team_or_admin)):
-    """Idempotent on `payload.id` — the frontend generates this ONCE per
-    Save tap (and disables the button immediately, per the brief's own
-    "save-lock" requirement) and never regenerates it on retry. A repeat
-    POST with the SAME id (double-click before the disabled state took
-    effect, or a network retry) hits the unique index on `id` and gets
-    the ALREADY-created record back instead of a second history row —
-    mirroring the exact "claim via unique-index insert, DuplicateKeyError
-    -> return the existing doc" pattern already used elsewhere in this
-    codebase (e.g. agents/modules/casting_command_interpreter.py's
-    _claim, inbound_messages.capture_inbound)."""
+    """Idempotent on `payload.id` — the frontend generates this ONCE per Save tap (and disables the button
+    immediately) and never regenerates it on retry. A repeat POST with the SAME id hits the unique index on
+    `id` and gets the ALREADY-created record back instead of a second history row (the same
+    "claim via unique-index insert, DuplicateKeyError -> return the existing doc" pattern used elsewhere,
+    e.g. agents/modules/casting_command_interpreter.py's _claim).
+
+    The call is also recorded against the talent's other ongoing-project calls (see
+    _sync_call_to_other_projects) unless `sync_other_projects` is false; the response lists the projects
+    that were updated. No ownership check: a team member may record a call that is not assigned to them —
+    and it never writes to ASSIGNMENTS_COLLECTION, so recording can never reassign anything. A call can
+    only be logged against a talent who is really in an ONGOING project's pipeline."""
     if payload.call_result not in CALL_RESULTS:
         raise HTTPException(400, f"call_result must be one of {CALL_RESULTS}")
     if payload.update_status is not None and payload.update_status not in UPDATE_STATUSES:
         raise HTTPException(400, f"update_status must be one of {UPDATE_STATUSES}")
 
-    # No ownership check here (2026-09-28): a team member may record a
-    # call for a pair NOT assigned to them, matching list_calls' own
-    # broadened visibility — see this task's brief ("Allow a Team Member
-    # to record/add a call entry even when the call is NOT assigned to
-    # that team member"). This is deliberately the ONLY permission this
-    # endpoint relaxes: it still never writes to ASSIGNMENTS_COLLECTION
-    # (assignment/reassignment stays exclusively behind POST /assign,
-    # require_role("admin"), untouched below), so recording a call can
-    # never reassign who a pair belongs to.
-    # Pipeline membership must be real and belong to a currently-ongoing
-    # project — never let a call be logged against a stale/closed
-    # combination (brief section 3, applied to writes too, not just the
-    # list view).
+    identity = await _identity()
+    canon_id = identity.canon(payload.talent_id)
     project = await db.projects.find_one(
         active_only({"id": payload.project_id, "status": "ongoing"}), {"_id": 0, "id": 1, "brand_name": 1},
     )
     if not project:
         raise HTTPException(400, "Project is not ongoing (or does not exist)")
     pipeline_row = await db.casting_pipeline.find_one(
-        active_only({"talent_id": payload.talent_id, "project_id": payload.project_id}), {"_id": 0, "id": 1},
+        active_only({"talent_id": {"$in": sorted(identity.alias_ids(canon_id))}, "project_id": payload.project_id}), {"_id": 0, "id": 1},
     )
     if not pipeline_row:
         raise HTTPException(400, "Talent is not in this project's pipeline")
 
     doc = {
         "id": payload.id,
-        "talent_id": payload.talent_id,
+        "talent_id": canon_id,
         "project_id": payload.project_id,
         "called_by": user.get("id"),
-        # Server-side timestamp (_now(), the SAME ISO-8601-UTC convention
-        # every other *_at field in this codebase uses) — never trusts the
-        # browser's own clock, per the brief's explicit requirement.
+        # Server-side timestamp (_now(), ISO-8601 UTC like every other *_at field) — never the browser's clock.
         "called_at": _now(),
         "call_result": payload.call_result,
         "update_status": payload.update_status,
         "update_text": (payload.update_text or "").strip() or None,
+        "sync_other_projects": bool(payload.sync_other_projects),
         "created_at": _now(),
     }
+    fresh = True
     try:
         await db[CALLS_COLLECTION].insert_one(doc)
     except DuplicateKeyError:
-        # A retry of an ALREADY-recorded call — the notification for the
-        # real mutation already fired the first time; replaying it here
-        # would be exactly the duplicate-from-retry PART 13 forbids.
         existing = await db[CALLS_COLLECTION].find_one({"id": payload.id}, {"_id": 0})
-        if existing:
-            return existing
-        raise
+        if not existing:
+            raise
+        doc, fresh = existing, False
     doc.pop("_id", None)
 
-    # WhatsApp group notification (PART 4/7) — fires only on the genuine
-    # fresh insert above, never on the idempotent-replay path.
-    talent = await db.talents.find_one({"id": payload.talent_id}, {"_id": 0, "name": 1})
-    talent_name = (talent or {}).get("name") or "Unnamed Talent"
-    actor_name = user.get("name") or user.get("email") or "Someone"
-    enqueue_workflow_whatsapp_notification(
-        _build_call_recorded_message(
-            talent_name, project.get("brand_name"), payload.call_result, payload.update_status, actor_name, doc["called_at"],
-        ),
-        f"{payload.talent_id}:{payload.project_id}",
-    )
+    # A replay finishes any sync a failed first attempt left half-done (calls recorded before this
+    # feature carry no flag and are never retro-synced).
+    synced: List[Dict[str, Any]] = []
+    if doc.get("sync_other_projects", False):
+        synced = await _sync_call_to_other_projects(doc, identity)
 
-    return doc
+    if fresh:
+        # WhatsApp group notification — only on the genuine fresh insert, never on an idempotent replay.
+        talent = await db.talents.find_one({"id": canon_id}, {"_id": 0, "name": 1})
+        talent_name = (talent or {}).get("name") or "Unnamed Talent"
+        actor_name = user.get("name") or user.get("email") or "Someone"
+        enqueue_workflow_whatsapp_notification(
+            _build_call_recorded_message(
+                talent_name, project.get("brand_name"), payload.call_result, payload.update_status, actor_name, doc["called_at"],
+            ),
+            f"{canon_id}:{payload.project_id}",
+        )
+    return {**doc, "synced_projects": synced}
+
+
+def _history_entry(kind: str, actor_id: Optional[str], now: str, **fields: Any) -> Dict[str, Any]:
+    return {"type": kind, "at": now, "by": actor_id, **fields}
 
 
 @router.post("/assign")
 async def assign_calls(payload: AssignIn, user: Dict[str, Any] = Depends(require_role("admin"))):
-    """Admin-only (brief section 12/25) — assignment is always at the
-    (talent_id, project_id) level, never a whole talent across every
-    project they're in (brief's own explicit "Important" callout)."""
+    """Admin-only — assignment is always at the (talent_id, project_id) level, never a whole talent across
+    every project they're in.
+
+    The assignment doc is the current state: assignee, `assigned_at` (when THIS assignee took it — reset on
+    a real reassignment, left alone on a same-assignee re-save), `priority` (default normal for a new
+    assignment), and an append-only `assignment_history` so a reassignment never destroys what came before.
+    A legacy doc being reassigned first records its previous known assignment, with its real original
+    timestamp — nothing is back-filled or invented."""
     if not payload.pairs:
         raise HTTPException(400, "pairs must not be empty")
+    if payload.priority is not None and payload.priority not in L.PRIORITIES:
+        raise HTTPException(400, f"priority must be one of {L.PRIORITIES}")
     if payload.assigned_to_id:
         assignee = await db.users.find_one({"id": payload.assigned_to_id}, {"_id": 0, "id": 1, "status": 1})
         if not assignee:
             raise HTTPException(404, "assigned_to_id does not match a real user")
 
-    # Fetch the BEFORE state for every pair in one query — this is what
-    # lets a real reassignment (old assignee != new) be told apart from a
-    # first-time assignment (was unassigned) or a genuine no-op (same
-    # assignee re-saved), so PART 13's "one logical change = one
-    # notification" holds even across a bulk multi-pair assign.
-    or_clauses = [{"talent_id": p.talent_id, "project_id": p.project_id} for p in payload.pairs]
+    identity = await _identity()
+    canon_pairs = [(identity.canon(p.talent_id), p.project_id) for p in payload.pairs]
     existing_docs = await db[ASSIGNMENTS_COLLECTION].find(
-        {"$or": or_clauses}, {"_id": 0, "talent_id": 1, "project_id": 1, "assigned_to_id": 1},
-    ).to_list(len(payload.pairs))
-    prev_assignee_by_pair = {(d["talent_id"], d["project_id"]): d.get("assigned_to_id") for d in existing_docs}
+        {"talent_id": {"$in": identity.all_ids(t for t, _ in canon_pairs)}, "project_id": {"$in": sorted({p for _, p in canon_pairs})}}, {"_id": 0},
+    ).to_list(None)
+    existing_by_pair: Dict[tuple, Dict[str, Any]] = {}
+    for d in existing_docs:
+        key = (identity.canon(d["talent_id"]), d["project_id"])
+        existing_by_pair[key] = _pick_later(existing_by_pair.get(key), d, "updated_at")
 
     now = _now()
     updated = 0
     changed_pairs = []  # (talent_id, project_id, prev_assignee_id)
-    for pair in payload.pairs:
-        result = await db[ASSIGNMENTS_COLLECTION].update_one(
-            {"talent_id": pair.talent_id, "project_id": pair.project_id},
-            {
-                "$set": {
-                    "assigned_to_id": payload.assigned_to_id, "assigned_by": user.get("id"), "updated_at": now,
-                },
-                "$setOnInsert": {
-                    "id": str(uuid.uuid4()), "talent_id": pair.talent_id, "project_id": pair.project_id,
-                    "assigned_at": now,
-                },
-            },
-            upsert=True,
-        )
-        if result.modified_count or result.upserted_id:
-            updated += 1
-        prev_assignee = prev_assignee_by_pair.get((pair.talent_id, pair.project_id))
-        if payload.assigned_to_id and payload.assigned_to_id != prev_assignee:
-            changed_pairs.append((pair.talent_id, pair.project_id, prev_assignee))
+    for canon_id, project_id in canon_pairs:
+        prev = existing_by_pair.get((canon_id, project_id))
+        prev_assignee = (prev or {}).get("assigned_to_id")
+        new_assignee = payload.assigned_to_id
+        priority = payload.priority or (prev or {}).get("priority") or L.DEFAULT_PRIORITY
+        assignee_changed = new_assignee != prev_assignee
+        priority_changed = bool(prev) and priority != L.clean_priority((prev or {}).get("priority")) and not assignee_changed
 
-    # WhatsApp group notifications (PART 5/6) — one per pair whose
-    # assignee genuinely changed to a real user; unassignment (setting
-    # assigned_to_id back to None) has no template in this pass and is
-    # deliberately left silent rather than inventing one.
+        if not prev:
+            doc = {
+                "id": str(uuid.uuid4()), "talent_id": canon_id, "project_id": project_id,
+                "assigned_to_id": new_assignee, "assigned_by": user.get("id"),
+                "assigned_at": now if new_assignee else None, "priority": priority, "updated_at": now,
+                "assignment_history": [_history_entry("assigned" if new_assignee else "unassigned", user.get("id"), now, assigned_to_id=new_assignee, priority=priority)],
+            }
+            try:
+                await db[ASSIGNMENTS_COLLECTION].insert_one(doc)
+                updated += 1
+                if new_assignee:
+                    changed_pairs.append((canon_id, project_id, None))
+                continue
+            except DuplicateKeyError:
+                prev = await db[ASSIGNMENTS_COLLECTION].find_one({"talent_id": canon_id, "project_id": project_id}, {"_id": 0}) or {}
+                prev_assignee = prev.get("assigned_to_id")
+                assignee_changed = new_assignee != prev_assignee
+
+        if assignee_changed:
+            history: List[Dict[str, Any]] = []
+            if not prev.get("assignment_history") and prev_assignee:
+                # legacy doc: keep what we genuinely know about the previous assignment, with its real timestamp
+                history.append(_history_entry("assigned", prev.get("assigned_by"), prev.get("assigned_at"), assigned_to_id=prev_assignee, legacy=True, ended_at=now))
+            history.append(_history_entry("assigned" if new_assignee else "unassigned", user.get("id"), now, assigned_to_id=new_assignee, previous_assigned_to_id=prev_assignee, priority=priority))
+            res = await db[ASSIGNMENTS_COLLECTION].update_one(
+                {"id": prev["id"], "assigned_to_id": prev_assignee},   # optimistic: a concurrent change loses cleanly
+                {"$set": {"assigned_to_id": new_assignee, "assigned_by": user.get("id"), "assigned_at": now if new_assignee else None,
+                          "priority": priority, "updated_at": now},
+                 "$push": {"assignment_history": {"$each": history}}},
+            )
+            if res.modified_count:
+                updated += 1
+                if new_assignee:
+                    changed_pairs.append((canon_id, project_id, prev_assignee))
+        elif priority_changed:
+            res = await db[ASSIGNMENTS_COLLECTION].update_one(
+                {"id": prev["id"]},
+                {"$set": {"priority": priority, "updated_at": now},
+                 "$push": {"assignment_history": _history_entry("priority_changed", user.get("id"), now, priority_from=L.clean_priority(prev.get("priority")), priority_to=priority)}},
+            )
+            updated += 1 if res.modified_count else 0
+
+    # WhatsApp group notifications — one per assignment ACTION, only for pairs whose assignee genuinely
+    # changed to a real user; unassignment has no template and stays silent.
     if changed_pairs:
         talent_ids = {t for t, _, _ in changed_pairs}
         project_ids = {p for _, p, _ in changed_pairs}
@@ -542,15 +736,6 @@ async def assign_calls(payload: AssignIn, user: Dict[str, Any] = Depends(require
         name_map = await _resolve_user_names({user.get("id"), payload.assigned_to_id} | {pa for _, _, pa in changed_pairs})
         actor_name = name_map.get(user.get("id"), user.get("name") or user.get("email") or "Someone")
         new_assignee_name = name_map.get(payload.assigned_to_id, "Unassigned")
-
-        # ONE notification per assignment ACTION, not one per pair — the
-        # batch boundary is this request (changed_pairs is already the
-        # complete set from the single payload.pairs the frontend already
-        # sends in one POST), never a per-pair loop. A single-pair action
-        # keeps the existing dedicated ASSIGNED/REASSIGNED wording; a
-        # multi-pair action gets one consolidated CALLS ASSIGNED message
-        # (see _build_calls_assigned_batch_messages' own length-based
-        # split, which only ever fires for a genuinely oversized batch).
         if len(changed_pairs) == 1:
             talent_id, project_id, prev_assignee = changed_pairs[0]
             talent_name = talent_names.get(talent_id, "Unnamed Talent")
@@ -571,3 +756,53 @@ async def assign_calls(payload: AssignIn, user: Dict[str, Any] = Depends(require
                 enqueue_workflow_whatsapp_notification(message, batch_source_id)
 
     return {"updated": updated}
+
+
+@router.patch("/priority")
+async def set_priority(payload: PriorityIn, user: Dict[str, Any] = Depends(current_team_or_admin)):
+    """Change priority (urgent / semi_urgent / normal). Admins may set it on any call; a team member only on
+    calls assigned to THEMSELVES (they cannot reach assignment itself). Persisted on the assignment doc, so
+    it survives refreshes and shows identically in the project view, pipeline view and call details."""
+    if payload.priority not in L.PRIORITIES:
+        raise HTTPException(400, f"priority must be one of {L.PRIORITIES}")
+    if not payload.pairs:
+        raise HTTPException(400, "pairs must not be empty")
+    is_admin = user.get("role") == "admin"
+    identity = await _identity()
+    canon_pairs = [(identity.canon(p.talent_id), p.project_id) for p in payload.pairs]
+    docs = await db[ASSIGNMENTS_COLLECTION].find(
+        {"talent_id": {"$in": identity.all_ids(t for t, _ in canon_pairs)}, "project_id": {"$in": sorted({p for _, p in canon_pairs})}}, {"_id": 0},
+    ).to_list(None)
+    by_pair: Dict[tuple, Dict[str, Any]] = {}
+    for d in docs:
+        key = (identity.canon(d["talent_id"]), d["project_id"])
+        by_pair[key] = _pick_later(by_pair.get(key), d, "updated_at")
+
+    now = _now()
+    updated, skipped = 0, []
+    for canon_id, project_id in canon_pairs:
+        doc = by_pair.get((canon_id, project_id))
+        if not is_admin and (not doc or doc.get("assigned_to_id") != user.get("id")):
+            skipped.append({"talent_id": canon_id, "project_id": project_id, "reason": "only the assignee can change this priority"})
+            continue
+        if doc is None:
+            new_doc = {
+                "id": str(uuid.uuid4()), "talent_id": canon_id, "project_id": project_id, "assigned_to_id": None, "assigned_by": None,
+                "assigned_at": None, "priority": payload.priority, "updated_at": now,
+                "assignment_history": [_history_entry("priority_changed", user.get("id"), now, priority_from=L.DEFAULT_PRIORITY, priority_to=payload.priority)],
+            }
+            try:
+                await db[ASSIGNMENTS_COLLECTION].insert_one(new_doc)
+                updated += 1
+                continue
+            except DuplicateKeyError:
+                doc = await db[ASSIGNMENTS_COLLECTION].find_one({"talent_id": canon_id, "project_id": project_id}, {"_id": 0})
+        if L.clean_priority(doc.get("priority")) == payload.priority:
+            continue
+        res = await db[ASSIGNMENTS_COLLECTION].update_one(
+            {"id": doc["id"]},
+            {"$set": {"priority": payload.priority, "updated_at": now},
+             "$push": {"assignment_history": _history_entry("priority_changed", user.get("id"), now, priority_from=L.clean_priority(doc.get("priority")), priority_to=payload.priority)}},
+        )
+        updated += 1 if res.modified_count else 0
+    return {"updated": updated, "skipped": skipped}

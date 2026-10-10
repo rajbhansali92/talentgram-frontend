@@ -1,57 +1,32 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { adminApi } from "@/lib/api";
-import {
-    Phone,
-    Eye,
-    History,
-    X,
-    Loader2,
-    Search,
-    ChevronDown,
-    Check,
-    PhoneCall,
-} from "lucide-react";
+import { X, Loader2, Search, ChevronDown, Check, Layers, List as ListIcon, PhoneCall } from "lucide-react";
 import { toast } from "sonner";
-import { PIPELINE_STAGE_ORDER, STAGE_LABELS, getStageLabel } from "@/components/pipeline/constants";
+import CallRow from "@/components/calls/CallRow";
+import ProjectGroup from "@/components/calls/ProjectGroup";
+import CallDetailDrawer from "@/components/calls/CallDetailDrawer";
+import RecordCallModal from "@/components/calls/RecordCallModal";
+import { PriorityBadge, StageChip } from "@/components/calls/CallBadges";
+import {
+    CALL_RESULT_LABELS, UPDATE_STATUS_LABELS, CALL_STATE_FILTERS, LAST_CALLED_FILTERS, CALL_PIPELINE_ORDER,
+    PRIORITIES, PRIORITY_META, stageLabel, fmtLocal, rowKey, toDo,
+} from "@/lib/calls";
 
-const CALL_RESULT_OPTIONS = [
-    { id: "answered", label: "Answered" },
-    { id: "no_answer", label: "No Answer" },
-    { id: "busy", label: "Busy" },
-    { id: "switched_off", label: "Switched Off" },
-    { id: "call_back", label: "Call Back" },
-];
-const CALL_RESULT_LABELS = Object.fromEntries(CALL_RESULT_OPTIONS.map((o) => [o.id, o.label]));
-
-const UPDATE_STATUS_OPTIONS = [
-    { id: "sending", label: "Sending" },
-    { id: "not_sending", label: "Not Sending" },
-    { id: "not_interested", label: "Not Interested" },
-];
-const UPDATE_STATUS_LABELS = Object.fromEntries(UPDATE_STATUS_OPTIONS.map((o) => [o.id, o.label]));
-
-const CALL_STATUS_OPTIONS = [
-    { id: "", label: "All" },
-    { id: "never", label: "Never Called" },
-    { id: "today", label: "Called Today" },
-    { id: "recent", label: "Called Recently" },
-    { id: "stale", label: "Needs Follow Up" },
+const GROUPED_PAGE = 6;     // projects per page in the grouped view
+const LIST_PAGE = 40;       // calls per page in the flat view
+const SCOPES = [
+    { id: "all", label: "All Calls" },
+    { id: "mine", label: "My Calls" },
+    { id: "unassigned", label: "Unassigned" },
+    { id: "assigned", label: "Assigned" },
+    { id: "completed", label: "Completed" },
 ];
 
-function fmtLocal(iso) {
-    if (!iso) return "Never";
-    try {
-        return new Date(iso).toLocaleString(undefined, {
-            dateStyle: "medium",
-            timeStyle: "short",
-        });
-    } catch {
-        return iso;
-    }
+function readPref(key, fallback) {
+    try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
 }
-
-function genId() {
-    return (crypto?.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+function writePref(key, value) {
+    try { localStorage.setItem(key, value); } catch { /* per-viewer convenience only */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +180,8 @@ function ProfileDrawer({ talentId, projectName, onClose }) {
 }
 
 // ---------------------------------------------------------------------------
-// Full call history for one Talent + Project pair — fetched on demand.
+// Full call history for one Talent + Project pair — fetched on demand. Entries synced from another
+// project's call are labelled with where they came from (the audit trail).
 // ---------------------------------------------------------------------------
 function HistoryModal({ talentId, projectId, talentName, projectName, onClose }) {
     const [history, setHistory] = useState([]);
@@ -222,40 +198,34 @@ function HistoryModal({ talentId, projectId, talentName, projectName, onClose })
     }, [talentId, projectId]);
 
     return (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-            <div
-                className="w-full max-w-lg max-h-[80vh] bg-white rounded-md shadow-xl flex flex-col"
-                onClick={(e) => e.stopPropagation()}
-            >
-                <div className="flex items-center justify-between p-4 border-b border-black/[0.06]">
-                    <div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+            <div className="w-full max-w-lg max-h-[80vh] bg-white rounded-md shadow-xl flex flex-col" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Call history">
+                <div className="flex items-center justify-between gap-2 p-4 border-b border-black/[0.06]">
+                    <div className="min-w-0">
                         <p className="text-xs font-semibold uppercase tracking-wider text-black/85">Call History</p>
-                        <p className="text-[11px] text-black/45">{talentName} — {projectName}</p>
+                        <p className="text-[11px] text-black/45 break-words">{talentName} — {projectName}</p>
                     </div>
-                    <button onClick={onClose} className="p-1 rounded-full text-black/40 hover:text-black hover:bg-black/[0.04]">
-                        <X className="w-4 h-4" />
-                    </button>
+                    <button onClick={onClose} className="p-1 rounded-full text-black/40 hover:text-black hover:bg-black/[0.04] shrink-0" aria-label="Close"><X className="w-4 h-4" /></button>
                 </div>
                 <div className="overflow-y-auto p-4 space-y-3">
                     {loading ? (
-                        <div className="flex items-center gap-2 text-xs text-black/50">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading...
-                        </div>
+                        <div className="flex items-center gap-2 text-xs text-black/50"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading...</div>
                     ) : history.length === 0 ? (
                         <p className="text-xs text-black/45">No calls logged yet.</p>
                     ) : (
                         history.map((h) => (
-                            <div key={h.id} className="border border-black/[0.06] rounded-sm p-2.5">
+                            <div key={h.id} className="border border-black/[0.06] rounded-sm p-2.5" data-testid="history-entry">
                                 <div className="flex items-center justify-between gap-2">
-                                    <span className="text-xs font-semibold text-black/85">
-                                        {CALL_RESULT_LABELS[h.call_result] || h.call_result}
-                                    </span>
+                                    <span className="text-xs font-semibold text-black/85">{CALL_RESULT_LABELS[h.call_result] || h.call_result}</span>
                                     <span className="text-[10px] text-black/40">{fmtLocal(h.called_at)}</span>
                                 </div>
                                 <p className="text-[11px] text-black/50 mt-0.5">
                                     by {h.called_by_name || "Unknown"}
                                     {h.update_status && ` · ${UPDATE_STATUS_LABELS[h.update_status] || h.update_status}`}
                                 </p>
+                                {h.synced_from_call_id && (
+                                    <p className="text-[10px] text-sky-700 mt-0.5" data-testid="history-synced">Synced from {h.synced_from_project_name || "another project"}</p>
+                                )}
                                 {h.update_text && <p className="text-xs text-black/70 mt-1">{h.update_text}</p>}
                             </div>
                         ))
@@ -267,235 +237,145 @@ function HistoryModal({ talentId, projectId, talentName, projectName, onClose })
 }
 
 // ---------------------------------------------------------------------------
-// Fast call-entry flow: Answered/No Answer (+optional extras) -> if
-// Answered, optional Sending/Not Sending/Not Interested -> optional note
-// -> Save. A single client-generated id is minted once per modal open and
-// reused on save (the router's own idempotency key), and Save disables
-// itself immediately on click (server-side dedupe is the real guarantee;
-// this just avoids an obvious accidental double-submit).
+// Main tab
 // ---------------------------------------------------------------------------
-function CallEntryModal({ row, onClose, onSaved }) {
-    const [callId] = useState(genId());
-    const [result, setResult] = useState(null);
-    const [updateStatus, setUpdateStatus] = useState(null);
-    const [note, setNote] = useState("");
-    const [saving, setSaving] = useState(false);
-
-    const handleSave = async () => {
-        if (!result || saving) return;
-        setSaving(true);
-        try {
-            const { data } = await adminApi.post("/workflow/calls", {
-                id: callId,
-                talent_id: row.talent_id,
-                project_id: row.project_id,
-                call_result: result,
-                update_status: updateStatus || null,
-                update_text: note.trim() || null,
-            });
-            toast.success("Call logged");
-            onSaved(data);
-        } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to save call");
-            setSaving(false);
-        }
-    };
-
+function SummaryChip({ label, value, tone }) {
+    const toneCls = { warn: "text-red-700", info: "text-sky-700", good: "text-emerald-700" }[tone] || "text-black/80";
     return (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-            <div className="w-full max-w-sm bg-white rounded-md shadow-xl p-4 space-y-4" onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center justify-between">
-                    <div>
-                        <p className="text-xs font-semibold uppercase tracking-wider text-black/85">Record Call</p>
-                        <p className="text-[11px] text-black/45">{row.talent_name} — {row.project_name}</p>
-                    </div>
-                    <button onClick={onClose} className="p-1 rounded-full text-black/40 hover:text-black hover:bg-black/[0.04]">
-                        <X className="w-4 h-4" />
-                    </button>
-                </div>
-
-                <div>
-                    <p className="text-[10px] uppercase font-bold text-black/45 mb-1.5">Result</p>
-                    <div className="flex flex-wrap gap-1.5">
-                        {CALL_RESULT_OPTIONS.map((o) => (
-                            <button
-                                key={o.id}
-                                onClick={() => { setResult(o.id); if (o.id !== "answered") setUpdateStatus(null); }}
-                                className={`px-2.5 py-1.5 rounded-sm text-xs border ${
-                                    result === o.id ? "bg-black text-white border-black" : "border-black/[0.1] hover:border-black/25"
-                                }`}
-                            >
-                                {o.label}
-                            </button>
-                        ))}
-                    </div>
-                </div>
-
-                {result === "answered" && (
-                    <div>
-                        <p className="text-[10px] uppercase font-bold text-black/45 mb-1.5">Update (optional)</p>
-                        <div className="flex flex-wrap gap-1.5">
-                            {UPDATE_STATUS_OPTIONS.map((o) => (
-                                <button
-                                    key={o.id}
-                                    onClick={() => setUpdateStatus(updateStatus === o.id ? null : o.id)}
-                                    className={`px-2.5 py-1.5 rounded-sm text-xs border ${
-                                        updateStatus === o.id ? "bg-black text-white border-black" : "border-black/[0.1] hover:border-black/25"
-                                    }`}
-                                >
-                                    {o.label}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                )}
-
-                <div>
-                    <p className="text-[10px] uppercase font-bold text-black/45 mb-1.5">Note (optional)</p>
-                    <textarea
-                        value={note}
-                        onChange={(e) => setNote(e.target.value)}
-                        rows={2}
-                        placeholder="Add a note about this call..."
-                        className="w-full text-xs px-2.5 py-2 border border-black/[0.08] rounded-sm focus:outline-none focus:border-black/30"
-                    />
-                </div>
-
-                <button
-                    onClick={handleSave}
-                    disabled={!result || saving}
-                    className="w-full px-3.5 py-2 bg-black text-white hover:bg-black/95 disabled:opacity-40 rounded-sm text-xs font-semibold uppercase tracking-wider inline-flex items-center justify-center gap-1.5 focus:outline-none"
-                >
-                    {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                    Save
-                </button>
-            </div>
+        <div className="flex items-baseline gap-1.5 px-2.5 py-1.5 border border-black/[0.07] bg-white rounded-sm" data-testid={`calls-summary-${label.toLowerCase().replace(/\s+/g, "-")}`}>
+            <span className={`text-sm font-semibold ${toneCls}`}>{value}</span>
+            <span className="text-[10px] uppercase tracking-wide text-black/45">{label}</span>
         </div>
     );
 }
 
-// ---------------------------------------------------------------------------
-// Main tab
-// ---------------------------------------------------------------------------
 export default function CallsTab({ isAdmin, currentUserId, users }) {
-    const [rows, setRows] = useState([]);
+    const [data, setData] = useState({ projects: [], rows: [], summary: null, next_up: [], facets: { projects: [], talents: [], assignees: [] }, pipeline_stages: [] });
     const [loading, setLoading] = useState(true);
-    const [baseline, setBaseline] = useState({ projects: [], talents: [], assignees: [] });
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [error, setError] = useState(false);
+    const [pagesLoaded, setPagesLoaded] = useState(1);
+    const [hasMore, setHasMore] = useState(false);
 
+    const [view, setView] = useState(() => (readPref("calls_view", "grouped") === "list" ? "list" : "grouped"));
+    const [scope, setScope] = useState("all");
     const [search, setSearch] = useState("");
     const [debouncedSearch, setDebouncedSearch] = useState("");
     const [projectFilter, setProjectFilter] = useState([]);
     const [pipelineFilter, setPipelineFilter] = useState([]);
     const [talentFilter, setTalentFilter] = useState("");
-    const [assignmentFilter, setAssignmentFilter] = useState(isAdmin ? "all" : "mine");
+    const [stateFilter, setStateFilter] = useState("");
+    const [priorityFilter, setPriorityFilter] = useState("");
     const [assignedToFilter, setAssignedToFilter] = useState("");
-    const [callStatusFilter, setCallStatusFilter] = useState("");
+    const [lastCalledFilter, setLastCalledFilter] = useState("");
 
-    // Guards fetchRows against out-of-order responses: rapid successive
-    // filter changes (e.g. toggling Project on/off quickly) can fire
-    // overlapping requests whose responses arrive out of send order — a
-    // later-fired-but-faster response must never be overwritten by an
-    // earlier-fired-but-slower one landing after it.
+    const [openProjects, setOpenProjects] = useState({});   // project_id -> bool (explicit choice)
+    const [closedLanes, setClosedLanes] = useState({});     // `${project}:${stage}` -> true
+
     const fetchSeq = useRef(0);
-
     const [selectedKeys, setSelectedKeys] = useState(new Set());
     const [assignTarget, setAssignTarget] = useState("");
+    const [assignPriority, setAssignPriority] = useState("");
     const [assigning, setAssigning] = useState(false);
 
-    const [profileTarget, setProfileTarget] = useState(null); // {talentId, projectName}
-    const [historyTarget, setHistoryTarget] = useState(null); // row
-    const [callTarget, setCallTarget] = useState(null); // row
+    const [detailTarget, setDetailTarget] = useState(null);
+    const [profileTarget, setProfileTarget] = useState(null);
+    const [historyTarget, setHistoryTarget] = useState(null);
+    const [callTarget, setCallTarget] = useState(null);
 
     useEffect(() => {
         const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
         return () => clearTimeout(t);
     }, [search]);
 
-    // Baseline (unfiltered) fetch — populates the Project/Talent filter
-    // option lists from the SAME ongoing-project-scoped source the main
-    // list itself uses, so "All Projects"/"All Talents" can never surface
-    // anything outside an ongoing project (never a second, invented
-    // status system, never the full database).
-    useEffect(() => {
-        adminApi
-            .get("/workflow/calls")
-            .then(({ data }) => {
-                const rows_ = data.rows || [];
-                const projectMap = new Map();
-                const talentMap = new Map();
-                const assigneeMap = new Map();
-                rows_.forEach((r) => {
-                    projectMap.set(r.project_id, r.project_name);
-                    talentMap.set(r.talent_id, r.talent_name);
-                    if (r.assigned_to_id) assigneeMap.set(r.assigned_to_id, r.assigned_to_name || r.assigned_to_id);
-                });
-                setBaseline({
-                    projects: [...projectMap.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label)),
-                    talents: [...talentMap.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label)),
-                    assignees: [...assigneeMap.entries()].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label)),
-                });
-            })
-            .catch(() => {});
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    const pageSize = view === "grouped" ? GROUPED_PAGE : LIST_PAGE;
 
-    const fetchRows = () => {
-        const seq = ++fetchSeq.current;
-        setLoading(true);
-        const params = {};
+    const buildParams = useCallback((page, size) => {
+        const params = { view, page, size };
         if (projectFilter.length) params.project_ids = projectFilter.join(",");
         if (talentFilter) params.talent_id = talentFilter;
-        if (assignmentFilter) params.assignment = assignmentFilter;
+        if (scope === "mine") params.assignment = "mine";
+        if (scope === "unassigned") params.assignment = "unassigned";
+        if (scope === "assigned") params.assignment = "assigned";
+        if (scope === "completed") params.call_state = "completed"; else if (stateFilter) params.call_state = stateFilter;
         if (assignedToFilter) params.assigned_to_id = assignedToFilter;
         if (pipelineFilter.length) params.pipeline = pipelineFilter.join(",");
-        if (callStatusFilter) params.call_status = callStatusFilter;
+        if (lastCalledFilter) params.call_status = lastCalledFilter;
+        if (priorityFilter) params.priority = priorityFilter;
         if (debouncedSearch) params.search = debouncedSearch;
-        adminApi
-            .get("/workflow/calls", { params })
-            .then(({ data }) => {
-                if (seq !== fetchSeq.current) return; // a newer request already resolved — discard this stale response
-                setRows(data.rows || []);
+        return params;
+    }, [view, projectFilter, talentFilter, scope, stateFilter, assignedToFilter, pipelineFilter, lastCalledFilter, priorityFilter, debouncedSearch]);
+
+    // Guards against out-of-order responses: rapid filter changes fire overlapping requests, and a slower,
+    // older response must never overwrite a newer one.
+    const load = useCallback(({ page = 0, append = false, pages = 1, facets = false } = {}) => {
+        const seq = ++fetchSeq.current;
+        append ? setLoadingMore(true) : setLoading(true);
+        setError(false);
+        // a refresh re-reads everything already on screen in one request (the server caps a page at 200)
+        const size = Math.min(200, pageSize * pages);
+        const params = buildParams(page, size);
+        if (!facets) params.include_facets = false;        // the dropdown option lists are fetched once, then kept
+        adminApi.get("/workflow/calls", { params })
+            .then(({ data: d }) => {
+                if (seq !== fetchSeq.current) return;
+                setData((prev) => ({
+                    ...d,
+                    facets: d.facets || prev.facets,
+                    projects: append ? [...prev.projects, ...(d.projects || [])] : (d.projects || []),
+                    rows: append ? [...prev.rows, ...(d.rows || [])] : (d.rows || []),
+                }));
+                setHasMore(!!d.has_more);
+                setPagesLoaded(append ? page + 1 : pages);
             })
             .catch(() => {
                 if (seq !== fetchSeq.current) return;
+                setError(true);
                 toast.error("Failed to load calls");
             })
             .finally(() => {
                 if (seq !== fetchSeq.current) return;
-                setLoading(false);
+                setLoading(false); setLoadingMore(false);
             });
-    };
+    }, [buildParams, pageSize]);
 
+    const firstLoad = useRef(true);
     useEffect(() => {
-        fetchRows();
+        load({ page: 0, facets: firstLoad.current });
+        firstLoad.current = false;
         setSelectedKeys(new Set());
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [projectFilter, talentFilter, assignmentFilter, assignedToFilter, pipelineFilter, callStatusFilter, debouncedSearch]);
+    }, [buildParams]);
 
-    const rowKey = (r) => `${r.talent_id}::${r.project_id}`;
+    // pass facets:true when who-is-assigned may have changed (a new assignee must appear in the dropdown)
+    const reload = (opts = {}) => load({ page: 0, pages: pagesLoaded, ...opts });
+    const loadMore = () => load({ page: pagesLoaded, append: true });
 
-    const toggleSelect = (r) => {
-        const key = rowKey(r);
-        setSelectedKeys((prev) => {
-            const next = new Set(prev);
-            if (next.has(key)) next.delete(key); else next.add(key);
-            return next;
-        });
+    const switchView = (v) => { setView(v); writePref("calls_view", v); };
+
+    const filtersActive = !!(projectFilter.length || pipelineFilter.length || talentFilter || stateFilter || priorityFilter || assignedToFilter || lastCalledFilter || debouncedSearch || scope !== "all");
+    const clearFilters = () => {
+        setProjectFilter([]); setPipelineFilter([]); setTalentFilter(""); setStateFilter(""); setPriorityFilter("");
+        setAssignedToFilter(""); setLastCalledFilter(""); setSearch(""); setScope("all");
     };
 
-    const selectedRows = rows.filter((r) => selectedKeys.has(rowKey(r)));
+    const toggleSelect = (r) => setSelectedKeys((prev) => { const n = new Set(prev); const k = rowKey(r); n.has(k) ? n.delete(k) : n.add(k); return n; });
+    const selectLane = (rows, on) => setSelectedKeys((prev) => { const n = new Set(prev); rows.forEach((r) => (on ? n.add(rowKey(r)) : n.delete(rowKey(r)))); return n; });
+
+    const allRows = useMemo(() => (view === "grouped" ? data.projects.flatMap((g) => g.pipelines.flatMap((p) => p.rows)) : data.rows), [view, data]);
+    const selectedRows = allRows.filter((r) => selectedKeys.has(rowKey(r)));
 
     const handleBulkAssign = async () => {
         if (selectedRows.length === 0 || assigning) return;
         setAssigning(true);
         try {
-            await adminApi.post("/workflow/calls/assign", {
-                pairs: selectedRows.map((r) => ({ talent_id: r.talent_id, project_id: r.project_id })),
-                assigned_to_id: assignTarget || null,
-            });
-            toast.success(`Assigned ${selectedRows.length} row(s)`);
+            const body = { pairs: selectedRows.map((r) => ({ talent_id: r.talent_id, project_id: r.project_id })), assigned_to_id: assignTarget || null };
+            if (assignPriority && assignTarget) body.priority = assignPriority;
+            await adminApi.post("/workflow/calls/assign", body);
+            toast.success(`Assigned ${selectedRows.length} call${selectedRows.length !== 1 ? "s" : ""}`);
             setSelectedKeys(new Set());
-            fetchRows();
+            setAssignTarget(""); setAssignPriority("");      // the next batch starts from a clean choice
+            reload({ facets: true });
         } catch (e) {
             toast.error(e?.response?.data?.detail || "Failed to assign");
         } finally {
@@ -503,260 +383,177 @@ export default function CallsTab({ isAdmin, currentUserId, users }) {
         }
     };
 
-    const onCallSaved = (call) => {
-        setRows((prev) =>
-            prev.map((r) =>
-                r.talent_id === callTarget.talent_id && r.project_id === callTarget.project_id
-                    ? {
-                          ...r,
-                          last_call_at: call.called_at,
-                          last_call_result: call.call_result,
-                          last_update_status: call.update_status,
-                          last_update_text: call.update_text,
-                          call_status_bucket: "today",
-                      }
-                    : r
-            )
-        );
-        setCallTarget(null);
+    const setPriority = async (row, priority) => {
+        try {
+            await adminApi.patch("/workflow/calls/priority", { pairs: [{ talent_id: row.talent_id, project_id: row.project_id }], priority });
+            toast.success(`Priority set to ${PRIORITY_META[priority].label}`);
+            setDetailTarget((d) => (d && rowKey(d) === rowKey(row) ? { ...d, priority } : d));
+            reload();
+        } catch (e) {
+            toast.error(e?.response?.data?.detail || "Could not change priority");
+        }
     };
 
+    const onCallSaved = () => {
+        setCallTarget(null);
+        reload();
+    };
+
+    const projectOpen = (id, idx) => (openProjects[id] !== undefined ? openProjects[id] : (filtersActive || idx < 2));
+    const laneClosed = (pid, stage) => !!closedLanes[`${pid}:${stage}`];
+    const toggleLane = (pid, stage) => setClosedLanes((c) => ({ ...c, [`${pid}:${stage}`]: !c[`${pid}:${stage}`] }));
+
     const pipelineOptions = useMemo(
-        () => PIPELINE_STAGE_ORDER.map((s) => ({ id: s, label: getStageLabel(s) || STAGE_LABELS[s] || s })),
-        []
+        () => (data.pipeline_stages?.length ? data.pipeline_stages : CALL_PIPELINE_ORDER).map((s) => ({ id: s, label: stageLabel(s) })),
+        [data.pipeline_stages],
     );
+    const projectOptions = useMemo(() => (data.facets.projects || []).map((p) => ({ id: p.id, label: p.label })), [data.facets]);
+
+    const rowProps = {
+        isAdmin, currentUserId,
+        onSelect: toggleSelect, onOpen: setDetailTarget, onRecord: setCallTarget,
+        onHistory: setHistoryTarget, onProfile: (r) => setProfileTarget({ talentId: r.talent_id, projectName: r.project_name }),
+        onPriority: setPriority,
+    };
+    const empty = !loading && !error && (view === "grouped" ? data.projects.length === 0 : data.rows.length === 0);
+    const s = data.summary;
+    const selectCls = "px-2.5 py-1.5 border border-black/[0.1] rounded-sm text-xs bg-white focus:outline-none max-w-full";
 
     return (
-        <div className="space-y-4">
+        <div className="space-y-3" data-testid="calls-root">
+            {/* Summary — describes the whole filtered set, not just the loaded page */}
+            {s && (
+                <div className="flex flex-wrap gap-2" data-testid="calls-summary">
+                    <SummaryChip label="To do" value={toDo(s)} />
+                    <SummaryChip label="New" value={s.new} tone={s.new ? "info" : undefined} />
+                    <SummaryChip label="Urgent" value={s.urgent} tone={s.urgent ? "warn" : undefined} />
+                    <SummaryChip label="Completed" value={s.completed} tone="good" />
+                    <SummaryChip label="Unassigned" value={s.unassigned} />
+                </div>
+            )}
+
+            {/* Next up — the first calls in the queue, whatever the project */}
+            {data.next_up?.length > 0 && !loading && (
+                <div className="border border-black/[0.07] bg-white rounded-md p-2.5" data-testid="calls-next-up">
+                    <p className="text-[10px] uppercase font-bold text-black/45 mb-1.5 inline-flex items-center gap-1"><PhoneCall className="w-3 h-3" /> Next up</p>
+                    <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+                        {data.next_up.slice(0, 3).map((r) => (
+                            <button key={rowKey(r)} type="button" onClick={() => setDetailTarget(r)} className="text-left border border-black/[0.07] rounded-sm px-2.5 py-1.5 hover:border-black/25 min-w-0" data-testid="next-up-item">
+                                <span className="flex items-center justify-between gap-2"><span className="text-xs font-medium text-black/85 truncate">{r.talent_name}</span><PriorityBadge priority={r.priority} /></span>
+                                <span className="flex items-center gap-1.5 text-[11px] text-black/45 min-w-0"><span className="truncate">{r.project_name}</span><StageChip stage={r.pipeline_stage} />{r.is_new && <span className="text-sky-700 font-semibold">NEW</span>}</span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
             {/* Filters toolbar */}
             <div className="border border-black/[0.06] bg-white p-3 rounded-md shadow-sm space-y-2.5">
                 <div className="flex items-center gap-1.5 border border-black/[0.08] rounded-sm px-2.5 py-1.5">
                     <Search className="w-3.5 h-3.5 text-black/35" />
-                    <input
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                        placeholder="Search talent, project, or phone..."
-                        className="text-xs w-full focus:outline-none"
-                    />
+                    <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search talent, project, or phone..." className="text-xs w-full focus:outline-none" data-testid="calls-search" />
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                    <MultiSelectPopover label="Project" options={baseline.projects} selected={projectFilter} onChange={setProjectFilter} />
+                    <MultiSelectPopover label="Project" options={projectOptions} selected={projectFilter} onChange={setProjectFilter} />
                     <MultiSelectPopover label="Pipeline" options={pipelineOptions} selected={pipelineFilter} onChange={setPipelineFilter} />
-                    <select
-                        value={talentFilter}
-                        onChange={(e) => setTalentFilter(e.target.value)}
-                        className="px-2.5 py-1.5 border border-black/[0.1] rounded-sm text-xs bg-white focus:outline-none"
-                    >
+                    <select value={talentFilter} onChange={(e) => setTalentFilter(e.target.value)} className={selectCls} aria-label="Talent">
                         <option value="">All Talents</option>
-                        {baseline.talents.map((t) => (
-                            <option key={t.id} value={t.id}>{t.label}</option>
-                        ))}
+                        {(data.facets.talents || []).map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
                     </select>
-                    <select
-                        value={callStatusFilter}
-                        onChange={(e) => setCallStatusFilter(e.target.value)}
-                        className="px-2.5 py-1.5 border border-black/[0.1] rounded-sm text-xs bg-white focus:outline-none"
-                    >
-                        {CALL_STATUS_OPTIONS.map((o) => (
-                            <option key={o.id} value={o.id}>{o.label === "All" ? "All Call Statuses" : o.label}</option>
-                        ))}
+                    <select value={scope === "completed" ? "completed" : stateFilter} onChange={(e) => { setScope("all"); setStateFilter(e.target.value); }} disabled={scope === "completed"} className={selectCls} aria-label="Call status">
+                        {scope === "completed" && <option value="completed">Completed</option>}
+                        {CALL_STATE_FILTERS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
                     </select>
-                    <select
-                        value={assignedToFilter}
-                        onChange={(e) => setAssignedToFilter(e.target.value)}
-                        className="px-2.5 py-1.5 border border-black/[0.1] rounded-sm text-xs bg-white focus:outline-none"
-                    >
+                    <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)} className={selectCls} aria-label="Filter by priority">
+                        <option value="">All priorities</option>
+                        {PRIORITIES.map((p) => <option key={p} value={p}>{PRIORITY_META[p].label}</option>)}
+                    </select>
+                    <select value={assignedToFilter} onChange={(e) => setAssignedToFilter(e.target.value)} className={selectCls} aria-label="Assigned to">
                         <option value="">All Team Members</option>
                         <option value="unassigned">Unassigned</option>
-                        {baseline.assignees.map((a) => (
-                            <option key={a.id} value={a.id}>{a.label}</option>
-                        ))}
+                        {(data.facets.assignees || []).map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
                     </select>
-                    <div className="flex items-center gap-1 ml-auto">
-                        {[
-                            { id: "all", label: "All Calls" },
-                            { id: "mine", label: "My Calls" },
-                            { id: "unassigned", label: "Unassigned" },
-                            { id: "assigned", label: "Assigned" },
-                        ].map((o) => (
-                            <button
-                                key={o.id}
-                                onClick={() => setAssignmentFilter(o.id)}
-                                className={`px-2.5 py-1.5 rounded-sm text-[11px] font-medium border ${
-                                    assignmentFilter === o.id
-                                        ? "bg-black text-white border-black"
-                                        : "bg-black/[0.015] text-black/50 border-black/[0.06] hover:bg-black/[0.03]"
-                                }`}
-                            >
+                    <select value={lastCalledFilter} onChange={(e) => setLastCalledFilter(e.target.value)} className={selectCls} aria-label="Last called">
+                        {LAST_CALLED_FILTERS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                    </select>
+                    {filtersActive && <button type="button" onClick={clearFilters} className="text-[11px] text-black/50 hover:text-black underline" data-testid="calls-clear">Clear filters</button>}
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-1">
+                        {SCOPES.map((o) => (
+                            <button key={o.id} onClick={() => setScope(o.id)} data-testid={`scope-${o.id}`}
+                                className={`px-2.5 py-1.5 rounded-sm text-[11px] font-medium border ${scope === o.id ? "bg-black text-white border-black" : "bg-black/[0.015] text-black/50 border-black/[0.06] hover:bg-black/[0.03]"}`}>
                                 {o.label}
                             </button>
                         ))}
+                    </div>
+                    <div className="flex items-center gap-1" role="group" aria-label="View">
+                        <button onClick={() => switchView("grouped")} data-testid="view-grouped" aria-pressed={view === "grouped"} className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-sm text-[11px] font-medium border ${view === "grouped" ? "bg-black text-white border-black" : "border-black/[0.1] text-black/55"}`}><Layers className="w-3 h-3" /> Projects</button>
+                        <button onClick={() => switchView("list")} data-testid="view-list" aria-pressed={view === "list"} className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-sm text-[11px] font-medium border ${view === "list" ? "bg-black text-white border-black" : "border-black/[0.1] text-black/55"}`}><ListIcon className="w-3 h-3" /> List</button>
                     </div>
                 </div>
             </div>
 
             {/* Bulk assign bar (admin only) */}
             {isAdmin && selectedKeys.size > 0 && (
-                <div className="flex items-center gap-3 bg-black text-white px-4 py-2.5 rounded-sm shadow-sm text-xs">
+                <div className="flex flex-wrap items-center gap-2 bg-black text-white px-3 py-2.5 rounded-sm shadow-sm text-xs" data-testid="calls-bulk">
                     <span>{selectedKeys.size} selected</span>
-                    <select
-                        value={assignTarget}
-                        onChange={(e) => setAssignTarget(e.target.value)}
-                        className="text-black text-xs px-2 py-1 rounded-sm ml-auto"
-                    >
+                    <select value={assignTarget} onChange={(e) => setAssignTarget(e.target.value)} className="text-black text-xs px-2 py-1 rounded-sm sm:ml-auto" aria-label="Assign to">
                         <option value="">Unassign</option>
-                        {users.map((u) => (
-                            <option key={u.id} value={u.id}>{u.name || u.email}</option>
-                        ))}
+                        {users.map((u) => <option key={u.id} value={u.id}>{u.name || u.email}</option>)}
                     </select>
-                    <button
-                        onClick={handleBulkAssign}
-                        disabled={assigning}
-                        className="px-3 py-1.5 bg-white text-black rounded-sm font-semibold disabled:opacity-50"
-                    >
-                        {assigning ? "Assigning..." : "Apply"}
-                    </button>
-                    <button onClick={() => setSelectedKeys(new Set())} className="text-white/70 hover:text-white">
-                        <X className="w-3.5 h-3.5" />
+                    <select value={assignPriority} onChange={(e) => setAssignPriority(e.target.value)} disabled={!assignTarget} className="text-black text-xs px-2 py-1 rounded-sm disabled:opacity-50" aria-label="Priority for assignment">
+                        <option value="">Keep priority (Normal if new)</option>
+                        {PRIORITIES.map((p) => <option key={p} value={p}>{PRIORITY_META[p].label}</option>)}
+                    </select>
+                    <button onClick={handleBulkAssign} disabled={assigning} className="px-3 py-1.5 bg-white text-black rounded-sm font-semibold disabled:opacity-50">{assigning ? "Assigning..." : "Apply"}</button>
+                    <button onClick={() => setSelectedKeys(new Set())} className="text-white/70 hover:text-white" aria-label="Clear selection"><X className="w-3.5 h-3.5" /></button>
+                </div>
+            )}
+
+            {/* Results */}
+            {loading ? (
+                <div className="p-8 text-center text-black/40" data-testid="calls-loading"><Loader2 className="w-4 h-4 animate-spin inline" /></div>
+            ) : error ? (
+                <div className="p-6 text-center text-xs text-black/55 border border-black/[0.06] bg-white rounded-md" data-testid="calls-error">
+                    Could not load calls. <button onClick={() => load({ page: 0 })} className="underline">Try again</button>
+                </div>
+            ) : empty ? (
+                <div className="p-6 text-center text-xs text-black/45 border border-black/[0.06] bg-white rounded-md" data-testid="calls-empty">
+                    No calls to show.{filtersActive && <> <button onClick={clearFilters} className="underline">Clear filters</button></>}
+                </div>
+            ) : view === "grouped" ? (
+                <div className="space-y-2.5" data-testid="calls-grouped">
+                    {data.projects.map((g, idx) => (
+                        <ProjectGroup key={g.project_id} group={g} open={projectOpen(g.project_id, idx)}
+                            onToggle={() => setOpenProjects((o) => ({ ...o, [g.project_id]: !projectOpen(g.project_id, idx) }))}
+                            laneClosed={laneClosed} onToggleLane={toggleLane} isAdmin={isAdmin} selectedKeys={selectedKeys} onSelectLane={selectLane} rowProps={rowProps} />
+                    ))}
+                </div>
+            ) : (
+                <div className="border border-black/[0.06] bg-white rounded-md shadow-sm overflow-hidden" data-testid="calls-list">
+                    {data.rows.map((r, i) => <div key={rowKey(r)} className={i === 0 ? "[&>div]:border-t-0" : ""}><CallRow row={r} selected={selectedKeys.has(rowKey(r))} showProject {...rowProps} /></div>)}
+                </div>
+            )}
+
+            {hasMore && !loading && (
+                <div className="text-center">
+                    <button onClick={loadMore} disabled={loadingMore} className="px-4 py-2 border border-black/[0.12] rounded-sm text-xs font-medium hover:border-black/30 disabled:opacity-50" data-testid="calls-load-more">
+                        {loadingMore ? "Loading..." : view === "grouped" ? "Load more projects" : "Load more calls"}
                     </button>
                 </div>
             )}
 
-            {/* Desktop table */}
-            <div className="hidden md:block border border-black/[0.06] bg-white rounded-md shadow-sm overflow-x-auto">
-                <table className="w-full text-xs">
-                    <thead>
-                        <tr className="border-b border-black/[0.06] text-[10px] uppercase font-bold text-black/45">
-                            {isAdmin && <th className="p-2.5 w-8"></th>}
-                            <th className="p-2.5 text-left">Talent</th>
-                            <th className="p-2.5 text-left">Project</th>
-                            <th className="p-2.5 text-left">Pipeline</th>
-                            <th className="p-2.5 text-left">Assigned To</th>
-                            <th className="p-2.5 text-left">Last Call</th>
-                            <th className="p-2.5 text-left">Latest Update</th>
-                            <th className="p-2.5 text-left">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {loading ? (
-                            <tr><td colSpan={8} className="p-6 text-center text-black/40"><Loader2 className="w-4 h-4 animate-spin inline" /></td></tr>
-                        ) : rows.length === 0 ? (
-                            <tr><td colSpan={8} className="p-6 text-center text-black/40">No calls to show.</td></tr>
-                        ) : (
-                            rows.map((r) => (
-                                <tr key={rowKey(r)} className="border-b border-black/[0.04] hover:bg-black/[0.015]">
-                                    {isAdmin && (
-                                        <td className="p-2.5">
-                                            <input type="checkbox" checked={selectedKeys.has(rowKey(r))} onChange={() => toggleSelect(r)} />
-                                        </td>
-                                    )}
-                                    <td className="p-2.5 font-medium text-black/85">{r.talent_name}</td>
-                                    <td className="p-2.5 text-black/70">{r.project_name}</td>
-                                    <td className="p-2.5">
-                                        <span className="px-1.5 py-0.5 bg-black/[0.04] rounded-sm text-[10px] font-semibold uppercase">
-                                            {STAGE_LABELS[r.pipeline_stage] || r.pipeline_stage}
-                                        </span>
-                                    </td>
-                                    <td className="p-2.5 text-black/60">{r.assigned_to_name || "Unassigned"}</td>
-                                    <td className="p-2.5 text-black/60">{fmtLocal(r.last_call_at)}</td>
-                                    <td className="p-2.5 text-black/60 max-w-[160px] truncate" title={r.last_update_text || ""}>
-                                        {r.last_update_status ? (UPDATE_STATUS_LABELS[r.last_update_status] || r.last_update_status) : "—"}
-                                        {r.last_update_text ? ` · ${r.last_update_text}` : ""}
-                                    </td>
-                                    <td className="p-2.5">
-                                        <div className="flex items-center gap-1">
-                                            <a
-                                                href={r.talent_phone ? `tel:${r.talent_phone}` : undefined}
-                                                onClick={(e) => { if (!r.talent_phone) e.preventDefault(); }}
-                                                className={`p-1.5 rounded-sm ${r.talent_phone ? "text-black/60 hover:bg-black/[0.06]" : "text-black/20 cursor-not-allowed"}`}
-                                                title={r.talent_phone || "No phone on file"}
-                                            >
-                                                <Phone className="w-3.5 h-3.5" />
-                                            </a>
-                                            <button onClick={() => setProfileTarget({ talentId: r.talent_id, projectName: r.project_name })} className="p-1.5 rounded-sm text-black/60 hover:bg-black/[0.06]" title="View profile">
-                                                <Eye className="w-3.5 h-3.5" />
-                                            </button>
-                                            <button onClick={() => setHistoryTarget(r)} className="p-1.5 rounded-sm text-black/60 hover:bg-black/[0.06]" title="Call history">
-                                                <History className="w-3.5 h-3.5" />
-                                            </button>
-                                            <button onClick={() => setCallTarget(r)} className="px-2 py-1 rounded-sm bg-black text-white text-[10px] font-semibold uppercase">
-                                                Record
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            ))
-                        )}
-                    </tbody>
-                </table>
-            </div>
-
-            {/* Mobile cards */}
-            <div className="md:hidden space-y-2.5">
-                {loading ? (
-                    <div className="p-6 text-center text-black/40"><Loader2 className="w-4 h-4 animate-spin inline" /></div>
-                ) : rows.length === 0 ? (
-                    <div className="p-6 text-center text-black/40 text-xs">No calls to show.</div>
-                ) : (
-                    rows.map((r) => (
-                        <div key={rowKey(r)} className="border border-black/[0.06] bg-white rounded-md p-3 space-y-2 shadow-sm">
-                            <div className="flex items-start justify-between gap-2">
-                                <div className="flex items-start gap-2">
-                                    {isAdmin && (
-                                        <input type="checkbox" className="mt-1" checked={selectedKeys.has(rowKey(r))} onChange={() => toggleSelect(r)} />
-                                    )}
-                                    <div>
-                                        <p className="text-sm font-medium text-black/90">{r.talent_name}</p>
-                                        <p className="text-[11px] text-black/50">{r.project_name}</p>
-                                    </div>
-                                </div>
-                                <span className="px-1.5 py-0.5 bg-black/[0.04] rounded-sm text-[10px] font-semibold uppercase shrink-0">
-                                    {STAGE_LABELS[r.pipeline_stage] || r.pipeline_stage}
-                                </span>
-                            </div>
-                            <div className="text-[11px] text-black/55 space-y-0.5">
-                                <p>Assigned: {r.assigned_to_name || "Unassigned"}</p>
-                                <p>Last Call: {fmtLocal(r.last_call_at)}</p>
-                                {r.last_update_status && <p>Update: {UPDATE_STATUS_LABELS[r.last_update_status]}</p>}
-                            </div>
-                            <div className="flex items-center gap-1.5 pt-1">
-                                <a
-                                    href={r.talent_phone ? `tel:${r.talent_phone}` : undefined}
-                                    onClick={(e) => { if (!r.talent_phone) e.preventDefault(); }}
-                                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-sm text-xs font-semibold ${r.talent_phone ? "bg-black text-white" : "bg-black/10 text-black/30"}`}
-                                >
-                                    <PhoneCall className="w-3.5 h-3.5" /> Call
-                                </a>
-                                <button onClick={() => setProfileTarget({ talentId: r.talent_id, projectName: r.project_name })} className="p-2.5 rounded-sm border border-black/[0.1] text-black/60">
-                                    <Eye className="w-3.5 h-3.5" />
-                                </button>
-                                <button onClick={() => setHistoryTarget(r)} className="p-2.5 rounded-sm border border-black/[0.1] text-black/60">
-                                    <History className="w-3.5 h-3.5" />
-                                </button>
-                                <button onClick={() => setCallTarget(r)} className="px-3 py-2.5 rounded-sm border border-black/[0.1] text-xs font-semibold">
-                                    Record
-                                </button>
-                            </div>
-                        </div>
-                    ))
-                )}
-            </div>
-
-            {profileTarget && (
-                <ProfileDrawer talentId={profileTarget.talentId} projectName={profileTarget.projectName} onClose={() => setProfileTarget(null)} />
+            {detailTarget && (
+                <CallDetailDrawer row={detailTarget} isAdmin={isAdmin} currentUserId={currentUserId}
+                    onClose={() => setDetailTarget(null)} onRecord={setCallTarget} onHistory={setHistoryTarget}
+                    onProfile={rowProps.onProfile} onPriority={setPriority} />
             )}
+            {profileTarget && <ProfileDrawer talentId={profileTarget.talentId} projectName={profileTarget.projectName} onClose={() => setProfileTarget(null)} />}
             {historyTarget && (
-                <HistoryModal
-                    talentId={historyTarget.talent_id}
-                    projectId={historyTarget.project_id}
-                    talentName={historyTarget.talent_name}
-                    projectName={historyTarget.project_name}
-                    onClose={() => setHistoryTarget(null)}
-                />
+                <HistoryModal talentId={historyTarget.talent_id} projectId={historyTarget.project_id} talentName={historyTarget.talent_name} projectName={historyTarget.project_name} onClose={() => setHistoryTarget(null)} />
             )}
-            {callTarget && (
-                <CallEntryModal row={callTarget} onClose={() => setCallTarget(null)} onSaved={onCallSaved} />
-            )}
+            {callTarget && <RecordCallModal row={callTarget} onClose={() => setCallTarget(null)} onSaved={onCallSaved} />}
         </div>
     );
 }

@@ -30,8 +30,19 @@ class CallIn(BaseModel):
     call_result: str  # one of CALL_RESULTS
     update_status: Optional[str] = None  # one of UPDATE_STATUSES, only meaningful when call_result == "answered"
     update_text: Optional[str] = None
+    # The call is one phone conversation with one talent: by default it is also recorded (as a clearly
+    # marked synced entry) against the talent's OTHER ongoing-project calls so nobody repeats it. Pipeline
+    # stages and every project-specific decision are never touched. False records it for this project only.
+    sync_other_projects: bool = True
 
 
 class AssignIn(BaseModel):
     pairs: List[TalentProjectPair]
     assigned_to_id: Optional[str] = None  # None = unassign
+    # urgent | semi_urgent | normal. Omitted = a NEW assignment is normal, an existing one keeps its priority.
+    priority: Optional[str] = None
+
+
+class PriorityIn(BaseModel):
+    pairs: List[TalentProjectPair]
+    priority: str  # urgent | semi_urgent | normal

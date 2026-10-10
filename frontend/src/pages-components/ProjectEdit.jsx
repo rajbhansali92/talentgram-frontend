@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link, useSearchParams } from "react-router-dom";
 import { adminApi, isAdmin, getSubdomainUrl } from "@/lib/api";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
+import DuplicateProjectDialog from "@/components/DuplicateProjectDialog";
 import { toast } from "sonner";
 import WhatsAppShareButton from "@/components/WhatsAppShareButton";
 import { generateSubmissionMessage } from "@/lib/whatsappShare";
@@ -389,6 +390,7 @@ export default function ProjectEdit() {
     };
 
     const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+    const [duplicateOpen, setDuplicateOpen] = useState(false);
 
     const deleteProject = async () => {
         if (!isEdit) return;
@@ -680,6 +682,16 @@ export default function ProjectEdit() {
                         >
                             {project.status || "ongoing"}
                         </span>
+                    )}
+                    {/* View mode: Duplicate (admin) — shown next to Edit; hidden while editing so unsaved changes are never ambiguous */}
+                    {isEdit && !isEditing && isAdminRole && (
+                        <button
+                            onClick={() => setDuplicateOpen(true)}
+                            data-testid="duplicate-project-btn"
+                            className="inline-flex items-center gap-2 px-4 py-2.5 border border-[#eaeaea] hover:border-black/[0.20] rounded-sm text-xs transition-colors"
+                        >
+                            <Copy className="w-3.5 h-3.5" /> Duplicate
+                        </button>
                     )}
                     {/* View mode: Edit button */}
                     {isEdit && !isEditing && (
@@ -2125,6 +2137,16 @@ export default function ProjectEdit() {
             )}
 
 
+
+            <DuplicateProjectDialog
+                open={duplicateOpen}
+                project={{ id, brand_name: project.brand_name }}
+                onCancel={() => setDuplicateOpen(false)}
+                onCreated={(created) => {
+                    setDuplicateOpen(false);
+                    nav(`/admin/projects/${created.id}?tab=details`);
+                }}
+            />
 
             <ConfirmDeleteDialog
                 open={confirmDeleteOpen}

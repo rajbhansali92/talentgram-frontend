@@ -1,9 +1,14 @@
 """Project CRUD, materials, forward-to-link."""
+import copy
+import hashlib
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
+from pymongo.errors import DuplicateKeyError
 
 from core import (
     APP_NAME,
@@ -48,6 +53,128 @@ async def create_project(payload: ProjectIn, admin: dict = Depends(current_team_
     await db.projects.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+
+# ---------------------------------------------------------------------------
+# Duplicate project
+#
+# The duplicate is BUILT from an explicit allowlist of configuration — it is never "copy everything then
+# delete the operational parts". Everything not named here (pipeline rows, submissions, calls, tasks,
+# review links, invoices, Production Desk state, ...) simply does not exist on the new project.
+# ---------------------------------------------------------------------------
+# Brief / commercial settings / submission form + Submission Requirements Engine (ProjectIn's own fields).
+DUPLICATE_COPY_FIELDS = (
+    "brand_link", "character", "shoot_dates", "budget_per_day", "commission_percent", "medium_usage", "director",
+    "production_house", "additional_details", "video_links", "competitive_brand_enabled", "custom_questions",
+    "talent_budget", "client_budget", "require_reapproval_on_edit", "hide_budget_from_talent", "submission_requirements",
+)
+# Deliberately NOT copied from ProjectIn: `status` (a duplicate always starts "ongoing") and
+# `whatsapp_casting_group_name` — inbound_messages.resolve_group maps ONE group to ONE project
+# (find_one), so a second project with the same group would make routing ambiguous. Set it on the copy.
+# Audition material only; Production Desk documents (invoices, call sheets, payment proofs, ...) are
+# operational and stay with the original.
+DUPLICATE_MATERIAL_CATEGORIES = {"script", "image", "audio", "video_file"}
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,100}$")
+
+
+class DuplicateProjectIn(BaseModel):
+    name: Optional[str] = None          # defaults to "<original> (Copy)"
+    request_id: Optional[str] = None    # client-generated once per dialog; makes a double-click / retry a no-op
+
+
+def _duplicate_name(raw: Optional[str], source_name: str) -> str:
+    name = " ".join((raw if raw is not None else f"{source_name} (Copy)").split())      # trim + collapse whitespace
+    if not name:
+        raise HTTPException(400, "A name is required for the duplicate project")
+    if len(name) > 200:
+        raise HTTPException(400, "Project name must be 200 characters or fewer")
+    if any(ord(c) < 32 for c in name):
+        raise HTTPException(400, "Project name contains invalid characters")
+    return name
+
+
+@router.post("/projects/{pid}/duplicate")
+async def duplicate_project(pid: str, payload: DuplicateProjectIn, admin: dict = Depends(current_admin)):
+    """Create a new project from an existing one: its configuration, Submission Requirements and audition
+    material — with a fresh id and public submission link, and NO talents or operational records.
+
+    Audition files are not re-uploaded: the new project's materials point at the SAME Cloudinary assets
+    (new material ids, scope bound to the new project). That is safe because nothing in the app destroys a
+    Cloudinary asset when a project material is removed (`delete_material` only unlinks) and project
+    materials never enter the media deletion ledger. The whole new project is ONE insert, so a failure can
+    never leave a half-built project, and the original is only ever read."""
+    from core import active_only
+
+    src = await db.projects.find_one(active_only({"id": pid}), {"_id": 0})
+    if not src:
+        raise HTTPException(404, "Project not found")
+    name = _duplicate_name(payload.name, src.get("brand_name") or "Untitled")
+    rid = payload.request_id
+    if rid is not None and not _REQUEST_ID_RE.match(rid):
+        raise HTTPException(400, "Invalid request_id")
+
+    def _summary(doc: Dict[str, Any], already: bool) -> Dict[str, Any]:
+        return {**doc, "duplicate": {
+            "source_project_id": pid, "already_created": already,
+            "materials_shared": len(doc.get("materials") or []),
+            "materials_excluded": doc.get("duplicate_materials_excluded", 0),
+        }}
+
+    if rid:
+        existing = await db.projects.find_one({"duplicated_from_project_id": pid, "duplicate_request_id": rid}, {"_id": 0})
+        if existing:
+            return _summary(existing, True)
+
+    # a ProjectIn-shaped document (so every default matches a normal create), overlaid with the allowlist
+    doc = ProjectIn(brand_name=name).model_dump()
+    for k in DUPLICATE_COPY_FIELDS:
+        if k in src:
+            doc[k] = copy.deepcopy(src[k])
+    doc["talent_budget"] = _clean_budget_lines(doc.get("talent_budget"))
+    doc["client_budget"] = _clean_budget_lines(doc.get("client_budget"))
+    doc["brand_name"] = name
+    doc["status"] = "ongoing"                        # a fresh project, never inheriting complete/hold/locked/deleted
+    doc["whatsapp_casting_group_name"] = None
+
+    new_id = str(uuid.uuid4())
+    materials, excluded = [], 0
+    for m in src.get("materials") or []:
+        if m.get("category") not in DUPLICATE_MATERIAL_CATEGORIES or not m.get("url") or not m.get("public_id"):
+            excluded += 1
+            continue
+        nm = {k: v for k, v in m.items() if k not in ("id", "project_id", "created_at", "scope")}
+        nm.update({
+            "id": str(uuid.uuid4()), "scope": "project_material", "project_id": new_id, "created_at": _now(),
+            "copied_from": {"project_id": pid, "material_id": m.get("id")},
+        })
+        materials.append(nm)
+
+    # The slug is the public submission link (a bearer secret) and is unique-indexed; with a request id it is
+    # derived from it, so two concurrent identical requests collide here instead of creating two projects.
+    base = _slugify(name).rsplit("-", 1)[0]
+    suffix = hashlib.sha256(f"{pid}:{rid}".encode()).hexdigest()[:12] if rid else uuid.uuid4().hex[:12]
+    doc.update({
+        "id": new_id, "slug": f"{base}-{suffix}", "materials": materials,
+        "created_at": _now(), "created_by": admin["id"],
+        "duplicated_from_project_id": pid, "duplicated_by": admin.get("email"), "duplicated_at": _now(),
+        "duplicate_materials_excluded": excluded,
+    })
+    if rid:
+        doc["duplicate_request_id"] = rid
+    try:
+        await db.projects.insert_one(doc)
+    except DuplicateKeyError:
+        existing = await db.projects.find_one({"duplicated_from_project_id": pid, "duplicate_request_id": rid}, {"_id": 0}) if rid else None
+        if existing:
+            return _summary(existing, True)
+        doc["slug"] = f"{base}-{uuid.uuid4().hex[:12]}"
+        await db.projects.insert_one(doc)
+    doc.pop("_id", None)
+    logger.info(
+        "DUPLICATE /projects/%s -> %s by %s: %d materials shared by reference, %d excluded; no pipeline/submissions/operational records copied",
+        pid, new_id, admin.get("email"), len(materials), excluded,
+    )
+    return _summary(doc, False)
 
 
 @router.get("/projects")
@@ -304,6 +431,9 @@ async def add_material(
 
 @router.delete("/projects/{pid}/material/{mid}")
 async def delete_material(pid: str, mid: str, admin: dict = Depends(current_admin)):
+    # Only UNLINKS the material from this project — it never destroys the Cloudinary asset. A duplicated
+    # project (see duplicate_project) shares the original's assets by reference, so keep it that way: never
+    # add a Cloudinary destroy here without first checking other projects' materials for the same public_id.
     res = await db.projects.update_one({"id": pid}, {"$pull": {"materials": {"id": mid}}})
     if not res.modified_count:
         raise HTTPException(404, "Material not found")

@@ -229,6 +229,8 @@ app.add_middleware(
     # the browser's CORS preflight for those direct calls is rejected before the
     # real request is ever sent.
     allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With", "X-Request-Id"],
+    # Roster PDF completeness (routers/roster.py) — read by the builder to warn about skipped images.
+    expose_headers=["X-Roster-Images-Total", "X-Roster-Images-Included"],
 )
 
 # RequestIdMiddleware added last so it wraps everything above, including CORS

@@ -583,6 +583,9 @@ def _talent_lite(t: dict) -> dict:
         "phone": enriched.get("phone"),
         "instagram_handle": enriched.get("instagram_handle"),
         "image_url": enriched.get("image_url"),
+        # small cover derivative (same value the Global Talent list shows) so callers that render a thumbnail
+        # never have to fall back to the full-size image_url
+        "cover_thumbnail_url": enriched.get("cover_thumbnail_url"),
     }
 
 

@@ -94,7 +94,7 @@ describe("RosterBuilder", () => {
 
         // Step 3: suggested images preselected; toggle one more; hero reorder; save
         await screen.findByTestId("roster-images-t1");
-        expect(adminApi.post).toHaveBeenCalledWith("/roster/media-options", { talent_ids: expect.any(Array) });
+        expect(adminApi.post).toHaveBeenCalledWith("/roster/media-options", { talent_ids: ["t2", "t1"] }, expect.anything());
         expect(screen.getByTestId("roster-count-t1").textContent).toContain("2 of 12");
         fireEvent.click(screen.getByTestId("roster-img-i2"));
         expect(screen.getByTestId("roster-count-t1").textContent).toContain("3 of 12");

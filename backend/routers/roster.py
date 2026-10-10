@@ -48,6 +48,7 @@ from core import (
     decode_token,
     decode_viewer,
     enrich_talent,
+    media_url,
     normalize_instagram_handle,
 )
 from routers.links import _extract_stream_uid, _format_location, _require_active_link
@@ -61,9 +62,9 @@ router = APIRouter(prefix="/api", tags=["roster"])
 
 ROSTER_CATEGORIES = ("indian", "western", "portfolio")
 CATEGORY_LABELS = {"indian": "Indian Look Images", "western": "Western Look Images", "portfolio": "Additional Portfolio"}
-MAX_TALENTS = 60
+MAX_TALENTS = 100
 MAX_IMAGES_PER_TALENT = 12
-MAX_TOTAL_IMAGES = 400
+MAX_TOTAL_IMAGES = 1000
 DEFAULT_PER_CATEGORY = 2
 LINKS_BASE_URL = os.environ.get("TALENT_MEDIA_BASE_URL", "https://links.talentgramagency.com").rstrip("/")
 _BLOCKED = {"archived", "merged"}
@@ -148,20 +149,43 @@ async def probe_image_dims(client: httpx.AsyncClient, url: str) -> Optional[Tupl
 
 @router.get("/roster/fields")
 async def roster_fields_registry(admin: dict = Depends(current_team_or_admin)):
-    """The field groups/defaults the roster builder offers (single source of truth)."""
-    return F.registry()
+    """The field groups/defaults the roster builder offers (single source of truth), plus the roster
+    size limits so the builder never hard-codes them."""
+    return {**F.registry(), "limits": _limits()}
 
 
 # ---------------------------------------------------------------------------
 # Admin: media options for the image-selection step
 # ---------------------------------------------------------------------------
+def _limits() -> dict:
+    return {"max_talents": MAX_TALENTS, "max_images_per_talent": MAX_IMAGES_PER_TALENT,
+            "max_total_images": MAX_TOTAL_IMAGES}
+
+
+def _thumb_url(m: dict) -> str:
+    """Small preview of an image for the builder's grid. Order: the media's stored `thumbnail_url` (every
+    upload path writes it through core.media_url's sanctioned presets, so it is already a small derivative
+    that other screens have requested — no new transformation), else the `thumb` preset built from the
+    public_id (same convention as the cover thumbnail in enrich_talent), else the stored URL unchanged.
+    The full-size file is only fetched by the PDF builder."""
+    if m.get("thumbnail_url"):
+        return m["thumbnail_url"]
+    pid = m.get("public_id")
+    if not pid:
+        return m["url"]
+    return media_url(pid, "thumb", m.get("resource_type") or "image") or m["url"]
+
+
 class MediaOptionsIn(BaseModel):
     talent_ids: List[str] = Field(default_factory=list)
 
 
 @router.post("/roster/media-options")
 async def roster_media_options(payload: MediaOptionsIn, admin: dict = Depends(current_team_or_admin)):
-    ids = list(dict.fromkeys([i for i in payload.talent_ids if i]))[:MAX_TALENTS]
+    ids = list(dict.fromkeys([i for i in payload.talent_ids if i]))
+    if len(ids) > MAX_TALENTS:
+        # Never silently drop talents: the caller must know the roster is over the limit.
+        raise HTTPException(400, f"A roster can include at most {MAX_TALENTS} talents")
     docs = await db.talents.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "media": 1, "cover_media_id": 1, "status": 1}).to_list(len(ids) or 1)
     by_id = {d["id"]: d for d in docs}
     out = []
@@ -179,12 +203,11 @@ async def roster_media_options(payload: MediaOptionsIn, admin: dict = Depends(cu
             "default_media_ids": default_selection(t),
             "groups": [
                 {"key": c, "label": CATEGORY_LABELS[c],
-                 "items": [{"id": m["id"], "url": m["url"]} for m in groups[c]]}
+                 "items": [{"id": m["id"], "url": m["url"], "thumb_url": _thumb_url(m)} for m in groups[c]]}
                 for c in ROSTER_CATEGORIES
             ],
         })
-    return {"talents": out, "limits": {"max_talents": MAX_TALENTS, "max_images_per_talent": MAX_IMAGES_PER_TALENT,
-                                       "max_total_images": MAX_TOTAL_IMAGES}}
+    return {"talents": out, "limits": _limits()}
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +267,7 @@ async def prepare_roster(raw: Optional[dict], existing: Optional[dict] = None) -
         raise HTTPException(400, f"A roster can include at most {MAX_TOTAL_IMAGES} images in total")
 
     if to_probe:
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(16)
         async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(10.0, connect=5.0)) as client:
             async def one(item):
                 async with sem:
@@ -422,8 +445,13 @@ async def _pdf_response(link: dict) -> FileResponse:
     except Exception:
         logger.exception("roster pdf build failed for link %s", link.get("id"))
         raise HTTPException(500, "Unable to generate the PDF. Please try again in a moment.")
+    headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+    meta = roster_pdf.read_meta(path)
+    if meta:  # lets the builder warn when an image could not be fetched and was left out
+        headers["X-Roster-Images-Total"] = str(meta.get("images_total", ""))
+        headers["X-Roster-Images-Included"] = str(meta.get("images_included", ""))
     return FileResponse(path, media_type="application/pdf", filename=_pdf_filename(link.get("title")),
-                        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+                        headers=headers)
 
 
 # ---------------------------------------------------------------------------

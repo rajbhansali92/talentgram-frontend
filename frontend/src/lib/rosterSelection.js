@@ -86,3 +86,38 @@ export function toggleField(fields, key) {
 export function countEnabled(fields) {
     return Object.values(fields || {}).filter(Boolean).length;
 }
+
+/** Limits the builder falls back to until /roster/fields reports the server's (backend routers/roster.py). */
+export const DEFAULT_ROSTER_LIMITS = { max_talents: 100, max_images_per_talent: 12, max_total_images: 1000 };
+
+/** Total images across the selected talents. */
+export function countImages(mediaByTalent, ids = null) {
+    const keys = ids || Object.keys(mediaByTalent || {});
+    let n = 0;
+    for (const id of keys) n += (mediaByTalent[id] || []).length;
+    return n;
+}
+
+/**
+ * Add `incoming` talents ({id, ...}) after the current selection, skipping ones already selected and
+ * keeping roster order. ATOMIC: if the result would exceed `max` nothing is added and `overflow` says
+ * by how many — a bulk "select all" never silently drops or truncates talents.
+ */
+export function mergeSelection(current, incoming, max = Infinity) {
+    const have = new Set(current.map((t) => t.id));
+    const fresh = [];
+    for (const t of incoming) {
+        if (!have.has(t.id)) { have.add(t.id); fresh.push(t); }
+    }
+    if (current.length + fresh.length > max) {
+        return { list: current, added: 0, overflow: current.length + fresh.length - max };
+    }
+    return { list: fresh.length ? [...current, ...fresh] : current, added: fresh.length, overflow: 0 };
+}
+
+/** Remove every talent whose id is in `ids` (a Set or array). Returns the same array if nothing matched. */
+export function removeIds(current, ids) {
+    const drop = ids instanceof Set ? ids : new Set(ids);
+    const next = current.filter((t) => !drop.has(t.id));
+    return next.length === current.length ? current : next;
+}

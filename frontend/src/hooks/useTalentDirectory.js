@@ -36,7 +36,7 @@ export const DEFAULT_FILTERS = {
 const DEFAULT_SORT = "created_desc";
 const DEFAULT_PAGE_SIZE = 40;
 
-function buildParams(filters, sortBy, page, pageSize) {
+export function buildParams(filters, sortBy, page, pageSize) {
     const params = { page, size: pageSize };
     if (filters.search.trim()) params.q = filters.search.trim();
     if (filters.gender !== "any") params.gender = filters.gender;

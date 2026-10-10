@@ -42,7 +42,7 @@ ASSETS = os.path.abspath(os.path.join(_HERE, "..", "assets"))
 LOGO_PATH = os.path.join(ASSETS, "talentgram-black.png")
 FONT_DIR = os.path.join(ASSETS, "fonts")
 
-FETCH_CONCURRENCY = int(os.environ.get("ROSTER_PDF_FETCH_CONCURRENCY", "4"))
+FETCH_CONCURRENCY = int(os.environ.get("ROSTER_PDF_FETCH_CONCURRENCY", "6"))
 MAX_CONCURRENT_BUILDS = int(os.environ.get("ROSTER_PDF_MAX_CONCURRENT", "2"))
 MAX_SOURCE_BYTES = 40 * 1024 * 1024
 INDEX_MIN_TALENTS = 6
@@ -426,10 +426,34 @@ def content_key(data: dict) -> str:
     return hashlib.sha1(blob.encode()).hexdigest()[:20]
 
 
+def _meta_path(pdf_path: str) -> str:
+    return pdf_path[:-4] + ".json"
+
+
+def _write_meta(pdf_path: str, meta: dict) -> None:
+    try:
+        with open(_meta_path(pdf_path), "w") as fh:
+            json.dump(meta, fh)
+    except OSError:
+        logger.warning("roster pdf: could not write build metadata (non-fatal)")
+
+
+def read_meta(pdf_path: str) -> Optional[dict]:
+    """{images_total, images_included} recorded when the PDF was built (None for older cache files)."""
+    try:
+        with open(_meta_path(pdf_path)) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def _cleanup_cache() -> None:
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         files = [os.path.join(CACHE_DIR, f) for f in os.listdir(CACHE_DIR) if f.endswith(".pdf")]
+        for f in os.listdir(CACHE_DIR):           # drop metadata whose PDF is gone
+            if f.endswith(".json") and not os.path.exists(os.path.join(CACHE_DIR, f[:-5] + ".pdf")):
+                os.remove(os.path.join(CACHE_DIR, f))
         now = time.time()
         for f in files:
             if now - os.path.getmtime(f) > CACHE_TTL_SEC:
@@ -486,6 +510,11 @@ async def get_or_build_pdf(cache_key: str, data: dict, http_client: Optional[htt
                 started = time.monotonic()
                 prepared = await prepare_images(data["talents"], workdir, client)
                 pages = await asyncio.to_thread(_render, data, prepared, workdir, out_path)
+                total_images = sum(len(t["images"]) for t in data["talents"])
+                _write_meta(out_path, {"images_total": total_images, "images_included": len(prepared)})
+                if len(prepared) < total_images:
+                    logger.warning("roster pdf: %d of %d images could not be fetched and were left out (key=%s)",
+                                   total_images - len(prepared), total_images, cache_key)
                 logger.info("roster pdf built: key=%s talents=%d images=%d/%d pages=%d %.1fs",
                             cache_key, len(data["talents"]), len(prepared),
                             sum(len(t["images"]) for t in data["talents"]), pages, time.monotonic() - started)

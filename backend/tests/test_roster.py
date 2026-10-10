@@ -367,6 +367,53 @@ async def test_media_options_endpoint_groups_like_the_profile_and_suggests_a_cur
     assert sum(1 for x in d if x.startswith("i")) <= 2 and sum(1 for x in d if x.startswith("p")) <= 2
 
 
+async def test_roster_limits_are_exposed_and_media_options_never_silently_truncates(env, cdn):
+    tdb, http = env
+    lim = (await http.get("/api/roster/fields")).json()["limits"]
+    assert lim == {"max_talents": 100, "max_images_per_talent": 12, "max_total_images": 1000}
+    # the field registry itself is unchanged by the added key
+    assert "groups" in (await http.get("/api/roster/fields")).json()
+    ok = await http.post("/api/roster/media-options", json={"talent_ids": [f"id{i}" for i in range(R.MAX_TALENTS)]})
+    assert ok.status_code == 200
+    over = await http.post("/api/roster/media-options", json={"talent_ids": [f"id{i}" for i in range(R.MAX_TALENTS + 1)]})
+    assert over.status_code == 400 and str(R.MAX_TALENTS) in over.json()["detail"]
+    # duplicates collapse before counting
+    dup = await http.post("/api/roster/media-options", json={"talent_ids": ["a"] * 500})
+    assert dup.status_code == 200
+
+
+async def test_roster_accepts_100_talents_and_1000_images_and_rejects_beyond(env, cdn):
+    tdb, http = env
+    ts = []
+    for i in range(R.MAX_TALENTS + 1):
+        ts.append(await _talent(tdb, cdn, name=f"Qa Talent {i}", media=[_m(cdn, "indian", "/portrait.jpg", f"{i}-{j}") for j in range(10)]))
+    entries = [{"talent_id": t["id"], "media_ids": [m["id"] for m in t["media"]]} for t in ts]
+    created = await _create(http, "R100", entries[:R.MAX_TALENTS])
+    assert len(created["roster"]["talents"]) == 100 and sum(len(t["media_ids"]) for t in created["roster"]["talents"]) == 1000
+    r = await http.post("/api/links", json=_payload("R101", entries))
+    assert r.status_code == 400 and "at most 100 talents" in r.json()["detail"]
+    extra = entries[:R.MAX_TALENTS]
+    # one image over the 1000 total: give a talent 11 images
+    t11 = await _talent(tdb, cdn, name="Eleven", media=[_m(cdn, "indian", "/portrait.jpg", f"e{j}") for j in range(11)])
+    extra[1] = {"talent_id": t11["id"], "media_ids": [m["id"] for m in t11["media"]]}
+    r2 = await http.post("/api/links", json=_payload("RTot", extra))
+    assert r2.status_code == 400 and "1000 images" in r2.json()["detail"]
+
+
+async def test_media_options_offer_small_thumbnails_not_the_full_size_file(env, cdn):
+    tdb, http = env
+    t = await _talent(tdb, cdn, media=[
+        _m(cdn, "indian", "/portrait.jpg", "cl", public_id="talents/abc123"),
+        _m(cdn, "indian", "/portrait2.jpg", "nopid"),
+        _m(cdn, "indian", "/square.jpg", "stored", public_id="talents/zzz", thumbnail_url="https://res.cloudinary.com/x/image/upload/c_fill,w_200/talents/zzz.jpg"),
+    ])
+    items = {i["id"]: i for g in (await http.post("/api/roster/media-options", json={"talent_ids": [t["id"]]})).json()["talents"][0]["groups"] for i in g["items"]}
+    assert "w_200" in items["cl"]["thumb_url"] and items["cl"]["url"].endswith("/portrait.jpg")   # sanctioned thumb preset
+    assert items["nopid"]["thumb_url"] == items["nopid"]["url"]                                     # nothing to derive from
+    assert items["cl"]["url"] != items["cl"]["thumb_url"]
+    assert items["stored"]["thumb_url"] == "https://res.cloudinary.com/x/image/upload/c_fill,w_200/talents/zzz.jpg"  # stored derivative wins
+
+
 # =========================================================================
 # Categories / video / graceful degradation
 # =========================================================================
@@ -574,6 +621,8 @@ async def test_pdf_survives_a_broken_image_and_never_leaves_temp_files(env, cdn)
     r = await http.get(f"/api/public/links/{link['slug']}/roster/pdf", headers=h)
     assert r.status_code == 200
     assert len(PdfReader(io.BytesIO(r.content)).pages) == 2  # cover + the one good image
+    # completeness is reported, never silent: 3 selected, 1 made it into the PDF
+    assert r.headers["x-roster-images-total"] == "3" and r.headers["x-roster-images-included"] == "1"
     after = {d for d in os.listdir(tempdir()) if d.startswith("tg_roster_")}
     assert after == before, "temp work dir leaked"
 

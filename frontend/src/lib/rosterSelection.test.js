@@ -94,3 +94,37 @@ describe("allow_pdf_download in the roster payload", () => {
         expect(buildRosterPayload({ ...base, allowPdfDownload: null }).roster.allow_pdf_download).toBe(true);
     });
 });
+
+describe("bulk selection helpers", () => {
+    const cur = [{ id: "a" }, { id: "b" }];
+    it("mergeSelection appends new talents after the current ones, skipping duplicates", async () => {
+        const { mergeSelection } = await import("./rosterSelection");
+        const r = mergeSelection(cur, [{ id: "b" }, { id: "c" }, { id: "c" }, { id: "d" }], 10);
+        expect(r.list.map((t) => t.id)).toEqual(["a", "b", "c", "d"]);
+        expect(r.added).toBe(2);
+        expect(r.overflow).toBe(0);
+    });
+    it("mergeSelection is atomic: over the limit adds nothing and reports by how much", async () => {
+        const { mergeSelection } = await import("./rosterSelection");
+        const r = mergeSelection(cur, [{ id: "c" }, { id: "d" }, { id: "e" }], 4);
+        expect(r.list).toBe(cur);
+        expect(r.added).toBe(0);
+        expect(r.overflow).toBe(1);
+    });
+    it("mergeSelection returns the same array when nothing is new", async () => {
+        const { mergeSelection } = await import("./rosterSelection");
+        expect(mergeSelection(cur, [{ id: "a" }], 4).list).toBe(cur);
+    });
+    it("removeIds drops only the given ids and keeps order; same array when nothing matched", async () => {
+        const { removeIds } = await import("./rosterSelection");
+        const list = [{ id: "a" }, { id: "b" }, { id: "c" }];
+        expect(removeIds(list, new Set(["b"])).map((t) => t.id)).toEqual(["a", "c"]);
+        expect(removeIds(list, ["z"])).toBe(list);
+    });
+    it("countImages sums only the requested talents", async () => {
+        const { countImages } = await import("./rosterSelection");
+        const m = { a: ["1", "2"], b: ["3"], c: ["4", "5", "6"] };
+        expect(countImages(m)).toBe(6);
+        expect(countImages(m, ["a", "c", "zzz"])).toBe(5);
+    });
+});

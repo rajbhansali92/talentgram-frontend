@@ -65,7 +65,7 @@ export default function RosterBuilder({ editId = null }) {
                 const list = Array.isArray(bulk) ? bulk : bulk?.items || bulk?.data || [];
                 const byId = Object.fromEntries(list.map((t) => [t.id, t]));
                 setSelected(ids.filter((i) => byId[i]).map((i) => ({
-                    id: i, name: byId[i].name, thumb: byId[i].cover_thumbnail_url || byId[i].image_url || null,
+                    id: i, name: byId[i].name, thumb: byId[i].cover_thumbnail_url || byId[i].image_url || null, full: byId[i].image_url || null,
                 })));
             } catch {
                 toast.error("Couldn't load this roster");

@@ -14,7 +14,16 @@ import { mergeSelection, moveItem, removeIds, shortTalentName } from "@/lib/rost
 export const ROSTER_DIRECTORY_KEY = "roster-builder-talents";
 const PAGE_SIZE = 24;
 
-const toEntry = (t) => ({ id: t.id, name: t.name, thumb: t.cover_thumbnail_url || t.image_url || null });
+const toEntry = (t) => ({ id: t.id, name: t.name, thumb: t.cover_thumbnail_url || t.image_url || null, full: t.image_url || null });
+
+/** Cover image: the small cover thumbnail first, then (once) the full-size cover if the thumbnail fails to load. */
+function CoverImg({ src, fallback, className }) {
+    const [useFallback, setUseFallback] = useState(false);
+    const shown = useFallback ? fallback : src;
+    if (!shown) return null;
+    return <img src={shown} alt="" loading="lazy" decoding="async" className={className}
+        onError={() => { if (!useFallback && fallback && fallback !== src) setUseFallback(true); }} />;
+}
 
 /** One result card. Memoised: ticking a card re-renders only that card, not the 24 around it. */
 const TalentCard = memo(function TalentCard({ t, on, onToggle }) {
@@ -23,7 +32,7 @@ const TalentCard = memo(function TalentCard({ t, on, onToggle }) {
         <button type="button" onClick={() => onToggle(t)} aria-pressed={on} data-testid={`roster-talent-${t.id}`}
             className={`relative text-left rounded-xl overflow-hidden border bg-white transition-colors ${on ? "border-black ring-1 ring-black" : "border-black/[0.08] hover:border-black/30"}`}>
             <div className="aspect-[3/4] bg-[#f3f2ef]">
-                {src && <img src={src} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />}
+                <CoverImg src={src} fallback={t.image_url} className="w-full h-full object-cover" />
             </div>
             <div className="p-2.5">
                 <div className="text-sm font-medium text-black/85 truncate">{t.name}</div>
@@ -43,7 +52,7 @@ const SelectedRow = memo(function SelectedRow({ t, i, last, onRemove, onMove, on
             <GripVertical className="w-4 h-4 text-black/30 cursor-grab shrink-0" aria-hidden />
             <span className="text-[11px] font-mono text-black/40 w-6">{String(i + 1).padStart(2, "0")}</span>
             <div className="w-9 h-11 rounded bg-[#f3f2ef] overflow-hidden shrink-0">
-                {t.thumb && <img src={t.thumb} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />}
+                <CoverImg src={t.thumb} fallback={t.full} className="w-full h-full object-cover" />
             </div>
             <div className="min-w-0 flex-1">
                 <div className="text-sm text-black/85 truncate">{t.name}</div>

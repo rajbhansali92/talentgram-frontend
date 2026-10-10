@@ -162,18 +162,25 @@ def _limits() -> dict:
             "max_total_images": MAX_TOTAL_IMAGES}
 
 
+# Real Cloudinary delivery path of an image URL: everything after the version segment, minus the extension.
+# Needed because many media records (submission uploads) keep only the BARE id in `public_id` while the asset
+# actually lives under a folder (…/talentgram/submissions/<id>/<uuid>), so a thumbnail built from `public_id`
+# (or the stored `thumbnail_url`) 404s. The delivery URL is the only reliable source of the path.
+_CLD_IMAGE_PATH = re.compile(r"/image/upload/(?:[^/]+/)*?v\d+/(.+?)(?:\.[A-Za-z0-9]+)?$")
+
+
 def _thumb_url(m: dict) -> str:
-    """Small preview of an image for the builder's grid. Order: the media's stored `thumbnail_url` (every
-    upload path writes it through core.media_url's sanctioned presets, so it is already a small derivative
-    that other screens have requested — no new transformation), else the `thumb` preset built from the
-    public_id (same convention as the cover thumbnail in enrich_talent), else the stored URL unchanged.
-    The full-size file is only fetched by the PDF builder."""
-    if m.get("thumbnail_url"):
-        return m["thumbnail_url"]
-    pid = m.get("public_id")
-    if not pid:
-        return m["url"]
-    return media_url(pid, "thumb", m.get("resource_type") or "image") or m["url"]
+    """Small preview of an image for the builder's grid: the existing sanctioned `thumb` preset
+    (core.media_url — c_fill,w_200,f_auto,q_auto, no new transformation) built from the path of the image's
+    own Cloudinary URL. Anything that is not a parseable Cloudinary image URL gets the stored URL unchanged
+    (always loadable, just full size) — a guessed path is never returned. The PDF builder is unaffected: it
+    fetches the full-size file."""
+    url = m["url"]
+    if "res.cloudinary.com" in url:
+        found = _CLD_IMAGE_PATH.search(url)
+        if found:
+            return media_url(found.group(1), "thumb") or url
+    return url
 
 
 class MediaOptionsIn(BaseModel):

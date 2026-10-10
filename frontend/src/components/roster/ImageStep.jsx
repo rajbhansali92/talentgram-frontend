@@ -10,35 +10,42 @@ const SECTION_STYLE = { contentVisibility: "auto", containIntrinsicSize: "auto 5
 
 const smallBtn = "px-3 min-h-[40px] text-xs border border-black/[0.12] rounded-lg text-black/65 hover:bg-black/[0.03]";
 
-/** A thumbnail with a placeholder while it loads and a visible fallback if it fails — selection still works. */
-function Thumb({ src }) {
-    const [failed, setFailed] = useState(false);
-    if (!src || failed) {
+/**
+ * A thumbnail with a placeholder while it loads. If the small version fails to load it falls back ONCE to the
+ * full-size image (always valid), and only then to a visible "unavailable" placeholder — selection works either way.
+ */
+function Thumb({ src, fallback }) {
+    const [stage, setStage] = useState(0); // 0 thumbnail, 1 full-size fallback, 2 placeholder
+    const shown = stage === 0 ? src : stage === 1 ? fallback : null;
+    if (!shown) {
         return <span className="absolute inset-0 flex items-center justify-center text-black/25" data-testid="roster-img-unavailable"><ImageOff className="w-5 h-5" aria-hidden /></span>;
     }
-    return <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} className="w-full h-full object-cover" />;
+    return (
+        <img src={shown} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover"
+            onError={() => setStage((s) => (s === 0 && fallback && fallback !== src ? 1 : 2))} />
+    );
 }
 
 /**
  * One selectable image. Memoised on primitives only, so toggling an image re-renders just that tile — and the
  * tile whose order badge changes — never the ~1,000 others.
  */
-const ImageTile = memo(function ImageTile({ id, src, label, on, order, onToggle }) {
+const ImageTile = memo(function ImageTile({ id, src, full, label, on, order, onToggle }) {
     return (
         <button type="button" aria-pressed={on} aria-label={label} data-testid={`roster-img-${id}`} onClick={() => onToggle(id)}
             className={`relative aspect-[3/4] rounded-md overflow-hidden bg-[#f3f2ef] border ${on ? "border-black ring-2 ring-black" : "border-black/10 hover:border-black/40"}`}>
-            <Thumb src={src} />
+            <Thumb src={src} fallback={full} />
             {on && <span className="absolute top-1 right-1 min-w-[20px] h-5 px-1 rounded-full bg-black text-white text-[10px] font-medium flex items-center justify-center">{order}</span>}
         </button>
     );
 });
 
 /** The "Order in roster" strip tile. */
-const OrderTile = memo(function OrderTile({ id, src, i, last, onMoveEarlier, onMoveLater, onHero }) {
+const OrderTile = memo(function OrderTile({ id, src, full, i, last, onMoveEarlier, onMoveLater, onHero }) {
     return (
         <li className="shrink-0 w-24">
             <div className="relative aspect-[3/4] rounded-md overflow-hidden bg-[#f3f2ef] border border-black/10">
-                <Thumb src={src} />
+                <Thumb src={src} fallback={full} />
                 {i === 0 && <span className="absolute top-1 left-1 text-[9px] tracking-widest uppercase bg-black text-white px-1.5 py-0.5 rounded">Hero</span>}
             </div>
             <div className="flex items-center justify-between mt-1">
@@ -58,9 +65,9 @@ const OrderTile = memo(function OrderTile({ id, src, i, last, onMoveEarlier, onM
  * on one talent costs one section, regardless of how many talents the roster holds.
  */
 const TalentImages = memo(function TalentImages({ talentId, index, opt, sel, maxPer, onChange }) {
-    const thumbById = useMemo(() => {
+    const itemById = useMemo(() => {
         const m = new Map();
-        for (const g of opt.groups) for (const i of g.items) m.set(i.id, i.thumb_url || i.url);
+        for (const g of opt.groups) for (const i of g.items) m.set(i.id, i);
         return m;
     }, [opt]);
     const orderById = useMemo(() => new Map(sel.map((id, i) => [id, i + 1])), [sel]);
@@ -96,7 +103,8 @@ const TalentImages = memo(function TalentImages({ talentId, index, opt, sel, max
                     <div className="text-[10px] tracking-widest uppercase text-black/40 mb-2">Order in roster</div>
                     <ol className="flex gap-3 overflow-x-auto pb-1">
                         {sel.map((id, i) => (
-                            <OrderTile key={id} id={id} src={thumbById.get(id)} i={i} last={i === sel.length - 1}
+                            <OrderTile key={id} id={id} src={itemById.get(id)?.thumb_url || itemById.get(id)?.url} full={itemById.get(id)?.url}
+                                i={i} last={i === sel.length - 1}
                                 onMoveEarlier={earlier} onMoveLater={later} onHero={hero} />
                         ))}
                     </ol>
@@ -111,7 +119,7 @@ const TalentImages = memo(function TalentImages({ talentId, index, opt, sel, max
                         {g.items.map((m, idx) => {
                             const order = orderById.get(m.id);
                             return (
-                                <ImageTile key={m.id} id={m.id} src={m.thumb_url || m.url} label={`${g.label} image ${idx + 1}`}
+                                <ImageTile key={m.id} id={m.id} src={m.thumb_url || m.url} full={m.url} label={`${g.label} image ${idx + 1}`}
                                     on={order !== undefined} order={order || 0} onToggle={toggle} />
                             );
                         })}

@@ -400,18 +400,24 @@ async def test_roster_accepts_100_talents_and_1000_images_and_rejects_beyond(env
     assert r2.status_code == 400 and "1000 images" in r2.json()["detail"]
 
 
-async def test_media_options_offer_small_thumbnails_not_the_full_size_file(env, cdn):
+async def test_media_options_offer_small_thumbnails_built_from_the_real_cloudinary_path(env, cdn):
     tdb, http = env
+    folder = "https://res.cloudinary.com/talentgram/image/upload/v1787130664/talentgram/submissions/sub-1/27b2979a.jpg"
+    flat = "https://res.cloudinary.com/talentgram/image/upload/v1784029929/talentgram/talents/t-1/profile_images/abc.png"
     t = await _talent(tdb, cdn, media=[
-        _m(cdn, "indian", "/portrait.jpg", "cl", public_id="talents/abc123"),
-        _m(cdn, "indian", "/portrait2.jpg", "nopid"),
-        _m(cdn, "indian", "/square.jpg", "stored", public_id="talents/zzz", thumbnail_url="https://res.cloudinary.com/x/image/upload/c_fill,w_200/talents/zzz.jpg"),
+        # production reality: bare uuid public_id, real asset lives under a folder -> a public_id-based thumb 404s
+        {**_m(cdn, "indian", "/portrait.jpg", "bare", public_id="27b2979a"), "url": folder,
+         "thumbnail_url": "https://res.cloudinary.com/talentgram/image/upload/c_fill,dpr_auto,f_auto,q_auto,w_200/27b2979a"},
+        {**_m(cdn, "indian", "/portrait.jpg", "full", public_id="talentgram/talents/t-1/profile_images/abc"), "url": flat},
+        _m(cdn, "indian", "/portrait2.jpg", "other"),                       # not a Cloudinary URL
     ])
     items = {i["id"]: i for g in (await http.post("/api/roster/media-options", json={"talent_ids": [t["id"]]})).json()["talents"][0]["groups"] for i in g["items"]}
-    assert "w_200" in items["cl"]["thumb_url"] and items["cl"]["url"].endswith("/portrait.jpg")   # sanctioned thumb preset
-    assert items["nopid"]["thumb_url"] == items["nopid"]["url"]                                     # nothing to derive from
-    assert items["cl"]["url"] != items["cl"]["thumb_url"]
-    assert items["stored"]["thumb_url"] == "https://res.cloudinary.com/x/image/upload/c_fill,w_200/talents/zzz.jpg"  # stored derivative wins
+    assert items["bare"]["thumb_url"] == "https://res.cloudinary.com/talentgram/image/upload/c_fill,f_auto,q_auto,w_200/v1/talentgram/submissions/sub-1/27b2979a"
+    assert items["full"]["thumb_url"] == "https://res.cloudinary.com/talentgram/image/upload/c_fill,f_auto,q_auto,w_200/v1/talentgram/talents/t-1/profile_images/abc"
+    assert items["bare"]["url"] == folder and items["full"]["url"] == flat                      # full-size url untouched (PDF/public use it)
+    assert items["other"]["thumb_url"] == items["other"]["url"]                                  # never a guessed path
+    for k in ("bare", "full"):
+        assert "dpr_auto" not in items[k]["thumb_url"]                                           # stored/ guessed derivatives are not trusted
 
 
 # =========================================================================

@@ -29,7 +29,7 @@ const REGISTRY = (limits) => ({
 });
 
 const mkTalents = (n, prefix = "t") => Array.from({ length: n }, (_, i) => ({
-    id: `${prefix}${i + 1}`, name: `Talent ${prefix}${i + 1}`, age: 20 + i, height: "5'7\"", cover_thumbnail_url: `https://x/${prefix}${i + 1}.jpg`,
+    id: `${prefix}${i + 1}`, name: `Talent ${prefix}${i + 1}`, age: 20 + i, height: "5'7\"", cover_thumbnail_url: `https://x/${prefix}${i + 1}.jpg`, image_url: `https://x/full-${prefix}${i + 1}.jpg`,
 }));
 
 const optionFor = (id, n = 4) => ({
@@ -127,6 +127,15 @@ describe("Talents step — filters, search and selection", () => {
         await screen.findByTestId("roster-talent-t1");
         expect(count()).toBe(3);
         expect(screen.getByTestId("roster-talent-t1").getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("a talent card whose cover thumbnail fails falls back to the full-size cover", async () => {
+        mockServer();
+        await toTalents();
+        const img = screen.getByTestId("roster-talent-t1").querySelector("img");
+        expect(img.getAttribute("src")).toBe("https://x/t1.jpg");
+        fireEvent.error(img);
+        expect(screen.getByTestId("roster-talent-t1").querySelector("img").getAttribute("src")).toBe("https://x/full-t1.jpg");
     });
 
     it("Select this page adds only the visible page; Deselect this page removes only it", async () => {
@@ -286,11 +295,14 @@ describe("Images step — state, caching and rendering cost", () => {
         expect(screen.queryByTestId("roster-images-failed")).toBeNull();
     });
 
-    it("a broken thumbnail shows a placeholder but the image can still be selected", async () => {
+    it("a broken thumbnail falls back to the full-size image once, then to a placeholder — selection still works", async () => {
         mockServer();
         await toImages(["t1"]);
         const tile = screen.getByTestId("roster-img-t1-3");
-        fireEvent.error(tile.querySelector("img"));
+        fireEvent.error(tile.querySelector("img"));                              // thumbnail failed -> full-size fallback
+        expect(tile.querySelector("img").getAttribute("src")).toBe("https://x/full-t1-3.jpg");
+        expect(within(tile).queryByTestId("roster-img-unavailable")).toBeNull();
+        fireEvent.error(tile.querySelector("img"));                              // fallback failed too -> placeholder
         expect(within(tile).getByTestId("roster-img-unavailable")).toBeTruthy();
         fireEvent.click(tile);
         expect(tile.getAttribute("aria-pressed")).toBe("true");

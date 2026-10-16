@@ -4920,6 +4920,9 @@ async def build_talent_submission_view(sub: dict) -> dict:
     ]
 
     sub["client_feedback"] = await list_approved_feedback_for_talent(sub["id"])
+    # Internal finalize idempotency bookkeeping — never part of the
+    # talent-facing representation.
+    sub.pop("finalize_attempts", None)
     return sign_r2_media_if_needed(sub)
 
 

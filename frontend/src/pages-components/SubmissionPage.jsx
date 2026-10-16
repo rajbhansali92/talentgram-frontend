@@ -13,6 +13,18 @@ import { useSubmissionExperienceModel } from "@/hooks/useSubmissionExperienceMod
 import { computeRequirementItems } from "@/lib/requirementEngine";
 import { buildRecognizedIdentity, shouldAttemptSilentRecognition, classifyPortalLookupResult, tokenAuthenticatesEmail } from "@/lib/returningTalent";
 import { formatErrorDetail } from "@/lib/errorFormatter";
+import {
+    FINALIZE_TIMEOUT_MS,
+    STATUS_TIMEOUT_MS,
+    RECOVERY_MESSAGES,
+    newIdempotencyKey,
+    loadFinalizeKey,
+    saveFinalizeKey,
+    clearFinalizeKey,
+    isFinalizeOutcomeUnknown,
+    finalizeWithRecovery,
+    createSingleFlight,
+} from "@/lib/finalizeRecovery";
 import { splitPendingConsentByKnownDestination, groupByDestinationDecision } from "@/lib/mediaDestination";
 import { useSwipeStep } from "@/hooks/useSwipeStep";
 import SubmissionReadinessPanel from "@/components/shared/SubmissionReadinessPanel";
@@ -610,6 +622,13 @@ function SubmissionPage() {
     const stickyFooterRef = useRef(null);
     useStickyFooterHeightVar(stickyFooterRef, "--tg-sticky-cta-h");
     const [finalizing, setFinalizing] = useState(false);
+    // Synchronous guard: `finalizing` state only flips on a later render, so a
+    // second tap in the same moment would otherwise start a second finalize.
+    const finalizeFlightRef = useRef(null);
+    if (!finalizeFlightRef.current) finalizeFlightRef.current = createSingleFlight();
+    // One Idempotency-Key per submit ATTEMPT, reused for retries of that same
+    // attempt (see lib/finalizeRecovery.js).
+    const finalizeKeyRef = useRef(null);
     const [editMode, setEditMode] = useState(false);
     const requirements = project?.submission_requirements || {};
 
@@ -2425,6 +2444,17 @@ function SubmissionPage() {
     };
 
     const finalize = async () => {
+        await finalizeFlightRef.current(async () => {
+            setFinalizing(true);
+            try {
+                await runFinalize();
+            } finally {
+                setFinalizing(false);
+            }
+        });
+    };
+
+    const runFinalize = async () => {
         // ── Guided validation: run inline before network call ──────────────
         // `experience` (useSubmissionExperienceModel) was computed during the
         // render that's already happened by the time this click handler runs
@@ -2494,17 +2524,44 @@ function SubmissionPage() {
         if (adminMode && pendingMediaConsent.length > 0) {
             await submitMediaConsent("only_this_project");
         }
-        setFinalizing(true);
-        try {
-            const { data: finalizeData } = await axios.post(
+        const authHeaders = { Authorization: `Bearer ${currentSaved.token}` };
+        // Reuse the key of an attempt whose outcome we never learned (this
+        // page load, or before a reload); otherwise start a new attempt.
+        if (!finalizeKeyRef.current) {
+            finalizeKeyRef.current = loadFinalizeKey(currentSaved.id) || newIdempotencyKey();
+        }
+        const attemptKey = finalizeKeyRef.current;
+        saveFinalizeKey(currentSaved.id, attemptKey);
+        const postFinalize = () =>
+            axios.post(
                 `/public/submissions/${currentSaved.id}/finalize`,
                 {},
-                {
-                    headers: {
-                        Authorization: `Bearer ${currentSaved.token}`,
-                    }
-                },
+                { headers: { ...authHeaders, "Idempotency-Key": attemptKey }, timeout: FINALIZE_TIMEOUT_MS },
             );
+        const attemptDone = () => {
+            finalizeKeyRef.current = null;
+            clearFinalizeKey(currentSaved.id);
+        };
+        try {
+            const result = await finalizeWithRecovery({
+                post: postFinalize,
+                fetchState: async () => {
+                    const { data } = await axios.get(
+                        `/public/submissions/${currentSaved.id}/finalize-status`,
+                        { params: { key: attemptKey }, headers: authHeaders, timeout: STATUS_TIMEOUT_MS },
+                    );
+                    return data?.state;
+                },
+            });
+            if (result.outcome !== "done") {
+                // We could not confirm the outcome. The key is kept, so the
+                // next tap is the same attempt — safe to repeat.
+                if (result.outcome === "pending") toast.message(RECOVERY_MESSAGES.pending);
+                else toast.error(RECOVERY_MESSAGES[result.outcome] || RECOVERY_MESSAGES.unknown);
+                return;
+            }
+            const finalizeData = result.data;
+            attemptDone();
             // A first-time submitter's Talent record is created inside
             // finalize itself — only from this point on does a portal
             // session exist for them. Persist it now so "View My Talent
@@ -2520,14 +2577,19 @@ function SubmissionPage() {
                     localStorage.setItem("talentgram_portal_email", finalizedEmailForPortal);
                 }
             }
-            const { data } = await axios.get(
-                `/public/submissions/${currentSaved.id}`,
-                {
-                    headers: {
-                        Authorization: `Bearer ${currentSaved.token}`,
-                    }
-                },
-            );
+            let data;
+            try {
+                ({ data } = await axios.get(
+                    `/public/submissions/${currentSaved.id}`,
+                    { headers: authHeaders },
+                ));
+            } catch (readErr) {
+                // Finalize already succeeded — a failed re-read must not be
+                // reported as a failed submission.
+                try { localStorage.removeItem(LS_DRAFT_KEY(slug)); } catch (e) { console.error(e); }
+                toast.success("Your audition has been received. Refresh the page to see your confirmation.");
+                return;
+            }
             applySubmissionResponse(data);
             setEditMode(false);
             // Once the user finalises, clear the local draft — the
@@ -2545,11 +2607,12 @@ function SubmissionPage() {
                 toast.success("Your audition has been received.");
             }
         } catch (err) {
+            // A definitive answer from the server ends this attempt; an
+            // unknown outcome keeps the key so the retry is the same attempt.
+            if (!isFinalizeOutcomeUnknown(err)) attemptDone();
             toast.error(
                 formatErrorDetail(err, "Please complete all required fields"),
             );
-        } finally {
-            setFinalizing(false);
         }
     };
 

@@ -31,7 +31,7 @@ const UPSTREAM_IDLE_TIMEOUT_MS =
 // Explicit allow-list, not a blanket copy — this proxy should never relay a
 // Next.js/Vercel-internal header, or something we haven't reasoned about,
 // into the upstream request.
-const FORWARD_REQUEST_HEADERS = ["authorization", "cookie", "content-type", "accept", "user-agent"];
+const FORWARD_REQUEST_HEADERS = ["authorization", "cookie", "content-type", "accept", "user-agent", "idempotency-key"];
 
 // Full RFC 7230 §6.1 hop-by-hop set, plus content-encoding/content-length
 // (fetch() transparently decompresses the upstream body, so those values

@@ -7,6 +7,30 @@ const FIELD_LABEL_MAP = {
     instagram_handle: "Instagram Handle",
 };
 
+// A request that never produced an HTTP response because it was aborted:
+// axios' CanceledError (message "canceled", code ERR_CANCELED), an
+// AbortError, axios' own timeout (ECONNABORTED), or a Request Manager
+// timeout — which aborts via AbortController, so the caller receives the raw
+// CanceledError with `classification === "timeout"` attached (axiosShim).
+// None of these say anything about what the SERVER did.
+export function isCancelOrTimeoutError(e) {
+    if (!e || e.response) return false;
+    return (
+        e.code === "ERR_CANCELED" ||
+        e.code === "ECONNABORTED" ||
+        e.code === "ETIMEDOUT" ||
+        e.name === "CanceledError" ||
+        e.name === "AbortError" ||
+        e.classification === "timeout" ||
+        e.classification === "cancelled" ||
+        e.classification === "aborted" ||
+        e.message === "canceled"
+    );
+}
+
+export const INTERRUPTED_REQUEST_MESSAGE =
+    "The connection was interrupted before we got a reply. Please check your connection and try again.";
+
 /**
  * Parses and formats FastAPI/Pydantic or generic Axios errors into clean, crash-proof user-facing strings.
  *
@@ -51,6 +75,12 @@ export function formatErrorDetail(e, fallback = "An error occurred") {
     const apiMessage = e?.response?.data?.message;
     if (typeof apiMessage === "string") {
         return apiMessage;
+    }
+
+    // 3b. An aborted/timed-out request has no server message — never surface
+    // axios' raw "canceled" / "timeout of Nms exceeded" text to a talent.
+    if (isCancelOrTimeoutError(e)) {
+        return INTERRUPTED_REQUEST_MESSAGE;
     }
 
     // 4. Fallback to standard Axios/JS error message

@@ -1,7 +1,9 @@
 """Public submission flow + admin review."""
 import hashlib
 import uuid
-from datetime import timedelta
+import asyncio
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
@@ -546,7 +548,7 @@ async def submission_update(
     if update:
         update.update(actor_stamp(submitter))
         await db.submissions.update_one({"id": sid}, {"$set": update})
-    updated = await db.submissions.find_one({"id": sid}, {"_id": 0})
+    updated = await db.submissions.find_one({"id": sid}, {"_id": 0, "finalize_attempts": 0})
     return updated
 
 
@@ -1992,8 +1994,24 @@ def _build_submission_form_messages(submission: dict, project: dict) -> List[str
     ]
 
 
-async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_type: str, decision: Optional[str] = None):
+async def _enqueue_internal_whatsapp_notification_task(
+    submission: dict,
+    event_type: str,
+    decision: Optional[str] = None,
+    dedupe_key: Optional[str] = None,
+    on_enqueued=None,
+):
+    # `dedupe_key`/`on_enqueued` (finalize idempotency): the main notification
+    # batch is stamped with the key and skipped if one already exists, and
+    # `on_enqueued` is awaited once that batch is durably written (or found to
+    # exist) — so a resumed finalize can re-run this safely, neither
+    # duplicating the message nor losing it. Callers passing neither get the
+    # unchanged behaviour.
     try:
+        if dedupe_key and await db.whatsapp_batches.find_one({"dedupe_key": dedupe_key}, {"_id": 0, "id": 1}):
+            if on_enqueued:
+                await on_enqueued()
+            return
         project_id = submission.get("project_id")
         project = await db.projects.find_one({"id": project_id})
         project_name = "Unknown Project"
@@ -2070,6 +2088,7 @@ async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_t
             "created_at": timestamp,
             "started_at": None,
             "completed_at": None,
+            **({"dedupe_key": dedupe_key} if dedupe_key else {}),
         }
 
         job_doc = {
@@ -2100,6 +2119,8 @@ async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_t
         await db.whatsapp_batches.insert_one(batch_doc)
         await db.whatsapp_jobs.insert_one(job_doc)
         logger.info(f"Successfully enqueued internal WhatsApp notification for {event_type}")
+        if on_enqueued:
+            await on_enqueued()
 
         # Immediately follow with the completed submission form, as its own
         # message(s) — same destination, same canonical formatter as Copy
@@ -2180,19 +2201,207 @@ async def _enqueue_internal_whatsapp_notification_task(submission: dict, event_t
         logger.warning(f"Error in background internal WhatsApp notification task: {e}", exc_info=True)
 
 
-def enqueue_internal_whatsapp_notification(submission: dict, event_type: str, decision: Optional[str] = None):
+def enqueue_internal_whatsapp_notification(
+    submission: dict, event_type: str, decision: Optional[str] = None,
+    dedupe_key: Optional[str] = None, on_enqueued=None,
+):
     try:
         import asyncio
-        asyncio.create_task(_enqueue_internal_whatsapp_notification_task(submission, event_type, decision))
+        asyncio.create_task(_enqueue_internal_whatsapp_notification_task(
+            submission, event_type, decision, dedupe_key=dedupe_key, on_enqueued=on_enqueued,
+        ))
     except Exception as e:
         logger.warning(f"Failed to schedule internal WhatsApp notification task: {e}", exc_info=True)
 
 
+# --------------------------------------------------------------------------
+# Finalize idempotency (2026-10-14 incident: a client-side abort left the
+# talent unsure whether finalize had run, and a blind repeat of finalize is a
+# "retest" — it resets the admin decision to pending and re-notifies).
+#
+# A client may send an `Idempotency-Key` header (one random value per submit
+# attempt, reused for retries of that SAME attempt). The attempt is recorded
+# on the submission as `finalize_attempts[]`:
+#   state       in_progress | done | failed
+#   is_retest   decided ONCE, at claim time, from the pre-attempt state — a
+#               takeover after a crash never re-derives it from a half-
+#               committed document
+#   patched     status/decision write committed (set ATOMICALLY with it)
+#   notified / wa_notified   set AFTER the corresponding notification is
+#               durably written; the send itself is idempotent (dedupe key),
+#               so a resume after a crash in the marker gap re-runs it
+#               without duplicating or losing it
+#   result      the response, replayed verbatim for a repeated key
+# No header → the legacy path runs exactly as before. A NEW key after a
+# successful finalize is a deliberate resubmission and behaves as a retest,
+# unchanged.
+# --------------------------------------------------------------------------
+FINALIZE_ATTEMPT_STALE_SECONDS = 120
+FINALIZE_ATTEMPTS_KEEP = 10
+_FINALIZE_KEY_RE = re.compile(r"^[A-Za-z0-9_\-]{8,128}$")
+
+
+def _finalize_key_or_none(raw: Any) -> Optional[str]:
+    # A direct (non-HTTP) call leaves the Header() default object in place;
+    # only a real string is a key.
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    key = raw.strip()
+    if not _FINALIZE_KEY_RE.match(key):
+        raise HTTPException(400, "Invalid Idempotency-Key")
+    return key
+
+
+def _as_utc(dt: Any) -> datetime:
+    if not isinstance(dt, datetime):
+        return datetime.fromtimestamp(0, timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _attempt_is_stale(attempt: dict) -> bool:
+    age = datetime.now(timezone.utc) - _as_utc(attempt.get("started_at"))
+    return age.total_seconds() > FINALIZE_ATTEMPT_STALE_SECONDS
+
+
+async def _get_finalize_attempt(sid: str, key: str) -> Optional[dict]:
+    doc = await db.submissions.find_one(
+        {"id": sid}, {"_id": 0, "finalize_attempts": {"$elemMatch": {"key": key}}}
+    )
+    attempts = (doc or {}).get("finalize_attempts") or []
+    return attempts[0] if attempts else None
+
+
+async def _claim_finalize_attempt(sid: str, key: str) -> tuple:
+    """Returns (action, attempt) where action is one of
+    run | resume | replay | in_progress."""
+    pre = await db.submissions.find_one(
+        {"id": sid}, {"_id": 0, "submitted_at": 1, "status": 1}
+    )
+    if pre is None:
+        raise HTTPException(404, "Submission not found")
+    attempt = {
+        "key": key,
+        "state": "in_progress",
+        "started_at": datetime.now(timezone.utc),
+        "is_retest": has_been_submitted_once(pre),
+        "patched": False,
+        "notified": False,
+        "wa_notified": False,
+    }
+    # One finalize at a time per submission: a second, DIFFERENT key while
+    # another attempt is still fresh and running (two tabs/devices) is turned
+    # away rather than run side by side.
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=FINALIZE_ATTEMPT_STALE_SECONDS)
+    claimed = await db.submissions.update_one(
+        {
+            "id": sid,
+            "finalize_attempts.key": {"$ne": key},
+            "finalize_attempts": {"$not": {"$elemMatch": {"state": "in_progress", "started_at": {"$gte": cutoff}}}},
+        },
+        {"$push": {"finalize_attempts": {"$each": [attempt], "$slice": -FINALIZE_ATTEMPTS_KEEP}}},
+    )
+    if claimed.modified_count == 1:
+        return "run", attempt
+    existing = await _get_finalize_attempt(sid, key)
+    if existing is None:
+        # Not ours and not claimable: another attempt is running right now.
+        return "in_progress", {}
+    if existing.get("state") == "done":
+        return "replay", existing
+    if existing.get("state") == "in_progress" and not _attempt_is_stale(existing):
+        return "in_progress", existing
+    # failed, or in_progress but stale (crashed/cancelled worker): take over
+    # with a compare-and-set so two retries can't both resume.
+    took = await db.submissions.update_one(
+        {"id": sid, "finalize_attempts": {"$elemMatch": {
+            "key": key, "state": existing.get("state"), "started_at": existing.get("started_at"),
+        }}},
+        {"$set": {
+            "finalize_attempts.$.state": "in_progress",
+            "finalize_attempts.$.started_at": datetime.now(timezone.utc),
+        }},
+    )
+    if took.modified_count == 1:
+        return "resume", existing
+    return "in_progress", existing
+
+
+async def _set_attempt_fields(sid: str, key: str, fields: Dict[str, Any]) -> None:
+    await db.submissions.update_one(
+        {"id": sid, "finalize_attempts.key": key},
+        {"$set": {f"finalize_attempts.$.{k}": v for k, v in fields.items()}},
+    )
+
+
+async def _replay_finalize_result(sid: str, response: Response, attempt: dict) -> Dict[str, Any]:
+    result = dict(attempt.get("result") or {"ok": True})
+    talent_id = result.get("talent_id")
+    portal_token = None
+    if talent_id:
+        # Never store the credential on the submission; re-read the talent's
+        # current one (the same value the original response carried).
+        t = await db.talents.find_one({"id": talent_id}, {"_id": 0, "portal_access_token": 1})
+        portal_token = (t or {}).get("portal_access_token")
+        await grant_trusted_device(response, talent_id)
+    result["portal_token"] = portal_token
+    result["replayed"] = True
+    return result
+
+
 @router.post("/public/submissions/{sid}/finalize")
-async def submission_finalize(sid: str, response: Response, authorization: Optional[str] = Header(None)):
+async def submission_finalize(
+    sid: str,
+    response: Response,
+    authorization: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+):
     submitter = await decode_submitter(authorization)
     if not submitter or submitter.get("sid") != sid:
         raise HTTPException(401, "Invalid submission token")
+    key = _finalize_key_or_none(idempotency_key)
+    if key is None:
+        return await _submission_finalize_core(sid, response, submitter, None)
+
+    action, attempt = await _claim_finalize_attempt(sid, key)
+    if action == "replay":
+        return await _replay_finalize_result(sid, response, attempt)
+    if action == "in_progress":
+        raise HTTPException(409, "Your submission is still being processed.")
+    try:
+        result = await _submission_finalize_core(sid, response, submitter, {"key": key, **attempt})
+    except BaseException:
+        # HTTP rejection, unexpected error, or the request task being
+        # cancelled on a client disconnect: leave a retryable record. The
+        # stage markers stay, so a resume never repeats a committed effect.
+        await asyncio.shield(_set_attempt_fields(sid, key, {"state": "failed"}))
+        raise
+    stored = {k: v for k, v in result.items() if k != "portal_token"}
+    await _set_attempt_fields(sid, key, {
+        "state": "done", "result": stored, "finished_at": datetime.now(timezone.utc),
+    })
+    return result
+
+
+@router.get("/public/submissions/{sid}/finalize-status")
+async def submission_finalize_status(sid: str, key: str, authorization: Optional[str] = Header(None)):
+    """Read-only: what happened to ONE specific finalize attempt. Lets a
+    client that lost the response distinguish "my attempt completed" from "an
+    earlier submission was already finalized" (the submission's own status
+    can't tell those apart)."""
+    submitter = await decode_submitter(authorization)
+    if not submitter or submitter.get("sid") != sid:
+        raise HTTPException(401, "Invalid submission token")
+    key = _finalize_key_or_none(key)
+    attempt = await _get_finalize_attempt(sid, key) if key else None
+    if attempt is None:
+        return {"state": "none"}
+    state = attempt.get("state")
+    if state == "in_progress" and _attempt_is_stale(attempt):
+        state = "failed"
+    return {"state": state}
+
+
+async def _submission_finalize_core(sid: str, response: Response, submitter: dict, attempt: Optional[dict]):
     sub = await db.submissions.find_one({"id": sid})
     if not sub:
         raise HTTPException(404, "Submission not found")
@@ -2437,7 +2646,11 @@ async def submission_finalize(sid: str, response: Response, authorization: Optio
     # First-time finalize vs retest finalize. Based on "has this submission
     # ever been submitted?" so EVERY post-first-submit workflow (resubmit,
     # update, edit, admin-reopen → submit again, …) is treated as a retest.
-    is_retest = has_been_submitted_once(sub)
+    # With an idempotency attempt, "is this a retest?" was decided once at
+    # claim time (see _claim_finalize_attempt) — never re-derived here, or a
+    # resumed attempt would mistake its own committed first half for an
+    # earlier submission.
+    is_retest = attempt["is_retest"] if attempt else has_been_submitted_once(sub)
     new_status = "updated" if is_retest else "submitted"
     patch: Dict[str, Any] = {
         "status": new_status,
@@ -2566,7 +2779,19 @@ async def submission_finalize(sid: str, response: Response, authorization: Optio
                 {"id": talent_doc["id"]}, {"$set": {"portal_access_token": portal_token}}
             )
 
-    await db.submissions.update_one({"id": sid}, {"$set": patch})
+    if attempt and attempt.get("patched"):
+        # Resumed attempt whose status/decision write already committed —
+        # re-applying it could clobber an admin decision made since.
+        patch.pop("decision", None)
+    elif attempt:
+        # One atomic write: the status/decision patch and its "patched"
+        # marker commit together or not at all.
+        await db.submissions.update_one(
+            {"id": sid, "finalize_attempts.key": attempt["key"]},
+            {"$set": {**patch, "finalize_attempts.$.patched": True}},
+        )
+    else:
+        await db.submissions.update_one({"id": sid}, {"$set": patch})
 
     # Sync all uploads retroactively into the talent's global media.
     # Idempotent via source_submission_media_id.
@@ -2651,33 +2876,51 @@ async def submission_finalize(sid: str, response: Response, authorization: Optio
     )
     brand = (project or {}).get("brand_name") or sub.get("project_slug") or "Project"
     talent_name = sub.get("talent_name") or sub.get("talent_email") or "A talent"
-    if is_retest:
-        await notify_fanout(
-            db,
-            type="submission_updated",
-            title=f"{talent_name} updated their submission",
-            body=f"{brand} — back to pending review.",
-            payload={"submission_id": sid, "project_id": sub["project_id"]},
-        )
-    else:
-        await notify_fanout(
-            db,
-            type="submission_new",
-            title=f"New submission from {talent_name}",
-            body=f"{brand} — awaiting your review.",
-            payload={"submission_id": sid, "project_id": sub["project_id"]},
-        )
+    # Admin in-app notification + internal WhatsApp. With an idempotency
+    # attempt, each is sent under a dedupe key and its marker is written only
+    # AFTER the notification is durably stored — so a crash anywhere (before
+    # the send, or in the gap before the marker) is repaired by a resume that
+    # re-runs the send: recipients already notified are skipped, the rest
+    # are reached. Never lost, never duplicated.
+    dk = f"finalize:{sid}:{attempt['key']}" if attempt else None
+    if attempt is None or not attempt.get("notified"):
+        if is_retest:
+            await notify_fanout(
+                db,
+                type="submission_updated",
+                title=f"{talent_name} updated their submission",
+                body=f"{brand} — back to pending review.",
+                payload={"submission_id": sid, "project_id": sub["project_id"]},
+                **({"dedupe_key": f"{dk}:admin"} if dk else {}),
+            )
+        else:
+            await notify_fanout(
+                db,
+                type="submission_new",
+                title=f"New submission from {talent_name}",
+                body=f"{brand} — awaiting your review.",
+                payload={"submission_id": sid, "project_id": sub["project_id"]},
+                **({"dedupe_key": f"{dk}:admin"} if dk else {}),
+            )
+        if attempt:
+            await _set_attempt_fields(sid, attempt["key"], {"notified": True})
     # Internal WhatsApp fires ONLY here — at finalize, the single business event
     # that means the talent has *completed* a submission (first-time) or a
     # *completed* resubmission (is_retest, triggered by pressing "Update
     # Submission"). Media-upload handlers are NOT used: they run when a file
     # uploads, before the talent commits, so they'd alert on an incomplete edit.
     # finalize is called exactly once per commit → exactly one notification.
-    if finalized_sub_for_notify := await db.submissions.find_one({"id": sid}, {"_id": 0}):
-        enqueue_internal_whatsapp_notification(
-            finalized_sub_for_notify,
-            "SUBMISSION UPDATED" if is_retest else "NEW SUBMISSION",
-        )
+    if attempt is None or not attempt.get("wa_notified"):
+        if finalized_sub_for_notify := await db.submissions.find_one({"id": sid}, {"_id": 0}):
+            wa_event = "SUBMISSION UPDATED" if is_retest else "NEW SUBMISSION"
+            if attempt:
+                async def _wa_done(_sid=sid, _key=attempt["key"]):
+                    await _set_attempt_fields(_sid, _key, {"wa_notified": True})
+                enqueue_internal_whatsapp_notification(
+                    finalized_sub_for_notify, wa_event, dedupe_key=f"{dk}:wa", on_enqueued=_wa_done,
+                )
+            else:
+                enqueue_internal_whatsapp_notification(finalized_sub_for_notify, wa_event)
     await update_talent_submission_metrics(email)
     return {
         "ok": True,

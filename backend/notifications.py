@@ -52,11 +52,18 @@ async def fanout(
     body: str,
     payload: Optional[Dict[str, Any]] = None,
     actor_id: Optional[str] = None,
+    dedupe_key: Optional[str] = None,
 ) -> int:
     """Insert one notification doc per active admin/team user.
 
     Best-effort — never raises into the caller's request handler. Returns
     the number of recipients reached.
+
+    `dedupe_key` (optional) makes the call safely repeatable: recipients that
+    already hold a notification stamped with this key are skipped, so a
+    resumed/retried caller can re-send without ever duplicating (and without
+    losing the recipients a crashed first attempt did not reach). Callers that
+    pass no key behave exactly as before.
     """
     if type not in NOTIFICATION_TYPES:
         logger.warning("notif fanout: unknown type=%s", type)
@@ -66,6 +73,12 @@ async def fanout(
         if not recipients:
             return 0
         now = _now()
+        already: set = set()
+        if dedupe_key:
+            already = {
+                r.get("recipient_id")
+                async for r in db.notifications.find({"dedupe_key": dedupe_key}, {"_id": 0, "recipient_id": 1})
+            }
         docs = [
             {
                 "id": str(uuid.uuid4()),
@@ -77,9 +90,10 @@ async def fanout(
                 "actor_id": actor_id,
                 "read_at": None,
                 "created_at": now,
+                **({"dedupe_key": dedupe_key} if dedupe_key else {}),
             }
             for rid in recipients
-            if rid != actor_id  # don't notify the actor of their own action
+            if rid != actor_id and rid not in already  # don't notify the actor of their own action
         ]
         if not docs:
             return 0

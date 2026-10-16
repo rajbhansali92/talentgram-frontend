@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { X, Search, UserPlus, Loader2, Check, Trash2, Video, Image as ImageIcon, Upload } from "lucide-react";
 import { adminApi, api, IMAGE_URL } from "@/lib/api";
+import { FINALIZE_TIMEOUT_MS, newIdempotencyKey, isFinalizeOutcomeUnknown } from "@/lib/finalizeRecovery";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import { AVAILABILITY_OPTIONS, BUDGET_OPTIONS } from "@/lib/talentSchema";
 import LocationSelector from "@/components/LocationSelector";
@@ -64,6 +65,11 @@ export default function AdminAddSubmissionModal({ open, onClose, projectId, proj
 
     // --- Finalize ---
     const [finalizing, setFinalizing] = useState(false);
+    // Same finalize protection as the talent page: one key per create attempt,
+    // reused on a retry so a lost reply can never turn into a second (retest)
+    // finalize. Synchronous guard against a double click.
+    const finalizeAttemptRef = useRef(null);
+    const finalizeBusyRef = useRef(false);
 
     useEffect(() => {
         if (!open) return;
@@ -252,7 +258,8 @@ export default function AdminAddSubmissionModal({ open, onClose, projectId, proj
     }
 
     async function handleCreateSubmission() {
-        if (!sid || !token) return;
+        if (!sid || !token || finalizeBusyRef.current) return;
+        finalizeBusyRef.current = true;
         setFinalizing(true);
         try {
             // Persist the latest edits before finalizing.
@@ -267,13 +274,31 @@ export default function AdminAddSubmissionModal({ open, onClose, projectId, proj
                     authHeaders(token)
                 );
             }
-            await api.post(`/public/submissions/${sid}/finalize`, {}, authHeaders(token));
+            if (finalizeAttemptRef.current?.sid !== sid) {
+                finalizeAttemptRef.current = { sid, key: newIdempotencyKey() };
+            }
+            await api.post(
+                `/public/submissions/${sid}/finalize`,
+                {},
+                {
+                    headers: { ...authHeaders(token).headers, "Idempotency-Key": finalizeAttemptRef.current.key },
+                    timeout: FINALIZE_TIMEOUT_MS,
+                },
+            );
+            finalizeAttemptRef.current = null;
             toast.success("Submission created");
             onCreated?.(sid);
             onClose();
         } catch (e) {
-            toast.error(e?.response?.data?.detail || "Failed to create submission");
+            if (isFinalizeOutcomeUnknown(e)) {
+                // Keep the key: clicking Create again is the same attempt.
+                toast.error("We couldn't confirm the submission was created. Click Create again — it will not be created twice.");
+            } else {
+                finalizeAttemptRef.current = null;
+                toast.error(e?.response?.data?.detail || "Failed to create submission");
+            }
         } finally {
+            finalizeBusyRef.current = false;
             setFinalizing(false);
         }
     }

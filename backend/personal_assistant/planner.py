@@ -58,6 +58,10 @@ def compute_slots(task: dict) -> List[dict]:
             slots.append({"key": f"project:{i}", "kind": "project", "phrase": e["phrase"], "options": e.get("options") or [],
                           "prompt": (f'Which project did you mean by "{e["phrase"]}"?' if e["state"] == "ambiguous"
                                      else (e.get("prompt") or f'I couldn\'t find a project matching "{e["phrase"]}".'))})
+    rec = p.get("recipient")
+    if task["kind"] == "share" and rec and rec.get("state") != "resolved":
+        slots.append({"key": "recipient", "kind": "recipient", "phrase": rec.get("label") or "", "options": rec.get("options") or [],
+                      "prompt": rec.get("prompt") or "Who should I send it to?"})
     if task["kind"] == "send" and p.get("template_state") != "resolved":
         slots.append({"key": "template", "kind": "template", "phrase": p.get("template_phrase") or "",
                       "options": p.get("template_options") or [],
@@ -83,8 +87,8 @@ def _title(task: dict) -> str:
         return f"Move {ts} to {stage_label(p.get('stage')) or '…'}" + (f" in {ps}" if p.get("projects") else "")
     if k == "share":
         rec = p.get("recipient") or {}
-        to = {"number": "a WhatsApp number", "project_group": f"the {ps} group" if p.get("projects") else "the project group",
-              "casting_director": "the casting director"}.get(rec.get("kind"), "…")
+        to = (f"the {ps} WhatsApp group" if rec.get("kind") == "project_group" and p.get("projects") else
+              rec.get("label") if rec.get("state") == "resolved" and rec.get("label") else "…")
         return f"Share {('media link' if p.get('lookup') == 'media_link' else 'profile')} of {ts} with {to}"
     if k == "list":
         return f"Talents in {stage_label(p.get('stage'))}" + (f" · {ps}" if p.get("projects") else "")
@@ -97,6 +101,11 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
     """Recompute slots / warnings / status of a task from its params. Idempotent; called after planning and after
     every clarification. Never executes anything."""
     p = task["params"]
+    if task["kind"] == "share" and p.get("lookup") == "audition" and task["status"] not in S.TERMINAL:
+        task["slots"], task["warnings"], task["summary"] = [], [], []
+        task["title"] = _title(task)
+        await _share_preview(task, [])                 # refuses at once, with the exact reason — no point asking who to send it to
+        return task
     task["slots"] = compute_slots(task)
     warnings: List[str] = []
     task["title"] = _title(task)
@@ -144,6 +153,12 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
         if missing:
             warnings.append(f"Not in {_names(projects)}: {_names(missing)} — will be skipped")
 
+    if task["kind"] == "send":
+        await _duplicate_check(task, warnings)
+    if task["kind"] == "share":
+        await _share_preview(task, warnings)
+        if task["status"] == S.FAILED:
+            return task
     task["warnings"] = warnings
     task["summary"] = summary_lines(task)
     if task["kind"] in CONSEQUENTIAL:
@@ -151,6 +166,67 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
     else:
         task["status"] = "ready"
     return task
+
+
+async def _duplicate_check(task: dict, warnings: List[str]) -> None:
+    """A second identical send (same template, same project, same talent) within a day is almost always a repeat.
+    The existing queue does not dedupe across requests, so say so before confirming — never block, never hide."""
+    from datetime import datetime, timedelta, timezone
+    p = task["params"]
+    pids = [e["id"] for e in p.get("projects") or [] if e.get("id")]
+    tids = [e["id"] for e in p.get("talents") or [] if e.get("id")]
+    if not (p.get("template_id") and pids and tids):
+        return
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    batches = await db.whatsapp_batches.find({"project_id": {"$in": pids}, "template_id": p["template_id"], "created_at": {"$gte": since}}, {"_id": 0, "id": 1}).to_list(200)
+    if not batches:
+        return
+    jobs = await db.whatsapp_jobs.find({"batch_id": {"$in": [b["id"] for b in batches]}, "talent_id": {"$in": tids}, "status": {"$in": ["pending", "sending", "sent"]}},
+                                        {"_id": 0, "talent_name": 1, "status": 1}).to_list(500)
+    if jobs:
+        names = sorted({j.get("talent_name") or "?" for j in jobs})
+        warnings.append(f"Already queued or sent in the last 24 h with this template for this project: {', '.join(names[:4])}{' +%d more' % (len(names) - 4) if len(names) > 4 else ''} — sending again would message them twice.")
+        task["duplicate_risk"] = True
+
+
+async def _share_preview(task: dict, warnings: List[str]) -> None:
+    """What will actually be sent and to whom — computed WITHOUT writing anything (no link is minted here)."""
+    p = task["params"]
+    rec = p.get("recipient") or {}
+    prev: Dict[str, Any] = {"items": []}
+    if p.get("lookup") == "audition":
+        task["status"] = S.FAILED
+        task["error"] = ("Sending an audition isn't something I can do yet. The existing audition SEND runs inside the WhatsApp casting-group workflow "
+                         "(it works from the marked WhatsApp media with its own approval and duplicate protection) and has no function the assistant can safely call. "
+                         "I can share the talent's profile or media link instead.")
+        return
+    if rec.get("kind") == "project_group":
+        pid = ((p.get("projects") or [{}])[0] or {}).get("id")
+        doc = await db.projects.find_one({"id": pid}, {"_id": 0, "whatsapp_casting_group_name": 1}) if pid else None
+        group = ((doc or {}).get("whatsapp_casting_group_name") or "").strip()
+        if not pid:
+            task["status"], task["error"] = S.FAILED, "Tell me which project's WhatsApp group (e.g. “…with the group for Amazon Now”)."
+            return
+        if not group:
+            task["status"], task["error"] = S.FAILED, f"{p['projects'][0]['label']} has no WhatsApp casting group set, so there is nowhere to send to."
+            return
+        prev["group"] = group
+    if rec.get("kind") in ("crm",) and not rec.get("phone_present"):
+        task["status"], task["error"] = S.FAILED, f"{rec.get('label')} has no phone number saved in the CRM."
+        return
+    for t in p.get("talents") or []:
+        if t.get("state") != "resolved":
+            continue
+        if p.get("lookup") == "media_link":
+            pk = await R.peek_media_link(t["id"])
+            text = {"ready": pk.get("url"), "will_create": "their media download link (created when you confirm)", "off": "media link is switched off — will be skipped",
+                    "missing": "talent not found — will be skipped"}[pk["state"]]
+            if pk["state"] in ("off", "missing"):
+                warnings.append(f"{t['label']}: {text}")
+        else:
+            text = "profile / portfolio link, as the Fetcher sends it"
+        prev["items"].append({"name": t["label"], "text": text})
+    task["preview"] = prev
 
 
 def summary_lines(task: dict) -> List[str]:
@@ -166,8 +242,13 @@ def summary_lines(task: dict) -> List[str]:
         lines = [f"{n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}", f"To {stage_label(p.get('stage'))} in {_names(p['projects'], 6)}"]
     elif k == "share":
         rec = p.get("recipient") or {}
-        lines = [f"Content: {'media link' if p.get('lookup') == 'media_link' else 'profile'} of {_names(p['talents'], 6)}",
-                 f"Recipient: {rec.get('display') or rec.get('kind')}", "Sent through the existing WhatsApp queue — pick the worker below."]
+        dest = rec.get("display") or rec.get("label") or "?"
+        if rec.get("kind") == "project_group" and (p.get("projects") or [None])[0]:
+            dest = f"WhatsApp group “{task.get('preview', {}).get('group') or '…'}” of {p['projects'][0]['label']}"
+        lines = [f"Recipient: {dest}", f"Content: {'media link' if p.get('lookup') == 'media_link' else 'profile'} of {n} talent{'s' if n != 1 else ''}:"]
+        for it in (task.get("preview") or {}).get("items", []):
+            lines.append(f"  • {it['name']} — {it['text']}")
+        lines.append("Sent through the existing WhatsApp queue — pick the worker below.")
     return lines + list(task.get("warnings") or [])
 
 
@@ -188,7 +269,7 @@ async def _validated_selection(ids: List[str]) -> List[dict]:
 async def _project_entries(seg: Segment, kind: str, prev: Optional[dict], ctx_project: Optional[dict], projects: List[dict]) -> tuple[List[dict], Optional[str]]:
     """→ (entries, inherited_from_task_id). Inherited = copied from the previous task ("send THEM the casting call")."""
     if seg.project_text:
-        res = await R.resolve_projects(seg.project_text, prefer_active=kind in ("add", "send"), projects=projects)
+        res = await R.resolve_projects(seg.project_text, prefer_active=kind in ("add", "send", "share"), projects=projects)
         return [{"phrase": r["phrase"], "state": r["state"], "id": r.get("id"), "label": r.get("label"), **({"options": r["options"]} if r.get("options") else {})} for r in res], None
     inherit = seg.talent_ref == "previous" and prev and prev["params"].get("projects")
     if seg.project_ref == "current" or (not seg.project_text and kind != "add"):
@@ -203,6 +284,8 @@ async def _project_entries(seg: Segment, kind: str, prev: Optional[dict], ctx_pr
 
 
 async def _talent_entries(seg: Segment, prev: Optional[dict], context: dict) -> tuple[List[dict], Optional[str]]:
+    if seg.talent_ref == "ask":
+        return [{"phrase": "", "state": "none", "prompt": "Which talents do you mean by “these other talents”? Type their names — I won't reuse the selection on screen for that."}], None
     if seg.talents:
         names = seg.talents[:MAX_NAMES]
         res = await asyncio.gather(*[R.resolve_talent(n) for n in names])
@@ -249,7 +332,7 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
                 t["depends_on"] = [origin] if (prev and prev["kind"] in ("add",) and kind in ("send", "move")) else []
             if seg.stage_filter:
                 p["stage_filter"] = seg.stage_filter
-        if kind in ("add", "send", "move", "list") or (kind == "share" and (seg.recipient or {}).get("kind") == "project_group"):
+        if kind in ("add", "send", "move", "list") or (kind == "share" and ((seg.recipient or {}).get("kind") == "project_group")):
             p["projects"], pfrom = await _project_entries(seg, kind, prev, ctx_project, projects)
             if pfrom:
                 p["projects_from"] = pfrom
@@ -265,7 +348,7 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
         if kind in ("lookup", "share"):
             p["lookup"] = seg.lookup
         if kind == "share":
-            p["recipient"] = seg.recipient or {"kind": "unspecified"}
+            p["recipient"] = await R.resolve_recipient(seg.recipient or {"kind": "unspecified"})
         # a send / move for talents that an earlier add in THIS message is putting into the same project waits for it
         if kind in ("send", "move") and not t["depends_on"]:
             for earlier in tasks:

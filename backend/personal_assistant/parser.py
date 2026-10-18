@@ -46,7 +46,9 @@ _VERBS = r"(?:send|add|move|share|show|find|mark|put|ask|forward|get|give|list|i
 _CONNECT = re.compile(
     r"\s*,?\s*\b(?:and\s+then|and\s+also|then|also|after\s+that|afterwards|plus)\b\s*,?\s*"
     r"|\s*,\s*(?=" + _VERBS + r"\b)"
-    r"|\s+and\s+(?=" + _VERBS + r"\b)",
+    r"|\s+and\s+(?=" + _VERBS + r"\b)"
+    r"|\s*,?\s*\band\s+(?=(?:tell\s+me|which\s+projects?|what\s+projects?|has\s+(?:she|he|they)\b|her\s|his\s|their\s))"
+    r"|\s*,\s*(?=tell\s+me\b)",
     re.I,
 )
 _LEAD = re.compile(r"^(?:(?:hey|hi|ok|okay|so|please|pls|kindly|can\s+you|could\s+you|would\s+you|i\s+want\s+you\s+to|i'd\s+like\s+you\s+to)\b[\s,]*)+", re.I)
@@ -89,10 +91,16 @@ def split_names(raw: str) -> List[str]:
     return out
 
 
+_OTHER = re.compile(r"\b(?:these|those|the)\s+(?:other|different|remaining|additional|new)\b", re.I)
+
+
 def _who(raw: str, seg: Segment) -> None:
     """Fill talents / talent_ref from the 'who' clause of a command."""
     raw = _norm_space(raw)
     if not raw:
+        return
+    if _OTHER.search(raw):                 # "these OTHER talents" is not the selection on screen: ask who
+        seg.talent_ref = "ask"
         return
     if _PRONOUN.match(raw):
         seg.talent_ref = "previous"
@@ -140,15 +148,30 @@ _RECIPIENT_GROUP = re.compile(r"\b(?:the\s+|this\s+)?(?:project|casting|whatsapp
 _RECIPIENT_DIRECTOR = re.compile(r"\b(?:the\s+)?casting\s+director\b", re.I)
 
 
+_ROLES = {
+    "casting director": "casting_director", "casting assistant": "casting_assistant", "line producer": "line_producer",
+    "creative producer": "creative_producer", "brand manager": "brand_manager", "marketing manager": "marketing_manager",
+    "production house": "production_house", "producer": "producer",
+}
+_ROLE_RE = re.compile(r"\b(?:the\s+)?(" + "|".join(sorted(_ROLES, key=len, reverse=True)) + r")\b", re.I)
+
+
 def _recipient(text: str) -> Optional[dict]:
     m = _PHONE.search(text)
     if m:
         return {"kind": "number", "value": re.sub(r"[^\d+]", "", m.group(1))}
-    if _RECIPIENT_DIRECTOR.search(text):
-        return {"kind": "casting_director", "value": None}
     if _RECIPIENT_GROUP.search(text):
         return {"kind": "project_group", "value": None}
-    return None
+    tail = re.search(r"\b(?:to|with)\s+(?P<r>.+?)\s*$", re.sub(r"\s+for\s+.+$", "", text, flags=re.I), re.I)
+    if not tail:
+        return None
+    r = tail.group("r").strip(" .,")
+    role = _ROLE_RE.search(r)
+    if role and len(r.split()) <= 4:
+        return {"kind": "role", "value": _ROLES[role.group(1).lower()], "text": role.group(1).lower()}
+    if re.fullmatch(r"(?:this|the|that)\s+\w*\s*(?:number|group|contact)?|them|him|her|it", r, re.I) or not re.search(r"[A-Za-z]", r):
+        return None
+    return {"kind": "named", "value": r}
 
 
 _NAME = r"[A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-z.'’\-]*){0,3}"
@@ -157,22 +180,56 @@ _NAME = r"[A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-z.'’\-]*){0,3}"
 def _parse_share(text: str, seg: Segment) -> None:
     seg.intent = "share"
     seg.recipient = _recipient(text)
+    pm = re.search(r"\s+for\s+(?P<p>.+?)\s*$", text, re.I)
+    if pm and not re.search(r"\bfor\s+(?:him|her|them|it)\b", pm.group(0), re.I):
+        _project(pm.group("p"), seg)
     body = text
     # "share Angela's media link" / "send Angela Kumar's audition to ..." / "share the profile of Angela"
     m = re.search(rf"(?P<n>{_NAME})(?:'|’)s\s+(?:profile|media\s*link|media|portfolio|audition|photos?|video)", body, re.I)
     if not m:
         m = re.search(rf"(?:profile|media\s*link|media|portfolio|audition)\s+(?:of|for)\s+(?P<n>{_NAME})", body, re.I)
     if m:
-        seg.talents = split_names(m.group("n"))
+        # "…media link of Angela with the casting director": the name stops at the preposition that starts the recipient
+        seg.talents = split_names(re.split(r"\s+(?:with|to|for|via|at)\b", m.group("n"), maxsplit=1, flags=re.I)[0])
+    elif re.search(r"\b(?:her|his|their)\s+(?:profile|audition|media\s*link|photos?)\b", body, re.I):
+        seg.talent_ref = "previous"     # "send her media link to …" — the talent just discussed
     elif re.search(r"\b(?:this|the|that)\s+(?:profile|audition|media\s*link)\b|\bit\b|\bthem\b", body, re.I):
         seg.talent_ref = "selected"     # "send this profile to …" — the one on screen / selected
     seg.lookup = "media_link" if re.search(r"media\s*link|media", body, re.I) else ("audition" if re.search(r"audition", body, re.I) else "profile")
+
+
+_PRON = r"(?:she|he|they|her|him|them|their|his)"
+
+
+def _parse_pronoun_lookup(text: str, seg: Segment) -> bool:
+    """"…which projects she has tested for" / "has he tested" / "her submission history" — about the talent of
+    the previous action in the same message."""
+    low = text.lower()
+    kind = None
+    if re.search(r"\b(?:which|what)\s+projects?\b.*\btested\b|\bhas\s+" + _PRON + r"\s+(?:ever\s+)?(?:tested|auditioned)\b|\bhave\s+they\s+tested\b", low):
+        kind = "tested"
+    elif re.search(r"\b(?:which|what)\s+projects?\b.*\b" + _PRON + r"\b|\bprojects?\s+(?:is|has|was)\s+" + _PRON + r"\b", low):
+        kind = "projects"
+    elif re.search(r"\b(?:her|his|their)\s+submission\s+history\b", low):
+        kind = "submissions"
+    elif re.search(r"\b(?:her|his|their)\s+media\s*link\b", low):
+        kind = "media_link"
+    elif re.search(r"\b(?:her|his|their)\s+(?:photos?|videos?)\b", low):
+        kind = "media"
+    elif re.search(r"\b(?:her|his|their)\s+profile\b", low):
+        kind = "profile"
+    if not kind:
+        return False
+    seg.intent, seg.lookup, seg.talent_ref = "lookup", kind, "previous"
+    return True
 
 
 def _parse_lookup(text: str, seg: Segment) -> bool:
     low = text.lower()
     names: Optional[str] = None
     kind: Optional[str] = None
+    if _parse_pronoun_lookup(text, seg):
+        return True
     m = re.search(rf"\bhas\s+(?P<n>{_NAME}?)\s+(?:ever\s+)?(?:tested|auditioned|been\s+tested)", text, re.I)
     if m:
         names, kind = m.group("n"), "tested"

@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Loader2, Maximize2, Mic, Minimize2, Minus, Send, Sparkles, Volume2, VolumeX, X } from "lucide-react";
 import {
     ACTIVE_STATUSES, ATTENTION_STATUSES, cancelTask, clarifyTask, clearAssistantHistory, confirmAll, confirmTask, followUpSend,
-    getAssistantHistory, listAssistantTasks, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage,
+    getAssistantHistory, isTimeoutError, listAssistantTasks, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage, statusLabel,
 } from "@/lib/personalAssistant";
 import { useAssistantContext } from "@/lib/assistantContext";
 import { speak, speechOutputSupported, useSpeechInput } from "@/hooks/useSpeechInput";
@@ -100,7 +100,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
             if (voiceOut) speak(out.reply);
         } catch (err) {
             const detail = err?.response?.data?.detail;
-            const msg = typeof detail === "string" ? detail : "I couldn't reach the server. Nothing was done — tap Retry.";
+            const msg = typeof detail === "string" ? detail : "I couldn't get an answer from the server. Nothing has been sent or changed (planning never does either) — tap Retry.";
             setMessages((cur) => [...cur, { id: `e-${rid}`, role: "assistant", text: msg, error: true }]);
             setFailed({ text: body, id: rid });
             setText(body);
@@ -117,8 +117,10 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
             mergeTask(await fn());
         } catch (err) {
             const detail = err?.response?.data?.detail;
-            setErrors((e) => ({ ...e, [taskId]: typeof detail === "string" ? detail : "That didn't work — nothing was changed." }));
-            listAssistantTasks(40).then(setTasks).catch(() => {});
+            setErrors((e) => ({ ...e, [taskId]: typeof detail === "string" ? detail
+                : isTimeoutError(err) ? "No answer from the server — it may still have run. I've refreshed this task from the server; check its status before trying again."
+                : "That didn't work — I've refreshed this task from the server." }));
+            listAssistantTasks(40).then(setTasks).catch(() => {});          // the persisted state is the truth, not the failed request
         } finally {
             setBusy((b) => ({ ...b, [taskId]: false }));
         }
@@ -229,7 +231,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 {tasks.length === 0 && <li className="text-sm text-black/50">No tasks yet.</li>}
                                 {tasks.map((t) => (
                                     <li key={t.id} className="rounded-lg border border-black/[0.08] p-2.5">
-                                        <div className="flex items-start justify-between gap-2"><span className="text-xs text-black/85 leading-snug">{t.title}</span><StatusChip status={t.status} /></div>
+                                        <div className="flex items-start justify-between gap-2"><span className="text-xs text-black/85 leading-snug">{t.title}</span><StatusChip status={t.status} kind={t.kind} /></div>
                                         <p className="text-[11px] text-black/45 mt-1">{t.status_detail || t.error || ""}{t.params?.worker_id ? `${t.status_detail || t.error ? " · " : ""}worker ${t.params.worker_id}` : ""}{t.updated_at ? ` · ${new Date(t.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</p>
                                     </li>
                                 ))}

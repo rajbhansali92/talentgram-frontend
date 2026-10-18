@@ -198,3 +198,102 @@ async def resolve_template(phrase: Optional[str], templates: Optional[List[dict]
 def template_options(templates: List[dict], limit: int = 12) -> List[dict]:
     ordered = sorted(templates, key=lambda t: (0 if t.get("slug") == "casting_call" else 1, (t.get("name") or "").lower()))
     return [{"id": t["id"], "label": t.get("name") or "Untitled", "sublabel": "", "thumb": None} for t in ordered[:limit]]
+
+
+# ------------------------------------------------------------------------------------------------ recipients
+def mask_phone(phone: str) -> str:
+    """"+919876543210" → "+91 ••••• 43210" — enough to recognise a number, not enough to copy it."""
+    digits = re.sub(r"[^\d]", "", phone or "")
+    if len(digits) < 6:
+        return "no number on file"
+    return ("+" if (phone or "").startswith("+") else "") + digits[:-5][:2] + " ••••• " + digits[-5:] if len(digits) > 7 else "••••" + digits[-4:]
+
+
+def _contact_option(c: dict, extra: str = "") -> dict:
+    kind = (c.get("contact_type") or "").replace("_", " ").title()
+    sub = " · ".join(x for x in [kind, c.get("company") or "", mask_phone(c.get("phone") or "")] if x)
+    return {"id": f"crm:{c['id']}", "label": c["name"], "sublabel": sub, "thumb": None}
+
+
+async def _crm_contacts(contact_type: Optional[str] = None) -> List[dict]:
+    q: Dict[str, Any] = {"archived": {"$ne": True}, "deleted": {"$ne": True}}
+    if contact_type:
+        q["contact_type"] = contact_type
+    docs = await db.clients.find(q, {"name": 1, "phone_number": 1, "contact_type": 1, "company_name": 1}).to_list(3000)
+    return [{"id": str(d["_id"]), "name": d.get("name") or "", "phone": d.get("phone_number") or "", "contact_type": d.get("contact_type"),
+             "company": d.get("company_name") or ""} for d in docs if (d.get("name") or "").strip()]
+
+
+async def resolve_recipient(rec: dict) -> dict:
+    """Existing WhatsApp recipient sources ONLY — a typed number, a saved CRM contact, a saved contact list, a saved
+    group list (the same sources the WhatsApp agent's SHARE command resolves from). A role ("the casting director")
+    is never guessed: it lists the CRM contacts of that type to pick from. → {"state", "kind", "id", "label", "display", "options"}"""
+    kind = (rec or {}).get("kind")
+    if kind == "number":
+        phone = rec.get("value") or ""
+        return {"state": "resolved", "kind": "number", "label": mask_phone(phone), "display": f"WhatsApp number {mask_phone(phone)}", "phone": phone}
+    if kind == "project_group":
+        return {"state": "resolved", "kind": "project_group", "label": "project group", "display": "the project's WhatsApp casting group"}
+    if kind == "role":
+        contacts = await _crm_contacts(rec["value"])
+        title = (rec.get("text") or rec["value"].replace("_", " ")).title()
+        if not contacts:
+            return {"state": "none", "kind": "role", "prompt": f"I have no saved {title} contacts. Give me a WhatsApp number, or save them in the CRM first.", "options": []}
+        return {"state": "ambiguous", "kind": "role", "prompt": f"Which {title}? (saved CRM contacts)", "options": [_contact_option(c) for c in contacts[:MAX_OPTIONS]]}
+    if kind == "named":
+        q = (rec.get("value") or "").strip()
+        from agents.modules.whatsapp_campaign_agent import _fetch_contact_lists, _fetch_group_lists
+        contacts = await _crm_contacts()
+        m = name_match.tiered_name_match(q, contacts, lambda c: c["name"], id_fn=lambda c: c["id"], what="contact")
+        by_id = {c["id"]: c for c in contacts}
+        if m.item is not None:
+            c = m.item
+            return {"state": "resolved", "kind": "crm", "id": c["id"], "label": c["name"], "display": f"{c['name']} ({mask_phone(c['phone'])}) — saved CRM contact", "phone_present": bool(c["phone"])}
+        if m.ambiguous:
+            return {"state": "ambiguous", "kind": "named", "prompt": f'Which contact did you mean by "{q}"?', "options": [_contact_option(by_id[a["id"]]) for a in m.ambiguous if a["id"] in by_id]}
+        for fetch, key, label in ((_fetch_contact_lists, "list", "saved contact list"), (_fetch_group_lists, "group", "saved group list")):
+            items = await fetch()
+            lm = name_match.tiered_name_match(q, items, lambda it: it.get("name") or "", id_fn=lambda it: it["id"], what=label)
+            if lm.item is not None:
+                return {"state": "resolved", "kind": key, "id": lm.item["id"], "label": lm.item["name"], "display": f"{lm.item['name']} — {label}"}
+            if lm.ambiguous:
+                return {"state": "ambiguous", "kind": "named", "prompt": f'Which {label} did you mean?', "options": [{"id": f"{key}:{a['id']}", "label": a["label"], "sublabel": label.title(), "thumb": None} for a in lm.ambiguous]}
+        return {"state": "none", "kind": "named", "prompt": f"I couldn't find a saved contact, list or group called “{q}”. Give me a WhatsApp number, or save them in the CRM first.", "options": []}
+    return {"state": "none", "kind": "unspecified", "prompt": "Who should I send it to? Give me a WhatsApp number, a saved contact's name, or say “the project group”.", "options": []}
+
+
+async def recipient_from_option(option_id: str) -> Optional[dict]:
+    """A picked option id ("crm:<id>" / "list:<id>" / "group:<id>") → the recipient entry (re-read from the database)."""
+    from bson import ObjectId
+    kind, _, rid = (option_id or "").partition(":")
+    if kind == "crm":
+        try:
+            d = await db.clients.find_one({"_id": ObjectId(rid), "archived": {"$ne": True}, "deleted": {"$ne": True}}, {"name": 1, "phone_number": 1})
+        except Exception:
+            return None
+        if not d:
+            return None
+        return {"state": "resolved", "kind": "crm", "id": rid, "label": d.get("name") or "", "display": f"{d.get('name')} ({mask_phone(d.get('phone_number') or '')}) — saved CRM contact", "phone_present": bool(d.get("phone_number"))}
+    if kind in ("list", "group"):
+        coll = db.whatsapp_contact_lists if kind == "list" else db.whatsapp_group_lists
+        d = await coll.find_one({"id": rid, "deleted": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1})
+        if not d:
+            return None
+        label = "saved contact list" if kind == "list" else "saved group list"
+        return {"state": "resolved", "kind": kind, "id": rid, "label": d.get("name") or "", "display": f"{d.get('name')} — {label}"}
+    return None
+
+
+# ---------------------------------------------------------------------------------------- link previews
+async def peek_media_link(tid: str) -> dict:
+    """What the talent's media link WOULD be, without writing anything (resolve_media_link mints a token on first
+    use — a write — so previews use this and only the confirmed send mints)."""
+    from routers.talent_media import is_media_download_enabled, media_link_url
+    t = await db.talents.find_one({"id": tid}, {"_id": 0, "id": 1, "status": 1, "media_download_enabled": 1, "media_download_token": 1})
+    if t is None:          # NOT `if not t`: a real talent with none of the optional fields projects to {} (falsy)
+        return {"state": "missing"}
+    if not is_media_download_enabled(t) or str(t.get("status") or "").lower() in ("archived", "merged"):
+        return {"state": "off"}
+    if t.get("media_download_token"):
+        return {"state": "ready", "url": media_link_url(t["media_download_token"])}
+    return {"state": "will_create"}

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, Check, Copy, ExternalLink, Loader2, RotateCcw, User, X } from "lucide-react";
-import { STATUS_META, getAssistantWorkers } from "@/lib/personalAssistant";
+import { STATUS_META, getAssistantWorkers, statusLabel } from "@/lib/personalAssistant";
 
 const TONES = {
     amber: "bg-amber-50 text-amber-800 border-amber-200",
@@ -11,8 +11,8 @@ const TONES = {
     slate: "bg-black/[0.04] text-black/65 border-black/10",
 };
 
-export function StatusChip({ status }) {
-    const m = STATUS_META[status] || { label: status, tone: "slate" };
+export function StatusChip({ status, kind }) {
+    const m = { ...(STATUS_META[status] || { tone: "slate" }), label: statusLabel(status, kind) };
     return (
         <span data-testid="pa-status" className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-medium whitespace-nowrap ${TONES[m.tone]}`}>
             {(status === "running" || status === "queued") && <Loader2 className="w-3 h-3 animate-spin" aria-hidden />}
@@ -203,12 +203,13 @@ export default function TaskCard({ task, busy, actionError, onClarify, onConfirm
         <article className="rounded-xl border border-black/[0.1] bg-white p-3" data-testid={`pa-task-${task.id}`} aria-label={task.title}>
             <header className="flex items-start justify-between gap-2">
                 <h4 className="text-[13px] font-medium text-black/90 leading-snug">{task.title}</h4>
-                <StatusChip status={task.status} />
+                <StatusChip status={task.status} kind={task.kind} />
             </header>
             {task.summary?.length > 0 && task.status === "awaiting_confirmation" && (
-                <ul className="mt-1.5 text-xs text-black/65 space-y-0.5">{task.summary.map((l, i) => <li key={i}>{l}</li>)}</ul>
+                <ul className="mt-1.5 text-xs text-black/65 space-y-0.5" data-testid="pa-preview">{task.summary.map((l, i) => <li key={i} className={/twice|skipped|switched off|Not in/.test(l) ? "text-amber-700" : ""}>{l}</li>)}</ul>
             )}
             {dep && <p className="mt-1 text-[11px] text-black/45">Runs after the step before it succeeds.</p>}
+            {task.params?.worker_label && task.status !== "awaiting_confirmation" && <p className="mt-1 text-[11px] text-black/45" data-testid="pa-worker-used">Worker: {task.params.worker_label}</p>}
             {task.status_detail && <p className="mt-1 text-[11px] text-black/55" data-testid="pa-detail">{task.status_detail}</p>}
             {task.error && <p className="mt-1.5 text-xs text-red-700 flex gap-1.5" role="alert"><AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden />{task.error}</p>}
             {actionError && <p className="mt-1.5 text-xs text-red-700" role="alert">{actionError}</p>}
@@ -220,7 +221,7 @@ export default function TaskCard({ task, busy, actionError, onClarify, onConfirm
                 {task.status === "awaiting_confirmation" && (
                     <button type="button" disabled={busy || (needsWorker && !worker)} onClick={() => onConfirm(task, worker)} data-testid="pa-confirm"
                         className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40 inline-flex items-center gap-1.5">
-                        {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />} Confirm
+                        {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />} {task.duplicate_risk ? "Send again anyway" : "Confirm"}
                     </button>
                 )}
                 {(task.status === "failed" || task.status === "partial") && (task.batch_ids?.length > 0 || !["send", "share"].includes(task.kind)) && (

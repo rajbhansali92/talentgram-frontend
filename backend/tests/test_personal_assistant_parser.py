@@ -75,7 +75,7 @@ def test_share_variants():
     s = one("Share Angela's media link")
     assert (s.intent, s.lookup, s.talents) == ("share", "media_link", ["Angela"])
     s = one("Send Angela's audition to the casting director.")
-    assert (s.intent, s.lookup, s.recipient["kind"]) == ("share", "audition", "casting_director")
+    assert (s.intent, s.lookup, s.recipient["kind"], s.recipient["value"]) == ("share", "audition", "role", "casting_director")
     s = one("Send this profile to this project group.")
     assert (s.intent, s.talent_ref, s.recipient["kind"]) == ("share", "selected", "project_group")
     s = one("Share the profile with this WhatsApp number +91 98765 43210")
@@ -130,3 +130,44 @@ def test_adversarial_and_oversized_input_is_handled_quickly():
     parse_message("show me " + "x'" * 900)
     parse_message(("Add Angela to Amazon. " * 100)[:2000])
     assert time.perf_counter() - t0 < 2.0
+
+
+def test_the_four_acceptance_examples_are_each_understood_completely():
+    a = parse_message("Add Angela Kumar to Amazon Now and send her the Casting Call.")
+    assert [x.intent for x in a] == ["add", "send"] and a[1].talent_ref == "previous" and a[1].template == "Casting Call"
+    b = parse_message("Send the Follow Up template to these three talents for Pepsi.")
+    assert [(x.intent, x.talent_ref, x.project_text, x.template) for x in b] == [("send", "selected", "Pepsi", "Follow Up")]
+    c = parse_message("Move these talents to Follow-up, and add these other talents to Amazon.")
+    assert [(x.intent, x.talent_ref) for x in c] == [("move", "selected"), ("add", "ask")]            # "other" ≠ the selection
+    d = parse_message("Show me Angela Kumar's profile, and tell me which projects she has tested for.")
+    assert [(x.intent, x.lookup, x.talent_ref) for x in d] == [("lookup", "profile", None), ("lookup", "tested", "previous")]
+    assert d[0].talents == ["Angela Kumar"]
+
+
+def test_pronoun_followups_refer_to_the_previous_talent():
+    for text, kind in [("Has she tested before?", "tested"), ("which projects has he been added to", "projects"), ("show her submission history", "submissions"),
+                       ("and her media link", "media_link")]:
+        segs = parse_message("Show me Angela's profile. " + text)
+        assert segs[-1].intent == "lookup" and segs[-1].lookup == kind and segs[-1].talent_ref == "previous", text
+
+
+def test_share_recipients_named_role_number_group_and_missing():
+    s = one("Send Angela Kumar's media link to Priya Nair")
+    assert s.recipient == {"kind": "named", "value": "Priya Nair"}
+    s = one("Share Angela's profile with the casting director for Amazon")
+    assert s.recipient["kind"] == "role" and s.recipient["value"] == "casting_director" and s.project_text == "Amazon"
+    s = one("Share Angela's profile with the WhatsApp group for Amazon Now")
+    assert s.recipient["kind"] == "project_group" and s.project_text == "Amazon Now"
+    s = one("Send her media link to Priya Nair")
+    assert s.talent_ref == "previous" and s.recipient["value"] == "Priya Nair"
+    assert one("Share Angela's media link").recipient is None
+
+
+@pytest.mark.parametrize("text, names, role", [
+    ("Share the media link of ZQA-PA Angela with the casting director", ["ZQA-PA Angela"], "casting_director"),
+    ("Send the profile of Angela Kumar to the casting director for Amazon", ["Angela Kumar"], "casting_director"),
+    ("Send the portfolio of Maya to the casting director", ["Maya"], "casting_director"),
+])
+def test_a_talent_name_never_swallows_the_recipient_that_follows_it(text, names, role):
+    s = one(text)
+    assert s.talents == names and s.recipient["kind"] == "role" and s.recipient["value"] == role

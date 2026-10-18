@@ -47,6 +47,7 @@ export default function BulkSelectBar({
         <div
             className="fixed bottom-6 inset-x-0 mx-auto w-fit z-40 border border-border bg-background/95 backdrop-blur shadow-[0_8px_32px_rgba(0,0,0,0.5)] rounded-sm px-4 py-2.5 flex items-center gap-x-3 gap-y-2 flex-wrap justify-center animate-in fade-in slide-in-from-bottom-2 max-w-[95vw] max-h-[40vh] overflow-y-auto"
             data-testid={testid}
+            data-pa-dock="bottom"
         >
             <span
                 className="text-sm font-medium shrink-0"

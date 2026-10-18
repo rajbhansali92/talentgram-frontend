@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -173,7 +174,7 @@ async def _apply_text(task: dict, slot: str, text: str) -> bool:
         i = int(idx) if idx.isdigit() else -1
         if not (0 <= i < len(p.get("projects") or [])):
             return False
-        res = await R.resolve_projects(text, prefer_active=task["kind"] in ("add", "send"))
+        res = await R.resolve_projects(text, prefer_active=task["kind"] in ("add", "send", "share"))
         entries = [{"phrase": r["phrase"], "state": r["state"], "id": r.get("id"), "label": r.get("label"), **({"options": r["options"]} if r.get("options") else {})} for r in res]
         p["projects"][i:i + 1] = entries or p["projects"][i:i + 1]
         return True
@@ -207,7 +208,28 @@ async def _propagate(owner: str, origin: dict) -> None:
             changed = True
         if changed:
             await P.finalize(t)
-            await S.update_task(owner, t["id"], {k: t[k] for k in ("params", "slots", "status", "title", "summary", "warnings", "error") if k in t})
+            await S.update_task(owner, t["id"], {k: t[k] for k in ("params", "slots", "status", "title", "summary", "warnings", "error", "preview", "duplicate_risk") if k in t})
+
+
+async def _apply_recipient(task: dict, choice_id: Optional[str], text: Optional[str]) -> bool:
+    p = task["params"]
+    rec = p.get("recipient") or {}
+    if choice_id:
+        if not any(o["id"] == choice_id for o in rec.get("options") or []):
+            return False                                   # only what the server offered
+        new = await R.recipient_from_option(choice_id)
+    else:
+        t = (text or "").strip()
+        digits = re.sub(r"\D", "", t)
+        new = await R.resolve_recipient({"kind": "number", "value": ("+" if t.startswith("+") else "") + digits} if len(digits) >= 8 and not re.search(r"[A-Za-z]", t)
+                                        else {"kind": "named", "value": t})
+        if new.get("state") != "resolved":
+            p["recipient"] = new                           # still unresolved: show the new options / prompt
+            return True
+    if not new:
+        return False
+    p["recipient"] = new
+    return True
 
 
 @router.post("/tasks/{task_id}/clarify")
@@ -218,11 +240,14 @@ async def clarify(task_id: str, body: ClarifyIn, user: Dict[str, Any] = Depends(
         raise HTTPException(409, "This task doesn't need clarification any more.")
     if not (body.choice_id or (body.text or "").strip()):
         raise HTTPException(400, "Pick one of the options or type a correction.")
-    ok = _apply_choice(task, body.slot, body.choice_id) if body.choice_id else await _apply_text(task, body.slot, body.text.strip())
+    if body.slot == "recipient" and task["kind"] == "share":
+        ok = await _apply_recipient(task, body.choice_id, body.text)
+    else:
+        ok = _apply_choice(task, body.slot, body.choice_id) if body.choice_id else await _apply_text(task, body.slot, body.text.strip())
     if not ok:
         raise HTTPException(400, "That isn't one of the options for this question.")
     task = await P.finalize(task)
-    saved = await S.update_task(owner, task_id, {k: task[k] for k in ("params", "slots", "status", "title", "summary", "warnings", "error") if k in task}, only_status=[S.NEEDS_CLARIFICATION])
+    saved = await S.update_task(owner, task_id, {k: task[k] for k in ("params", "slots", "status", "title", "summary", "warnings", "error", "preview", "duplicate_risk") if k in task}, only_status=[S.NEEDS_CLARIFICATION])
     if saved is None:
         raise HTTPException(409, "This task was just changed — refresh and try again.")
     await _propagate(owner, saved)

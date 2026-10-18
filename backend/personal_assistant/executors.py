@@ -189,22 +189,32 @@ async def _run_share(user: dict, task: dict, worker_id: str) -> dict:
     p = task["params"]
     rec = p.get("recipient") or {}
     if p.get("lookup") == "audition":
-        return {"status": S.FAILED, "result": None, "error": "Sending an audition isn't available from the assistant yet — the existing flow lives in the WhatsApp SEND command. I can share the profile or media link instead."}
+        return {"status": S.FAILED, "result": None, "error": "Sending an audition isn't available from the assistant yet."}
     custom = await db.whatsapp_templates.find_one({"slug": "custom"}, {"_id": 0, "id": 1})
     if not custom:
         return {"status": S.FAILED, "result": None, "error": "The WhatsApp “Custom Message” template isn't set up, so there is no safe way to send free text."}
-    contact: Optional[ManualContact] = None
+    params: Optional[SourceParams] = None
     if rec.get("kind") == "number":
-        contact = ManualContact(name="", phone=rec["value"])
+        params = SourceParams(contacts=[ManualContact(name="", phone=rec["phone"])])
+    elif rec.get("kind") == "crm":
+        from bson import ObjectId
+        c = await db.clients.find_one({"_id": ObjectId(rec["id"]), "archived": {"$ne": True}, "deleted": {"$ne": True}}, {"name": 1, "phone_number": 1})
+        if not c or not (c.get("phone_number") or "").strip():
+            return {"status": S.FAILED, "result": None, "error": f"{rec.get('label') or 'That contact'} has no usable phone number in the CRM any more."}
+        params = SourceParams(contacts=[ManualContact(name=c.get("name") or "", phone=c["phone_number"])])
+    elif rec.get("kind") == "list":
+        params = SourceParams(contact_list_ids=[rec["id"]])
+    elif rec.get("kind") == "group":
+        params = SourceParams(group_list_ids=[rec["id"]])
     elif rec.get("kind") == "project_group":
         proj = (p.get("projects") or [None])[0]
         doc = await db.projects.find_one({"id": (proj or {}).get("id")}, {"_id": 0, "brand_name": 1, "whatsapp_casting_group_name": 1}) if proj else None
         group = ((doc or {}).get("whatsapp_casting_group_name") or "").strip()
         if not group:
             return {"status": S.FAILED, "result": None, "error": f"{(doc or {}).get('brand_name') or 'That project'} has no WhatsApp casting group set, so there is nowhere to send to."}
-        contact = ManualContact(name=doc.get("brand_name") or "", phone="", whatsapp_group_name=group)
-    else:
-        return {"status": S.FAILED, "result": None, "error": "I can share to a WhatsApp number or to a project's WhatsApp group. “Casting director” isn't a saved recipient I can resolve safely."}
+        params = SourceParams(contacts=[ManualContact(name=doc.get("brand_name") or "", phone="", whatsapp_group_name=group)])
+    if params is None:
+        return {"status": S.FAILED, "result": None, "error": "I don't have a resolved recipient for this."}
     blocks, skipped = [], []
     for t in p["talents"]:
         text = await (_render_media_link(t["id"]) if p.get("lookup") == "media_link" else _render_talent_profile(t["id"], t["label"]))
@@ -215,10 +225,10 @@ async def _run_share(user: dict, task: dict, worker_id: str) -> dict:
     if not blocks:
         return {"status": S.FAILED, "result": None, "outcomes": skipped, "error": "Nothing shareable: " + "; ".join(f"{s['name']} — {s['reason']}" for s in skipped)}
     await require_sendable_worker(worker_id)
-    out = await _create_batch_internal(BatchIn(source_type="MANUAL", source_params=SourceParams(contacts=[contact]), template_id=custom["id"],
+    out = await _create_batch_internal(BatchIn(source_type="SAVED_LISTS" if rec.get("kind") in ("list", "group") else "MANUAL", source_params=params, template_id=custom["id"],
                                                variable_data={"message": "\n\n---\n\n".join(blocks)}, worker_id=worker_id), user)
     return {"status": S.QUEUED, "error": None, "batch_ids": [out["batch"]["id"]], "not_queued": skipped,
-            "result": {"queued": len(out["jobs"]), "not_queued": len(skipped), "worker_id": worker_id}}
+            "result": {"queued": len(out["jobs"]), "not_queued": len(skipped), "worker_id": worker_id, "recipient": rec.get("label")}}
 
 
 # ------------------------------------------------------------------------------------------------- driver
@@ -239,7 +249,9 @@ async def run_task(user: dict, task: dict, worker_id: Optional[str]) -> dict:
     retry, another tab — finds the claim taken and returns the current task instead of executing again."""
     owner = user["id"]
     kind = task["kind"]
-    claimed = await S.update_task(owner, task["id"], {"status": S.RUNNING, "started_at": S.now(), "params.worker_id": worker_id}, only_status=[S.AWAITING_CONFIRMATION, "ready"])
+    wdoc = await db.whatsapp_workers.find_one({"id": worker_id}, {"_id": 0, "label": 1}) if worker_id else None
+    claimed = await S.update_task(owner, task["id"], {"status": S.RUNNING, "started_at": S.now(), "params.worker_id": worker_id,
+                                                      "params.worker_label": (wdoc or {}).get("label") or worker_id}, only_status=[S.AWAITING_CONFIRMATION, "ready"])
     if claimed is None:
         return await S.get_task(owner, task["id"])
     try:
@@ -261,8 +273,11 @@ async def run_task(user: dict, task: dict, worker_id: Optional[str]) -> dict:
         out = {"status": S.FAILED, "error": _detail(exc), "result": None}
     except Exception:  # noqa: BLE001
         logger.exception("assistant task %s (%s) crashed", task["id"], kind)
-        out = {"status": S.FAILED, "error": "Something went wrong while running this. Nothing was reported as done.", "result": None}
+        out = {"status": S.FAILED, "result": None, "uncertain": kind in ("send", "share"),
+               "error": "Something went wrong while running this" + (", so I can't tell whether anything was queued. Check WhatsApp Engine → campaign history before sending again." if kind in ("send", "share") else ". Nothing was reported as done.")}
     patch = {"status": out["status"], "error": out.get("error"), "result": out.get("result"), "completed_at": S.now() if out["status"] in S.TERMINAL else None}
+    if out.get("uncertain"):
+        patch["uncertain"] = True
     for k in ("outcomes", "batch_ids", "not_queued"):
         if out.get(k) is not None:
             patch[k] = out[k]
@@ -298,8 +313,29 @@ def _delivery(jobs: List[dict]) -> tuple[str, List[dict], str]:
     return S.FAILED, per, f"{failed} failed"
 
 
+STALE_RUNNING_SEC = 120
+
+
+def _age_seconds(iso: Optional[str]) -> float:
+    from datetime import datetime, timezone
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds()
+    except Exception:
+        return 0.0
+
+
 async def refresh_task(owner_id: str, task: dict) -> dict:
-    """For queued/running sends, read the real per-job states back from the existing queue and persist them."""
+    """For queued/running sends, read the real per-job states back from the existing queue and persist them.
+    A task still "running" with nothing queued after two minutes was interrupted (e.g. the API restarted mid-run):
+    it is marked failed AND flagged `uncertain` — we cannot know whether it got as far as queueing — so a send is
+    never blindly retried (that could message people twice)."""
+    if task["status"] == S.RUNNING and not task.get("batch_ids") and _age_seconds(task.get("started_at")) > STALE_RUNNING_SEC:
+        cur = await S.update_task(owner_id, task["id"], {
+            "status": S.FAILED, "uncertain": True, "completed_at": S.now(),
+            "error": "This was interrupted while it was running (the server restarted), so I can't tell whether it finished."
+                     + (" Check WhatsApp Engine → campaign history for this project before sending again." if task["kind"] in ("send", "share") else " It is safe to retry.")},
+            only_status=[S.RUNNING])
+        return cur or task
     if task["status"] not in S.ACTIVE or not task.get("batch_ids"):
         return task
     jobs = await db.whatsapp_jobs.find({"batch_id": {"$in": task["batch_ids"]}}, {"_id": 0, "talent_id": 1, "talent_name": 1, "status": 1, "verification_status": 1, "error_message": 1}).to_list(2000)
@@ -342,10 +378,12 @@ async def retry_task(user: dict, task: dict) -> dict:
     owner = user["id"]
     if task["status"] not in (S.FAILED, S.PARTIAL):
         raise HTTPException(409, "Only failed or partially completed tasks can be retried.")
+    if task.get("uncertain") and task["kind"] in ("send", "share"):
+        raise HTTPException(409, "I can't tell whether this was queued before it was interrupted. Check WhatsApp Engine → campaign history for this project first; if nothing went out, ask me again.")
     if not task.get("batch_ids"):
         if task["kind"] in ("send", "share"):
             raise HTTPException(409, "Nothing was queued, so there is nothing to retry — confirm it again from a new request.")
-        cur = await S.update_task(owner, task["id"], {"status": S.AWAITING_CONFIRMATION, "error": None}, only_status=[S.FAILED, S.PARTIAL])
+        cur = await S.update_task(owner, task["id"], {"status": S.AWAITING_CONFIRMATION, "error": None, "uncertain": False}, only_status=[S.FAILED, S.PARTIAL])
         return cur or task
     # sends: re-queue ONLY the failed jobs through the existing retry (sent jobs are never touched → no duplicates)
     from routers.whatsapp import retry_job

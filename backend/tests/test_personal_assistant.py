@@ -73,6 +73,18 @@ async def cleanup():
     await db.whatsapp_templates.delete_many({"id": {"$regex": "^zzz-test-pa-"}})
 
 
+@pytest_asyncio.fixture(autouse=True, loop_scope="module")
+async def _isolate_each_test():
+    """Every test starts and ends with no pipeline rows / jobs / batches on the throwaway talents and projects."""
+    async def wipe():
+        await db.casting_pipeline.delete_many({"project_id": {"$in": _created["projects"]}})
+        await db.whatsapp_jobs.delete_many({"talent_id": {"$in": _created["talents"]}})
+        await db.whatsapp_batches.delete_many({"project_id": {"$in": _created["projects"]}})
+    await wipe()
+    yield
+    await wipe()
+
+
 async def _talent(name, phone="911234500000", **extra):
     tid = f"zzz-test-pa-t-{uuid.uuid4().hex[:8]}"
     doc = {"id": tid, "name": name, "email": f"{tid}@example.com", "phone": phone, "status": "ACTIVE", "age": 27, "height": "5'6\"",
@@ -397,12 +409,10 @@ async def test_share_media_link_to_a_number_goes_through_the_existing_queue_afte
     await db.whatsapp_batches.delete_many({"id": {"$in": done["batch_ids"]}})
 
 
-async def test_unsupported_sharing_is_reported_not_faked(anon, alice, world):
+async def test_audition_sharing_is_refused_at_planning_with_the_exact_reason(anon, alice, world):
     a = (await say(anon, alice, "Send Rivka Zenith's audition to the casting director."))["tasks"][0]
-    f = await confirm(anon, alice, a["id"], worker=world["w1"])
-    assert f["task"]["status"] == "failed" and "audition" in f["task"]["error"].lower()
-    g = (await say(anon, alice, "Share Rivka Zenith's media link to the casting director"))["tasks"][0]
-    assert (await confirm(anon, alice, g["id"], worker=world["w1"]))["task"]["status"] == "failed"
+    assert a["status"] == "failed" and "audition" in a["error"].lower() and "WhatsApp casting-group workflow" in a["error"]
+    await confirm(anon, alice, a["id"], worker=world["w1"], expect=200)                            # nothing to confirm: no job, no claim
     assert await _jobs([world["rivka"]]) == []
 
 
@@ -447,3 +457,238 @@ async def test_the_workers_endpoint_reports_live_state_not_a_hardcoded_one(anon,
     await db.whatsapp_sessions.update_one({"id": world["w1"]}, {"$set": {"status": "qr_pending"}})
     assert {w["id"]: w for w in (await anon.get(f"{BASE}/workers", headers=alice["headers"])).json()["workers"]}[world["w1"]]["status"] == "Scan QR"
     await db.whatsapp_sessions.update_one({"id": world["w1"]}, {"$set": {"status": "authenticated"}})
+
+
+# ======================================================================================== acceptance gaps
+async def test_example_one_add_then_send_with_a_pronoun_is_one_dependent_pair(anon, alice, world):
+    out = await say(anon, alice, "Add Rivka Zenith to Streaming Now and send her the Qzx Casting Call.")
+    add, send = out["tasks"]
+    assert (add["kind"], send["kind"]) == ("add", "send") and send["depends_on"] == [add["id"]]
+    assert [e["id"] for e in send["params"]["talents"]] == [world["rivka"]] and [e["id"] for e in send["params"]["projects"]] == [world["amazon"]]
+    assert send["params"]["template_id"] == world["cc"]
+    r = await anon.post(f"{BASE}/tasks/{send['id']}/confirm", headers=alice["headers"], json={"worker_id": world["w1"]})
+    assert r.status_code == 409 and await _jobs([world["rivka"]]) == []
+    for t in out["tasks"]:
+        await anon.post(f"{BASE}/tasks/{t['id']}/cancel", headers=alice["headers"])
+
+
+async def test_example_three_profile_and_a_pronoun_followup_both_run_and_point_at_the_same_talent(anon, alice, world):
+    await db.casting_pipeline.insert_one({"id": uuid.uuid4().hex, "project_id": world["old"], "talent_id": world["rivka"], "stage": "already_tested", "created_at": _now(), "updated_at": _now()})
+    out = await say(anon, alice, "Show me Rivka Zenith's profile, and tell me which projects she has tested for.")
+    first, second = out["tasks"]
+    assert [first["status"], second["status"]] == ["completed", "completed"]                        # neither half was dropped
+    assert second["result"]["kind"] == "tested" and second["result"]["cards"][0]["id"] == world["rivka"]
+    assert [x["project"] for x in second["result"]["cards"][0]["tested_projects"]] == ["Qzx Fizzy Cola Legacy"]
+    await db.casting_pipeline.delete_many({"talent_id": world["rivka"]})
+
+
+async def test_example_four_these_other_talents_is_not_the_selection_on_screen(anon, alice, world):
+    ctx = {"talent_ids": [world["rivka"]]}
+    out = await say(anon, alice, "Move these talents to Follow-up, and add these other talents to Streaming Now.", ctx)
+    move, add = out["tasks"]
+    assert [e["id"] for e in move["params"]["talents"]] == [world["rivka"]]
+    assert add["status"] == "needs_clarification" and add["params"]["talents"][0]["state"] == "none"         # asks who — never reuses the selection
+    assert "other talents" in add["slots"][0]["prompt"]
+    fixed = (await anon.post(f"{BASE}/tasks/{add['id']}/clarify", headers=alice["headers"], json={"slot": "talent:0", "text": "Nehara Zolt"})).json()["task"]
+    assert fixed["status"] == "awaiting_confirmation" and [e["id"] for e in fixed["params"]["talents"]] == [world["nehara"]]
+    for t in (move, fixed):
+        await anon.post(f"{BASE}/tasks/{t['id']}/cancel", headers=alice["headers"])
+
+
+async def test_partial_surname_only_and_misspelt_names_resolve_but_nothing_runs_without_confirmation(anon, alice, world):
+    for phrase in ("Rivka", "Zenith", "Rivca Zenyth", "rivka zenith"):
+        t = (await say(anon, alice, f"Add {phrase} to Streaming Now"))["tasks"][0]
+        assert t["status"] == "awaiting_confirmation" and t["params"]["talents"][0]["id"] == world["rivka"], phrase
+        assert "Qzx Rivka Zenith" in t["title"]                                                      # the user sees who it understood
+        await anon.post(f"{BASE}/tasks/{t['id']}/cancel", headers=alice["headers"])
+    assert await _stage(world["amazon"], world["rivka"]) is None
+    nick = (await say(anon, alice, "Add Riv to Streaming Now"))["tasks"][0]                          # a nickname is never silently trusted
+    assert nick["status"] in ("needs_clarification", "awaiting_confirmation") and await _stage(world["amazon"], world["rivka"]) is None
+    await anon.post(f"{BASE}/tasks/{nick['id']}/cancel", headers=alice["headers"])
+
+
+async def test_two_ongoing_projects_with_similar_names_must_be_chosen_and_a_missing_project_asks(anon, alice, world):
+    p1, p2 = await _project("Qzx Mango Soda One"), await _project("Qzx Mango Soda Two")
+    t = (await say(anon, alice, "Add Rivka Zenith to Mango Soda"))["tasks"][0]
+    assert t["status"] == "needs_clarification" and {o["id"] for o in t["slots"][0]["options"]} == {p1, p2}
+    picked = (await anon.post(f"{BASE}/tasks/{t['id']}/clarify", headers=alice["headers"], json={"slot": "project:0", "choice_id": p2})).json()["task"]
+    assert picked["status"] == "awaiting_confirmation" and [e["id"] for e in picked["params"]["projects"]] == [p2]
+    missing = (await say(anon, alice, "Add Rivka Zenith to Zqjxv Nonexistent"))["tasks"][0]
+    assert missing["status"] == "needs_clarification" and missing["slots"][0]["kind"] == "project"
+    none_given = (await say(anon, alice, "Add Rivka Zenith"))["tasks"]
+    assert not none_given or none_given[0]["status"] in ("needs_clarification",)
+    for x in (picked, missing):
+        await anon.post(f"{BASE}/tasks/{x['id']}/cancel", headers=alice["headers"])
+
+
+async def test_a_talent_who_exists_but_is_not_in_the_project_cannot_be_sent_to_or_moved(anon, alice, world):
+    s = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"][0]
+    assert s["status"] == "failed" and "Add them first" in s["error"] or "in the Qzx Streaming Now pipeline yet" in s["error"]
+    m = (await say(anon, alice, "Move Rivka Zenith to Approved in Streaming Now"))["tasks"][0]
+    assert m["status"] == "failed" and "pipeline" in m["error"]
+    assert await _jobs([world["rivka"]]) == []
+
+
+async def test_two_simultaneous_confirms_of_one_send_create_exactly_one_batch_and_one_message(anon, alice, world):
+    import asyncio
+    await _add_rows(world["amazon"], world["rivka"])
+    t = (await say(anon, alice, "Send the Qzx Follow Up to Rivka Zenith for Streaming Now"))["tasks"][0]
+    rs = await asyncio.gather(*[anon.post(f"{BASE}/tasks/{t['id']}/confirm", headers=alice["headers"], json={"worker_id": world["w1"]}) for _ in range(5)])
+    assert all(r.status_code == 200 for r in rs)
+    assert len(await _jobs([world["rivka"]])) == 1
+    assert await db.whatsapp_batches.count_documents({"project_id": world["amazon"], "template_id": world["fu"]}) == 1
+    await db.casting_pipeline.delete_many({"project_id": world["amazon"]})
+    await db.whatsapp_jobs.delete_many({"talent_id": world["rivka"]})
+    await db.whatsapp_batches.delete_many({"project_id": world["amazon"]})
+
+
+async def test_repeating_the_same_send_is_flagged_before_it_can_message_someone_twice(anon, alice, world):
+    await _add_rows(world["amazon"], world["rivka"])
+    first = (await say(anon, alice, "Send the Qzx Follow Up to Rivka Zenith for Streaming Now"))["tasks"][0]
+    assert not first.get("duplicate_risk")
+    await confirm(anon, alice, first["id"], worker=world["w1"])
+    again = (await say(anon, alice, "Send the Qzx Follow Up to Rivka Zenith for Streaming Now"))["tasks"][0]            # a NEW request, same intent
+    assert again["duplicate_risk"] is True and any("twice" in w for w in again["warnings"])
+    await anon.post(f"{BASE}/tasks/{again['id']}/cancel", headers=alice["headers"])
+    await db.casting_pipeline.delete_many({"project_id": world["amazon"]})
+    await db.whatsapp_jobs.delete_many({"talent_id": world["rivka"]})
+    await db.whatsapp_batches.delete_many({"project_id": world["amazon"]})
+
+
+async def test_a_worker_going_offline_after_queueing_leaves_the_jobs_pending_and_the_task_queued(anon, alice, world):
+    w = await _worker("ZZZ PA Flaky")
+    await _add_rows(world["amazon"], world["rivka"])
+    t = (await say(anon, alice, "Send the Qzx Follow Up to Rivka Zenith for Streaming Now"))["tasks"][0]
+    await confirm(anon, alice, t["id"], worker=w)
+    await db.whatsapp_sessions.update_one({"id": w}, {"$set": {"status": "disconnected"}})          # redeploy / logout
+    cur = (await anon.get(f"{BASE}/tasks/{t['id']}", headers=alice["headers"])).json()["task"]
+    assert cur["status"] == "queued" and {j["status"] for j in await _jobs([world["rivka"]])} == {"pending"}
+    assert "sent" not in cur["status_detail"]                                                         # never inflated into success
+    await db.casting_pipeline.delete_many({"project_id": world["amazon"]})
+    await db.whatsapp_jobs.delete_many({"talent_id": world["rivka"]})
+    await db.whatsapp_batches.delete_many({"project_id": world["amazon"]})
+
+
+async def test_an_interrupted_run_is_failed_as_uncertain_and_a_send_is_never_blindly_retried(anon, alice, world):
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    a = (await say(anon, alice, "Add Nehara Zolt to Streaming Now"))["tasks"][0]
+    s = (await say(anon, alice, "Send the Qzx Follow Up to Nehara Zolt for Streaming Now. "))["tasks"]
+    await db.assistant_tasks.update_one({"id": a["id"]}, {"$set": {"status": "running", "started_at": old}})
+    got = (await anon.get(f"{BASE}/tasks/{a['id']}", headers=alice["headers"])).json()["task"]
+    assert got["status"] == "failed" and got["uncertain"] is True and "interrupted" in got["error"]
+    assert (await anon.post(f"{BASE}/tasks/{a['id']}/retry", headers=alice["headers"])).json()["task"]["status"] == "awaiting_confirmation"      # idempotent kinds may retry
+    snd = (await say(anon, alice, "Share Nehara Zolt's media link with +91 98765 43211"))["tasks"][0]
+    await db.assistant_tasks.update_one({"id": snd["id"]}, {"$set": {"status": "running", "started_at": old}})
+    got2 = (await anon.get(f"{BASE}/tasks/{snd['id']}", headers=alice["headers"])).json()["task"]
+    assert got2["status"] == "failed" and got2["uncertain"] is True and "campaign history" in got2["error"]
+    r = await anon.post(f"{BASE}/tasks/{snd['id']}/retry", headers=alice["headers"])
+    assert r.status_code == 409 and "campaign history" in r.json()["detail"]                          # blocked: could double-send
+    fresh = (await say(anon, alice, "Add Nehara Zolt to Fizzy Cola"))["tasks"][0]
+    await db.assistant_tasks.update_one({"id": fresh["id"]}, {"$set": {"status": "running", "started_at": _now()}})
+    assert (await anon.get(f"{BASE}/tasks/{fresh['id']}", headers=alice["headers"])).json()["task"]["status"] == "running"   # a live run is left alone
+
+
+# -------------------------------------------------------------------------------------------- recipients
+async def _crm(name, phone, ctype="casting_director"):
+    r = await db.clients.insert_one({"name": name, "phone_number": phone, "contact_type": ctype, "company_name": "ZZZ TEST PA Co"})
+    _created.setdefault("clients", []).append(r.inserted_id)
+    return str(r.inserted_id)
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module", autouse=True)
+async def cleanup_clients():
+    yield
+    await db.clients.delete_many({"_id": {"$in": _created.get("clients", [])}})
+    await db.whatsapp_templates.delete_many({"id": "zzz-test-pa-custom"})
+
+
+async def test_share_to_a_named_crm_contact_previews_recipient_and_content_without_writing_then_sends_to_that_contact(anon, alice, world):
+    await db.whatsapp_templates.update_one({"slug": "custom"}, {"$setOnInsert": {"id": "zzz-test-pa-custom", "name": "Custom Message", "slug": "custom", "body_text": "{{message}}", "variables": ["message"], "created_at": _now(), "updated_at": _now()}}, upsert=True)
+    cid = await _crm("Qzx Casty Person", "+919800011122")
+    await db.talents.update_one({"id": world["rivka"]}, {"$unset": {"media_download_token": ""}, "$set": {"media_download_enabled": True}})
+    t = (await say(anon, alice, "Share Rivka Zenith's media link with Casty Person"))["tasks"][0]
+    assert t["status"] == "awaiting_confirmation" and t["params"]["recipient"]["id"] == cid
+    text = "\n".join(t["summary"])
+    assert "Qzx Casty Person" in text and "••••• 11122" in text and "9800011122" not in text         # recipient shown, number masked
+    assert "Qzx Rivka Zenith" in text and "created when you confirm" in text                         # content shown
+    assert "media_download_token" not in (await db.talents.find_one({"id": world["rivka"]}, {"_id": 0}))   # preview wrote nothing
+    done = (await confirm(anon, alice, t["id"], worker=world["w2"]))["task"]
+    job = (await db.whatsapp_jobs.find({"batch_id": done["batch_ids"][0]}).to_list(5))[0]
+    assert job["destination"].endswith("9800011122") and "/talent-media/" in job["message_body"] and job["worker_id"] == world["w2"]
+    assert done["params"]["worker_label"] == "ZZZ PA Worker 2"
+    await db.whatsapp_jobs.delete_many({"batch_id": {"$in": done["batch_ids"]}})
+    await db.whatsapp_batches.delete_many({"id": {"$in": done["batch_ids"]}})
+
+
+async def test_a_role_is_never_guessed_it_lists_the_saved_contacts_of_that_type_to_pick_from(anon, alice, world):
+    a, b = await _crm("Qzx Director A", "+919800011133"), await _crm("Qzx Director B", "+919800011144")
+    t = (await say(anon, alice, "Share Rivka Zenith's profile with the casting director"))["tasks"][0]
+    assert t["status"] == "needs_clarification" and t["slots"][0]["kind"] == "recipient"
+    opts = {o["id"]: o for o in t["slots"][0]["options"]}
+    assert {f"crm:{a}", f"crm:{b}"} <= set(opts) and "Casting Director" in opts[f"crm:{a}"]["sublabel"] and "9800011133" not in str(opts)
+    bad = await anon.post(f"{BASE}/tasks/{t['id']}/clarify", headers=alice["headers"], json={"slot": "recipient", "choice_id": "crm:000000000000000000000000"})
+    assert bad.status_code == 400                                                                      # only offered options are accepted
+    ok = (await anon.post(f"{BASE}/tasks/{t['id']}/clarify", headers=alice["headers"], json={"slot": "recipient", "choice_id": f"crm:{b}"})).json()["task"]
+    assert ok["status"] == "awaiting_confirmation" and ok["params"]["recipient"]["id"] == b
+    await anon.post(f"{BASE}/tasks/{ok['id']}/cancel", headers=alice["headers"])
+
+
+async def test_unknown_recipient_asks_and_a_typed_number_resolves_it(anon, alice, world):
+    t = (await say(anon, alice, "Share Rivka Zenith's media link with Zqjxv Nobody"))["tasks"][0]
+    assert t["status"] == "needs_clarification" and "couldn't find" in t["slots"][0]["prompt"].lower()
+    fixed = (await anon.post(f"{BASE}/tasks/{t['id']}/clarify", headers=alice["headers"], json={"slot": "recipient", "text": "+91 98765 43210"})).json()["task"]
+    assert fixed["status"] == "awaiting_confirmation" and "••••• 43210" in "\n".join(fixed["summary"])
+    none = (await say(anon, alice, "Share Rivka Zenith's media link"))["tasks"][0]
+    assert none["status"] == "needs_clarification" and "Who should I send it to" in none["slots"][0]["prompt"]
+    for x in (fixed, none):
+        await anon.post(f"{BASE}/tasks/{x['id']}/cancel", headers=alice["headers"])
+
+
+async def test_a_project_group_share_shows_the_group_and_a_project_without_one_is_refused(anon, alice, world):
+    t = (await say(anon, alice, "Share Rivka Zenith's media link with the WhatsApp group for Streaming Now"))["tasks"][0]
+    assert t["status"] == "awaiting_confirmation" and "ZZZ TEST PA GROUP" in "\n".join(t["summary"])
+    nogroup = (await say(anon, alice, "Share Rivka Zenith's media link with the WhatsApp group for Fizzy Cola"))["tasks"][0]
+    assert nogroup["status"] == "failed" and "no WhatsApp casting group" in nogroup["error"]
+    await anon.post(f"{BASE}/tasks/{t['id']}/cancel", headers=alice["headers"])
+
+
+# -------------------------------------------------------------------------------------------- privacy depth
+async def test_every_assistant_endpoint_scopes_by_the_authenticated_user_not_by_anything_in_the_request(anon, alice, bob, world):
+    mine = await say(anon, alice, "Add Rivka Zenith to Streaming Now")
+    task_id, cmd_id = mine["tasks"][0]["id"], mine["command_id"]
+    # listing with someone else's command id / extra owner fields in the body returns nothing and acts on nothing
+    assert (await anon.get(f"{BASE}/tasks", headers=bob["headers"], params={"command_id": cmd_id, "owner_id": alice["id"]})).json()["tasks"] == []
+    spoof = await anon.post(f"{BASE}/message", headers=bob["headers"], json={"text": "Find Rivka Zenith", "client_request_id": uuid.uuid4().hex, "owner_id": alice["id"], "user_id": alice["id"]})
+    assert spoof.status_code == 200
+    assert (await anon.get(f"{BASE}/tasks", headers=alice["headers"])).json()["tasks"][0]["id"] != spoof.json()["tasks"][0]["id"]      # recorded under bob, not alice
+    assert not any(t["id"] == spoof.json()["tasks"][0]["id"] for t in (await anon.get(f"{BASE}/tasks", headers=alice["headers"])).json()["tasks"])
+    assert (await anon.post(f"{BASE}/history/clear", headers=bob["headers"])).json()["deleted"] >= 1
+    assert len((await anon.get(f"{BASE}/history", headers=alice["headers"])).json()["messages"]) >= 2      # alice's history untouched by bob's clear
+    for method, path in (("get", f"/tasks/{task_id}"), ("post", f"/tasks/{task_id}/confirm"), ("post", f"/tasks/{task_id}/cancel"), ("post", f"/tasks/{task_id}/retry"),
+                         ("post", f"/commands/{cmd_id}/confirm-all")):
+        r = await getattr(anon, method)(BASE + path, headers=bob["headers"], **({"json": {}} if method == "post" else {}))
+        assert r.status_code == 404 and "Rivka" not in r.text and alice["id"] not in r.text, path           # leaks nothing, not even existence
+    assert await _stage(world["amazon"], world["rivka"]) is None
+    await anon.post(f"{BASE}/tasks/{task_id}/cancel", headers=alice["headers"])
+
+
+async def test_tasks_and_history_survive_a_new_session(anon, alice, world):
+    out = await say(anon, alice, "Show me Nehara Zolt's profile")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as fresh_client:    # "a new browser"
+        tasks = (await fresh_client.get(f"{BASE}/tasks", headers=alice["headers"])).json()["tasks"]
+        assert any(t["id"] == out["tasks"][0]["id"] and t["status"] == "completed" for t in tasks)
+        assert any(m["command_id"] == out["command_id"] for m in (await fresh_client.get(f"{BASE}/history", headers=alice["headers"])).json()["messages"])
+
+
+async def test_media_link_preview_finds_a_bare_talent_that_has_none_of_the_optional_fields(world):
+    """Real talents often have no status / media_download_* fields: the projection is then `{}` (falsy) and the preview
+    used to say "talent not found — will be skipped" for someone who exists."""
+    from personal_assistant import resolve as R
+    tid = f"zzz-test-pa-bare-{uuid.uuid4().hex[:8]}"
+    await db.talents.insert_one({"id": tid, "name": "Qzx Bare Talent"})
+    _created["talents"].append(tid)
+    assert (await R.peek_media_link(tid))["state"] == "will_create"
+    assert (await R.peek_media_link("zzz-test-pa-does-not-exist"))["state"] == "missing"
+    await db.talents.update_one({"id": tid}, {"$set": {"media_download_enabled": False}})
+    assert (await R.peek_media_link(tid))["state"] == "off"

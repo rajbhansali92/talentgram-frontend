@@ -93,6 +93,41 @@ describe("floating entry point", () => {
     });
 });
 
+describe("bulk bar overlap", () => {
+    const bar = (top, right) => {
+        const el = document.createElement("div");
+        el.setAttribute("data-pa-dock", "bottom");
+        el.getBoundingClientRect = () => ({ top, right, left: 0, bottom: top + 200, width: right, height: 200 });
+        document.body.appendChild(el);
+        return el;
+    };
+
+    it("lifts the launcher to sit above the MEASURED top of a docked bulk bar (any height), and drops back when the selection clears", async () => {
+        server();
+        Object.defineProperty(window, "innerHeight", { value: 800, configurable: true });
+        Object.defineProperty(window, "innerWidth", { value: 375, configurable: true });
+        const el = bar(552, 366);
+        setAssistantContext({ projectId: null, talentIds: ["t-a"] });
+        mount();
+        const launcher = await screen.findByTestId("pa-launcher");
+        await waitFor(() => expect(launcher.style.bottom).toBe("260px"));            // 800 − 552 + 12
+        act(() => setAssistantContext({ projectId: null, talentIds: [] }));
+        await waitFor(() => expect(screen.getByTestId("pa-launcher").style.bottom).toBe(""));
+        el.remove();
+    });
+
+    it("ignores a bar that does not reach the launcher's side of a wide screen", async () => {
+        server();
+        Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true });
+        const el = bar(700, 900);
+        setAssistantContext({ projectId: null, talentIds: ["t-a"] });
+        mount();
+        const launcher = await screen.findByTestId("pa-launcher");
+        expect(launcher.style.bottom).toBe("");
+        el.remove();
+    });
+});
+
 describe("text commands", () => {
     it("sends the text with the page context (current project from the URL + the selection on screen) and shows the reply and the task", async () => {
         server();
@@ -118,7 +153,7 @@ describe("text commands", () => {
         await open();
         type("Find Angela");
         fireEvent.click(screen.getByTestId("pa-send"));
-        expect(await screen.findByText(/couldn't reach the server/i)).toBeTruthy();
+        expect(await screen.findByText(/couldn't get an answer from the server/i)).toBeTruthy();
         fireEvent.click(screen.getByTestId("pa-retry-send"));
         await waitFor(() => expect(posts("/message")).toHaveLength(2));
         expect(posts("/message")[1][1].client_request_id).toBe(posts("/message")[0][1].client_request_id);
@@ -263,7 +298,7 @@ describe("confirmation, workers and statuses", () => {
         expect(rows.getByText(/sent ✓ verified/)).toBeTruthy();
         expect(rows.getByText(/number not on WhatsApp/)).toBeTruthy();
         expect(rows.getByText(/No whatsapp_group_name/)).toBeTruthy();
-        expect(screen.getByText("Partly completed")).toBeTruthy();
+        expect(screen.getByText("Partly sent")).toBeTruthy();
         expect(screen.getByTestId("pa-retry")).toBeTruthy();
     });
 
@@ -286,7 +321,7 @@ describe("confirmation, workers and statuses", () => {
         await screen.findByText("Queued");
         tasksOnServer = [sendTask({ status: "completed", summary: [], status_detail: "1 sent" })];
         await act(async () => { await vi.advanceTimersByTimeAsync(4200); });
-        expect(await screen.findByText("Completed")).toBeTruthy();
+        expect(await screen.findByText("Sent")).toBeTruthy();                      // a SEND that the backend reports finished reads "Sent", not just "Completed"
     });
 
     it("the Tasks tab lists persisted tasks after a refresh (history + tasks load from the backend)", async () => {
@@ -302,6 +337,72 @@ describe("confirmation, workers and statuses", () => {
         expect(await screen.findByTestId("pa-task-t1")).toBeTruthy();             // the card is back under its command
         fireEvent.click(screen.getByTestId("pa-tab-tasks"));
         expect(within(screen.getByTestId("pa-queue")).getByText("Add Angela to Amazon Now")).toBeTruthy();
+    });
+});
+
+describe("honest wording and failure handling", () => {
+    const send = (over = {}) => task({ id: "s1", kind: "send", title: "Send Casting Call to Angela", summary: [], params: { talents: [], projects: [] }, ...over });
+    const show = async (t) => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "x", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("send"); fireEvent.click(screen.getByTestId("pa-send")); await screen.findByTestId(`pa-task-${t.id}`);
+    };
+
+    it.each([["queued", "Queued"], ["running", "Sending"], ["completed", "Sent"], ["partial", "Partly sent"], ["failed", "Failed"], ["cancelled", "Cancelled"]])(
+        "a WhatsApp send in state %s reads %s — never 'Completed' unless it was actually sent", async (status, label) => {
+            await show(send({ status }));
+            expect(within(screen.getByTestId("pa-task-s1")).getByTestId("pa-status").textContent).toBe(label);
+        });
+
+    it("non-send tasks keep the plain wording", async () => {
+        await show(task({ id: "a1", kind: "add", status: "completed", summary: [] }));
+        expect(within(screen.getByTestId("pa-task-a1")).getByTestId("pa-status").textContent).toBe("Completed");
+    });
+
+    it("shows which worker a send used", async () => {
+        await show(send({ status: "queued", params: { talents: [], projects: [], worker_id: "worker-2", worker_label: "Worker 2" } }));
+        expect(screen.getByTestId("pa-worker-used").textContent).toBe("Worker: Worker 2");
+    });
+
+    it("a confirm that times out says it may still have run, refreshes from the server, and does not double-run", async () => {
+        await show(send({ status: "awaiting_confirmation", summary: ["Template: Casting Call"] }));
+        tasksOnServer = [send({ status: "queued", status_detail: "1 waiting for the worker", batch_ids: ["b1"] })];     // the server DID queue it
+        adminApi.post.mockImplementation((url) => Promise.reject(Object.assign(new Error("timeout of 45000ms exceeded"), { code: "ECONNABORTED" })));
+        fireEvent.click(await screen.findByTestId("pa-worker-default"));
+        fireEvent.click(screen.getByTestId("pa-confirm"));
+        expect(await screen.findByText(/may still have run/i)).toBeTruthy();
+        await waitFor(() => expect(within(screen.getByTestId("pa-task-s1")).getByTestId("pa-status").textContent).toBe("Queued"));   // truth comes from the persisted task
+        expect(posts("/confirm")).toHaveLength(1);
+    });
+
+    it("every API call has a client-side timeout so nothing spins forever", async () => {
+        await show(send({ status: "awaiting_confirmation", summary: [] }));
+        const [, , cfg] = posts("/message")[0];
+        expect(cfg).toEqual({ timeout: 45000 });
+    });
+
+    it("a repeat of an already-queued send is flagged and the button says so", async () => {
+        await show(send({ status: "awaiting_confirmation", duplicate_risk: true, warnings: ["Already queued…"], summary: ["Template: Casting Call", "Already queued or sent in the last 24 h with this template for this project: Angela — sending again would message them twice."] }));
+        expect(screen.getByTestId("pa-confirm").textContent).toContain("Send again anyway");
+        expect(screen.getByTestId("pa-preview").textContent).toContain("would message them twice");
+    });
+
+    it("a share shows recipient, content and (after confirmation) worker before/after it runs", async () => {
+        await show(task({ id: "sh1", kind: "share", status: "awaiting_confirmation", title: "Share media link of Angela with Casty Person",
+            summary: ["Recipient: Casty Person (+91 ••••• 11122) — saved CRM contact", "Content: media link of 1 talent:", "  • Angela — their media download link (created when you confirm)"] }));
+        const p = screen.getByTestId("pa-preview").textContent;
+        expect(p).toContain("Casty Person"); expect(p).toContain("••••• 11122"); expect(p).toContain("media download link");
+        expect(screen.getByTestId("pa-confirm").disabled).toBe(true);              // a worker must be chosen
+    });
+
+    it("a recipient question offers the saved contacts as tappable options and sends only the picked id", async () => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "1 needs your pick", unrecognised: [], tasks: [task({ id: "sh2", kind: "share", status: "needs_clarification", title: "Share profile of Angela with …",
+            slots: [{ key: "recipient", kind: "recipient", phrase: "", prompt: "Which Casting Director? (saved CRM contacts)", options: [{ id: "crm:abc", label: "Priya Nair", sublabel: "Casting Director · +91 ••••• 11122" }] }] })] } }) });
+        mount(); await open(); type("share"); fireEvent.click(screen.getByTestId("pa-send"));
+        const opt = await screen.findByTestId("pa-option-crm:abc");
+        expect(opt.textContent).toContain("Casting Director");
+        adminApi.post.mockImplementation((url, body) => Promise.resolve({ data: { task: task({ id: "sh2", kind: "share", status: "awaiting_confirmation", slots: [] }) } }));
+        fireEvent.click(opt);
+        await waitFor(() => expect(posts("/clarify")[0][1]).toEqual({ slot: "recipient", choice_id: "crm:abc" }));
     });
 });
 

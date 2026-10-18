@@ -14,6 +14,7 @@ import PipelineFilters from "./PipelineFilters";
 import PipelineColumn from "./PipelineColumn";
 import { BoardSection, BoardRow } from "./PipelineBoardSection";
 import BulkActionBar from "./BulkActionBar";
+import PipelineTemplateSend from "./PipelineTemplateSend";
 import { FilterEmptyState } from "./PipelineEmptyState";
 import QuickAddTalents from "./QuickAddTalents";
 import BulkAddModal from "./BulkAddModal";
@@ -37,11 +38,12 @@ function PipelineBoard({ projectId, projectName }) {
     // lookup that drives each card's Create/Continue Draft/Open Submission
     // quick action. One board-level fetch each, not a per-card network call.
     const [projectSlug, setProjectSlug] = useState(null);
+    const [projectBrand, setProjectBrand] = useState(null);   // the page doesn't pass projectName; the same fetch provides it
     useEffect(() => {
         if (!projectId) return;
         let alive = true;
         adminApi.get(`/projects/${projectId}`)
-            .then(({ data: proj }) => { if (alive) setProjectSlug(proj?.slug || null); })
+            .then(({ data: proj }) => { if (alive) { setProjectSlug(proj?.slug || null); setProjectBrand(proj?.brand_name || null); } })
             .catch(() => {});
         return () => { alive = false; };
     }, [projectId]);
@@ -254,7 +256,14 @@ function PipelineBoard({ projectId, projectName }) {
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [deleteBusy, setDeleteBusy] = useState(false);
 
-    const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
+    // WhatsApp: the talent ids selected at click time (null = closed). Captured once so the selection
+    // can't drift while the picker is open; the selection itself is left untouched.
+    const [templateTargets, setTemplateTargets] = useState(null);
+    const openSendTemplate = () => {
+        const ids = Array.from(new Set(Array.from(bulkIds).map((id) => data.find((i) => i.id === id)?.talent_id).filter(Boolean)));
+        if (ids.length === 0) { toast.error("Select at least one talent first"); return; }
+        setTemplateTargets(ids);
+    };
     const [showEmailModal, setShowEmailModal] = useState(false);
     const [emailSubject, setEmailSubject] = useState("");
     const [emailBody, setEmailBody] = useState("");
@@ -783,13 +792,20 @@ function PipelineBoard({ projectId, projectName }) {
                     onNote={() => setShowNoteModal(true)}
                     onDelete={() => setShowDeleteConfirm(true)}
                     onExport={handleBulkExport}
-                    onWhatsApp={() => setShowWhatsAppModal(true)}
+                    onWhatsApp={openSendTemplate}
                     onEmail={() => setShowEmailModal(true)}
                     onArchive={handleBulkArchive}
                     onReachedOut={handleBulkReachedOut}
                     showReachedOut={bulkAllAskToTest}
                     onCreateSubmissions={handleBulkCreateSubmissions}
                     creatingSubmissions={bulkCreatingSubmissions}
+                />
+
+                <PipelineTemplateSend
+                    talentIds={templateTargets}
+                    projectId={projectId}
+                    projectName={projectName || projectBrand}
+                    onClose={() => setTemplateTargets(null)}
                 />
 
                 <TalentBrowserModal
@@ -907,68 +923,6 @@ function PipelineBoard({ projectId, projectName }) {
                                     className="px-4 py-2 bg-rose-600 text-white rounded-lg text-xs font-semibold hover:bg-rose-500 disabled:opacity-40"
                                 >
                                     {deleteBusy ? "Deleting..." : "Delete"}
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* --- BULK WHATSAPP PREVIEW --- */}
-                {showWhatsAppModal && (
-                    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
-                        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-black/15 overflow-hidden p-6 space-y-4">
-                            <div className="flex justify-between items-center">
-                                <h3 className="text-sm font-bold uppercase tracking-wider text-black/85">Bulk WhatsApp Preview</h3>
-                                <button onClick={() => setShowWhatsAppModal(false)} className="text-black/40 hover:text-black/60"><X className="w-4 h-4" /></button>
-                            </div>
-                            <div className="text-xs text-black/55">
-                                Ready to message <strong>{bulkIds.size}</strong> selected talents. Below is the dispatch preview:
-                            </div>
-                            <div className="max-h-[180px] overflow-y-auto border border-black/[0.06] rounded-lg p-2 space-y-1.5 bg-[#fafafa]">
-                                {Array.from(bulkIds).map(id => {
-                                    const talent = data.find(i => i.id === id);
-                                    if (!talent) return null;
-                                    const phone = talent.talent_phone || "No phone";
-                                    return (
-                                        <div key={id} className="flex justify-between items-center text-xs p-1 hover:bg-black/5 rounded">
-                                            <span>{talent.talent_name || "Unknown"}</span>
-                                            <a 
-                                                href={`https://wa.me/${phone.replace(/\D/g, '')}?text=${encodeURIComponent(whatsAppMessage)}`}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="text-[#25D366] hover:underline font-mono text-[10.5px]"
-                                            >
-                                                {phone} ↗
-                                            </a>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                            <div className="space-y-1.5">
-                                <label className="text-[10px] uppercase font-bold text-neutral-400">Pre-fill Message (Optional)</label>
-                                <textarea 
-                                    placeholder="Type message text to pre-fill wa.me links..."
-                                    value={whatsAppMessage}
-                                    onChange={(e) => setWhatsAppMessage(e.target.value)}
-                                    rows={2}
-                                    className="w-full border border-black/[0.08] rounded-lg px-3 py-2 text-xs outline-none focus:border-black/40 resize-none"
-                                />
-                            </div>
-                            <div className="flex justify-end gap-2 pt-2">
-                                <button 
-                                    onClick={() => setShowWhatsAppModal(false)}
-                                    className="px-4 py-2 border border-black/10 rounded-lg text-xs font-semibold text-black/55 hover:bg-black/5"
-                                >
-                                    Close
-                                </button>
-                                <button 
-                                    onClick={() => {
-                                        // Open WhatsApp Engine broadcast page pre-populated
-                                        window.location.href = `/admin/whatsapp?project_id=${projectId}&source=manual`;
-                                    }}
-                                    className="px-4 py-2 bg-black text-white rounded-lg text-xs font-semibold hover:bg-black/90"
-                                >
-                                    Open Broadcast Engine
                                 </button>
                             </div>
                         </div>

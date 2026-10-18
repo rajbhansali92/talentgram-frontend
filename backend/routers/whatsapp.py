@@ -1659,6 +1659,10 @@ class CastingCallSendIn(BaseModel):
     # pre-existing behaviour for any caller that predates the picker (BatchIn's own default worker);
     # present-but-blank is rejected, and a chosen worker is NEVER swapped for another one.
     worker_id: Optional[str] = None
+    # Global Talent's send always moves ask_to_test -> follow_up once a casting call is actually delivered
+    # (the default, unchanged). The Casting Pipeline's own "Send Template" passes False: messaging from inside
+    # a project must not move anyone between stages as a side effect — the pipeline has its own move actions.
+    apply_pipeline_move: bool = True
 
 
 def _clean_id_list(raw: List[str]) -> List[str]:
@@ -1800,18 +1804,25 @@ async def send_casting_call(payload: CastingCallSendIn, admin: dict = Depends(cu
             continue
         batch = batch_result["batch"]
         batch_ids.append(batch["id"])
+        queued_ids = {j.get("talent_id") for j in batch_result["jobs"]}
+        skipped_ids = {x.get("recipient_id") for x in batch_result["skipped"]}
         results.append({
             "project_id": pid,
             "project_name": proj.get("brand_name"),
             "batch_id": batch["id"],
             "queued": len(batch_result["jobs"]),
             "skipped": len(batch_result["skipped"]),
+            # Who was NOT queued and why (e.g. no valid WhatsApp number) — so callers can say it, not just count it.
+            "skipped_recipients": [{"talent_id": x.get("recipient_id"), "name": x.get("name"), "reason": x.get("reason")}
+                                   for x in batch_result["skipped"]],
+            # Selected talents that are not in this project's pipeline at all (never silently dropped).
+            "not_in_project": [t for t in talent_ids if t not in queued_ids and t not in skipped_ids],
         })
 
     if not results:
         raise HTTPException(400, f"Could not queue any casting calls: {errors}")
 
-    if batch_ids:
+    if batch_ids and payload.apply_pipeline_move:
         asyncio.create_task(_watch_and_apply_casting_call_move(batch_ids))
 
     return {"success": True, "batches": results, "errors": errors, **batch_worker}

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminApi, isAdmin } from "@/lib/api";
+import { usePublishAssistantContext } from "@/lib/assistantContext";
 import { formatTalentLocation } from "@/lib/sanitize";
 import { instagramProfileUrl } from "@/lib/mediaUtils";
 import { Search, Plus, Check, User, LayoutGrid, List, Tag, Instagram, SlidersHorizontal, FolderKanban, Eye, RefreshCw } from "lucide-react";
@@ -741,6 +742,9 @@ export default function TalentList() {
     const [showDesktopFilters, setShowDesktopFilters] = useState(false);
 
     const [selected, setSelected] = useState(new Set());
+    // The assistant's "these selected talents" = what is ticked on this page (the backend re-validates every id).
+    const selectedTalentIds = useMemo(() => Array.from(selected), [selected]);
+    usePublishAssistantContext({ projectId: null, talentIds: selectedTalentIds });
     const [confirmOpen, setConfirmOpen] = useState(false);
     const canBulkDelete = isAdmin();
 

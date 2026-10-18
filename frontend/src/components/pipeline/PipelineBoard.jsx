@@ -2,6 +2,7 @@ import React, { memo, useCallback, useState, useMemo, useEffect, useRef } from "
 import { toast } from "sonner";
 import { formatErrorDetail } from "@/lib/errorFormatter";
 import { adminApi } from "@/lib/api";
+import { usePublishAssistantContext } from "@/lib/assistantContext";
 
 import { usePipelineData } from "@/hooks/usePipelineData";
 import { useTalentSearch } from "@/hooks/useTalentSearch";
@@ -259,6 +260,9 @@ function PipelineBoard({ projectId, projectName }) {
     // WhatsApp: the talent ids selected at click time (null = closed). Captured once so the selection
     // can't drift while the picker is open; the selection itself is left untouched.
     const [templateTargets, setTemplateTargets] = useState(null);
+    // The assistant's "these selected talents" / "the current project" = this board's selection and project.
+    const assistantTalentIds = useMemo(() => Array.from(new Set(Array.from(bulkIds).map((id) => data.find((i) => i.id === id)?.talent_id).filter(Boolean))), [bulkIds, data]);
+    usePublishAssistantContext({ projectId, talentIds: assistantTalentIds });
     const openSendTemplate = () => {
         const ids = Array.from(new Set(Array.from(bulkIds).map((id) => data.find((i) => i.id === id)?.talent_id).filter(Boolean)));
         if (ids.length === 0) { toast.error("Select at least one talent first"); return; }

@@ -4,6 +4,7 @@ import { clearAdminSession, getAdmin } from "@/lib/api";
 import Logo from "@/components/Logo";
 import NotificationBell from "@/components/NotificationBell";
 import ActionQueuePanel from "@/components/ActionQueuePanel";
+import PersonalAssistant from "@/components/personal-assistant/PersonalAssistant";
 import {
   LayoutDashboard,
   Users,
@@ -593,6 +594,10 @@ export default function AdminLayout() {
             underlying backend action it reflects keeps running
             independently of any open Submission Review page. */}
         <ActionQueuePanel />
+
+        {/* Personal Assistant — one floating entry point for every authenticated page (closed by default; the panel
+            code is lazy-loaded on first open). Gated by the backend, see backend/personal_assistant/access.py. */}
+        <PersonalAssistant />
       </div>
     </LayoutErrorBoundary>
   );

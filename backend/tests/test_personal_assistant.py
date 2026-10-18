@@ -762,3 +762,31 @@ async def test_the_not_in_the_pipeline_message_reads_correctly_for_one_and_for_s
     assert two["status"] == "failed"
     assert two["error"] == "None of these talents are in the Qzx Streaming Now pipeline yet. Add them first."
     assert await _jobs([world["rivka"], world["nehara"]]) == []                                              # still nothing queued
+
+
+async def test_which_projects_has_a_named_talent_tested_for_returns_that_talents_history(anon, alice, world):
+    await db.casting_pipeline.insert_many([
+        {"id": uuid.uuid4().hex, "project_id": world["old"], "talent_id": world["rivka"], "stage": "already_tested", "created_at": _now(), "updated_at": _now()},
+        {"id": uuid.uuid4().hex, "project_id": world["pepsi"], "talent_id": world["rivka"], "stage": "ask_to_test", "created_at": _now(), "updated_at": _now()}])
+    for phrase in ("Which projects has Rivka Zenith tested for", "WHICH PROJECTS HAS RIVKA ZENITH TESTED FOR?"):
+        t = (await say(anon, alice, phrase))["tasks"][0]
+        assert t["status"] == "completed", t
+        card = t["result"]["cards"][0]
+        assert t["result"]["kind"] == "tested" and card["id"] == world["rivka"]
+        assert [x["project"] for x in card["tested_projects"]] == ["Qzx Fizzy Cola Legacy"]       # only the Already-Tested one
+        assert {p["project"] for p in card["history"]["projects"]} == {"Qzx Fizzy Cola Legacy", "Qzx Fizzy Cola"}
+
+
+async def test_which_projects_has_a_name_shared_by_two_talents_tested_for_asks_which_and_never_picks(anon, alice, world):
+    t = (await say(anon, alice, "Which projects has Quorra Tessier tested for?"))["tasks"][0]
+    assert t["status"] == "needs_clarification" and t.get("result") in (None, {})                 # nothing was looked up yet
+    slot = t["slots"][0]
+    assert slot["kind"] == "talent" and {o["id"] for o in slot["options"]} == {world["quorra"], world["quorra2"]}
+    ok = (await anon.post(f"{BASE}/tasks/{t['id']}/clarify", headers=alice["headers"], json={"slot": slot["key"], "choice_id": world["quorra2"]})).json()["task"]
+    assert ok["status"] == "completed" and ok["result"]["kind"] == "tested" and ok["result"]["cards"][0]["id"] == world["quorra2"]
+
+
+async def test_a_pronoun_question_still_uses_the_talent_of_the_previous_step(anon, alice, world):
+    out = await say(anon, alice, "Show me Rivka Zenith's profile, and tell me which projects she has tested for.")
+    second = out["tasks"][1]
+    assert second["status"] == "completed" and second["result"]["kind"] == "tested" and second["result"]["cards"][0]["id"] == world["rivka"]

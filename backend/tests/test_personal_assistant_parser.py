@@ -171,3 +171,40 @@ def test_share_recipients_named_role_number_group_and_missing():
 def test_a_talent_name_never_swallows_the_recipient_that_follows_it(text, names, role):
     s = one(text)
     assert s.talents == names and s.recipient["kind"] == "role" and s.recipient["value"] == role
+
+
+# ------------------------------------------------------------------ "which projects has <NAME> tested for"
+# The pronoun branch used to claim ANY "which projects … tested" before the named branch could read the name, so
+# the lookup was left with no talent ("No talents are selected").
+@pytest.mark.parametrize("text,names", [
+    ("Which projects has Angela Kumar tested for", ["Angela Kumar"]),
+    ("Which projects has Angela Kumar tested for?", ["Angela Kumar"]),
+    ("WHICH PROJECTS HAS ANGELA KUMAR TESTED FOR?", ["ANGELA KUMAR"]),
+    ("what projects has priya sharma tested.", ["priya sharma"]),
+    ("Which project has Angela tested?", ["Angela"]),
+    ("Which projects has Heena Bhansali tested for?", ["Heena Bhansali"]),      # "he" inside a name is not the pronoun
+    ("Which projects has ZQA-PA Meera Kapoor tested for", ["ZQA-PA Meera Kapoor"]),
+])
+def test_which_projects_has_a_named_talent_tested_resolves_that_talent(text, names):
+    s = one(text)
+    assert (s.intent, s.lookup, s.talents, s.talent_ref) == ("lookup", "tested", names, None)
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("Which projects has she tested for?", "tested"),
+    ("which projects has he tested for", "tested"),
+    ("What projects have they tested?", "tested"),
+    ("Has she tested before?", "tested"),
+    ("Which projects has she been added to?", "projects"),
+    ("Show me her submission history", "submissions"),
+])
+def test_pronoun_questions_still_refer_to_the_previous_talent(text, kind):
+    s = one(text)
+    assert (s.intent, s.lookup, s.talent_ref, s.talents) == ("lookup", kind, "previous", [])
+
+
+def test_the_other_named_question_forms_are_unchanged():
+    assert (one("Has Angela tested for any previous projects?").lookup, one("Has Angela tested for any previous projects?").talents) == ("tested", ["Angela"])
+    assert (one("Which projects has Angela been added to?").lookup, one("Which projects has Angela been added to?").talents) == ("projects", ["Angela"])
+    d = parse_message("Show me Angela Kumar's profile, and tell me which projects she has tested for.")
+    assert [(x.lookup, x.talents, x.talent_ref) for x in d] == [("profile", ["Angela Kumar"], None), ("tested", [], "previous")]

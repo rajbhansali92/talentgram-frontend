@@ -206,7 +206,9 @@ def _parse_pronoun_lookup(text: str, seg: Segment) -> bool:
     the previous action in the same message."""
     low = text.lower()
     kind = None
-    if re.search(r"\b(?:which|what)\s+projects?\b.*\btested\b|\bhas\s+" + _PRON + r"\s+(?:ever\s+)?(?:tested|auditioned)\b|\bhave\s+they\s+tested\b", low):
+    # "which projects <she> has tested for" needs a PRONOUN: with a name in that spot ("which projects has Angela tested
+    # for") this branch used to claim the sentence and leave it without a talent; the named branch below reads those.
+    if re.search(r"\b(?:which|what)\s+projects?\b.*\b" + _PRON + r"\b.*\btested\b|\bhas\s+" + _PRON + r"\s+(?:ever\s+)?(?:tested|auditioned)\b|\bhave\s+they\s+tested\b", low):
         kind = "tested"
     elif re.search(r"\b(?:which|what)\s+projects?\b.*\b" + _PRON + r"\b|\bprojects?\s+(?:is|has|was)\s+" + _PRON + r"\b", low):
         kind = "projects"

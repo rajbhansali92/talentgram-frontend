@@ -847,3 +847,63 @@ async def test_if_the_destination_cannot_be_checked_the_send_is_not_offered(anon
     t = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"][0]
     assert t["status"] == "failed" and "won't offer to send" in t["error"]                       # fail closed — never guess a destination
     assert await _jobs([world["rivka"]]) == []
+
+
+# ------------------------------------------------------------ "which projects has X tested for" answers with projects, not a profile
+async def _submission(tid, pid, status):
+    sid = f"zzz-test-pa-sub-{uuid.uuid4().hex[:8]}"
+    await db.submissions.insert_one({"id": sid, "talent_id": tid, "project_id": pid, "status": status, "created_at": _now(), "talent_email": f"{sid}@example.com"})   # unique index on (project, email)
+    return sid
+
+
+async def test_which_project_has_x_tested_for_returns_a_titled_project_answer_with_tested_and_submitted_projects(anon, alice, world):
+    await db.casting_pipeline.insert_many([
+        {"id": uuid.uuid4().hex, "project_id": world["old"], "talent_id": world["rivka"], "stage": "already_tested", "created_at": _now(), "updated_at": _now()},
+        {"id": uuid.uuid4().hex, "project_id": world["pepsi"], "talent_id": world["rivka"], "stage": "ask_to_test", "created_at": _now(), "updated_at": _now()}])
+    subs = []
+    try:
+        subs += [await _submission(world["rivka"], world["pepsi"], "submitted"), await _submission(world["rivka"], world["amazon"], "draft")]
+        for phrase in ("Which project has Rivka Zenith tested for", "Which projects has Rivka Zenith tested for?", "What project has Rivka Zenith tested for?",
+                       "What projects has Rivka Zenith tested for?", "Has Rivka Zenith tested?"):
+            t = (await say(anon, alice, phrase))["tasks"][0]
+            assert t["status"] == "completed" and t["title"] == "Projects tested · Qzx Rivka Zenith", (phrase, t["title"])     # not "Has … tested?" for a which-question
+            assert t["result"]["kind"] == "tested"
+            card = t["result"]["cards"][0]
+            assert [x["project"] for x in card["tested_projects"]] == ["Qzx Fizzy Cola Legacy"]
+            assert [x["project"] for x in card["submitted_projects"]] == ["Qzx Fizzy Cola"]            # the draft for Streaming Now is not a submission
+    finally:
+        await db.submissions.delete_many({"id": {"$in": subs}})
+
+
+async def test_a_talent_with_submissions_but_no_project_marked_already_tested_gets_an_explicit_empty_answer_plus_her_submissions(anon, alice, world):
+    """The production case: many submissions, none of the pipeline rows in Already Tested — the answer must say so, not go blank."""
+    await db.casting_pipeline.insert_many([
+        {"id": uuid.uuid4().hex, "project_id": world["amazon"], "talent_id": world["nehara"], "stage": "approved", "created_at": _now(), "updated_at": _now()},
+        {"id": uuid.uuid4().hex, "project_id": world["pepsi"], "talent_id": world["nehara"], "stage": "follow_up", "created_at": _now(), "updated_at": _now()}])
+    subs = []
+    try:
+        subs += [await _submission(world["nehara"], world["amazon"], "submitted"), await _submission(world["nehara"], world["amazon"], "updated"),
+                 await _submission(world["nehara"], world["pepsi"], "submitted")]
+        card = (await say(anon, alice, "Which project has Nehara Zolt tested for"))["tasks"][0]["result"]["cards"][0]
+        assert card["tested_projects"] == []
+        assert sorted(x["project"] for x in card["submitted_projects"]) == ["Qzx Fizzy Cola", "Qzx Streaming Now"]    # one row per project (two Amazon submissions → one)
+        assert {p["project"] for p in card["history"]["projects"]} == {"Qzx Fizzy Cola", "Qzx Streaming Now"}
+    finally:
+        await db.submissions.delete_many({"id": {"$in": subs}})
+
+
+async def test_which_project_questions_resolve_hyphenated_and_punctuated_names_and_still_ask_when_ambiguous(anon, alice, world):
+    anne = await _talent("Qzx Anne-Marie O'Neil")
+    t = (await say(anon, alice, "Which projects has Qzx Anne-Marie O'Neil tested for?"))["tasks"][0]
+    assert t["status"] == "completed" and t["result"]["cards"][0]["id"] == anne and t["title"] == "Projects tested · Qzx Anne-Marie O'Neil"
+    amb = (await say(anon, alice, "Which project has Quorra Tessier tested for"))["tasks"][0]
+    assert amb["status"] == "needs_clarification" and not amb.get("result")                                       # two talents share the name: nothing picked for her
+    assert {o["id"] for o in amb["slots"][0]["options"]} == {world["quorra"], world["quorra2"]}
+
+
+async def test_the_projects_a_talent_is_in_and_the_projects_she_tested_for_are_different_answers(anon, alice, world):
+    await db.casting_pipeline.insert_one({"id": uuid.uuid4().hex, "project_id": world["old"], "talent_id": world["rivka"], "stage": "already_tested", "created_at": _now(), "updated_at": _now()})
+    been = (await say(anon, alice, "Which projects has Rivka Zenith been added to?"))["tasks"][0]
+    tested = (await say(anon, alice, "Which projects has Rivka Zenith tested for?"))["tasks"][0]
+    assert been["title"] == "Projects of Qzx Rivka Zenith" and tested["title"] == "Projects tested · Qzx Rivka Zenith"
+    assert "submitted_projects" not in been["result"]["cards"][0] and "submitted_projects" in tested["result"]["cards"][0]

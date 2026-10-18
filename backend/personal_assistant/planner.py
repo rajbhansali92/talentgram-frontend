@@ -93,7 +93,7 @@ def _title(task: dict) -> str:
     if k == "list":
         return f"Talents in {stage_label(p.get('stage'))}" + (f" · {ps}" if p.get("projects") else "")
     return {"profile": f"Profile · {ts}", "media_link": f"Media link · {ts}", "media": f"Photos & video · {ts}", "history": f"History · {ts}",
-            "projects": f"Projects of {ts}", "submissions": f"Submissions of {ts}", "tested": f"Has {ts} tested?", "find": f"Find {ts}"}.get(p.get("lookup"), f"Look up {ts}")
+            "projects": f"Projects of {ts}", "submissions": f"Submissions of {ts}", "tested": f"Projects tested · {ts}", "find": f"Find {ts}"}.get(p.get("lookup"), f"Look up {ts}")
 
 
 # ------------------------------------------------------------------------------------------ finalisation

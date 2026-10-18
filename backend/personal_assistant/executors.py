@@ -107,6 +107,15 @@ async def run_lookup(task: dict) -> dict:
             c["history"] = h
             tested = [x for x in h["projects"] if x["stage"] == "Already Tested"]
             c["tested_projects"] = tested
+            if kind == "tested":
+                # "Tested" is the pipeline stage Already Tested. A talent can have submitted for many projects without any being
+                # marked that way, so an empty answer must not be silent: also list the projects she has submitted for (drafts
+                # excluded; one row per project, newest first — _history is already newest first).
+                subs: dict = {}
+                for x in h["submissions"]:
+                    if x.get("status") not in (None, "", "draft") and x.get("project_id") not in subs:
+                        subs[x.get("project_id")] = {"project": x["project"], "status": x["status"], "date": x.get("date")}
+                c["submitted_projects"] = list(subs.values())
         cards.append(c)
     return {"kind": kind, "cards": cards}
 

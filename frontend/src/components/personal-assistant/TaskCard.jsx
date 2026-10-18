@@ -122,8 +122,32 @@ function CopyBtn({ text }) {
     );
 }
 
-function TalentResult({ card, onPrefill }) {
+// Questions ABOUT a talent's projects get the answer, not a profile: no photo strip / portfolio / video / share prompt.
+const HISTORY_KINDS = ["tested", "projects", "history", "submissions"];
+
+function TestedAnswer({ card }) {
+    const tested = card.tested_projects || [];
+    const submitted = card.submitted_projects || [];
+    return (
+        <div className="mt-2 text-[11px] space-y-1" data-testid="pa-tested">
+            {tested.length > 0
+                ? <p className="text-emerald-700" data-testid="pa-tested-list">Tested for {tested.length} project{tested.length === 1 ? "" : "s"}: {tested.map((x) => x.project).join(", ")}</p>
+                : <p className="text-amber-700" data-testid="pa-tested-none">No project is marked “Already Tested” for {card.label}.</p>}
+            {submitted.length > 0
+                ? <>
+                    <p className="text-black/60" data-testid="pa-submitted-head">Has submitted for {submitted.length} project{submitted.length === 1 ? "" : "s"}:</p>
+                    <ul>{submitted.slice(0, 10).map((x, i) => <li key={`${x.project}-${i}`} className="flex justify-between gap-2"><span className="truncate">{x.project}</span><span className="text-black/50 shrink-0">{x.status}{x.date ? ` · ${x.date}` : ""}</span></li>)}</ul>
+                    {submitted.length > 10 && <p className="text-black/45">+{submitted.length - 10} more</p>}
+                </>
+                : <p className="text-black/50" data-testid="pa-submitted-none">No submissions on record either.</p>}
+            <p className="text-black/35 text-[10px]">“Tested” means the project's pipeline stage is Already Tested; submissions are listed separately.</p>
+        </div>
+    );
+}
+
+function TalentResult({ card, kind, onPrefill }) {
     const h = card.history;
+    const historyOnly = HISTORY_KINDS.includes(kind);
     return (
         <div className="p-2 rounded-lg border border-black/[0.08] bg-white" data-testid={`pa-card-${card.id}`}>
             <div className="flex gap-2.5">
@@ -133,8 +157,8 @@ function TalentResult({ card, onPrefill }) {
                     {card.sublabel && <p className="text-[11px] text-black/50">{card.sublabel}</p>}
                     <div className="flex flex-wrap items-center gap-x-3 mt-1 text-[11px]">
                         <Link to={card.profile_path} className="inline-flex items-center gap-1 text-black/70 underline">Open profile <ExternalLink className="w-3 h-3" /></Link>
-                        {card.portfolio_url && <a href={card.portfolio_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-black/70 underline">Portfolio <ExternalLink className="w-3 h-3" /></a>}
-                        {card.video_url && <a href={card.video_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-black/70 underline">Intro video <ExternalLink className="w-3 h-3" /></a>}
+                        {!historyOnly && card.portfolio_url && <a href={card.portfolio_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-black/70 underline">Portfolio <ExternalLink className="w-3 h-3" /></a>}
+                        {!historyOnly && card.video_url && <a href={card.video_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-black/70 underline">Intro video <ExternalLink className="w-3 h-3" /></a>}
                     </div>
                 </div>
             </div>
@@ -143,19 +167,20 @@ function TalentResult({ card, onPrefill }) {
             ) : (
                 <p className="mt-1.5 text-[11px] text-black/45">Media download link is unavailable for this talent.</p>
             )}
-            {card.photos?.length > 0 && (
+            {!historyOnly && card.photos?.length > 0 && (
                 <div className="flex gap-1.5 mt-1.5 overflow-x-auto" data-testid="pa-photos">
                     {card.photos.map((p, i) => <a key={`${p.url}-${i}`} href={p.url} target="_blank" rel="noreferrer" className="shrink-0"><Thumb src={p.thumb} className="w-12 h-16 rounded" /></a>)}
                 </div>
             )}
-            {h && (
+            {kind === "tested" && <TestedAnswer card={card} />}
+            {h && kind !== "tested" && (
                 <div className="mt-2 text-[11px] space-y-1" data-testid="pa-history">
                     {card.tested_projects?.length > 0 && <p className="text-emerald-700">Tested for: {card.tested_projects.map((x) => x.project).join(", ")}</p>}
                     {h.projects.length > 0 ? <ul>{h.projects.slice(0, 12).map((x, i) => <li key={`${x.project_id}-${i}`} className="flex justify-between gap-2"><span className="truncate">{x.project}</span><span className="text-black/50 shrink-0">{x.stage}{x.since ? ` · ${x.since}` : ""}</span></li>)}</ul> : <p className="text-black/50">Not in any project yet.</p>}
                     {h.submissions.length > 0 && <><p className="text-black/40 uppercase tracking-wider text-[9px] mt-1">Submissions</p><ul>{h.submissions.slice(0, 10).map((x, i) => <li key={`${x.project_id}-${i}`} className="flex justify-between gap-2"><span className="truncate">{x.project}</span><span className="text-black/50 shrink-0">{x.status}{x.date ? ` · ${x.date}` : ""}</span></li>)}</ul></>}
                 </div>
             )}
-            <button type="button" onClick={() => onPrefill(`Share ${card.label}'s media link with `)} className="mt-1.5 text-[11px] underline text-black/60 min-h-[32px]">Share this…</button>
+            {!historyOnly && <button type="button" onClick={() => onPrefill(`Share ${card.label}'s media link with `)} className="mt-1.5 text-[11px] underline text-black/60 min-h-[32px]">Share this…</button>}
         </div>
     );
 }
@@ -163,7 +188,7 @@ function TalentResult({ card, onPrefill }) {
 function Result({ task, onPrefill, onFollowUp, busy }) {
     const r = task.result;
     if (!r) return null;
-    if (task.kind === "lookup") return <div className="mt-2 space-y-2">{r.cards.map((c) => <TalentResult key={c.id} card={c} onPrefill={onPrefill} />)}</div>;
+    if (task.kind === "lookup") return <div className="mt-2 space-y-2">{r.cards.map((c) => <TalentResult key={c.id} card={c} kind={r.kind} onPrefill={onPrefill} />)}</div>;
     if (task.kind === "list") {
         return (
             <div className="mt-2 space-y-2" data-testid="pa-list">

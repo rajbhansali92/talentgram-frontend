@@ -93,6 +93,61 @@ describe("floating entry point", () => {
     });
 });
 
+describe("a question about a talent's projects shows the answer, not a profile", () => {
+    const card = (over = {}) => ({
+        id: "tal-1", label: "Angela Kumar", sublabel: "28y · Mumbai", thumb: "http://x/t.jpg", profile_path: "/admin/talents/tal-1",
+        portfolio_url: "https://folio.example/angela", video_url: "https://video.example/angela", photo_count: 2,
+        photos: [{ thumb: "http://x/p1.jpg", url: "http://x/p1.jpg" }, { thumb: "http://x/p2.jpg", url: "http://x/p2.jpg" }],
+        history: { projects: [{ project_id: "p1", project: "Amazon Now", stage: "Approved", since: "2026-09-01" }, { project_id: "p2", project: "Giva", stage: "Follow Up", since: "2026-09-02" }],
+                   submissions: [{ project_id: "p1", project: "Amazon Now", status: "submitted", date: "2026-09-03" }] },
+        tested_projects: [], ...over });
+    const lookup = (kind, c, title) => task({ id: "q1", kind: "lookup", status: "completed", title, summary: [], result: { kind, cards: [c] } });
+    const show = async (t) => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "x", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("q"); fireEvent.click(screen.getByTestId("pa-send")); return screen.findByTestId("pa-task-q1");
+    };
+
+    it("lists the projects she is marked Already Tested for, without the photo strip, portfolio, video or share prompt", async () => {
+        const el = await show(lookup("tested", card({ tested_projects: [{ project: "Amazon Now" }, { project: "Giva" }], submitted_projects: [] }), "Projects tested · Angela Kumar"));
+        expect(el.getAttribute("aria-label")).toBe("Projects tested · Angela Kumar");
+        expect(within(el).getByTestId("pa-tested-list").textContent).toBe("Tested for 2 projects: Amazon Now, Giva");
+        expect(within(el).queryByTestId("pa-photos")).toBeNull();
+        expect(within(el).queryByText(/Portfolio/)).toBeNull();
+        expect(within(el).queryByText(/Intro video/)).toBeNull();
+        expect(within(el).queryByText(/Share this/)).toBeNull();
+        expect(within(el).getByText(/Open profile/)).toBeTruthy();                                // still easy to reach her profile
+    });
+
+    it("an EMPTY tested answer says so explicitly and lists the projects she has submitted for instead of going blank", async () => {
+        const el = await show(lookup("tested", card({ submitted_projects: [{ project: "Amazon Now", status: "submitted", date: "2026-09-03" }, { project: "Giva", status: "updated", date: "2026-09-02" }] }), "Projects tested · Angela Kumar"));
+        expect(within(el).getByTestId("pa-tested-none").textContent).toBe("No project is marked “Already Tested” for Angela Kumar.");
+        expect(within(el).getByTestId("pa-submitted-head").textContent).toBe("Has submitted for 2 projects:");
+        expect(el.textContent).toContain("Giva");
+        expect(el.textContent).toContain("updated · 2026-09-02");
+        expect(within(el).queryByText(/Not in any project yet/)).toBeNull();
+        expect(within(el).queryByTestId("pa-history")).toBeNull();                                // not the long pipeline list for a tested question
+        expect(el.textContent).toContain("“Tested” means the project's pipeline stage is Already Tested");
+    });
+
+    it("no tested projects and no submissions → both facts stated, never an empty card", async () => {
+        const el = await show(lookup("tested", card({ submitted_projects: [] }), "Projects tested · Angela Kumar"));
+        expect(within(el).getByTestId("pa-tested-none")).toBeTruthy();
+        expect(within(el).getByTestId("pa-submitted-none").textContent).toBe("No submissions on record either.");
+    });
+
+    it("'projects she is in' keeps its pipeline list but is also not a profile; a PROFILE lookup still shows the media", async () => {
+        const inProj = await show(lookup("projects", card(), "Projects of Angela Kumar"));
+        expect(within(inProj).getByTestId("pa-history").textContent).toContain("Amazon Now");
+        expect(within(inProj).queryByTestId("pa-photos")).toBeNull();
+        cleanup();
+        const prof = await show(lookup("profile", card({ history: undefined }), "Profile · Angela Kumar"));
+        expect(within(prof).getByTestId("pa-photos")).toBeTruthy();
+        expect(within(prof).getByText(/Portfolio/)).toBeTruthy();
+        expect(within(prof).getByText(/Intro video/)).toBeTruthy();
+        expect(within(prof).getByText(/Share this/)).toBeTruthy();
+    });
+});
+
 describe("send preview destinations", () => {
     const send = (over = {}) => task({ id: "d1", kind: "send", status: "awaiting_confirmation", title: "Send Casting Call to Rivka, Gita, Nolan", params: { talents: [], projects: [], template_name: "Casting Call" }, ...over });
     const show = async (t) => {

@@ -208,3 +208,25 @@ def test_the_other_named_question_forms_are_unchanged():
     assert (one("Which projects has Angela been added to?").lookup, one("Which projects has Angela been added to?").talents) == ("projects", ["Angela"])
     d = parse_message("Show me Angela Kumar's profile, and tell me which projects she has tested for.")
     assert [(x.lookup, x.talents, x.talent_ref) for x in d] == [("profile", ["Angela Kumar"], None), ("tested", [], "previous")]
+
+
+# ---- every way of asking "which project(s) has X tested for" / "has X tested" is the SAME lookup with the named talent
+@pytest.mark.parametrize("text,names", [
+    ("Which project has Angela Kumar tested for", ["Angela Kumar"]),                 # exact wording that was tried in production
+    ("Which projects has Angela Kumar tested for?", ["Angela Kumar"]),
+    ("What project has Angela Kumar tested for?", ["Angela Kumar"]),
+    ("What projects has Angela Kumar tested for?", ["Angela Kumar"]),
+    ("which projects has anne-marie o'neil tested for.", ["anne-marie o'neil"]),    # hyphen + apostrophe + trailing full stop
+    ("WHICH PROJECTS HAS Priya Sharma TESTED FOR?!", ["Priya Sharma"]),            # stacked punctuation + mixed case
+    ("Has Angela Kumar tested?", ["Angela Kumar"]),                                   # the yes/no form
+    ("Has Angela Kumar tested for any previous projects?", ["Angela Kumar"]),
+])
+def test_all_the_which_what_has_tested_phrasings_are_one_named_lookup(text, names):
+    s = one(text)
+    assert (s.intent, s.lookup, s.talents, s.talent_ref) == ("lookup", "tested", names, None)
+
+
+def test_asking_which_projects_a_talent_tested_for_is_not_the_same_lookup_as_which_projects_she_is_in():
+    assert one("Which projects has Angela Kumar tested for?").lookup == "tested"
+    assert one("Which projects has Angela Kumar been added to?").lookup == "projects"
+    assert one("Show me Angela Kumar's profile").lookup == "profile"

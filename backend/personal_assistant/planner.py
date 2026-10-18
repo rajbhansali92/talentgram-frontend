@@ -156,6 +156,9 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
 
     if task["kind"] == "send":
         await _duplicate_check(task, warnings)
+        await _send_destinations(task)
+        if task["status"] == S.FAILED:
+            return task
     if task["kind"] == "share":
         await _share_preview(task, warnings)
         if task["status"] == S.FAILED:
@@ -188,6 +191,40 @@ async def _duplicate_check(task: dict, warnings: List[str]) -> None:
         names = sorted({j.get("talent_name") or "?" for j in jobs})
         warnings.append(f"Already queued or sent in the last 24 h with this template for this project: {', '.join(names[:4])}{' +%d more' % (len(names) - 4) if len(names) > 4 else ''} — sending again would message them twice.")
         task["duplicate_risk"] = True
+
+
+async def _send_destinations(task: dict) -> None:
+    """Where each message would actually go — decided by the SENDER's own routing rule (routers.whatsapp._resolve_destination:
+    the talent's WhatsApp group if set, else their phone), read-only, so the preview cannot disagree with the send. Numbers are
+    masked like the share previews. If NOBODY has a usable destination — or it cannot be checked — the task fails here with the
+    reason instead of offering a Confirm; talents without one are listed as skipped, exactly as the queue skips them."""
+    p = task["params"]
+    talents = [t for t in p.get("talents") or [] if t.get("state") == "resolved" and t.get("id")]
+    if not talents:
+        return
+    try:
+        from routers.whatsapp import _resolve_destination
+        docs = await db.talents.find({"id": {"$in": [t["id"] for t in talents]}}, {"_id": 0, "id": 1, "phone": 1, "whatsapp_group_name": 1}).to_list(len(talents))
+        by_id = {d["id"]: d for d in docs}
+        items = []
+        for t in talents:
+            doc = by_id.get(t["id"])
+            kind, dest, _ = _resolve_destination(doc) if doc else ("", None, None)
+            if kind == "group":
+                items.append({"name": t["label"], "kind": "group", "text": f"WhatsApp group “{dest}”"})
+            elif kind == "number" and R.mask_phone(dest) != "no number on file":
+                items.append({"name": t["label"], "kind": "number", "text": f"WhatsApp {R.mask_phone(dest)}"})
+            else:
+                items.append({"name": t["label"], "kind": "none", "text": "no WhatsApp number or group on file — will be skipped"})
+    except Exception:
+        task["status"] = S.FAILED
+        task["error"] = "I couldn't check where these messages would be sent, so I won't offer to send them. Try again in a moment."
+        return
+    task["preview"] = {**(task.get("preview") or {}), "destinations": items}
+    if all(i["kind"] == "none" for i in items):
+        task["status"] = S.FAILED
+        task["error"] = (("That talent has no" if len(items) == 1 else "None of these talents has a") + " WhatsApp number or group on file, so there is nowhere to send "
+                         "this. Add one on the talent's profile first.")
 
 
 async def _share_preview(task: dict, warnings: List[str]) -> None:
@@ -237,8 +274,10 @@ def summary_lines(task: dict) -> List[str]:
     if k == "add":
         lines = [f"{n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}", f"Into: {_names(p['projects'], 6)}"]
     elif k == "send":
-        lines = [f"Template: {p.get('template_name')}", f"To {n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}", f"Project: {_names(p['projects'], 6)}",
-                 "Sent through the existing WhatsApp queue — pick the worker below."]
+        dests = (task.get("preview") or {}).get("destinations") or []
+        lines = [f"Template: {p.get('template_name')}", f"To {n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}"]
+        lines += [f"  • {d['name']} → {d['text']}" for d in dests[:8]] + ([f"  • …and {len(dests) - 8} more"] if len(dests) > 8 else [])
+        lines += [f"Project: {_names(p['projects'], 6)}", "Sent through the existing WhatsApp queue — pick the worker below."]
     elif k == "move":
         lines = [f"{n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}", f"To {stage_label(p.get('stage'))} in {_names(p['projects'], 6)}"]
     elif k == "share":

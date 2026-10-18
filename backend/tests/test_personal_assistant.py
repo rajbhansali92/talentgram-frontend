@@ -790,3 +790,60 @@ async def test_a_pronoun_question_still_uses_the_talent_of_the_previous_step(ano
     out = await say(anon, alice, "Show me Rivka Zenith's profile, and tell me which projects she has tested for.")
     second = out["tasks"][1]
     assert second["status"] == "completed" and second["result"]["kind"] == "tested" and second["result"]["cards"][0]["id"] == world["rivka"]
+
+
+# --------------------------------------------------------------------- send preview shows WHERE each message goes
+async def _preview_text(t):
+    return "\n".join(t["summary"]) + "\n" + str(t.get("preview"))
+
+
+async def test_send_preview_shows_a_masked_number_never_the_full_one_and_matches_the_queued_destination(anon, alice, world):
+    await _add_rows(world["amazon"], world["rivka"])
+    t = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"][0]
+    assert t["status"] == "awaiting_confirmation"
+    assert "  • Qzx Rivka Zenith → WhatsApp 91 ••••• 00000" in t["summary"]
+    assert "911234500000" not in await _preview_text(t)                                          # the full number is never shown
+    assert await _jobs([world["rivka"]]) == []                                                   # previewing queued nothing
+    await confirm(anon, alice, t["id"], worker=world["w1"])
+    job = (await _jobs([world["rivka"]]))[0]
+    assert str(job.get("destination") or job.get("phone") or "").endswith("00000")              # what the preview promised is what was queued
+
+
+async def test_send_preview_shows_the_whatsapp_group_when_the_talent_routes_to_a_group(anon, alice, world):
+    gid = await _talent("Qzx Grouped Gita", phone="911234599999", whatsapp_group_name="ZZZ TEST PA TALENT GROUP")
+    await _add_rows(world["amazon"], gid)
+    t = (await say(anon, alice, "Send the Qzx Casting Call to Grouped Gita for Streaming Now"))["tasks"][0]
+    assert t["status"] == "awaiting_confirmation"
+    assert "  • Qzx Grouped Gita → WhatsApp group “ZZZ TEST PA TALENT GROUP”" in t["summary"]
+    assert "99999" not in await _preview_text(t)                                                 # group wins, exactly as the sender decides — phone not shown
+    await confirm(anon, alice, t["id"], worker=world["w1"])
+    job = (await _jobs([gid]))[0]
+    assert "ZZZ TEST PA TALENT GROUP" in str(job.get("destination") or job.get("whatsapp_group_name") or job)
+
+
+async def test_send_preview_lists_a_talent_without_a_destination_as_skipped_and_still_allows_the_others(anon, alice, world):
+    await _add_rows(world["amazon"], world["rivka"], world["nophone"])
+    t = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith and Nolan Nophone for Streaming Now"))["tasks"][0]
+    assert t["status"] == "awaiting_confirmation"                                                # partial: the queue skips one, so do we
+    assert "  • Qzx Nolan Nophone → no WhatsApp number or group on file — will be skipped" in t["summary"]
+    assert "  • Qzx Rivka Zenith → WhatsApp 91 ••••• 00000" in t["summary"]
+
+
+async def test_send_with_no_usable_destination_is_refused_at_planning_with_no_confirm(anon, alice, world):
+    await _add_rows(world["amazon"], world["nophone"])
+    t = (await say(anon, alice, "Send the Qzx Casting Call to Nolan Nophone for Streaming Now"))["tasks"][0]
+    assert t["status"] == "failed" and t["error"].startswith("That talent has no WhatsApp number or group on file")
+    r = await anon.post(f"{BASE}/tasks/{t['id']}/confirm", headers=alice["headers"], json={"worker_id": world["w1"]})
+    assert r.status_code == 200 and r.json()["task"]["status"] == "failed"                       # the existing idempotent confirm hands back the unchanged task…
+    assert await _jobs([world["nophone"]]) == [] and await db.whatsapp_batches.count_documents({"project_id": world["amazon"]}) == 0   # …and nothing was queued
+
+
+async def test_if_the_destination_cannot_be_checked_the_send_is_not_offered(anon, alice, world, monkeypatch):
+    await _add_rows(world["amazon"], world["rivka"])
+    import routers.whatsapp as W
+    def boom(_talent):
+        raise RuntimeError("routing unavailable")
+    monkeypatch.setattr(W, "_resolve_destination", boom)
+    t = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"][0]
+    assert t["status"] == "failed" and "won't offer to send" in t["error"]                       # fail closed — never guess a destination
+    assert await _jobs([world["rivka"]]) == []

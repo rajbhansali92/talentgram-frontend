@@ -93,6 +93,36 @@ describe("floating entry point", () => {
     });
 });
 
+describe("send preview destinations", () => {
+    const send = (over = {}) => task({ id: "d1", kind: "send", status: "awaiting_confirmation", title: "Send Casting Call to Rivka, Gita, Nolan", params: { talents: [], projects: [], template_name: "Casting Call" }, ...over });
+    const show = async (t) => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "x", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("send"); fireEvent.click(screen.getByTestId("pa-send")); await screen.findByTestId(`pa-task-${t.id}`);
+    };
+
+    it("lists each recipient with a masked number or the WhatsApp group, and flags one with no destination as skipped", async () => {
+        await show(send({ summary: [
+            "Template: Casting Call", "To 3 talents: Rivka, Gita, Nolan",
+            "  • Rivka → WhatsApp 91 ••••• 00000", "  • Gita → WhatsApp group “Gita Casting Group”", "  • Nolan → no WhatsApp number or group on file — will be skipped",
+            "Project: Streaming Now", "Sent through the existing WhatsApp queue — pick the worker below."] }));
+        const preview = screen.getByTestId("pa-preview");
+        expect(preview.textContent).toContain("Rivka → WhatsApp 91 ••••• 00000");
+        expect(preview.textContent).toContain("Gita → WhatsApp group “Gita Casting Group”");
+        expect(preview.textContent).not.toMatch(/\d{10,}/);                                    // never a full number
+        const skipped = [...preview.querySelectorAll("li")].find((li) => li.textContent.includes("Nolan →"));
+        expect(skipped.className).toContain("text-amber-700");                                  // visibly flagged
+        expect(screen.getByTestId("pa-confirm").disabled).toBe(true);                           // still needs a worker chosen first
+    });
+
+    it("a send with nowhere to go is shown as failed with the reason and offers no Confirm", async () => {
+        await show(send({ status: "failed", summary: [], error: "That talent has no WhatsApp number or group on file, so there is nowhere to send this. Add one on the talent's profile first." }));
+        const card = screen.getByTestId("pa-task-d1");
+        expect(within(card).getByTestId("pa-status").textContent).toBe("Failed");
+        expect(within(card).getByRole("alert").textContent).toMatch(/no WhatsApp number or group on file/);
+        expect(within(card).queryByTestId("pa-confirm")).toBeNull();
+    });
+});
+
 describe("Tasks tab worker naming", () => {
     const showTasks = async (rows) => {
         server();

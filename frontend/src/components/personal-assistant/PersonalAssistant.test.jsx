@@ -353,6 +353,24 @@ describe("honest wording and failure handling", () => {
             expect(within(screen.getByTestId("pa-task-s1")).getByTestId("pa-status").textContent).toBe(label);
         });
 
+    it("an interrupted send reads Uncertain (not Failed) and offers no Retry, because it may already have gone out", async () => {
+        await show(send({ status: "failed", uncertain: true, error: "This was interrupted — I can't tell whether it was queued. Check WhatsApp Engine → campaign history for this project first." }));
+        const card = screen.getByTestId("pa-task-s1");
+        expect(within(card).getByTestId("pa-status").textContent).toBe("Uncertain");
+        expect(within(card).queryByTestId("pa-retry")).toBeNull();
+        expect(within(card).getByRole("alert").textContent).toMatch(/campaign history/i);
+    });
+
+    it("a clean failure still reads Failed and still offers Retry; an uncertain ADD may be retried (idempotent)", async () => {
+        await show(send({ status: "failed", batch_ids: ["b1"] }));
+        expect(within(screen.getByTestId("pa-task-s1")).getByTestId("pa-status").textContent).toBe("Failed");
+        expect(within(screen.getByTestId("pa-task-s1")).getByTestId("pa-retry")).toBeTruthy();
+        cleanup();
+        await show(task({ id: "a2", kind: "add", status: "failed", uncertain: true, summary: [] }));
+        expect(within(screen.getByTestId("pa-task-a2")).getByTestId("pa-status").textContent).toBe("Uncertain");
+        expect(within(screen.getByTestId("pa-task-a2")).getByTestId("pa-retry")).toBeTruthy();
+    });
+
     it("non-send tasks keep the plain wording", async () => {
         await show(task({ id: "a1", kind: "add", status: "completed", summary: [] }));
         expect(within(screen.getByTestId("pa-task-a1")).getByTestId("pa-status").textContent).toBe("Completed");

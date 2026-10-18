@@ -71,8 +71,9 @@ export const STATUS_META = {
     cancelled: { label: "Cancelled", tone: "slate" },
 };
 /** What the badge says. For a WhatsApp send the words matter: "Queued" = waiting in the queue, "Sent" = the worker reports it handed the message to WhatsApp. */
-export function statusLabel(status, kind) {
+export function statusLabel(status, kind, uncertain = false) {
     const send = kind === "send" || kind === "share";
+    if (uncertain && status === "failed") return "Uncertain";      // interrupted mid-run: we can't tell whether it went out — never the same word as a clean failure
     if (send && status === "running") return "Sending";
     if (send && status === "completed") return "Sent";
     if (send && status === "partial") return "Partly sent";

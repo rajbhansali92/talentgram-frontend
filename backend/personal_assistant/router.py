@@ -102,8 +102,9 @@ async def _auto_run_reads(user: dict, tasks: List[dict]) -> List[dict]:
 # ----------------------------------------------------------------------------------------------------- access
 @router.get("/access")
 async def access(user: Dict[str, Any] = Depends(current_team_or_admin)):
-    """Cheap capability probe for the shell (the icon is only shown when allowed). Not a security boundary."""
-    return {"allowed": is_allowed(user), "role": user.get("role")}
+    """Cheap capability probe for the shell (the icon is only shown when allowed). Not a security boundary.
+    Reveals the one boolean and nothing else (no role, no allowlist, no configuration)."""
+    return {"allowed": is_allowed(user)}
 
 
 @router.get("/workers")

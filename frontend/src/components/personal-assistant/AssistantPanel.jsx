@@ -231,7 +231,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 {tasks.length === 0 && <li className="text-sm text-black/50">No tasks yet.</li>}
                                 {tasks.map((t) => (
                                     <li key={t.id} className="rounded-lg border border-black/[0.08] p-2.5">
-                                        <div className="flex items-start justify-between gap-2"><span className="text-xs text-black/85 leading-snug">{t.title}</span><StatusChip status={t.status} kind={t.kind} /></div>
+                                        <div className="flex items-start justify-between gap-2"><span className="text-xs text-black/85 leading-snug">{t.title}</span><StatusChip status={t.status} kind={t.kind} uncertain={!!t.uncertain} /></div>
                                         <p className="text-[11px] text-black/45 mt-1">{t.status_detail || t.error || ""}{t.params?.worker_id ? `${t.status_detail || t.error ? " · " : ""}worker ${t.params.worker_id}` : ""}{t.updated_at ? ` · ${new Date(t.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</p>
                                     </li>
                                 ))}

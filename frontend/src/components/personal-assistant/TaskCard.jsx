@@ -11,8 +11,9 @@ const TONES = {
     slate: "bg-black/[0.04] text-black/65 border-black/10",
 };
 
-export function StatusChip({ status, kind }) {
-    const m = { ...(STATUS_META[status] || { tone: "slate" }), label: statusLabel(status, kind) };
+export function StatusChip({ status, kind, uncertain = false }) {
+    const isUncertain = uncertain && status === "failed";
+    const m = { ...(STATUS_META[status] || { tone: "slate" }), label: statusLabel(status, kind, uncertain), ...(isUncertain ? { tone: "amber" } : {}) };
     return (
         <span data-testid="pa-status" className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-medium whitespace-nowrap ${TONES[m.tone]}`}>
             {(status === "running" || status === "queued") && <Loader2 className="w-3 h-3 animate-spin" aria-hidden />}
@@ -203,7 +204,7 @@ export default function TaskCard({ task, busy, actionError, onClarify, onConfirm
         <article className="rounded-xl border border-black/[0.1] bg-white p-3" data-testid={`pa-task-${task.id}`} aria-label={task.title}>
             <header className="flex items-start justify-between gap-2">
                 <h4 className="text-[13px] font-medium text-black/90 leading-snug">{task.title}</h4>
-                <StatusChip status={task.status} kind={task.kind} />
+                <StatusChip status={task.status} kind={task.kind} uncertain={!!task.uncertain} />
             </header>
             {task.summary?.length > 0 && task.status === "awaiting_confirmation" && (
                 <ul className="mt-1.5 text-xs text-black/65 space-y-0.5" data-testid="pa-preview">{task.summary.map((l, i) => <li key={i} className={/twice|skipped|switched off|Not in/.test(l) ? "text-amber-700" : ""}>{l}</li>)}</ul>
@@ -224,7 +225,7 @@ export default function TaskCard({ task, busy, actionError, onClarify, onConfirm
                         {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />} {task.duplicate_risk ? "Send again anyway" : "Confirm"}
                     </button>
                 )}
-                {(task.status === "failed" || task.status === "partial") && (task.batch_ids?.length > 0 || !["send", "share"].includes(task.kind)) && (
+                {(task.status === "failed" || task.status === "partial") && !(task.uncertain && ["send", "share"].includes(task.kind)) && (task.batch_ids?.length > 0 || !["send", "share"].includes(task.kind)) && (
                     <button type="button" disabled={busy} onClick={() => onRetry(task)} data-testid="pa-retry" className="px-3 min-h-[36px] rounded-lg border border-black/[0.15] text-xs inline-flex items-center gap-1.5 disabled:opacity-50"><RotateCcw className="w-3.5 h-3.5" /> Retry</button>
                 )}
                 {canCancel && <button type="button" disabled={busy} onClick={() => onCancel(task)} data-testid="pa-cancel" className="px-3 min-h-[36px] rounded-lg border border-black/[0.15] text-xs text-black/65 inline-flex items-center gap-1 disabled:opacity-50"><X className="w-3.5 h-3.5" /> Cancel</button>}

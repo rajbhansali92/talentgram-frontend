@@ -150,7 +150,7 @@ async def world(anon):
 async def test_access_rules_are_enforced_on_the_backend(anon, alice, team, monkeypatch):
     assert (await anon.get(f"{BASE}/access")).status_code in (401, 403)
     assert (await anon.post(f"{BASE}/message", json={"text": "hi there", "client_request_id": "x" * 10})).status_code in (401, 403)
-    assert (await anon.get(f"{BASE}/access", headers=alice["headers"])).json() == {"allowed": True, "role": "admin"}
+    assert (await anon.get(f"{BASE}/access", headers=alice["headers"])).json() == {"allowed": True}      # exactly the boolean — no role / config
     assert (await anon.get(f"{BASE}/access", headers=team["headers"])).json()["allowed"] is False
     for method, path in (("get", "/tasks"), ("get", "/history"), ("get", "/workers")):
         assert (await getattr(anon, method)(BASE + path, headers=team["headers"])).status_code == 403
@@ -692,3 +692,63 @@ async def test_media_link_preview_finds_a_bare_talent_that_has_none_of_the_optio
     assert (await R.peek_media_link("zzz-test-pa-does-not-exist"))["state"] == "missing"
     await db.talents.update_one({"id": tid}, {"$set": {"media_download_enabled": False}})
     assert (await R.peek_media_link(tid))["state"] == "off"
+
+
+# ------------------------------------------------------------------------------- production-acceptance safety checks
+async def _footprint(world):
+    """Everything a confirmed action could change, for the throwaway fixtures."""
+    projects = [world["amazon"], world["pepsi"]]
+    talents = [world["rivka"], world["nehara"]]
+    return {
+        "pipeline": sorted([(r["project_id"], r["talent_id"], r["stage"]) async for r in db.casting_pipeline.find({"project_id": {"$in": projects}}, {"_id": 0})]),
+        "jobs": await db.whatsapp_jobs.count_documents({"talent_id": {"$in": talents}}),
+        "batches": await db.whatsapp_batches.count_documents({"project_id": {"$in": projects}}),
+        "tokens": await db.talents.count_documents({"id": {"$in": talents}, "media_download_token": {"$exists": True}}),
+    }
+
+
+async def test_planning_every_kind_of_task_writes_nothing_until_it_is_confirmed(anon, alice, world):
+    await _add_rows(world["amazon"], world["rivka"])
+    before = await _footprint(world)
+    res = await say(anon, alice, "Add Nehara Zolt to Fizzy Cola. Move Rivka Zenith in Streaming Now to Approved. "
+                                 "Send the Qzx Casting Call to Rivka Zenith for Streaming Now. Share Rivka Zenith's media link with +91 98765 43211")
+    kinds = {t["kind"] for t in res["tasks"]}
+    assert {"add", "move", "send", "share"} <= kinds, kinds                         # all four consequential kinds were planned…
+    assert all(t["status"] in ("awaiting_confirmation", "needs_clarification") for t in res["tasks"])
+    assert await _footprint(world) == before                                         # …and not one row, job, batch or media token was written
+    for t in res["tasks"]:                                                           # a refresh / poll / preview read changes nothing either
+        await anon.get(f"{BASE}/tasks/{t['id']}", headers=alice["headers"])
+    await anon.get(f"{BASE}/tasks", headers=alice["headers"])
+    assert await _footprint(world) == before
+
+
+async def test_cancelling_a_task_touches_only_its_own_pending_jobs(anon, alice, world):
+    await _add_rows(world["amazon"], world["rivka"], world["nehara"])
+    mine = (await say(anon, alice, "Send the Qzx Follow Up to Rivka Zenith for Streaming Now"))["tasks"][0]
+    other = (await say(anon, alice, "Send the Qzx Casting Call to Nehara Zolt for Streaming Now"))["tasks"][0]
+    await confirm(anon, alice, mine["id"], worker=world["w1"])
+    await confirm(anon, alice, other["id"], worker=world["w2"])
+    await db.whatsapp_jobs.insert_one({"id": "zzz-test-pa-foreign-job", "batch_id": "zzz-test-pa-foreign-batch", "talent_id": world["nehara"], "talent_name": "Qzx Nehara Zolt",
+                                       "status": "pending", "worker_id": world["w1"], "message_body": "someone else's campaign"})       # a campaign this assistant never made
+    assert (await anon.post(f"{BASE}/tasks/{mine['id']}/cancel", headers=alice["headers"])).json()["task"]["status"] == "cancelled"
+    by_talent = {j["talent_id"]: j["status"] for j in await _jobs([world["rivka"], world["nehara"]]) if j["id"] != "zzz-test-pa-foreign-job"}
+    assert by_talent[world["rivka"]] == "skipped" and by_talent[world["nehara"]] == "pending"          # the other task's job is untouched
+    assert (await db.whatsapp_jobs.find_one({"id": "zzz-test-pa-foreign-job"}))["status"] == "pending"   # and so is a campaign from outside the assistant
+    assert (await anon.get(f"{BASE}/tasks/{other['id']}", headers=alice["headers"])).json()["task"]["status"] == "queued"
+
+
+async def test_double_tapping_retry_requeues_each_failed_message_once_and_never_errors_or_resends_a_sent_one(anon, alice, world):
+    import asyncio
+    await _add_rows(world["amazon"], world["rivka"], world["nehara"])
+    t = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith and Nehara Zolt for Streaming Now"))["tasks"][0]
+    await confirm(anon, alice, t["id"], worker=world["w1"])
+    jobs = await _jobs([world["rivka"], world["nehara"]])
+    await db.whatsapp_jobs.update_one({"id": jobs[0]["id"]}, {"$set": {"status": "sent", "verification_status": "verified"}})
+    await db.whatsapp_jobs.update_one({"id": jobs[1]["id"]}, {"$set": {"status": "failed", "error_message": "number not on WhatsApp"}})
+    assert (await anon.get(f"{BASE}/tasks/{t['id']}", headers=alice["headers"])).json()["task"]["status"] == "partial"
+    rs = await asyncio.gather(*[anon.post(f"{BASE}/tasks/{t['id']}/retry", headers=alice["headers"]) for _ in range(4)])
+    assert all(r.status_code in (200, 409) for r in rs), [(r.status_code, r.text[:120]) for r in rs]   # never a 400/500 from the underlying job retry
+    assert any(r.status_code == 200 for r in rs)
+    after = {j["id"]: j for j in await _jobs([world["rivka"], world["nehara"]])}
+    assert len(after) == 2 and after[jobs[0]["id"]]["status"] == "sent"                              # the delivered one is never re-queued
+    assert after[jobs[1]["id"]]["status"] == "pending"                                                # the failed one is re-queued exactly once

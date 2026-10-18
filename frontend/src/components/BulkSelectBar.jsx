@@ -29,6 +29,8 @@ export default function BulkSelectBar({
     onAddToProject,
     onMerge,
     onMergeEmails,
+    // Optional slot for page-specific actions (e.g. the Projects page's "change status"), rendered before Delete.
+    extraActions = null,
     labelSingular = "item",
     labelPlural = "items",
     testid = "bulk-select-bar",
@@ -43,7 +45,7 @@ export default function BulkSelectBar({
     const isPageScoped = typeof grandTotal === "number" && grandTotal > total;
     return (
         <div
-            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 border border-border bg-background/95 backdrop-blur shadow-[0_8px_32px_rgba(0,0,0,0.5)] rounded-sm px-4 py-2.5 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 max-w-[95vw] overflow-x-auto"
+            className="fixed bottom-6 inset-x-0 mx-auto w-fit z-40 border border-border bg-background/95 backdrop-blur shadow-[0_8px_32px_rgba(0,0,0,0.5)] rounded-sm px-4 py-2.5 flex items-center gap-x-3 gap-y-2 flex-wrap justify-center animate-in fade-in slide-in-from-bottom-2 max-w-[95vw] max-h-[40vh] overflow-y-auto"
             data-testid={testid}
         >
             <span
@@ -142,15 +144,20 @@ export default function BulkSelectBar({
                 </button>
             )}
 
-            <button
-                type="button"
-                onClick={onDelete}
-                className="text-xs px-3 py-2 bg-[var(--tg-danger)] text-white rounded-sm inline-flex items-center gap-1.5 hover:opacity-90 shrink-0"
-                data-testid={`${testid}-delete`}
-            >
-                <Trash2 className="w-3.5 h-3.5" />
-                Delete {count}
-            </button>
+            {extraActions}
+
+            {/* Delete is shown only when the page provides a handler (existing callers all do). */}
+            {onDelete && (
+                <button
+                    type="button"
+                    onClick={onDelete}
+                    className="text-xs px-3 py-2 bg-[var(--tg-danger)] text-white rounded-sm inline-flex items-center gap-1.5 hover:opacity-90 shrink-0"
+                    data-testid={`${testid}-delete`}
+                >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete {count}
+                </button>
+            )}
             <button
                 type="button"
                 onClick={onClear}

@@ -38,3 +38,18 @@ describe("BulkSelectBar — Merge Different Emails action", () => {
         expect(screen.getByTestId("bar-merge-emails").disabled).toBe(true);
     });
 });
+
+describe("BulkSelectBar — optional extra actions / optional Delete", () => {
+    it("renders extraActions and keeps Delete when onDelete is given (every existing caller)", () => {
+        render(<BulkSelectBar count={2} onDelete={vi.fn()} extraActions={<span data-testid="extra">X</span>} testid="bar" />);
+        expect(screen.getByTestId("extra")).toBeTruthy();
+        expect(screen.getByTestId("bar-delete")).toBeTruthy();
+    });
+
+    it("hides Delete when no onDelete handler is passed", () => {
+        render(<BulkSelectBar count={2} extraActions={<span data-testid="extra">X</span>} testid="bar" />);
+        expect(screen.getByTestId("extra")).toBeTruthy();
+        expect(screen.queryByTestId("bar-delete")).toBeNull();
+        expect(screen.getByTestId("bar-clear")).toBeTruthy();
+    });
+});

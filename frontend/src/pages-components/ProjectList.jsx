@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useRef, useState, useMemo } from "react";
 import { Link } from "react-router-dom";
-import { adminApi, isAdmin } from "@/lib/api";
+import { adminApi, getRole, isAdmin } from "@/lib/api";
 import {
     Plus,
     Clapperboard,
@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import BulkSelectBar from "@/components/BulkSelectBar";
+import ProjectBulkStatusControl, { PROJECT_STATUS_OPTIONS } from "@/components/ProjectBulkStatusControl";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 
 export default function ProjectList() {
@@ -33,14 +34,19 @@ export default function ProjectList() {
     });
 
     const canBulkDelete = isAdmin();
+    // Same people who can change a project's status today (backend: admin or team) — Delete stays admin-only.
+    const canChangeStatus = canBulkDelete || getRole() === "team";
+    const [statusBusy, setStatusBusy] = useState(false);
+    const statusInFlight = useRef(false);
 
-    const load = async () => {
-        setLoading(true);
+    // `silent` refreshes the cards in place (no "Loading..." flash) — used after a bulk status change.
+    const load = async ({ silent = false } = {}) => {
+        if (!silent) setLoading(true);
         try {
             const { data } = await adminApi.get("/projects");
             setProjects(data);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
@@ -49,6 +55,7 @@ export default function ProjectList() {
     }, []);
 
     const toggle = (id) => {
+        if (statusInFlight.current) return;      // selection is frozen while a status change is being saved
         setSelected((prev) => {
             const next = new Set(prev);
             if (next.has(id)) next.delete(id);
@@ -57,7 +64,7 @@ export default function ProjectList() {
         });
     };
     const clear = () => setSelected(new Set());
-    const selectAll = () => setSelected(new Set(projects.map((p) => p.id)));
+    const selectAll = () => { if (!statusInFlight.current) setSelected(new Set(projects.map((p) => p.id))); };
 
     const bulkDelete = async () => {
         const ids = Array.from(selected);
@@ -77,6 +84,56 @@ export default function ProjectList() {
             toast.error(err?.response?.data?.detail || "Bulk delete failed");
             throw err;
         }
+    };
+
+    // Change the status of every selected project (across all sections) in one request. The server writes only
+    // `status`; on partial failure the failed projects stay selected so the action can be retried.
+    const applyStatus = async (status) => {
+        if (statusInFlight.current || selected.size === 0) return;
+        statusInFlight.current = true;
+        setStatusBusy(true);
+        const ids = Array.from(selected);
+        const label = PROJECT_STATUS_OPTIONS.find((o) => o.value === status)?.label || status;
+        try {
+            const { data } = await adminApi.post("/projects/bulk-status", { ids, status });
+            const done = new Set([...(data.updated || []), ...(data.unchanged || [])]);
+            const failed = data.failed || [];
+            // Move the cards right away; the silent refetch below then confirms the saved state.
+            setProjects((prev) => prev.map((p) => (done.has(p.id) ? { ...p, status } : p)));
+            if (failed.length === 0) {
+                const n = (data.updated || []).length;
+                toast.success(
+                    n === 0
+                        ? `Already ${label} — nothing to change`
+                        : `${n} project${n === 1 ? "" : "s"} set to ${label}${(data.unchanged || []).length ? ` (${data.unchanged.length} already ${label})` : ""}`,
+                );
+                setSelected(new Set());
+            } else {
+                const names = failed.map((f) => projects.find((p) => p.id === f.id)?.brand_name || f.id);
+                toast.error(
+                    `${done.size} updated, ${failed.length} NOT updated: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` +${names.length - 3} more` : ""}`,
+                );
+                setSelected(new Set(failed.map((f) => f.id)));   // keep only what still needs doing
+            }
+            load({ silent: true }).catch(() => {});
+        } catch (err) {
+            console.error("[bulk status projects] failed", err?.response?.data || err);
+            toast.error(err?.response?.data?.detail || "Couldn't update the selected projects — nothing was changed. Please try again.");
+            // selection is preserved so the admin can retry
+        } finally {
+            statusInFlight.current = false;
+            setStatusBusy(false);
+        }
+    };
+
+    const selectGroup = (list) => {
+        if (statusInFlight.current) return;
+        setSelected((prev) => {
+            const next = new Set(prev);
+            const allIn = list.every((p) => next.has(p.id));
+            list.forEach((p) => (allIn ? next.delete(p.id) : next.add(p.id)));
+            return next;
+        });
     };
 
     const isSelectionMode = selected.size > 0;
@@ -118,6 +175,17 @@ export default function ProjectList() {
                             {count}
                         </span>
                     </div>
+                    <div className="flex items-center gap-3">
+                    {canChangeStatus && !isCollapsed && visibleList.length > 0 && (
+                        <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); selectGroup(visibleList); }}
+                            data-testid={`project-group-select-${key}`}
+                            className="text-[11px] text-black/55 hover:text-black underline underline-offset-2"
+                        >
+                            {visibleList.every((p) => selected.has(p.id)) ? "Deselect all" : "Select all"}
+                        </button>
+                    )}
                     <button
                         type="button"
                         className="p-1 border border-black/[0.08] hover:border-black/[0.16] rounded-md text-black/55 hover:text-black transition-colors"
@@ -125,6 +193,7 @@ export default function ProjectList() {
                     >
                         <ChevronDown className={`w-3.5 h-3.5 transform transition-transform duration-200 ${isCollapsed ? "-rotate-90" : ""}`} />
                     </button>
+                    </div>
                 </div>
 
                 {!isCollapsed && (
@@ -148,7 +217,7 @@ export default function ProjectList() {
                                                     : "border-black/[0.08] bg-white hover:border-black/[0.16]"
                                             }`}
                                         >
-                                            {canBulkDelete && (
+                                            {canChangeStatus && (
                                                 <button
                                                     type="button"
                                                     onClick={(e) => {
@@ -163,7 +232,7 @@ export default function ProjectList() {
                                                         checked 
                                                             ? "bg-black border-black text-white" 
                                                             : "bg-white border-black/[0.2] text-transparent group-hover:border-black/40"
-                                                    } ${isSelectionMode ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                                                    } ${isSelectionMode ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"}`}
                                                 >
                                                     {checked && (
                                                         <Check className="w-3 h-3" />
@@ -260,14 +329,15 @@ export default function ProjectList() {
                 </div>
             )}
 
-            {canBulkDelete && (
+            {canChangeStatus && (
                 <BulkSelectBar
                     count={selected.size}
                     total={projects.length}
                     allSelected={selected.size === projects.length}
                     onSelectAll={selectAll}
-                    onClear={clear}
-                    onDelete={() => setConfirmOpen(true)}
+                    onClear={() => { if (!statusInFlight.current) clear(); }}
+                    onDelete={canBulkDelete ? () => setConfirmOpen(true) : undefined}
+                    extraActions={<ProjectBulkStatusControl count={selected.size} busy={statusBusy} onApply={applyStatus} />}
                     labelSingular="project"
                     labelPlural="projects"
                     testid="projects-bulk-bar"

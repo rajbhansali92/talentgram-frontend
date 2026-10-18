@@ -7,7 +7,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from core import (
@@ -220,6 +220,54 @@ async def update_project(pid: str, payload: ProjectIn, admin: dict = Depends(cur
         raise HTTPException(404, "Project not found")
     p = await db.projects.find_one({"id": pid}, {"_id": 0})
     return p
+
+
+# ---------------------------------------------------------------------------
+# Bulk status — the Projects page "change status of the selected projects".
+#
+# Writes ONLY `status` ($set), on the same four stored values PUT /projects/{pid} validates and with the same
+# permission (admin or team). The single-project PUT cannot be reused for this: it replaces every ProjectIn
+# field from the payload, so a bulk call built from a list snapshot would rewrite unrelated fields (and re-run
+# budget normalisation) on every selected project. Soft-deleted projects are never touched or revived.
+# ---------------------------------------------------------------------------
+PROJECT_STATUSES = ("ongoing", "hold", "complete", "locked")
+BULK_STATUS_MAX = 500
+
+
+class BulkStatusIn(BaseModel):
+    ids: List[str] = Field(default_factory=list)
+    status: str
+
+
+@router.post("/projects/bulk-status")
+async def bulk_set_project_status(payload: BulkStatusIn, admin: dict = Depends(current_team_or_admin)):
+    if payload.status not in PROJECT_STATUSES:
+        raise HTTPException(400, "Invalid status")
+    ids = list(dict.fromkeys(i for i in (payload.ids or []) if isinstance(i, str) and i))
+    if not ids:
+        raise HTTPException(400, "No ids provided")
+    if len(ids) > BULK_STATUS_MAX:
+        raise HTTPException(400, f"At most {BULK_STATUS_MAX} projects can be updated at once")
+
+    from core import active_only
+    existing = await db.projects.find(
+        active_only({"id": {"$in": ids}, "status": {"$ne": "deleted"}}), {"_id": 0, "id": 1, "status": 1},
+    ).to_list(len(ids))
+    current = {d["id"]: d.get("status") or "ongoing" for d in existing}
+
+    to_change = [i for i in ids if i in current and current[i] != payload.status]
+    if to_change:
+        await db.projects.update_many(
+            active_only({"id": {"$in": to_change}, "status": {"$ne": "deleted"}}), {"$set": {"status": payload.status}},
+        )
+    logger.info("BULK STATUS /projects by user=%s status=%s requested=%d changed=%d ids=%s",
+                admin.get("email"), payload.status, len(ids), len(to_change), ids[:10])
+    return {
+        "status": payload.status,
+        "updated": to_change,
+        "unchanged": [i for i in ids if i in current and current[i] == payload.status],
+        "failed": [{"id": i, "reason": "Project not found or deleted"} for i in ids if i not in current],
+    }
 
 
 @router.post("/projects/bulk-delete")

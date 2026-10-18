@@ -27,7 +27,7 @@ function server({ access = true, onMessage } = {}) {
     workers = [W1, W2, WDOWN];
     sessionStorage.clear();
     adminApi.get.mockImplementation((url) => {
-        if (url === "/personal-assistant/access") return Promise.resolve({ data: { allowed: access, role: "admin" } });
+        if (url === "/personal-assistant/access") return Promise.resolve({ data: { allowed: access } });
         if (url === "/personal-assistant/history") return Promise.resolve({ data: { messages: [] } });
         if (url === "/personal-assistant/tasks") return Promise.resolve({ data: { tasks: tasksOnServer } });
         if (url === "/personal-assistant/workers") return Promise.resolve({ data: { workers } });
@@ -90,6 +90,41 @@ describe("floating entry point", () => {
         expect(screen.getByLabelText("Command").className).toMatch(/text-base/);
         fireEvent.keyDown(panel, { key: "Escape" });
         expect(screen.queryByTestId("pa-panel")).toBeNull();
+    });
+});
+
+describe("Tasks tab worker naming", () => {
+    const showTasks = async (rows) => {
+        server();
+        tasksOnServer = rows;
+        mount(); await open();
+        fireEvent.click(screen.getByTestId("pa-tab-tasks"));
+        return screen.findByTestId("pa-queue");
+    };
+    const row = (over) => task({ id: "w1", kind: "send", status: "failed", title: "Send Casting Call to Angela", summary: [], ...over });
+
+    it("shows the worker's friendly label saved with the task and does not ask the registry", async () => {
+        const q = await showTasks([row({ params: { talents: [], projects: [], worker_id: "worker-2", worker_label: "Worker 2" } })]);
+        expect(q.textContent).toContain("Worker: Worker 2");
+        expect(adminApi.get).not.toHaveBeenCalledWith("/personal-assistant/workers");
+    });
+
+    it("names a task saved before labels existed from the live worker registry instead of the raw id", async () => {
+        const q = await showTasks([row({ params: { talents: [], projects: [], worker_id: "default" } })]);
+        await waitFor(() => expect(q.textContent).toContain("Worker: Worker 1"));
+        expect(q.textContent).not.toContain("Worker: default");
+    });
+
+    it("falls back to the raw id (never a guess) when the registry cannot be read", async () => {
+        server();
+        tasksOnServer = [row({ params: { talents: [], projects: [], worker_id: "default" } })];
+        const base = adminApi.get.getMockImplementation();
+        adminApi.get.mockImplementation((url) => (url === "/personal-assistant/workers" ? Promise.reject(new Error("down")) : base(url)));
+        mount(); await open();
+        fireEvent.click(screen.getByTestId("pa-tab-tasks"));
+        const q = await screen.findByTestId("pa-queue");
+        await waitFor(() => expect(adminApi.get).toHaveBeenCalledWith("/personal-assistant/workers"));
+        expect(q.textContent).toContain("Worker: default");
     });
 });
 

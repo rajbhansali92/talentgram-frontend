@@ -148,7 +148,8 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
         missing = [t for t in p["talents"] if t["id"] not in in_proj]
         if missing and len(missing) == len(tids):
             task["status"] = S.FAILED
-            task["error"] = f"{'That talent is' if len(tids) == 1 else 'None of these talents are'} in the {_names(projects)} pipeline yet. Add them first."
+            lead = "That talent isn't" if len(tids) == 1 else "None of these talents are"
+            task["error"] = f"{lead} in the {_names(projects)} pipeline yet. Add them first."
             return task
         if missing:
             warnings.append(f"Not in {_names(projects)}: {_names(missing)} — will be skipped")

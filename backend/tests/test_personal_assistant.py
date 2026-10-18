@@ -752,3 +752,13 @@ async def test_double_tapping_retry_requeues_each_failed_message_once_and_never_
     after = {j["id"]: j for j in await _jobs([world["rivka"], world["nehara"]])}
     assert len(after) == 2 and after[jobs[0]["id"]]["status"] == "sent"                              # the delivered one is never re-queued
     assert after[jobs[1]["id"]]["status"] == "pending"                                                # the failed one is re-queued exactly once
+
+
+async def test_the_not_in_the_pipeline_message_reads_correctly_for_one_and_for_several_talents(anon, alice, world):
+    one = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"][0]
+    assert one["status"] == "failed"
+    assert one["error"] == "That talent isn't in the Qzx Streaming Now pipeline yet. Add them first."       # was "That talent is in …" (missing "not")
+    two = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith and Nehara Zolt for Streaming Now"))["tasks"][0]
+    assert two["status"] == "failed"
+    assert two["error"] == "None of these talents are in the Qzx Streaming Now pipeline yet. Add them first."
+    assert await _jobs([world["rivka"], world["nehara"]]) == []                                              # still nothing queued

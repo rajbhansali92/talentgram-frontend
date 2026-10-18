@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Loader2, Maximize2, Mic, Minimize2, Minus, Send, Sparkles, Volume2, VolumeX, X } from "lucide-react";
 import {
     ACTIVE_STATUSES, ATTENTION_STATUSES, cancelTask, clarifyTask, clearAssistantHistory, confirmAll, confirmTask, followUpSend,
-    getAssistantHistory, isTimeoutError, listAssistantTasks, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage, statusLabel,
+    getAssistantHistory, getAssistantWorkers, isTimeoutError, listAssistantTasks, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage, statusLabel,
 } from "@/lib/personalAssistant";
 import { useAssistantContext } from "@/lib/assistantContext";
 import { speak, speechOutputSupported, useSpeechInput } from "@/hooks/useSpeechInput";
@@ -50,6 +50,8 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const [busy, setBusy] = useState({});
     const [errors, setErrors] = useState({});
     const [batchWorker, setBatchWorker] = useState("");
+    const [workerNames, setWorkerNames] = useState({});          // worker id → registry label, only to name workers on tasks saved before labels were stored
+    const workerNamesAsked = useRef(false);
     const inputRef = useRef(null);
     const endRef = useRef(null);
     const loaded = useRef(false);
@@ -66,6 +68,14 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
             setTasks(t);
         });
     }, [open]);
+
+    // Tasks saved by the first release carry only the raw worker id ("default"): name those from the live registry (presentation only).
+    useEffect(() => {
+        if (!open || tab !== "tasks" || workerNamesAsked.current) return;
+        if (!tasks.some((t) => t.params?.worker_id && !t.params?.worker_label)) return;
+        workerNamesAsked.current = true;
+        getAssistantWorkers().then((list) => setWorkerNames(Object.fromEntries((list || []).map((w) => [w.id, w.label || w.id])))).catch(() => {});
+    }, [open, tab, tasks]);
 
     // status of queued/running work is polled from the backend — never inferred in the browser
     const hasActive = tasks.some((t) => ACTIVE_STATUSES.includes(t.status));
@@ -232,7 +242,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 {tasks.map((t) => (
                                     <li key={t.id} className="rounded-lg border border-black/[0.08] p-2.5">
                                         <div className="flex items-start justify-between gap-2"><span className="text-xs text-black/85 leading-snug">{t.title}</span><StatusChip status={t.status} kind={t.kind} uncertain={!!t.uncertain} /></div>
-                                        <p className="text-[11px] text-black/45 mt-1">{t.status_detail || t.error || ""}{t.params?.worker_id ? `${t.status_detail || t.error ? " · " : ""}worker ${t.params.worker_id}` : ""}{t.updated_at ? ` · ${new Date(t.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</p>
+                                        <p className="text-[11px] text-black/45 mt-1">{t.status_detail || t.error || ""}{t.params?.worker_id ? `${t.status_detail || t.error ? " · " : ""}Worker: ${t.params.worker_label || workerNames[t.params.worker_id] || t.params.worker_id}` : ""}{t.updated_at ? ` · ${new Date(t.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</p>
                                     </li>
                                 ))}
                             </ul>

@@ -493,8 +493,26 @@ async def retry_task(user: dict, task: dict) -> dict:
     failed = await db.whatsapp_jobs.find({"batch_id": {"$in": task["batch_ids"]}, "status": "failed"}, {"_id": 0, "id": 1, "batch_id": 1}).to_list(500)
     if not failed:
         raise HTTPException(409, "There are no failed messages to retry.")
+    already_requeued = already_handled = 0
     for j in failed:
-        await retry_job(j["batch_id"], j["id"], admin=user)
+        try:
+            await retry_job(j["batch_id"], j["id"], admin=user)
+        except HTTPException as exc:
+            # A double tap / second tab: the job was "failed" when listed but is not any more, so retry_job refused it with a 400. Only that
+            # case is absorbed, and the follow-up read decides how it is counted (each job in exactly one bucket):
+            #   pending / sending      → another request re-queued it and it is waiting or in flight: already_requeued
+            #   sent / sent_unverified → it has since gone out; this flow cannot prove it re-queued it: already_handled_not_requeued
+            # Anything else — still failed, missing, any other status, any non-400 — propagates unchanged.
+            now = await db.whatsapp_jobs.find_one({"id": j["id"]}, {"_id": 0, "status": 1})
+            state = (now or {}).get("status")
+            if exc.status_code == 400 and state in ("pending", "sending"):
+                already_requeued += 1
+                continue
+            if exc.status_code == 400 and state in ("sent", "sent_unverified"):
+                already_handled += 1
+                continue
+            raise
     cur = await S.update_task(owner, task["id"], {"status": S.QUEUED, "completed_at": None, "error": None}, only_status=[S.FAILED, S.PARTIAL])
-    await S.audit(user, "retry", cur or task, "requeued_failed_jobs", {"jobs": len(failed)})
+    await S.audit(user, "retry", cur or task, "requeued_failed_jobs",
+                  {"jobs": len(failed) - already_requeued - already_handled, "already_requeued": already_requeued, "already_handled_not_requeued": already_handled})
     return await refresh_task(owner, cur or task)

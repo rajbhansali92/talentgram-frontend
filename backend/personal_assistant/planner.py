@@ -16,10 +16,11 @@ from typing import Any, Dict, List, Optional
 from core import db
 from personal_assistant import resolve as R
 from personal_assistant import store as S
+from personal_assistant import update_plan
 from personal_assistant.parser import Segment, parse_message
 from routers.casting_pipeline import PIPELINE_STAGE_ORDER, _normalise_stage
 
-CONSEQUENTIAL = {"add", "send", "move", "share"}
+CONSEQUENTIAL = {"add", "send", "move", "share", "update"}
 READ_ONLY = {"lookup", "list"}
 MAX_SELECTED = 200
 MAX_SEGMENTS = 10          # actions per message
@@ -67,6 +68,8 @@ def compute_slots(task: dict) -> List[dict]:
         slots.append({"key": "template", "kind": "template", "phrase": p.get("template_phrase") or "",
                       "options": p.get("template_options") or [],
                       "prompt": "Which template should I send?" if not p.get("template_phrase") else f'Which template did you mean by "{p["template_phrase"]}"?'})
+    if task["kind"] == "update" and p.get("updates"):
+        slots += update_plan.slots(task)
     if task["kind"] == "move" and not p.get("stage"):
         sug = p.get("stage_suggest") or []
         opts = sorted(({**o, "best": True} if o["id"] == (sug[0] if sug else None) and len(sug) == 1 else {**o, "sublabel": "Looks like what you said"} if o["id"] in sug else o for o in STAGE_OPTIONS),
@@ -97,6 +100,8 @@ def _title(task: dict) -> str:
         return f"Send {p.get('template_name') or p.get('template_phrase') or 'a template'} to {ts}" + (f" for {ps}" if p.get("projects") else "")
     if k == "move":
         return f"Move {ts} to {stage_label(p.get('stage')) or '…'}" + (f" in {ps}" if p.get("projects") else "")
+    if k == "update":
+        return update_plan.title(task)
     if k == "share":
         rec = p.get("recipient") or {}
         to = (f"the {ps} WhatsApp group" if rec.get("kind") == "project_group" and p.get("projects") else
@@ -125,6 +130,25 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
         return task
     if task["slots"]:
         task["status"] = S.NEEDS_CLARIFICATION
+        return task
+
+    if task["kind"] == "update":
+        # every talent / value / file question is answered: read the CURRENT profile (read-only), check each value, then show exactly what will change
+        if update_plan.all_unsupported(task):
+            task["status"], task["error"] = S.FAILED, "I can't update that from here. " + update_plan.SUPPORTED_TEXT
+            return task
+        await update_plan.prepare(task)
+        task["slots"] = compute_slots(task)
+        if task["slots"]:
+            task["status"] = S.NEEDS_CLARIFICATION
+            return task
+        u = p["updates"]
+        if not u["media"] and all(f.get("blocked") for f in u["fields"]):
+            task["status"], task["error"] = S.FAILED, " ".join(f["blocked"] for f in u["fields"])
+            return task
+        task["warnings"] = [f"“{t}” can't be changed from here, so it will be left as it is." for t in u.get("unsupported") or []]
+        task["summary"] = update_plan.describe(task)
+        task["status"] = S.AWAITING_CONFIRMATION
         return task
 
     projects = p.get("projects") or []
@@ -389,6 +413,8 @@ def _heard_lines(p: dict) -> List[str]:
 def summary_lines(task: dict) -> List[str]:
     p, k = task["params"], task["kind"]
     lines: List[str] = []
+    if k == "update":
+        return update_plan.describe(task)
     n = len(p.get("talents") or [])
     if k == "add":
         lines = [f"{n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}", f"Into: {_names(p['projects'], 6)}"]
@@ -486,6 +512,13 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
             if prev and prev["kind"] == "add":
                 prev["params"]["offer_send"] = True
             continue
+        if seg.intent == "update":
+            new = await _plan_update(owner_id, command_id, seg, prev, context, len(tasks))
+            if not new:
+                unrecognised.append(seg.text)
+            tasks.extend(new)
+            prev = new[-1] if new else prev
+            continue
         if seg.intent == "unknown":
             unrecognised.append(seg.text + (" — it contains a correction, so I did not act on it; please say it once, with the name you want" if seg.correction else ""))
             continue
@@ -541,6 +574,29 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
         tasks.append(t)
         prev = t
     return tasks, unrecognised, []
+
+
+async def _plan_update(owner_id: str, command_id: str, seg: Segment, prev: Optional[dict], context: dict, seq0: int) -> List[dict]:
+    """`update …` → ONE task per talent (each with only its own items), so a file or value can never attach to another talent and one
+    talent's failure cannot touch another's. Names resolve exactly as everywhere else (cards for anything uncertain)."""
+    out: List[dict] = []
+    for g in seg.update_groups:
+        entries: List[dict] = []
+        if g.get("ref") == "previous":
+            entries = [dict(e) for e in (prev or {}).get("params", {}).get("talents", [])]
+            if not entries:
+                entries = [{"phrase": "", "state": "none", "prompt": "Whose profile should I update? Say the name."}]
+        else:
+            names = g["names"][:MAX_NAMES]
+            res = await asyncio.gather(*[R.resolve_talent(n) for n in names])
+            entries = [_entry(n, r) for n, r in zip(names, res)]
+        for e in entries:
+            t = _base_task(owner_id, command_id, seq0 + len(out), "update", seg)
+            t["params"]["talents"] = [e]
+            t["params"]["updates"] = update_plan.new_params([dict(i) for i in g["items"]])
+            await finalize(t)
+            out.append(t)
+    return out
 
 
 def _overlap(add_task: dict, other: dict) -> bool:

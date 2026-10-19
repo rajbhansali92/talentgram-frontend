@@ -841,6 +841,104 @@ describe("name candidates (2026-10-19)", () => {
     });
 });
 
+describe("`update` command: values, file selection, approval and upload (2026-10-20)", () => {
+    const media = (over = {}) => ({ category: "video", label: "Introduction video", op: "replace", existing: 1, existing_names: ["old.mp4"], files: [], ...over });
+    const upd = (over = {}) => task({ id: "u1", kind: "update", status: "needs_clarification", title: "Update Angela: introduction video", summary: [], fingerprint: "fp1",
+        params: { talents: [{ id: "t1", label: "Angela", state: "resolved" }], projects: [], updates: { fields: [], media: [media()] } },
+        slots: [{ key: "files:video", kind: "files", category: "video", multiple: false, accept: ".mp4,.mov", max_mb: 200, prompt: "Choose the video for Introduction video." }], ...over });
+    const file = (name, size = 1000, type = "video/mp4") => { const f = new File(["x"], name, { type }); Object.defineProperty(f, "size", { value: size }); return f; };
+    const begin = async (t) => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "1 needs your pick", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("update angela's introduction video"); fireEvent.click(screen.getByTestId("pa-send"));
+        return screen.findByTestId(`pa-task-${t.id}`);
+    };
+    const manifestOf = (c) => c[1].files;
+
+    it("a missing value is typed in, sent as text, and the file slot only accepts approved formats and sizes", async () => {
+        const card = await begin(upd({ slots: [{ key: "value:age", kind: "value", prompt: "What should Age be?", options: [] }] }));
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { task: upd({ status: "awaiting_confirmation", slots: [], summary: ["Age: 22 → 24"] }) } }));
+        fireEvent.change(within(card).getByLabelText("What should Age be?"), { target: { value: "24" } });
+        fireEvent.click(within(card).getByTestId("pa-value-ok-value:age"));
+        await waitFor(() => expect(posts("/tasks/u1/clarify")).toHaveLength(1));
+        expect(posts("/tasks/u1/clarify")[0][1]).toEqual({ slot: "value:age", text: "24" });
+    });
+
+    it("choosing a file shows its name and size, rejects the wrong type or size, and sends only a LIST (no file bytes) for the approval", async () => {
+        const card = await begin(upd());
+        const input = within(card).getByTestId("pa-file-input-video");
+        fireEvent.change(input, { target: { files: [file("notes.pdf", 100, "application/pdf")] } });
+        expect(within(card).getByTestId("pa-file-problem").textContent).toMatch(/isn't an accepted format/);
+        fireEvent.change(input, { target: { files: [file("big.mp4", 300 * 1024 * 1024)] } });
+        expect(within(card).getByTestId("pa-file-problem").textContent).toMatch(/too large — the limit is 200 MB/);
+        fireEvent.change(input, { target: { files: [file("a.mp4"), file("b.mp4")] } });
+        expect(within(card).getByTestId("pa-file-problem").textContent).toMatch(/single file/);
+        expect(posts("/clarify")).toHaveLength(0);
+        fireEvent.change(input, { target: { files: [file("intro.mp4", 5 * 1048576)] } });
+        expect(within(card).getByTestId("pa-file-chosen").textContent).toMatch(/intro\.mp4.*5\.0 MB/);
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { task: upd({ status: "awaiting_confirmation", slots: [], summary: ["Introduction video: REPLACES old.mp4 with intro.mp4"] }) } }));
+        fireEvent.click(within(card).getByTestId("pa-files-use-video"));
+        await waitFor(() => expect(posts("/tasks/u1/clarify")).toHaveLength(1));
+        expect(posts("/tasks/u1/clarify")[0][1]).toEqual({ slot: "files:video", files: [{ name: "intro.mp4", size: 5 * 1048576, type: "video/mp4" }] });
+        expect((await screen.findByTestId("pa-preview")).textContent).toMatch(/REPLACES old\.mp4 with intro\.mp4/);
+    });
+
+    it("files attached BEFORE the command are used only when the user taps Use, and only for a compatible slot", async () => {
+        const card = await begin(upd());
+        fireEvent.change(screen.getByTestId("pa-attach"), { target: { files: [file("pic.jpg", 500, "image/jpeg"), file("movie.mp4", 900, "video/mp4")] } });
+        expect(screen.getByTestId("pa-attached").textContent).toMatch(/pic\.jpg.*movie\.mp4/);
+        const use = within(card).getByTestId("pa-files-attached-video");
+        expect(use.textContent).toMatch(/Use 1 attached file \(movie\.mp4\)/);              // the picture is not offered for a video slot
+        expect(posts("/clarify")).toHaveLength(0);                                              // attaching alone assigned nothing
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { task: upd({ status: "awaiting_confirmation", slots: [], summary: ["x"] }) } }));
+        fireEvent.click(use);
+        await waitFor(() => expect(posts("/tasks/u1/clarify")).toHaveLength(1));
+        expect(manifestOf(posts("/tasks/u1/clarify")[0])).toEqual([{ name: "movie.mp4", size: 900, type: "video/mp4" }]);
+        await waitFor(() => expect(screen.getByTestId("pa-attached").textContent).not.toMatch(/movie\.mp4/));
+        expect(screen.getByTestId("pa-attached").textContent).toMatch(/pic\.jpg/);
+    });
+
+    it("approving applies the fields, then uploads each approved file through the existing API and shows what the server read back", async () => {
+        const card0 = await begin(upd());
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { task: upd({ status: "awaiting_confirmation", slots: [], summary: ["Introduction video: REPLACES old.mp4 with intro.mp4"],
+            params: { talents: [{ id: "t1", label: "Angela" }], projects: [], updates: { fields: [], media: [media({ files: [{ key: "intro.mp4|1000", name: "intro.mp4", size: 1000, type: "video/mp4", state: "pending" }] })] } } }) } }));
+        fireEvent.change(within(card0).getByTestId("pa-file-input-video"), { target: { files: [file("intro.mp4", 1000)] } });
+        fireEvent.click(within(card0).getByTestId("pa-files-use-video"));
+        const card = await screen.findByTestId("pa-task-u1");
+        await within(card).findByText("Approve changes");
+        const running = upd({ status: "running", slots: [], params: { talents: [{ id: "t1", label: "Angela" }], projects: [], updates: { fields: [], media: [media({ files: [{ key: "intro.mp4|1000", name: "intro.mp4", size: 1000, type: "video/mp4", state: "pending" }] })] } } });
+        const finished = upd({ status: "completed", slots: [], outcomes: [{ name: "Angela — Introduction video", status: "uploaded", detail: "intro.mp4" }],
+            params: { talents: [{ id: "t1", label: "Angela" }], projects: [], updates: { fields: [], media: [media({ files: [{ key: "intro.mp4|1000", name: "intro.mp4", size: 1000, type: "video/mp4", state: "uploaded" }] })] } } });
+        adminApi.post.mockImplementation((url) => Promise.resolve({ data: { task: url.endsWith("/media") ? finished : running } }));
+        fireEvent.click(within(card).getByTestId("pa-confirm"));
+        await waitFor(() => expect(posts("/tasks/u1/media")).toHaveLength(1));
+        const [url, body, cfg] = posts("/tasks/u1/media")[0];
+        expect(body instanceof FormData && body.get("category") === "video" && body.get("key") === "intro.mp4|1000" && body.get("file").name === "intro.mp4").toBe(true);
+        expect(cfg.timeout).toBeGreaterThan(60000);
+        expect(posts("/tasks/u1/confirm")[0][1]).toEqual({ fingerprint: "fp1" });
+        const out = await screen.findByTestId("pa-outcomes");
+        expect(out.textContent).toMatch(/Angela — Introduction video \(intro\.mp4\).*uploaded/);
+        expect(screen.getByText("Completed")).toBeTruthy();
+    });
+
+    it("a failed upload is shown with its reason and can be retried; after a reload the same file must be selected again, and only an approved file is accepted", async () => {
+        const stuck = upd({ status: "partial", slots: [], outcomes: [{ name: "Angela — Introduction video", status: "failed", reason: "The upload failed — nothing was added to the profile.", detail: "intro.mp4" }],
+            params: { talents: [{ id: "t1", label: "Angela" }], projects: [], updates: { fields: [], media: [media({ files: [{ key: "intro.mp4|1000", name: "intro.mp4", size: 1000, type: "video/mp4", state: "failed", error: "x" }] })] } } });
+        const card = await begin(stuck);
+        expect(within(card).getByTestId("pa-outcomes").textContent).toMatch(/intro\.mp4.*failed — The upload failed/);
+        expect(within(card).getByTestId("pa-upload-status").textContent).toMatch(/Select the same file again/);    // this tab no longer holds the file
+        expect(within(card).queryByTestId("pa-confirm")).toBeNull();
+        expect(within(card).queryByTestId("pa-retry")).toBeNull();                                                  // no generic Retry that would re-run the whole update
+        const { toast } = await import("sonner");
+        toast.error.mockClear();
+        fireEvent.change(within(card).getByTestId("pa-reselect"), { target: { files: [file("other.mp4", 1000)] } });
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/None of those files is on the approved list/)));
+        expect(posts("/media")).toHaveLength(0);
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { task: { ...stuck, status: "completed", outcomes: [{ name: "Angela — Introduction video", status: "uploaded", detail: "intro.mp4" }] } } }));
+        fireEvent.change(within(card).getByTestId("pa-reselect"), { target: { files: [file("intro.mp4", 1000)] } });
+        await waitFor(() => expect(posts("/tasks/u1/media")).toHaveLength(1));
+    });
+});
+
 describe("live reply line", () => {
     const t = (status) => ({ status });
     it("is recomputed from the tasks' current statuses, so it never says 'needs your pick' after the pick", () => {

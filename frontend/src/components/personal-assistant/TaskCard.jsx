@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Check, Copy, ExternalLink, Loader2, RotateCcw, User, X } from "lucide-react";
-import { STATUS_META, getAssistantWorkers, statusLabel } from "@/lib/personalAssistant";
+import { AlertTriangle, Check, Copy, ExternalLink, Loader2, RotateCcw, Upload, User, X } from "lucide-react";
+import { STATUS_META, fileKey, fileProblem, getAssistantWorkers, statusLabel } from "@/lib/personalAssistant";
 
 const TONES = {
     amber: "bg-amber-50 text-amber-800 border-amber-200",
@@ -87,6 +87,66 @@ function ClarifySlot({ slot, busy, onPick, command }) {
     );
 }
 
+const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+
+/** `update`: a value the command did not include (or that was not valid) — type it; it is validated and shown back before anything changes. */
+function ValueSlot({ slot, busy, onPick, command }) {
+    const [text, setText] = useState("");
+    return (
+        <div className="mt-2" data-testid={`pa-slot-${slot.key}`}>
+            {command && <p className="text-[11px] text-black/45 mb-1.5" data-testid="pa-command-echo">Your command: “{command}”</p>}
+            <p className="text-xs text-black/70 mb-2">{slot.prompt}</p>
+            <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { onPick(slot.key, { text }); setText(""); } }}>
+                <input value={text} onChange={(e) => setText(e.target.value)} aria-label={slot.prompt} maxLength={300}
+                    className="flex-1 min-w-0 border border-black/[0.12] rounded-lg px-3 min-h-[40px] text-sm focus:outline-none focus:border-black/50" />
+                <button type="submit" disabled={busy || !text.trim()} data-testid={`pa-value-ok-${slot.key}`} className="px-3 min-h-[40px] rounded-lg bg-black text-white text-xs disabled:opacity-40">Use this</button>
+            </form>
+        </div>
+    );
+}
+
+/** `update`: choose the file(s) for ONE talent and ONE media category. The browser keeps the files; the server gets only the list (name / size /
+ *  type) for the approval — files are uploaded after the approval, and only the approved ones are accepted. Nothing is assigned by guesswork:
+ *  attached files are used only when the user taps "Use". */
+function FilesSlot({ slot, busy, onFiles, attached = [], command }) {
+    const [chosen, setChosen] = useState([]);
+    const [problem, setProblem] = useState(null);
+    const video = slot.category === "video";
+    const compatible = attached.filter((f) => !fileProblem(slot.category, f));
+    const pick = (list) => {
+        const files = Array.from(list || []);
+        const bad = files.map((f) => fileProblem(slot.category, f)).find(Boolean) || (video && files.length > 1 ? "The introduction video is a single file — choose one." : null);
+        setProblem(bad);
+        setChosen(bad ? [] : files);
+    };
+    return (
+        <div className="mt-2" data-testid={`pa-slot-${slot.key}`}>
+            {command && <p className="text-[11px] text-black/45 mb-1.5" data-testid="pa-command-echo">Your command: “{command}”</p>}
+            <p className="text-xs text-black/70 mb-2">{slot.prompt}</p>
+            <label className="inline-flex items-center gap-2 px-3 min-h-[40px] rounded-lg border border-black/[0.15] text-xs cursor-pointer hover:border-black/40">
+                <Upload className="w-3.5 h-3.5" aria-hidden /> {video ? "Choose video" : "Choose pictures"}
+                <input type="file" className="sr-only" accept={slot.accept} multiple={slot.multiple} disabled={busy} data-testid={`pa-file-input-${slot.category}`}
+                    aria-label={`Choose file${slot.multiple ? "s" : ""} for ${slot.category}`} onChange={(e) => { pick(e.target.files); e.target.value = ""; }} />
+            </label>
+            <span className="ml-2 text-[10px] text-black/40">{video ? "MP4 or MOV" : "JPEG, PNG, WEBP or HEIC"}, up to {slot.max_mb} MB each</span>
+            {problem && <p className="mt-1.5 text-xs text-red-700" role="alert" data-testid="pa-file-problem">{problem}</p>}
+            {chosen.length > 0 && (
+                <div className="mt-2" data-testid="pa-file-chosen">
+                    <ul className="text-[11px] text-black/70 space-y-0.5">{chosen.map((f) => <li key={fileKey(f)} className="flex justify-between gap-2"><span className="truncate">{f.name}</span><span className="text-black/45 shrink-0">{sizeText(f.size)}</span></li>)}</ul>
+                    <button type="button" disabled={busy} onClick={() => { onFiles(slot.category, chosen); setChosen([]); }} data-testid={`pa-files-use-${slot.category}`}
+                        className="mt-1.5 px-3 min-h-[36px] rounded-lg bg-black text-white text-xs disabled:opacity-40">Use {chosen.length === 1 ? "this file" : `these ${chosen.length} files`}</button>
+                </div>
+            )}
+            {chosen.length === 0 && compatible.length > 0 && (
+                <button type="button" disabled={busy || (video && compatible.length !== 1)} onClick={() => onFiles(slot.category, compatible, true)} data-testid={`pa-files-attached-${slot.category}`}
+                    className="mt-2 block px-3 min-h-[36px] rounded-lg border border-black/[0.15] text-xs disabled:opacity-40">
+                    Use {compatible.length} attached file{compatible.length === 1 ? "" : "s"} ({compatible.slice(0, 3).map((f) => f.name).join(", ")}{compatible.length > 3 ? "…" : ""}) here
+                </button>
+            )}
+        </div>
+    );
+}
+
 /** Live worker availability from the backend (existing registry + sessions). Nothing is chosen for the user when several are connected. */
 export function WorkerPicker({ value, onChange, hint, disabled }) {
     const [workers, setWorkers] = useState(null);
@@ -130,8 +190,8 @@ function Outcomes({ rows }) {
         <ul className="mt-2 space-y-0.5 text-[11px]" data-testid="pa-outcomes">
             {rows.slice(0, 20).map((r, i) => (
                 <li key={`${r.talent_id || r.name}-${i}`} className="flex gap-2 justify-between">
-                    <span className="truncate text-black/70">{r.name && r.project ? `${r.name} → ${r.project}` : (r.name || r.project || "—")}</span>
-                    <span className={`shrink-0 ${["sent", "moved", "added", "already_there"].includes(r.status) ? "text-emerald-700" : r.status === "failed" ? "text-red-600" : "text-black/50"}`}>
+                    <span className="truncate text-black/70">{r.name && r.project ? `${r.name} → ${r.project}` : (r.name || r.project || "—")}{r.detail ? ` (${r.detail})` : ""}</span>
+                    <span className={`shrink-0 ${["sent", "moved", "added", "already_there", "updated", "uploaded"].includes(r.status) ? "text-emerald-700" : r.status === "failed" ? "text-red-600" : "text-black/50"}`}>
                         {r.status === "sent" ? (r.verified ? "sent ✓ verified" : "sent") : String(r.status || "").replace(/_/g, " ")}{r.reason || r.error ? ` — ${r.reason || r.error}` : ""}
                     </span>
                 </li>
@@ -267,7 +327,7 @@ function Result({ task, onPrefill, onFollowUp, busy }) {
     return null;
 }
 
-export default function TaskCard({ task, busy, actionError, inPlan = false, onClarify, onConfirm, onCancel, onRetry, onFollowUp, onPrefill }) {
+export default function TaskCard({ task, busy, actionError, inPlan = false, onClarify, onConfirm, onCancel, onRetry, onFollowUp, onPrefill, onFiles, attached = [], uploadInfo = null, missingLocal = false, onRetryUploads, onReselect }) {
     const [worker, setWorker] = useState("");
     const [ack, setAck] = useState(false);
     const access = task.kind === "share" && task.status === "awaiting_confirmation" && worker ? task.preview?.worker_access?.[worker] : null;
@@ -302,7 +362,26 @@ export default function TaskCard({ task, busy, actionError, inPlan = false, onCl
                     {IDENTIFY[task.slots?.[0]?.kind] || "Which one do you mean?"}{CONSEQUENTIAL.includes(task.kind) ? <span className="font-normal text-black/50"> Picking only identifies it — nothing happens until you approve.</span> : null}
                 </p>
             )}
-            {task.status === "needs_clarification" && task.slots?.map((s, i) => <ClarifySlot key={s.key} slot={s} busy={busy} command={i === 0 ? task.source_text : null} onPick={(key, body) => onClarify(task, key, body)} />)}
+            {task.status === "needs_clarification" && task.slots?.map((s, i) => s.kind === "files"
+                ? <FilesSlot key={s.key} slot={s} busy={busy} attached={attached} command={i === 0 ? task.source_text : null} onFiles={(cat, files, fromAttached) => onFiles?.(task, cat, files, fromAttached)} />
+                : s.kind === "value"
+                    ? <ValueSlot key={s.key} slot={s} busy={busy} command={i === 0 ? task.source_text : null} onPick={(key, body) => onClarify(task, key, body)} />
+                    : <ClarifySlot key={s.key} slot={s} busy={busy} command={i === 0 ? task.source_text : null} onPick={(key, body) => onClarify(task, key, body)} />)}
+            {task.kind === "update" && ["running", "partial", "failed"].includes(task.status) && task.params?.updates?.media?.some((m) => m.files?.some((x) => ["pending", "failed", "uploading"].includes(x.state))) && (
+                <div className="mt-2 text-xs text-black/70" data-testid="pa-upload-status">
+                    {uploadInfo ? <p className="flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden /> Uploading {uploadInfo.name} ({uploadInfo.index} of {uploadInfo.total}){uploadInfo.pct != null ? ` — ${uploadInfo.pct}%` : ""}…</p>
+                        : <>
+                            <p>{missingLocal ? "Some files still need to be uploaded. Select the same file again to finish." : "Some files have not been uploaded."}</p>
+                            <button type="button" disabled={busy} onClick={() => onRetryUploads?.(task)} data-testid="pa-retry-uploads" className="mt-1 px-3 min-h-[34px] rounded-lg border border-black/[0.15] text-xs disabled:opacity-50">Upload the remaining files</button>
+                            {missingLocal && (
+                                <label className="ml-2 inline-flex items-center gap-1.5 px-3 min-h-[34px] rounded-lg border border-black/[0.15] text-xs cursor-pointer">
+                                    <Upload className="w-3.5 h-3.5" aria-hidden /> Select files again
+                                    <input type="file" multiple className="sr-only" data-testid="pa-reselect" onChange={(e) => { onReselect?.(task, Array.from(e.target.files || [])); e.target.value = ""; }} />
+                                </label>
+                            )}
+                        </>}
+                </div>
+            )}
             {needsWorker && !inPlan && <div className="mt-2.5"><WorkerPicker value={worker} onChange={setWorker} hint={task.params?.worker_hint} disabled={busy} /></div>}
             {blocked && !inPlan && <p className="mt-1.5 text-xs text-red-700" role="alert" data-testid="pa-group-blocked">“{task.preview?.group}”: this worker could not find the group last time, so it is held. Pick a different worker.</p>}
             {unverified && !inPlan && (
@@ -317,10 +396,10 @@ export default function TaskCard({ task, busy, actionError, inPlan = false, onCl
                 {task.status === "awaiting_confirmation" && !inPlan && (
                     <button type="button" disabled={busy || (needsWorker && !worker) || blocked || (unverified && !ack)} onClick={() => onConfirm(task, worker, unverified && ack)} data-testid="pa-confirm"
                         className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40 inline-flex items-center gap-1.5">
-                        {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />} {task.duplicate_risk ? "Send again anyway" : "Confirm"}
+                        {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />} {task.duplicate_risk ? "Send again anyway" : task.kind === "update" ? "Approve changes" : "Confirm"}
                     </button>
                 )}
-                {(task.status === "failed" || task.status === "partial") && !(task.uncertain && ["send", "share"].includes(task.kind)) && (task.batch_ids?.length > 0 || !["send", "share"].includes(task.kind)) && (
+                {(task.status === "failed" || task.status === "partial") && task.kind !== "update" && !(task.uncertain && ["send", "share"].includes(task.kind)) && (task.batch_ids?.length > 0 || !["send", "share"].includes(task.kind)) && (
                     <button type="button" disabled={busy} onClick={() => onRetry(task)} data-testid="pa-retry" className="px-3 min-h-[36px] rounded-lg border border-black/[0.15] text-xs inline-flex items-center gap-1.5 disabled:opacity-50"><RotateCcw className="w-3.5 h-3.5" /> Retry</button>
                 )}
                 {canCancel && <button type="button" disabled={busy} onClick={() => onCancel(task)} data-testid="pa-cancel" className="px-3 min-h-[36px] rounded-lg border border-black/[0.15] text-xs text-black/65 inline-flex items-center gap-1 disabled:opacity-50"><X className="w-3.5 h-3.5" /> Cancel</button>}

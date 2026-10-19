@@ -72,6 +72,9 @@ def fingerprint(task: dict) -> str:
         "dest": [[d.get("name"), d.get("kind"), d.get("text")] for d in prev.get("destinations") or []],
         "pre": sorted({(m.get("talent_id"), m.get("project_id")) for m in (p.get("prereq") or {}).get("missing") or [] if isinstance(m, dict)}),
     }
+    if p.get("updates"):
+        from personal_assistant import update_plan
+        body["upd"] = update_plan.fingerprint_part(task)
     return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()[:20]
 
 
@@ -127,6 +130,33 @@ async def update_task(owner_id: str, task_id: str, patch: dict, *, only_status: 
         q["status"] = {"$in": only_status}
     patch = {**patch, "updated_at": now()}
     return await db.assistant_tasks.find_one_and_update(q, {"$set": patch}, return_document=True, projection={"_id": 0})
+
+
+# -------------------------------------------------------------------------------------- update: per-file upload state
+async def claim_upload(owner_id: str, task_id: str, category: str, key: str) -> bool:
+    """Atomic: pending|failed → uploading for ONE file of an approved update (a double click / second tab finds it taken → False)."""
+    r = await db.assistant_tasks.update_one(
+        {"owner_id": owner_id, "id": task_id, "status": {"$in": [RUNNING, PARTIAL, FAILED]},
+         # the document only matches while THIS file is still claimable — otherwise the $set below would "modify" it for every caller
+         "params.updates.media": {"$elemMatch": {"category": category, "files": {"$elemMatch": {"key": key, "state": {"$in": ["pending", "failed"]}}}}}},
+        {"$set": {"params.updates.media.$[m].files.$[f].state": "uploading", "status": RUNNING, "updated_at": now()}},
+        array_filters=[{"m.category": category}, {"f.key": key, "f.state": {"$in": ["pending", "failed"]}}])
+    return r.modified_count == 1
+
+
+async def finish_upload(owner_id: str, task_id: str, category: str, key: str, media_id: Optional[str], error: Optional[str]) -> dict:
+    """Record one file's real outcome, then re-derive the task's status / outcomes from the persisted state."""
+    from personal_assistant import update_plan
+    await db.assistant_tasks.update_one(
+        {"owner_id": owner_id, "id": task_id},
+        {"$set": {"params.updates.media.$[m].files.$[f].state": "failed" if error else "uploaded",
+                  "params.updates.media.$[m].files.$[f].error": error, "params.updates.media.$[m].files.$[f].media_id": media_id}},
+        array_filters=[{"m.category": category}, {"f.key": key}])
+    task = await get_task(owner_id, task_id)
+    res = update_plan.settle(task)
+    patch = {"status": res["status"], "result": res["result"], "error": res["error"], "outcomes": res["outcomes"],
+             "completed_at": now() if res["status"] in TERMINAL else None}
+    return (await update_task(owner_id, task_id, patch)) or task
 
 
 # -------------------------------------------------------------------------------------------------- messages

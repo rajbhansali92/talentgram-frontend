@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from agents.modules import casting_pipeline_nlu as nlu
@@ -18,6 +18,7 @@ from personal_assistant import executors as X
 from personal_assistant import planner as P
 from personal_assistant import resolve as R
 from personal_assistant import store as S
+from personal_assistant import update_plan
 from personal_assistant.access import assistant_user, is_allowed
 from core import current_team_or_admin
 from routers.casting_pipeline import PIPELINE_STAGE_ORDER
@@ -29,7 +30,8 @@ MAX_CONCURRENT = 3
 PENDING_TTL_SEC = 12 * 3600          # an unanswered question / unapproved action older than this is stale and will not run
 NEEDS_WORKER = {"send", "share"}
 HELP = ("I can look up a talent (“show Angela's profile / media link / submission history”), add talents to projects, "
-        "send a casting call or any template, move talents between pipeline stages, list who is in a stage, and share a media link or profile.")
+        "send a casting call or any template, move talents between pipeline stages, list who is in a stage, share a media link or profile, and update "
+        "a talent's age, height, location, WhatsApp group name, Instagram details, introduction video or pictures.")
 
 
 class ContextIn(BaseModel):
@@ -44,10 +46,17 @@ class MessageIn(BaseModel):
     context: ContextIn = Field(default_factory=ContextIn)
 
 
+class FileMeta(BaseModel):
+    name: str = Field(..., max_length=200)
+    size: int = Field(..., ge=0)
+    type: str = Field(default="", max_length=100)
+
+
 class ClarifyIn(BaseModel):
     slot: str = Field(..., max_length=40)
     choice_id: Optional[str] = Field(default=None, max_length=80)
     text: Optional[str] = Field(default=None, max_length=300)
+    files: Optional[List[FileMeta]] = Field(default=None, max_length=20)      # `update`: the manifest of files chosen in the browser
 
 
 class ConfirmIn(BaseModel):
@@ -263,9 +272,20 @@ async def clarify(task_id: str, body: ClarifyIn, user: Dict[str, Any] = Depends(
     task = await _fresh(owner, await _own(user, task_id))
     if task["status"] != S.NEEDS_CLARIFICATION:
         raise HTTPException(409, "This task doesn't need clarification any more.")
-    if not (body.choice_id or (body.text or "").strip()):
+    if task["kind"] == "update" and body.slot.startswith(("value:", "files:")):
+        if body.slot.startswith("value:"):
+            if not (body.text or "").strip():
+                raise HTTPException(400, "Type the new value.")
+            if not update_plan.apply_value(task, body.slot[6:], body.text.strip("\n\r")):
+                raise HTTPException(400, "That isn't one of the items requested.")
+        else:
+            err = update_plan.apply_files(task, body.slot[6:], [f.model_dump() for f in body.files or []])
+            if err:
+                raise HTTPException(400, err)
+        ok = True
+    elif not (body.choice_id or (body.text or "").strip()):
         raise HTTPException(400, "Pick one of the options or type a correction.")
-    if body.slot == "recipient" and task["kind"] == "share":
+    elif body.slot == "recipient" and task["kind"] == "share":
         ok = await _apply_recipient(task, body.choice_id, body.text)
     else:
         ok = _apply_choice(task, body.slot, body.choice_id) if body.choice_id else await _apply_text(task, body.slot, body.text.strip())
@@ -352,6 +372,21 @@ async def confirm(task_id: str, body: ConfirmIn = ConfirmIn(), user: Dict[str, A
     except PlanChanged as exc:
         raise HTTPException(409, {"message": exc.detail, "changed": True, "tasks": [_pub(t) for t in exc.tasks]})
     return {"task": _pub(await X.refresh_task(user["id"], done))}
+
+
+@router.post("/tasks/{task_id}/media")
+async def upload_media(task_id: str, category: str = Form(...), key: str = Form(...), file: UploadFile = File(...),
+                       user: Dict[str, Any] = Depends(assistant_user)):
+    """ONE file of an APPROVED update. The talent and category come from the approved plan; the file must match the approved manifest
+    (name, size, type); it is uploaded through the existing talent-media path and reported only after it is read back from the profile."""
+    task = await _own(user, task_id)
+    if task["kind"] != "update" or task["status"] not in (S.RUNNING, S.PARTIAL, S.FAILED):
+        raise HTTPException(409, "This update isn't waiting for uploads.")
+    updated = await update_plan.upload_one(user, task, category, key, file)
+    m = next((x for x in updated["params"]["updates"]["media"] if x["category"] == category), {})
+    state = next((x["state"] for x in m.get("files", []) if x["key"] == key), "unknown")
+    await S.audit(user, "upload", updated, state, {"category": category})
+    return {"task": _pub(updated)}
 
 
 @router.post("/commands/{command_id}/confirm-all")

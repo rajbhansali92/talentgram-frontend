@@ -24,6 +24,38 @@ export async function clarifyTask(taskId, body) {
 }
 // An approval is for exactly what was shown: the server's `fingerprint` of the task (a hash of the resolved entities, destination
 // and content) goes back with the approval. If the plan has changed since, the server refuses and returns the revised task(s).
+// Uploading an approved update's files goes through the existing authenticated API, one file at a time; a big video can take a few minutes.
+const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+export async function uploadUpdateMedia(taskId, category, key, file, onProgress) {
+    const fd = new FormData();
+    fd.append("category", category);
+    fd.append("key", key);
+    fd.append("file", file);
+    const { data } = await adminApi.post(`${BASE}/tasks/${taskId}/media`, fd, {
+        headers: { "Content-Type": "multipart/form-data" }, timeout: UPLOAD_TIMEOUT_MS,
+        onUploadProgress: (e) => { if (onProgress && e.total) onProgress(Math.min(99, Math.round((e.loaded / e.total) * 100))); },
+    });
+    return data.task;
+}
+export async function getAssistantTask(taskId) {
+    const { data } = await adminApi.get(`${BASE}/tasks/${taskId}`);
+    return data.task;
+}
+/** The same limits as the talent page / backend (20 MB pictures; 200 MB MP4 or MOV video). → the reason a file is not acceptable, or null. */
+export const MAX_IMAGE_MB = 20;
+export const MAX_VIDEO_MB = 200;
+export function fileProblem(category, file) {
+    const video = category === "video";
+    const cap = (video ? MAX_VIDEO_MB : MAX_IMAGE_MB) * 1024 * 1024;
+    if (!file.size) return `${file.name} is empty.`;
+    if (file.size > cap) return `${file.name} is too large — the limit is ${video ? MAX_VIDEO_MB : MAX_IMAGE_MB} MB.`;
+    const okType = video ? ["video/mp4", "video/quicktime"] : ["image/jpeg", "image/png", "image/webp", "image/jpg", "image/heic", "image/heif"];
+    const okExt = video ? /\.(mp4|mov)$/i : /\.(jpe?g|png|webp|heic|heif)$/i;
+    if (!okType.includes(file.type) && !(!file.type && okExt.test(file.name || ""))) return `${file.name} isn't an accepted format — use ${video ? "MP4 or MOV" : "JPEG, PNG, WEBP or HEIC"}.`;
+    return null;
+}
+export const fileKey = (f) => `${f.name}|${f.size}`;
+
 export async function confirmTask(taskId, workerId, fingerprint, ackUnverified = false) {
     const body = {};
     if (workerId) body.worker_id = workerId;

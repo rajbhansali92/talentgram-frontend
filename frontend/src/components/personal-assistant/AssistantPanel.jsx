@@ -1,16 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { toast } from "sonner";
-import { Loader2, Maximize2, Mic, Minimize2, Minus, Send, Sparkles, Volume2, VolumeX, X } from "lucide-react";
+import { Loader2, Maximize2, Mic, Minimize2, Minus, Paperclip, Send, Sparkles, Volume2, VolumeX, X } from "lucide-react";
 import {
     ACTIVE_STATUSES, ATTENTION_STATUSES, cancelCommand, cancelTask, changedPlan, clarifyTask, errorDetail, clearAssistantHistory, confirmAll, confirmTask, followUpSend,
-    getAssistantHistory, getAssistantWorkers, isTimeoutError, listAssistantTasks, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage, statusLabel,
+    fileKey, getAssistantHistory, getAssistantWorkers, isTimeoutError, listAssistantTasks, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage, statusLabel, uploadUpdateMedia,
 } from "@/lib/personalAssistant";
 import { useAssistantContext } from "@/lib/assistantContext";
 import { speak, speechOutputSupported, useSpeechInput } from "@/hooks/useSpeechInput";
 import TaskCard, { StatusChip, WorkerPicker } from "./TaskCard";
 
 const EXAMPLES = [
+    "Update Angela Kumar's age to 24",
     "Show me Angela Kumar's profile",
     "Add these selected talents to the current project",
     "Send the casting call to the selected talents",
@@ -75,6 +76,9 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const [errors, setErrors] = useState({});
     const [batchWorker, setBatchWorker] = useState("");
     const [planAck, setPlanAck] = useState({});                   // command id → the user ticked "send anyway" for an unverified group
+    const [attached, setAttached] = useState([]);                 // files the user attached BEFORE (or while) issuing a command — used only when they tap "Use"
+    const [uploadInfo, setUploadInfo] = useState({});              // task id → {name, index, total, pct} while its approved files upload
+    const localFiles = useRef(new Map());                          // `${taskId}|${category}|${name}|${size}` → File (kept in this tab only; the server holds just the approved list)
     const [workerNames, setWorkerNames] = useState({});          // worker id → registry label, only to name workers on tasks saved before labels were stored
     const workerNamesAsked = useRef(false);
     const inputRef = useRef(null);
@@ -170,7 +174,47 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
         listAssistantTasks(40).then(setTasks).catch(() => {});      // dependents of this task may have changed too
         return updated;
     });
-    const onConfirm = (t, worker, ack) => act(t.id, () => confirmTask(t.id, worker, t.fingerprint, !!ack));
+    // `update`: the server applies the approved FIELD changes, then each approved file is uploaded one by one through the existing authenticated
+    // API. A file is accepted only if it matches the approved list; the result shown is whatever the server read back, never the browser's belief.
+    const runUploads = async (task) => {
+        let cur = task;
+        const todo = [];
+        (cur.params?.updates?.media || []).forEach((m) => (m.files || []).forEach((x) => { if (["pending", "failed"].includes(x.state)) todo.push([m.category, x]); }));
+        let n = 0;
+        for (const [category, x] of todo) {
+            const f = localFiles.current.get(`${task.id}|${category}|${x.key}`);
+            if (!f) continue;
+            n += 1;
+            setUploadInfo((u) => ({ ...u, [task.id]: { name: x.name, index: n, total: todo.length, pct: 0 } }));
+            try {
+                cur = await uploadUpdateMedia(task.id, category, x.key, f, (pct) => setUploadInfo((u) => ({ ...u, [task.id]: { name: x.name, index: n, total: todo.length, pct } })));
+            } catch (err) {
+                setErrors((e) => ({ ...e, [task.id]: `${x.name}: ${errorDetail(err) || (isTimeoutError(err) ? "no answer from the server — check the result below before trying again." : "the upload failed.")}` }));
+                try { cur = (await listAssistantTasks(40)).find((t) => t.id === task.id) || cur; } catch { /* keep what we have */ }
+            }
+        }
+        setUploadInfo((u) => { const { [task.id]: _gone, ...rest } = u; return rest; });
+        return cur;
+    };
+    const onConfirm = (t, worker, ack) => act(t.id, async () => {
+        const done = await confirmTask(t.id, worker, t.fingerprint, !!ack);
+        return done.kind === "update" && done.status === "running" ? runUploads(done) : done;
+    });
+    const onRetryUploads = (t) => act(t.id, () => runUploads(t));
+    const lacksLocalFiles = (t) => t.kind === "update" && (t.params?.updates?.media || []).some((m) => (m.files || []).some((x) => ["pending", "failed"].includes(x.state) && !localFiles.current.has(`${t.id}|${m.category}|${x.key}`)));
+    const onFiles = (t, category, files, fromAttached) => act(t.id, async () => {
+        const out = await clarifyTask(t.id, { slot: `files:${category}`, files: files.map((f) => ({ name: f.name, size: f.size, type: f.type || "" })) });
+        files.forEach((f) => localFiles.current.set(`${t.id}|${category}|${fileKey(f)}`, f));
+        if (fromAttached) setAttached((a) => a.filter((f) => !files.includes(f)));
+        return out;
+    });
+    const onReselect = (t, files) => {
+        // the page was reloaded: match chosen files to the APPROVED list by name + size — anything else is ignored, never uploaded
+        let hit = 0;
+        (t.params?.updates?.media || []).forEach((m) => (m.files || []).forEach((x) => { const f = files.find((g) => fileKey(g) === x.key); if (f) { localFiles.current.set(`${t.id}|${m.category}|${x.key}`, f); hit += 1; } }));
+        if (!hit) toast.error("None of those files is on the approved list.");
+        else onRetryUploads(t);
+    };
     const onCancel = (t) => act(t.id, () => cancelTask(t.id));
     const onRetry = (t) => act(t.id, () => retryTask(t.id));
     const onFollowUp = (t, templateId) => act(t.id, () => followUpSend(t.id, templateId));
@@ -184,6 +228,9 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
         try {
             const fps = waiting.every((t) => t.fingerprint) ? Object.fromEntries(waiting.map((t) => [t.id, t.fingerprint])) : undefined;
             const results = await confirmAll(commandId, batchWorker, fps, !!ack);
+            for (const r of Object.values(results || {})) {
+                if (r?.task?.kind === "update" && r.task.status === "running") mergeTask(await runUploads(r.task));
+            }
             const held = Object.entries(results || {}).filter(([, r]) => r.error);
             setErrors((e) => ({ ...e, ...Object.fromEntries(held.map(([id, r]) => [id, r.error])) }));
             if (held.length) toast.error(`${held.length} step${held.length === 1 ? " was" : "s were"} not run — see the reason on ${held.length === 1 ? "its" : "each"} card.`);
@@ -280,7 +327,8 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                                         {m.error && failed && <button type="button" onClick={() => submit(failed.text)} className="mt-1 text-xs underline" data-testid="pa-retry-send">Retry</button>}
                                                         {ts.length > 0 && (
                                                             <div className="mt-2 space-y-2">
-                                                                {ts.map((t) => <TaskCard key={t.id} task={t} busy={!!busy[t.id]} actionError={errors[t.id]} inPlan={chained(t)} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }} />)}
+                                                                {ts.map((t) => <TaskCard key={t.id} task={t} busy={!!busy[t.id]} actionError={errors[t.id]} inPlan={chained(t)} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }}
+                                                                    attached={attached} onFiles={onFiles} uploadInfo={uploadInfo[t.id] || null} onRetryUploads={onRetryUploads} onReselect={onReselect} missingLocal={lacksLocalFiles(t)} />)}
                                                                 {isPlan && (
                                                                     <div className="rounded-xl border border-black/[0.15] p-3 bg-black/[0.02] space-y-2" data-testid="pa-plan">
                                                                         <p className="text-xs font-medium text-black/85">Plan — {waiting.length} actions. One approval covers exactly these, in this order:</p>
@@ -343,7 +391,23 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                             </div>
                         )}
                         {!speech.supported && <p className="text-[11px] text-black/45 mb-1.5" data-testid="pa-voice-unsupported">Voice input isn&apos;t available in this browser — type your command instead{typeof navigator !== "undefined" && navigator.maxTouchPoints > 0 ? ", or tap the microphone key on your keyboard to dictate" : ""}.</p>}
+                        {attached.length > 0 && (
+                            <ul className="flex flex-wrap gap-1.5 mb-1.5" data-testid="pa-attached" aria-label="Attached files">
+                                {attached.map((f) => (
+                                    <li key={`${f.name}|${f.size}|${f.lastModified}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-black/[0.05] text-[11px] text-black/70 max-w-full">
+                                        <span className="truncate max-w-[160px]">{f.name}</span>
+                                        <button type="button" aria-label={`Remove ${f.name}`} onClick={() => setAttached((a) => a.filter((x) => x !== f))} className="text-black/50 hover:text-black"><X className="w-3 h-3" /></button>
+                                    </li>
+                                ))}
+                                <li className="text-[10px] text-black/40 self-center">Say what they are for (e.g. “update Angela's introduction video”), then tap “Use attached” on the card.</li>
+                            </ul>
+                        )}
                         <div className="flex items-end gap-2">
+                            <label className="w-11 h-11 shrink-0 rounded-xl border border-black/[0.15] flex items-center justify-center text-black/70 cursor-pointer hover:border-black/40" title="Attach pictures or a video">
+                                <Paperclip className="w-4 h-4" aria-hidden />
+                                <input type="file" multiple className="sr-only" accept="image/*,video/mp4,video/quicktime,.mp4,.mov,.heic,.heif" data-testid="pa-attach" aria-label="Attach files"
+                                    onChange={(e) => { const add = Array.from(e.target.files || []); e.target.value = ""; setAttached((a) => [...a, ...add.filter((f) => !a.some((x) => x.name === f.name && x.size === f.size))].slice(0, 20)); }} />
+                            </label>
                             <textarea ref={inputRef} value={text} onChange={(e) => setText(e.target.value)} rows={1} maxLength={2000} placeholder="Type a command…" aria-label="Command"
                                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
                                 className="flex-1 min-w-0 resize-none max-h-28 border border-black/[0.12] rounded-xl px-3 py-2.5 text-base sm:text-sm focus:outline-none focus:border-black/50" />

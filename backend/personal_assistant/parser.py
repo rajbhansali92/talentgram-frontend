@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from agents.modules import casting_pipeline_nlu as nlu
+from personal_assistant import update_items
 from routers.casting_pipeline import PIPELINE_STAGE_ORDER
 
 INTENTS = ("lookup", "add", "send", "move", "list", "share", "offer_send", "unknown")
@@ -35,6 +36,7 @@ class Segment:
     template: Optional[str] = None                        # raw template phrase
     stage: Optional[str] = None                           # canonical stage key
     stage_text: Optional[str] = None                      # stage phrase that did not resolve cleanly
+    update_groups: List[dict] = field(default_factory=list)  # `update` only: [{"names", "ref", "items"}] — see update_items.parse_update
     correction: bool = False                              # the speaker corrected themselves ("…no wait, Disha"): never acted on, asked again
     stage_suggest: List[str] = field(default_factory=list)  # stages it merely RESEMBLES (spelling / sound): offered as cards, never chosen
     stage_filter: Optional[str] = None                    # "selected talents in <stage>"
@@ -45,7 +47,7 @@ class Segment:
 
 # ---------------------------------------------------------------------------------------------------------
 _SENTENCE = re.compile(r"(?<=[.!?;])\s+|\n+")
-_VERBS = r"(?:send|add|move|share|show|find|mark|put|ask|forward|get|give|list|include)"
+_VERBS = r"(?:send|add|move|share|show|find|mark|put|ask|forward|get|give|list|include|update)"
 _CONNECT = re.compile(
     r"\s*,?\s*\b(?:and\s+then|and\s+also|then|also|after\s+that|afterwards|plus)\b\s*,?\s*"
     r"|\s*,\s*(?=" + _VERBS + r"\b)"
@@ -298,6 +300,13 @@ def parse_segment(text: str) -> Segment:
     if not t:
         return seg
 
+    # update <talent>'s <profile items>   (fields / media) — see update_items. The RAW text is parsed so a pasted group name keeps its exact spacing.
+    if update_items.is_update(text):
+        groups = update_items.parse_update(text)
+        if groups:
+            seg.intent, seg.update_groups = "update", groups
+        return seg
+
     # ask whether … (follow-up question about sending — attaches to the previous add)
     if re.match(r"(?:and\s+)?(?:ask|check|prompt|remind)\b.*\b(?:send|casting|message|template)\b", low) or re.match(r"(?:and\s+)?(?:ask\s+)?(?:me\s+)?(?:whether|if)\b.*\b(?:send|casting)", low):
         seg.intent = "offer_send"
@@ -487,7 +496,7 @@ _CORRECTION = re.compile(
     r"|(?<=[A-Za-z])\s+no\s+(?=[A-Za-z])", re.I)                                  # "Doha no Disha" (speech engines drop the punctuation)
 
 
-_COMMAND_VERB = re.compile(r"\s+(?=(?:add|include|move|shift|put|send|forward|share|show|mark|list)\b)", re.I)
+_COMMAND_VERB = re.compile(r"\s+(?=(?:add|include|move|shift|put|send|forward|share|show|mark|list|update)\b)", re.I)
 
 
 def _verb_split(piece: str) -> List[str]:

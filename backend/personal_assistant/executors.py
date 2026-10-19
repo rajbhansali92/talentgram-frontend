@@ -345,6 +345,9 @@ async def run_task(user: dict, task: dict, worker_id: Optional[str]) -> dict:
             out = await _run_send(user, claimed, worker_id)
         elif kind == "share":
             out = await _run_share(user, claimed, worker_id)
+        elif kind == "update":
+            from personal_assistant import update_plan
+            out = await update_plan.run(user, claimed)
         elif kind == "lookup":
             out = {"status": S.COMPLETED, "result": await run_lookup(claimed), "error": None}
         elif kind == "list":
@@ -360,7 +363,7 @@ async def run_task(user: dict, task: dict, worker_id: Optional[str]) -> dict:
     patch = {"status": out["status"], "error": out.get("error"), "result": out.get("result"), "completed_at": S.now() if out["status"] in S.TERMINAL else None}
     if out.get("uncertain"):
         patch["uncertain"] = True
-    for k in ("outcomes", "batch_ids", "not_queued"):
+    for k in ("outcomes", "batch_ids", "not_queued", "field_outcomes"):
         if out.get(k) is not None:
             patch[k] = out[k]
     updated = await S.update_task(owner, task["id"], patch)
@@ -369,7 +372,7 @@ async def run_task(user: dict, task: dict, worker_id: Optional[str]) -> dict:
     return updated
 
 
-S_CONSEQUENTIAL = {"add", "move", "send", "share"}
+S_CONSEQUENTIAL = {"add", "move", "send", "share", "update"}
 
 
 async def stale_reason(task: dict) -> Optional[str]:
@@ -432,6 +435,8 @@ async def refresh_task(owner_id: str, task: dict) -> dict:
     A task still "running" with nothing queued after two minutes was interrupted (e.g. the API restarted mid-run):
     it is marked failed AND flagged `uncertain` — we cannot know whether it got as far as queueing — so a send is
     never blindly retried (that could message people twice)."""
+    if task["kind"] == "update":
+        return await _settle_stalled_update(owner_id, task)           # uploads run from the browser: judged by their own progress, not the 2-minute rule
     if task["status"] == S.RUNNING and not task.get("batch_ids") and _age_seconds(task.get("started_at")) > STALE_RUNNING_SEC:
         cur = await S.update_task(owner_id, task["id"], {
             "status": S.FAILED, "uncertain": True, "completed_at": S.now(),
@@ -449,6 +454,27 @@ async def refresh_task(owner_id: str, task: dict) -> dict:
         detail += f" · {len(not_queued)} not queued"
     patch = {"status": status, "outcomes": per, "status_detail": detail, "completed_at": S.now() if status in S.TERMINAL else None}
     return (await S.update_task(owner_id, task["id"], patch)) or task
+
+
+UPDATE_UPLOAD_STALL_SEC = 15 * 60
+
+
+async def _settle_stalled_update(owner_id: str, task: dict) -> dict:
+    """An approved update whose browser stopped uploading (tab closed, network gone) for 15 minutes: the files that never arrived are marked
+    failed — honestly, with the reason — and the task is settled from what is really persisted."""
+    from personal_assistant import update_plan
+    if task["status"] != S.RUNNING or _age_seconds(task.get("updated_at")) <= UPDATE_UPLOAD_STALL_SEC:
+        return task
+    u = task["params"]["updates"]
+    for m in u["media"]:
+        for x in m["files"]:
+            if x["state"] in ("pending", "uploading"):
+                x["state"], x["error"] = "failed", "The upload never finished (the page was closed or the connection was lost). Select the file again."
+    task["params"]["updates"] = u
+    res = update_plan.settle(task)
+    patch = {"params.updates": u, "status": res["status"], "result": res["result"], "error": res["error"], "outcomes": res["outcomes"],
+             "completed_at": S.now() if res["status"] in S.TERMINAL else None}
+    return (await S.update_task(owner_id, task["id"], patch, only_status=[S.RUNNING])) or task
 
 
 async def cancel_task(user: dict, task: dict) -> dict:
@@ -481,6 +507,8 @@ async def retry_task(user: dict, task: dict) -> dict:
     owner = user["id"]
     if task["status"] not in (S.FAILED, S.PARTIAL):
         raise HTTPException(409, "Only failed or partially completed tasks can be retried.")
+    if task["kind"] == "update":
+        raise HTTPException(409, "To redo an update, ask me again — a failed upload can be retried from its card while the page is open.")
     if task.get("uncertain") and task["kind"] in ("send", "share"):
         raise HTTPException(409, "I can't tell whether this was queued before it was interrupted. Check WhatsApp Engine → campaign history for this project first; if nothing went out, ask me again.")
     if not task.get("batch_ids"):

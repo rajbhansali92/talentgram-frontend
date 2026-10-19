@@ -13,6 +13,7 @@ Stage vocabulary is the existing casting-pipeline NLU's (shorthand, fuzzy, live 
 """
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -34,6 +35,8 @@ class Segment:
     template: Optional[str] = None                        # raw template phrase
     stage: Optional[str] = None                           # canonical stage key
     stage_text: Optional[str] = None                      # stage phrase that did not resolve cleanly
+    correction: bool = False                              # the speaker corrected themselves ("…no wait, Disha"): never acted on, asked again
+    stage_suggest: List[str] = field(default_factory=list)  # stages it merely RESEMBLES (spelling / sound): offered as cards, never chosen
     stage_filter: Optional[str] = None                    # "selected talents in <stage>"
     lookup: Optional[str] = None                          # profile|media_link|media|history|projects|submissions|tested|find
     recipient: Optional[dict] = None                      # {"kind": number|project_group|casting_director, "value": ...}
@@ -401,15 +404,54 @@ def _after_prep(text: str) -> Optional[str]:
     return m.group("p") if m else None
 
 
+def _exact_stage(phrase: str) -> Optional[str]:
+    """The stage a phrase NAMES — same words ignoring case / hyphen / underscore ("follow-up" = "Follow Up"), or a registered shorthand
+    ("approve"). No fuzzy matching: this is what may be applied without asking."""
+    registry = nlu.build_stage_registry(PIPELINE_STAGE_ORDER)
+    return registry.get(re.sub(r"\s+", " ", re.sub(r"[-_]", " ", (phrase or "").lower())).strip())
+
+
+def _exact_stage_in(text: str) -> Optional[str]:
+    words = re.findall(r"[A-Za-z][A-Za-z']*", text or "")
+    for n in (3, 2, 1):
+        for i in range(len(words) - n + 1):
+            k = _exact_stage(" ".join(words[i:i + n]))
+            if k:
+                return k
+    return None
+
+
+def stage_resembles(phrase: str) -> List[str]:
+    """Stages a phrase merely looks or sounds like — the nearest first. Used to PROPOSE cards for a stage that was not named exactly."""
+    from personal_assistant import phonetic
+    registry = nlu.build_stage_registry(PIPELINE_STAGE_ORDER)
+    key = re.sub(r"\s+", " ", re.sub(r"[-_]", " ", (phrase or "").lower())).strip()
+    out: List[str] = []
+    for c in difflib.get_close_matches(key, list(registry.keys()), n=4, cutoff=0.6):
+        out.append(registry[c])
+    compact = key.replace(" ", "")
+    for st in PIPELINE_STAGE_ORDER:
+        if phonetic.similarity(compact, st.replace("_", "")) >= phonetic.PHON_MIN:
+            out.append(st)
+    return list(dict.fromkeys(out))[:3]
+
+
 def _stage_and_project(rest: str, seg: Segment) -> None:
     key, amb, remaining = nlu.extract_stage_phrase(rest, PIPELINE_STAGE_ORDER)
-    if key:
+    if key and _exact_stage_in(rest) != key:
+        # found only through a spelling correction: never applied silently — a move into the wrong stage is a real change
+        seg.stage_text = _norm_space(" ".join(w for w in rest.split() if w.lower().strip(",.") not in remaining.lower().split())) or _norm_space(rest)
+        seg.stage_suggest = list(dict.fromkeys([key] + stage_resembles(seg.stage_text)))[:3]
+    elif key:
         seg.stage = key
     else:
         first = re.split(r"\s+(?:in|for|on)\s+", rest, maxsplit=1)[0]
         m = nlu.match_stage_phrase(first, PIPELINE_STAGE_ORDER)
-        seg.stage = m.key
-        seg.stage_text = None if m.key else _norm_space(first)
+        if m.key and _exact_stage(first) == m.key:
+            seg.stage = m.key
+        else:
+            seg.stage_text = _norm_space(first)
+            seg.stage_suggest = list(dict.fromkeys(([m.key] if m.key else []) + stage_resembles(first)))[:3]
         remaining = rest[len(first):]
     _project(_after_prep(remaining) or (remaining if re.search(r"\b(?:current|this)\s+project\b", remaining, re.I) else None), seg)
 
@@ -432,15 +474,26 @@ def _follow_up_share(seg: Segment, prev: Optional[Segment]) -> Optional[Segment]
     return out
 
 
+# Spoken hesitations are noise; a spoken CORRECTION is not — "move Doha Kumar, no wait, Disha Kumar" contains two names and no way to
+# know which one was meant, so neither is acted on (the clause before the correction is held too) and the user is asked to say it once.
+_FILLER = re.compile(r"(?<![\w'])(?:um+|uhm+|uh+|erm+|hmm+)(?![\w'])[,.]?\s*", re.I)
+_CORRECTION = re.compile(r"\b(?:no\s*,?\s*wait|wait\s*,?\s*no|i\s+mean(?:t)?|sorry|scratch\s+that|correction|make\s+that|or\s+rather|actually)\b", re.I)
+
+
 def parse_message(message: str) -> List[Segment]:
     """Split a message into ordered segments and parse each. Empty input → []."""
-    text = (message or "").strip()
+    text = _FILLER.sub("", (message or "")).strip()
     if not text:
         return []
     out: List[Segment] = []
     for sentence in _SENTENCE.split(text):
         for piece in _CONNECT.split(sentence):
             piece = (piece or "").strip()
+            if piece and re.search(r"[A-Za-z0-9]", piece) and _CORRECTION.search(piece):
+                if out and out[-1].intent != "unknown":
+                    out[-1] = Segment(text=out[-1].text, intent="unknown", correction=True)      # the clause being corrected is held as well
+                out.append(Segment(text=piece, intent="unknown", correction=True))
+                continue
             if piece and re.search(r"[A-Za-z0-9]", piece):
                 seg = parse_segment(piece)
                 follow = _follow_up_share(seg, out[-1] if out else None) if seg.intent in ("send", "unknown") else None

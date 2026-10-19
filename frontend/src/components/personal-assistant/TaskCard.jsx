@@ -66,7 +66,8 @@ function ClarifySlot({ slot, busy, onPick, command }) {
                                         {sub && <span className="block text-[11px] text-black/50 truncate">{sub}</span>}
                                     </span>
                                     <span className="shrink-0 flex flex-col items-end gap-0.5">
-                                        {o.best && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200" data-testid={`pa-best-${o.id}`}>Best match</span>}
+                                        {o.best && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200" data-testid={`pa-best-${o.id}`}>{o.in_project && slot.kind === "talent" ? "In this project" : "Best match"}</span>}
+                                        {o.match === "sounds_like" && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-800 border border-violet-200" data-testid={`pa-sounds-${o.id}`}>Sounds similar</span>}
                                         {chip && <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${o.status === "ongoing" ? "bg-sky-50 text-sky-800 border-sky-200" : "bg-black/[0.04] text-black/60 border-black/10"}`}>{chip}</span>}
                                         {on && <span className="text-[10px] text-black/70 inline-flex items-center gap-1"><Check className="w-3 h-3" aria-hidden /> Selected</span>}
                                     </span>

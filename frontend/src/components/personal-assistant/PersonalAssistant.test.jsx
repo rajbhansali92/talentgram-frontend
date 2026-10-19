@@ -812,6 +812,35 @@ describe("destination group evidence (2026-10-19)", () => {
     });
 });
 
+describe("name candidates (2026-10-19)", () => {
+    const cards = (opts, kind = "talent") => task({ id: "m1", kind: "move", status: "needs_clarification", title: "Move Doha Kumar to Approved", summary: [],
+        slots: [{ key: "talent:0", kind, prompt: 'Which "Doha Kumar" did you mean?', options: opts }] });
+    const show = async (t) => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "1", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("move doha"); fireEvent.click(screen.getByTestId("pa-send")); return screen.findByTestId("pa-task-m1");
+    };
+
+    it("a name that only SOUNDS like what was said is labelled, never flagged as the best match", async () => {
+        const el = await show(cards([{ id: "t1", label: "Disha Kumar", sublabel: "27y", match: "sounds_like" }, { id: "t2", label: "Dasha Kumar", sublabel: "29y", match: "sounds_like" }]));
+        expect(within(el).getByTestId("pa-sounds-t1").textContent).toBe("Sounds similar");
+        expect(within(el).getByTestId("pa-sounds-t2")).toBeTruthy();
+        expect(within(el).queryByTestId("pa-best-t1")).toBeNull();
+        expect(within(el).getByTestId("pa-identify-head").textContent).toMatch(/Who do you mean\?/);
+        expect(adminApi.post.mock.calls.filter((c) => /confirm|clarify/.test(c[0]))).toHaveLength(0);          // showing the candidates changed nothing
+    });
+
+    it("a same-named talent already in the named project is proposed as 'In this project', and a looks-like stage is proposed first", async () => {
+        const el = await show(cards([{ id: "p2", label: "Priya Nair", sublabel: "In Sebamed's pipeline · Shortlisted · 33y", match: "exact", best: true, in_project: true }, { id: "p1", label: "Priya Nair", sublabel: "24y", match: "exact" }]));
+        expect(within(el).getByTestId("pa-best-p2").textContent).toBe("In this project");
+        expect(within(el).queryByTestId("pa-best-p1")).toBeNull();
+        cleanup();
+        const st = await show(task({ id: "m1", kind: "move", status: "needs_clarification", title: "Move", summary: [],
+            slots: [{ key: "stage", kind: "stage", prompt: 'Which pipeline stage did you mean by "Improved"?', options: [{ id: "approved", label: "Approved", sublabel: "", best: true }, { id: "hold", label: "Hold", sublabel: "" }] }] }));
+        expect(within(st).getByTestId("pa-best-approved").textContent).toBe("Best match");
+        expect(within(st).getByTestId("pa-identify-head").textContent).toMatch(/Which stage\?/);
+    });
+});
+
 describe("live reply line", () => {
     const t = (status) => ({ status });
     it("is recomputed from the tasks' current statuses, so it never says 'needs your pick' after the pick", () => {

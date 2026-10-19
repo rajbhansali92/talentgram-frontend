@@ -190,7 +190,7 @@ async def _apply_text(task: dict, slot: str, text: str) -> bool:
         i = int(idx) if idx.isdigit() else -1
         if not (0 <= i < len(p.get("talents") or [])):
             return False
-        p["talents"][i] = P._entry(text, await R.resolve_talent(text))
+        p["talents"][i] = P._entry(text, await R.resolve_talent(text, [e["id"] for e in p.get("projects") or [] if e.get("state") == "resolved" and e.get("id")]))
         return True
     if kind == "project":
         i = int(idx) if idx.isdigit() else -1
@@ -210,8 +210,10 @@ async def _apply_text(task: dict, slot: str, text: str) -> bool:
             p["template_options"] = r.get("options") or []
         return True
     if kind == "stage":
-        m = nlu.match_stage_phrase(text, PIPELINE_STAGE_ORDER)
-        p["stage"], p["stage_text"] = m.key, None if m.key else text
+        from personal_assistant.parser import _exact_stage, stage_resembles
+        exact = _exact_stage(text)
+        p["stage"], p["stage_text"] = exact, None if exact else text
+        p["stage_suggest"] = [] if exact else stage_resembles(text)          # a typed stage that merely resembles one is proposed, not applied
         return True
     return False
 

@@ -68,8 +68,11 @@ def compute_slots(task: dict) -> List[dict]:
                       "options": p.get("template_options") or [],
                       "prompt": "Which template should I send?" if not p.get("template_phrase") else f'Which template did you mean by "{p["template_phrase"]}"?'})
     if task["kind"] == "move" and not p.get("stage"):
-        slots.append({"key": "stage", "kind": "stage", "phrase": p.get("stage_text") or "", "options": STAGE_OPTIONS,
-                      "prompt": "Which pipeline stage?"})
+        sug = p.get("stage_suggest") or []
+        opts = sorted(({**o, "best": True} if o["id"] == (sug[0] if sug else None) and len(sug) == 1 else {**o, "sublabel": "Looks like what you said"} if o["id"] in sug else o for o in STAGE_OPTIONS),
+                      key=lambda o: 0 if o["id"] in sug else 1)
+        slots.append({"key": "stage", "kind": "stage", "phrase": p.get("stage_text") or "", "options": opts,
+                      "prompt": f'Which pipeline stage did you mean by "{p["stage_text"]}"?' if p.get("stage_text") else "Which pipeline stage?"})
     return slots
 
 
@@ -435,12 +438,12 @@ async def _project_entries(seg: Segment, kind: str, prev: Optional[dict], ctx_pr
     return [{"phrase": "", "state": "none", "options": options, "prompt": "Which project?"}], None
 
 
-async def _talent_entries(seg: Segment, prev: Optional[dict], context: dict) -> tuple[List[dict], Optional[str]]:
+async def _talent_entries(seg: Segment, prev: Optional[dict], context: dict, project_ids: Optional[List[str]] = None) -> tuple[List[dict], Optional[str]]:
     if seg.talent_ref == "ask":
         return [{"phrase": "", "state": "none", "prompt": "Which talents do you mean by “these other talents”? Type their names — I won't reuse the selection on screen for that."}], None
     if seg.talents:
         names = seg.talents[:MAX_NAMES]
-        res = await asyncio.gather(*[R.resolve_talent(n) for n in names])
+        res = await asyncio.gather(*[R.resolve_talent(n, project_ids) for n in names])
         return [_entry(n, r) for n, r in zip(names, res)], None
     if seg.talent_ref == "previous" and prev:
         return copy.deepcopy(prev["params"].get("talents") or []), prev["id"]
@@ -470,24 +473,26 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
                 prev["params"]["offer_send"] = True
             continue
         if seg.intent == "unknown":
-            unrecognised.append(seg.text)
+            unrecognised.append(seg.text + (" — it contains a correction, so I did not act on it; please say it once, with the name you want" if seg.correction else ""))
             continue
         kind = seg.intent
         t = _base_task(owner_id, command_id, len(tasks), kind, seg)
         p = t["params"]
         if seg.worker_hint:
             p["worker_hint"] = seg.worker_hint
+        if kind in ("add", "send", "move", "list") or (kind == "share" and ((seg.recipient or {}).get("kind") == "project_group")):
+            # projects first: the project named in THIS clause is context for telling similar talent names apart (cards only — it never chooses)
+            p["projects"], pfrom = await _project_entries(seg, kind, prev, ctx_project, projects)
+            if pfrom:
+                p["projects_from"] = pfrom
         if kind in ("add", "send", "move", "share", "lookup"):
-            p["talents"], origin = await _talent_entries(seg, prev, context)
+            ctx_pids = [e["id"] for e in p.get("projects") or [] if e.get("state") == "resolved" and e.get("id")]
+            p["talents"], origin = await _talent_entries(seg, prev, context, ctx_pids)
             if origin:
                 p["talents_from"] = origin
                 t["depends_on"] = [origin] if (prev and prev["kind"] in ("add",) and kind in ("send", "move")) else []
             if seg.stage_filter:
                 p["stage_filter"] = seg.stage_filter
-        if kind in ("add", "send", "move", "list") or (kind == "share" and ((seg.recipient or {}).get("kind") == "project_group")):
-            p["projects"], pfrom = await _project_entries(seg, kind, prev, ctx_project, projects)
-            if pfrom:
-                p["projects_from"] = pfrom
         if kind == "send":
             r = await R.resolve_template(seg.template, templates)
             p["template_phrase"], p["template_state"] = seg.template or "", r["state"]
@@ -497,6 +502,8 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
                 p["template_options"] = r.get("options") or []
         if kind == "move" or kind == "list":
             p["stage"], p["stage_text"] = seg.stage, seg.stage_text
+            if seg.stage_suggest:
+                p["stage_suggest"] = list(seg.stage_suggest)
         if kind in ("lookup", "share"):
             p["lookup"] = seg.lookup
         if kind == "share":

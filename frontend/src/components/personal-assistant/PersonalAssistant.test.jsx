@@ -545,274 +545,6 @@ describe("honest wording and failure handling", () => {
     });
 });
 
-describe("voice input", () => {
-    const setPermission = (state) => {
-        Object.defineProperty(navigator, "permissions", { configurable: true, value: state === "throws" ? { query: () => Promise.reject(new Error("unsupported")) } : state ? { query: vi.fn(() => Promise.resolve({ state })) } : undefined });
-    };
-    const resetEnv = () => {
-        setPermission(undefined);
-        Object.defineProperty(window, "isSecureContext", { configurable: true, value: true });
-        Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 });
-    };
-    beforeEach(resetEnv);
-    afterEach(() => { resetEnv(); vi.useRealTimers(); });
-
-    function fakeRecognition() {
-        const inst = { starts: 0 };
-        window.webkitSpeechRecognition = function Rec() {
-            Object.assign(this, { start: vi.fn(() => { inst.starts += 1; }), stop: vi.fn(), abort: vi.fn() });
-            inst.rec = this;
-        };
-        return inst;
-    }
-    const result = (...parts) => ({ resultIndex: 0, results: parts.map(([t, isFinal]) => Object.assign([{ transcript: t }], { isFinal })) });
-    const tapMic = async () => { fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => {}); };
-    const say = (inst, ...parts) => act(() => { inst.rec.onresult(result(...parts)); });
-    const end = (inst) => act(() => { inst.rec.onend(); });
-
-    it("says plainly when the browser has no speech recognition, and the text box still works", async () => {
-        server();
-        mount(); await open();
-        expect(screen.getByTestId("pa-voice-unsupported")).toBeTruthy();
-        expect(screen.getByTestId("pa-mic").disabled).toBe(true);
-        type("Find Angela");
-        expect(screen.getByTestId("pa-send").disabled).toBe(false);
-    });
-
-    it("a touch device without speech recognition is pointed at the keyboard's own dictation key", async () => {
-        Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 5 });
-        server(); mount(); await open();
-        expect(screen.getByTestId("pa-voice-unsupported").textContent).toMatch(/microphone key on your keyboard/i);
-    });
-
-    it("tap shows 'Starting…' until the browser reports audio, then Listening; the words go in the text box for review and are NOT sent", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        expect(inst.starts).toBe(1);
-        expect(screen.getByTestId("pa-listening").textContent).toMatch(/starting microphone/i);
-        expect(inst.rec.continuous).toBe(false);                                   // push-to-talk, never continuous
-        act(() => { inst.rec.onstart(); });
-        expect(screen.getByTestId("pa-listening").textContent).toMatch(/listening/i);
-        await say(inst, ["show me angela kumar's profile", true]);
-        await end(inst);
-        expect(screen.getByLabelText("Command").value).toBe("show me angela kumar's profile");
-        expect(posts("/message")).toHaveLength(0);                                 // the user reviews / edits, then sends
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
-    });
-
-    it("keeps what was already typed and appends the transcript once, however many end/stop events arrive", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        type("Move");
-        await tapMic();
-        act(() => { inst.rec.onstart(); });
-        await say(inst, ["Vidushi Tiwari to hold", true]);
-        const rec = inst.rec;
-        await end(inst);
-        act(() => { rec.onend?.(); rec.onend?.(); });                              // late / repeated events from the finished session
-        expect(screen.getByLabelText("Command").value).toBe("Move Vidushi Tiwari to hold");
-    });
-
-    it("a result list that is re-sent in full (some engines do) does not duplicate words, and the whole utterance is kept", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        act(() => { inst.rec.onstart(); });
-        await say(inst, ["send the casting for sebamed", false]);
-        await say(inst, ["send the casting for sebamed testimonial film", false]);
-        await say(inst, ["send the casting for sebamed testimonial film and trend film with kripa trivedi", true]);
-        await end(inst);
-        expect(screen.getByLabelText("Command").value).toBe("send the casting for sebamed testimonial film and trend film with kripa trivedi");
-    });
-
-    it("words that were only ever interim (no final event before the engine stopped) are still delivered", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        act(() => { inst.rec.onstart(); });
-        await say(inst, ["add neha to pepsi", false]);
-        await end(inst);
-        expect(screen.getByLabelText("Command").value).toBe("add neha to pepsi");
-    });
-
-    it("tapping again stops listening, and a stop that never produces an end event is forced after a moment (no stuck spinner) while keeping the words", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();                                                     // real timers while the UI mounts…
-        vi.useFakeTimers();                                                        // …fake ones only for the voice session's own clocks
-        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
-        act(() => { inst.rec.onstart(); inst.rec.onresult(result(["find angela", true])); });
-        fireEvent.click(screen.getByTestId("pa-mic"));
-        expect(inst.rec.stop).toHaveBeenCalled();
-        expect(screen.getByTestId("pa-listening")).toBeTruthy();                   // still waiting for the engine's end event…
-        await act(async () => { await vi.advanceTimersByTimeAsync(2600); });       // …which never comes
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
-        expect(screen.getByLabelText("Command").value).toBe("find angela");
-        expect(screen.getByTestId("pa-mic").disabled).toBe(false);                 // usable again
-    });
-
-    it("never hangs on 'Starting…': no start event within the limit → back to idle with a message and the mic usable again", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();                                                     // real timers while the UI mounts…
-        vi.useFakeTimers();                                                        // …fake ones only for the voice session's own clocks
-        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
-        expect(screen.getByTestId("pa-listening")).toBeTruthy();
-        await act(async () => { await vi.advanceTimersByTimeAsync(8100); });
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
-        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/didn't start/i);
-        expect(inst.rec.abort).toHaveBeenCalled();
-        expect(screen.getByTestId("pa-mic").disabled).toBe(false);
-    });
-
-    it("stops by itself after the maximum listening time and still hands over the words", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();                                                     // real timers while the UI mounts…
-        vi.useFakeTimers();                                                        // …fake ones only for the voice session's own clocks
-        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
-        act(() => { inst.rec.onstart(); inst.rec.onresult(result(["list ask to test", true])); });
-        await act(async () => { await vi.advanceTimersByTimeAsync(30100); });
-        expect(inst.rec.stop).toHaveBeenCalled();
-        await act(async () => { await vi.advanceTimersByTimeAsync(2600); });
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
-        expect(screen.getByLabelText("Command").value).toBe("list ask to test");
-    });
-
-    it("the browser reporting the microphone DENIED for this site never starts recognition and names the site (permissions are per website)", async () => {
-        setPermission("denied");
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        expect(inst.starts).toBe(0);
-        const msg = screen.getByTestId("pa-voice-error").textContent;
-        expect(msg).toContain(window.location.host);
-        expect(msg).toMatch(/site settings/i);
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
-        expect(screen.getByTestId("pa-mic").disabled).toBe(false);
-    });
-
-    it("not-allowed while the site IS allowed is reported as a refusal of speech (OS setting / other app) — not 'blocked in site settings'", async () => {
-        setPermission("granted");
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        expect(inst.starts).toBe(1);                                               // permission is fine, so recognition is attempted
-        act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
-        const msg = screen.getByTestId("pa-voice-error").textContent;
-        expect(msg).toMatch(/allowed for/i);
-        expect(msg).toMatch(/still refused/i);
-        expect(msg).toMatch(/privacy setting/i);
-        expect(msg).not.toMatch(/is blocked for/i);
-    });
-
-    it("not-allowed with an unknown permission state (Safari/Firefox have no microphone query) says it can't tell and names the site", async () => {
-        setPermission("throws");
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
-        const msg = screen.getByTestId("pa-voice-error").textContent;
-        expect(msg).toContain(window.location.host);
-        expect(msg).toMatch(/site settings/i);
-    });
-
-    it.each([["no-speech", /didn't hear/i], ["network", /network/i], ["audio-capture", /No working microphone/i], ["service-not-allowed", /speech service refused/i], ["language-not-supported", /language/i], ["weird-new-code", /stopped unexpectedly/i]])("handles the %s error with its own message, returns to idle and keeps the keyboard fallback", async (code, re) => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        type("typed before");
-        await tapMic();
-        act(() => { inst.rec.onerror({ error: code }); inst.rec.onend?.(); });
-        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(re);
-        expect(screen.getByTestId("pa-voice-error").textContent).not.toMatch(/blocked/i);          // unrelated failures are not "permission blocked"
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
-        expect(screen.getByLabelText("Command").value).toBe("typed before");                      // nothing lost
-        expect(screen.getByTestId("pa-mic").disabled).toBe(false);
-    });
-
-    it("an aborted recognition is silent (no error) and keeps what was heard", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        act(() => { inst.rec.onstart(); });
-        await say(inst, ["add riya", true]);
-        act(() => { inst.rec.onerror({ error: "aborted" }); inst.rec.onend?.(); });
-        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
-        expect(screen.getByLabelText("Command").value).toBe("add riya");
-    });
-
-    it("an insecure (non-https) page says why voice can't work instead of failing silently", async () => {
-        Object.defineProperty(window, "isSecureContext", { configurable: true, value: false });
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        expect(inst.starts).toBe(0);
-        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/secure/i);
-    });
-
-    it("a recognition object that throws on start is reported and leaves the UI idle", async () => {
-        server();
-        window.webkitSpeechRecognition = function Rec() { this.start = () => { throw new Error("InvalidStateError"); }; this.abort = vi.fn(); this.stop = vi.fn(); };
-        mount(); await open();
-        await tapMic();
-        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/couldn't start/i);
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
-    });
-
-    it("closing or minimising the panel aborts a microphone session (it must not keep listening with nothing on screen)", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        act(() => { inst.rec.onstart(); });
-        fireEvent.click(screen.getByTestId("pa-minimize"));
-        expect(inst.rec.abort).toHaveBeenCalled();
-        fireEvent.click(screen.getByTestId("pa-minimize"));
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
-        await tapMic();                                                            // and it can start a fresh session
-        expect(inst.starts).toBe(2);
-        fireEvent.click(screen.getByTestId("pa-close"));
-        expect(inst.rec.abort).toHaveBeenCalled();
-    });
-
-    it("unmounting while listening aborts the session and a late result is ignored", async () => {
-        server();
-        const inst = fakeRecognition();
-        const { unmount } = mount(); await open();
-        await tapMic();
-        act(() => { inst.rec.onstart(); });
-        const rec = inst.rec;
-        unmount();
-        expect(rec.abort).toHaveBeenCalled();
-        expect(() => rec.onresult?.(result(["late words", true]))).not.toThrow();
-    });
-
-    it("spoken text goes through the normal command path only when the user sends it (no automatic action)", async () => {
-        server();
-        const inst = fakeRecognition();
-        mount(); await open();
-        await tapMic();
-        act(() => { inst.rec.onstart(); });
-        await say(inst, ["send the casting call to the selected talents", true]);
-        await end(inst);
-        expect(posts("/message")).toHaveLength(0);
-        fireEvent.click(screen.getByTestId("pa-send"));
-        await waitFor(() => expect(posts("/message")).toHaveLength(1));
-        expect(posts("/message")[0][1].text).toBe("send the casting call to the selected talents");
-    });
-});
-
 describe("entity resolution cards (2026-10-19)", () => {
     const slot = (over = {}) => ({ key: "talent:0", kind: "talent", phrase: "Vidushi Tiwari", prompt: 'Which "Vidushi Tiwari" did you mean?', options: [
         { id: "v1", label: "Viidushi Tiwari", sublabel: "26y · 5'5\" · Mumbai, India · @viid", thumb: null, best: true, match: "close" }], ...over });
@@ -969,54 +701,464 @@ describe("live reply line", () => {
     });
 });
 
-describe("voice input — the 'blocked although allowed' bug and platform specifics (2026-10-20)", () => {
-    // Root cause reproduced for real in Chromium: with `Permissions-Policy: microphone=()` the DOCUMENT may not use the
-    // microphone, so document.featurePolicy.allowsFeature("microphone") is false, permissions.query says "denied" and
-    // getUserMedia throws NotAllowedError — whatever the user allowed in the site settings.
+
+// ================================================================================================================================
+// Voice input — TAP TO START, TAP TO STOP (2026-10-20). A session is the user's intention to listen; the browser's recognition
+// ending by itself (silence, a pause, a service limit) must not end it, and every word captured must arrive exactly once.
+// All browser behaviour here is MOCKED (SpeechRecognition, Permissions API, timers): deterministic, but not proof of real devices.
+// ================================================================================================================================
+describe("voice input — tap to start, tap to stop", () => {
     const setPolicy = (allowed) => Object.defineProperty(document, "featurePolicy", { configurable: true, value: allowed === undefined ? undefined : { allowsFeature: (f) => (f === "microphone" ? allowed : true) } });
     const setPerm = (state) => Object.defineProperty(navigator, "permissions", { configurable: true, value: state ? { query: vi.fn(() => Promise.resolve({ state })) } : undefined });
     const setUA = (ua, extra = {}) => { Object.defineProperty(navigator, "userAgent", { configurable: true, value: ua }); Object.entries(extra).forEach(([k, v]) => Object.defineProperty(navigator, k, { configurable: true, value: v })); };
     const REAL_UA = navigator.userAgent;
-    beforeEach(() => { setPolicy(undefined); setPerm(undefined); Object.defineProperty(window, "isSecureContext", { configurable: true, value: true }); Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 }); setUA(REAL_UA, { standalone: undefined }); });
-    afterEach(() => { setPolicy(undefined); setPerm(undefined); setUA(REAL_UA, { standalone: undefined }); vi.useRealTimers(); });
+    const reset = () => { setPolicy(undefined); setPerm(undefined); Object.defineProperty(window, "isSecureContext", { configurable: true, value: true }); Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 }); setUA(REAL_UA, { standalone: undefined }); };
+    beforeEach(reset);
+    afterEach(() => { reset(); vi.useRealTimers(); });
 
-    function fakeRec() {
-        const inst = { starts: 0, made: 0 };
-        window.webkitSpeechRecognition = function Rec() { inst.made += 1; Object.assign(this, { start: vi.fn(() => { inst.starts += 1; }), stop: vi.fn(), abort: vi.fn() }); inst.rec = this; };
+    // every recognition object the app creates is recorded: a restart makes a NEW one (inst.all[1], …)
+    function fakeRecognition() {
+        const inst = { all: [], get rec() { return this.all[this.all.length - 1]; } };
+        window.webkitSpeechRecognition = function Rec() { Object.assign(this, { start: vi.fn(), stop: vi.fn(), abort: vi.fn() }); inst.all.push(this); };
         return inst;
     }
-    const tap = async () => { fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => {}); };
+    const results = (...parts) => ({ resultIndex: 0, results: parts.map(([t, isFinal]) => Object.assign([{ transcript: t }], { isFinal })) });
+    const mic = () => screen.getByTestId("pa-mic");
+    const tap = async () => { fireEvent.click(mic()); await act(async () => {}); };
+    const begin = async (inst) => { await tap(); act(() => { inst.rec.onstart(); }); };               // tap → the engine reports audio
+    const hear = (rec, ...parts) => act(() => { rec.onresult(results(...parts)); });
+    const engineEnds = (rec) => act(() => { rec.onend?.(); });
+    const input = () => screen.getByLabelText("Command").value;
+    // timers: mount with REAL timers (RTL waits), then fake ones only for the voice clocks
+    const mountFake = async () => { server(); const inst = fakeRecognition(); mount(); await open(); vi.useFakeTimers(); return inst; };
+    const advance = (ms) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 
-    it("a page whose security policy disables the microphone is reported as THAT (a site setup problem) — not as the user's permission — and recognition is never attempted", async () => {
-        setPolicy(false); setPerm("denied");                                         // exactly what Chrome reported on production
-        server(); const inst = fakeRec(); mount(); await open();
+    // ------------------------------------------------------------------------------------------------ 1. the toggle
+    it("first tap starts listening and the button says so; the second tap stops it, the engine's last words arrive, and the text lands in the box", async () => {
+        server(); const inst = fakeRecognition(); mount(); await open();
+        expect(mic().getAttribute("aria-label")).toBe("Start voice input");
         await tap();
-        const msg = screen.getByTestId("pa-voice-error").textContent;
-        expect(inst.made).toBe(0);
-        expect(msg).toMatch(/security settings/i);
-        expect(msg).toMatch(/our side/i);
-        expect(msg).not.toMatch(/site settings|lock icon|blocked for/i);               // it must NOT tell the user to change a setting that is already Allow
-        expect(screen.getByTestId("pa-voice-diag").textContent).toMatch(/page policy blocked by site policy/);
-        expect(screen.getByTestId("pa-mic").disabled).toBe(false);                   // recoverable
+        expect(inst.all).toHaveLength(1);
+        expect(inst.rec.start).toHaveBeenCalledTimes(1);
+        expect(inst.rec.continuous).toBe(true);                                         // keeps listening through pauses where supported
+        expect(screen.getByTestId("pa-listening").textContent).toMatch(/starting microphone/i);
+        act(() => { inst.rec.onstart(); });
+        expect(mic().getAttribute("aria-label")).toBe("Listening — tap to stop");
+        expect(mic().getAttribute("aria-pressed")).toBe("true");
+        expect(screen.getByTestId("pa-state").textContent).toMatch(/Listening — tap the mic to stop/);
+        hear(inst.rec, ["show me angela kumar's profile", true]);
+        fireEvent.click(mic());                                                           // the intentional stop
+        expect(inst.rec.stop).toHaveBeenCalledTimes(1);
+        expect(mic().getAttribute("aria-label")).toMatch(/Finishing transcript/);
+        expect(mic().disabled).toBe(false);                                               // never a button that cannot be used to stop
+        expect(input()).toBe("");                                                         // nothing yet: still waiting for the engine's last words
+        engineEnds(inst.rec);
+        expect(input()).toBe("show me angela kumar's profile");
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(mic().getAttribute("aria-label")).toBe("Start voice input");
+        expect(posts("/message")).toHaveLength(0);                                        // never sent by itself
     });
 
-    it("policy allows + Chrome says Allow + recognition still refused → NOT 'grant permission again': it says the browser/OS refused speech", async () => {
-        setPolicy(true); setPerm("granted");
-        server(); const inst = fakeRec(); mount(); await open();
+    it("a second tap while it is finishing delivers what has been captured right away (it can always be stopped)", async () => {
+        server(); const inst = fakeRecognition(); mount(); await open();
+        await begin(inst);
+        hear(inst.rec, ["add neha to pepsi", true]);
+        fireEvent.click(mic());                                                           // stop requested; the engine is slow to say `end`
+        fireEvent.click(mic());                                                           // impatient second tap
+        expect(input()).toBe("add neha to pepsi");
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        engineEnds(inst.rec);                                                             // the engine's late end changes nothing
+        expect(input()).toBe("add neha to pepsi");
+    });
+
+    it("tapping while it is still starting cancels it cleanly; the next tap starts one fresh session", async () => {
+        let release;
+        Object.defineProperty(navigator, "permissions", { configurable: true, value: { query: () => new Promise((r) => { release = () => r({ state: "granted" }); }) } });
+        server(); const inst = fakeRecognition(); mount(); await open();
+        fireEvent.click(mic());                                                           // starting… (waiting on the permission query)
+        fireEvent.click(mic());                                                           // cancel
+        await act(async () => { release(); });
+        expect(inst.all).toHaveLength(0);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        Object.defineProperty(navigator, "permissions", { configurable: true, value: undefined });
         await tap();
-        expect(inst.starts).toBe(1);
+        expect(inst.all).toHaveLength(1);
+    });
+
+    // ------------------------------------------------------------------------------------------------ 2. pauses
+    it("a long pause never ends an active session: minutes of silence → still listening, nothing stopped, no error, nothing restarted", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["add these talents", true]);
+        await advance(90_000);                                                            // the user is thinking for a minute and a half
+        expect(screen.getByTestId("pa-listening")).toBeTruthy();
+        expect(inst.rec.stop).not.toHaveBeenCalled();
+        expect(inst.all).toHaveLength(1);
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+        expect(mic().getAttribute("aria-label")).toBe("Listening — tap to stop");
+        expect(screen.getByTestId("pa-live-text").textContent).toBe("add these talents");     // and the live preview still shows what was captured
+    });
+
+    it("the start watchdog only reports a genuine failure to START: once audio has begun it can never end the session", async () => {
+        const inst = await mountFake();
+        await begin(inst);                                                                // onstart arrived
+        await advance(20_000);                                                            // well past the 8 s start limit
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+        expect(screen.getByTestId("pa-listening")).toBeTruthy();
+    });
+
+    // ------------------------------------------------------------------------------------------------ 3-4. accumulation
+    it("several result events add up to ONE complete transcript with no missing or repeated phrase", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["add Kripa Trivedi", true]);
+        hear(inst.rec, ["add Kripa Trivedi", true], ["and Neha Rao", true]);                // the list grows (finals stay)
+        hear(inst.rec, ["add Kripa Trivedi", true], ["and Neha Rao", true], ["to Sebamed Trend film", true]);
+        fireEvent.click(mic()); engineEnds(inst.rec);
+        expect(input()).toBe("add Kripa Trivedi and Neha Rao to Sebamed Trend film");
+    });
+
+    it("interim results are replaced by their final, never repeated beside it", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["send the", false]);
+        expect(screen.getByTestId("pa-live-text").textContent).toBe("send the");
+        hear(inst.rec, ["send the casting", false]);
+        hear(inst.rec, ["send the casting for sebamed", false]);
+        hear(inst.rec, ["send the casting for sebamed", true], ["trend film", false]);       // final arrives; the next interim trails it
+        expect(screen.getByTestId("pa-live-text").textContent).toBe("send the casting for sebamed trend film");
+        hear(inst.rec, ["send the casting for sebamed", true], ["trend film", true]);
+        fireEvent.click(mic()); engineEnds(inst.rec);
+        expect(input()).toBe("send the casting for sebamed trend film");
+    });
+
+    it("words that were only ever interim when the user stops are still kept", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["move vidushi to hold", false]);
+        fireEvent.click(mic()); engineEnds(inst.rec);
+        expect(input()).toBe("move vidushi to hold");
+    });
+
+    it("existing typed text is kept and the transcript is appended to it", async () => {
+        server(); const inst = fakeRecognition(); mount(); await open();
+        type("Move");
+        await begin(inst);
+        hear(inst.rec, ["Vidushi Tiwari to hold", true]);
+        fireEvent.click(mic()); engineEnds(inst.rec);
+        expect(input()).toBe("Move Vidushi Tiwari to hold");
+    });
+
+    // ------------------------------------------------------------------------------------------------ 5-7. unexpected end → bounded restart
+    it("the engine ending by itself while the user is still listening restarts it, and everything said before AND after the restart is combined", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["add Kripa Trivedi", true]);
+        await advance(5_000);                                                              // a healthy stretch…
+        const first = inst.rec;
+        engineEnds(first);                                                                 // …then the browser's service ends the recognition on its own
+        expect(input()).toBe("");                                                          // the session is NOT over: nothing delivered yet
+        expect(screen.getByTestId("pa-listening")).toBeTruthy();
+        await advance(300);                                                                // after the short restart delay
+        expect(inst.all).toHaveLength(2);                                                  // a NEW recognition object
+        expect(inst.rec.start).toHaveBeenCalledTimes(1);
+        expect(inst.rec).not.toBe(first);
+        act(() => { inst.rec.onstart(); });
+        hear(inst.rec, ["to Sebamed Trend film", true]);
+        fireEvent.click(mic()); engineEnds(inst.rec);
+        expect(input()).toBe("add Kripa Trivedi to Sebamed Trend film");                    // earlier words kept, later words appended, once each
+    });
+
+    it("an intentional stop never restarts: after the stop, the engine's end finishes the session and nothing new is created", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["list ask to test", true]);
+        fireEvent.click(mic());
+        engineEnds(inst.rec);
+        await advance(10_000);
+        expect(inst.all).toHaveLength(1);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(input()).toBe("list ask to test");
+    });
+
+    it("a stop during the restart delay cancels the restart and still delivers the text", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["find angela", true]);
+        await advance(3_000);
+        engineEnds(inst.rec);                                                              // engine ended; a restart is pending…
+        fireEvent.click(mic());                                                            // …and the user taps stop before it happens
+        await advance(5_000);
+        expect(inst.all).toHaveLength(1);
+        expect(input()).toBe("find angela");
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+    });
+
+    it("repeated `end` events for one recognition cannot create a restart loop (exactly one restart)", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        await advance(3_000);
+        const first = inst.rec;
+        act(() => { first.onend?.(); first.onend?.(); first.onend?.(); });
+        await advance(2_000);
+        expect(inst.all).toHaveLength(2);                                                  // not 4
+        act(() => { first.onend?.(); });                                                   // a late duplicate from the OLD recognition
+        await advance(2_000);
+        expect(inst.all).toHaveLength(2);
+    });
+
+    it("an engine that keeps ending instantly is given up on after a few tries (bounded, rate-limited) and what was heard is kept with an honest message", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["move kripa to hold", true]);
+        for (let i = 0; i < 12 && screen.queryByTestId("pa-listening"); i += 1) {         // every recognition begins and dies at once
+            engineEnds(inst.rec);
+            await advance(1_500);
+            if (inst.all.length > i + 1 && screen.queryByTestId("pa-listening")) act(() => { inst.rec.onstart(); });
+        }
+        expect(inst.all.length).toBeLessThanOrEqual(6);                                    // 1 + at most MAX_FAST_ENDS restarts, never a flood
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(input()).toBe("move kripa to hold");
+        expect(screen.getByTestId("pa-voice-notice").textContent).toMatch(/keeps stopping.*kept everything/i);
+        expect(mic().disabled).toBe(false);
+    });
+
+    it("a browser that refuses to resume by itself (restart throws) ends the session with the text kept and a tap-to-continue message", async () => {
+        server(); fakeRecognition();
+        let made = 0;
+        window.webkitSpeechRecognition = function Rec() { made += 1; this.start = made === 1 ? vi.fn() : () => { throw new Error("NotAllowedError: needs a user gesture"); }; this.stop = vi.fn(); this.abort = vi.fn(); window.__rec = this; };
+        mount(); await open();
+        vi.useFakeTimers();
+        await tap(); act(() => { window.__rec.onstart(); });
+        hear(window.__rec, ["add riya to pepsi", true]);
+        await advance(3_000);
+        engineEnds(window.__rec);
+        await advance(500);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(input()).toBe("add riya to pepsi");
+        expect(screen.getByTestId("pa-voice-notice").textContent).toMatch(/tap the mic to continue/i);
+    });
+
+    it("a restart that never begins ends the session within a few seconds (text kept) instead of hanging", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["share her profile", true]);
+        await advance(3_000);
+        engineEnds(inst.rec);
+        await advance(300);
+        expect(inst.all).toHaveLength(2);                                                  // restarted… but the new one never reports `start`
+        await advance(4_100);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(input()).toBe("share her profile");
+        expect(screen.getByTestId("pa-voice-notice")).toBeTruthy();
+    });
+
+    // ------------------------------------------------------------------------------------------------ 8. hard maximum
+    it("the hard maximum duration stops the session, delivers the captured text, and says it was the limit (not an error)", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["a very long command about everyone", true]);
+        await advance(119_000);
+        expect(screen.getByTestId("pa-listening")).toBeTruthy();                           // not before the maximum
+        await advance(1_500);                                                              // 120 s reached
+        expect(inst.rec.stop).toHaveBeenCalled();
+        expect(mic().getAttribute("aria-label")).toMatch(/Finishing transcript/);
+        engineEnds(inst.rec);
+        expect(input()).toBe("a very long command about everyone");
+        expect(screen.getByTestId("pa-voice-notice").textContent).toMatch(/2-minute limit.*kept everything/i);
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+        expect(mic().disabled).toBe(false);
+    });
+
+    it("if the engine never answers the maximum's stop request, the session is forced shut after a moment with the text kept", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["keep this", true]);
+        await advance(120_100);
+        await advance(2_600);                                                              // the engine never says `end`
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(input()).toBe("keep this");
+    });
+
+    it("a session that ends with nothing recognised says so and returns to idle (silence during the session is not an error by itself)", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        await advance(12_000);                                                             // 12 s of nothing: the engine reports no-speech and ends…
+        act(() => { inst.rec.onerror({ error: "no-speech" }); });
+        engineEnds(inst.rec);
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();                         // …that alone does not end or fail the session
+        await advance(500);
+        expect(inst.all).toHaveLength(2);                                                  // it was quietly restarted
+        act(() => { inst.rec.onstart(); });
+        fireEvent.click(mic()); engineEnds(inst.rec);                                      // the user finally taps stop with nothing said
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/didn't hear anything/i);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(mic().disabled).toBe(false);
+        expect(input()).toBe("");
+    });
+
+    // ------------------------------------------------------------------------------------------------ 9. errors
+    it.each([["network", /network connection/i], ["audio-capture", /No working microphone/i], ["language-not-supported", /language/i], ["weird-new-code", /stopped unexpectedly/i]])("a %s failure ends the session with its own message, keeps and delivers the words already captured, and leaves the mic usable", async (code, re) => {
+        server(); const inst = fakeRecognition(); mount(); await open();
+        type("typed before");
+        await begin(inst);
+        hear(inst.rec, ["move kripa", true]);
+        act(() => { inst.rec.onerror({ error: code }); inst.rec.onend?.(); });
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(msg).toMatch(re);
+        expect(msg).not.toMatch(/permission|blocked|allow/i);                             // unrelated failures are not "permission blocked"
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(input()).toBe("typed before move kripa");                                   // typed text + what was heard: nothing lost
+        expect(mic().disabled).toBe(false);
+        expect(mic().getAttribute("data-state")).toBe("failed");
+    });
+
+    it("an aborted recognition is not fatal: the session continues (restart) and keeps what was heard", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["add riya", true]);
+        act(() => { inst.rec.onerror({ error: "aborted" }); });
+        engineEnds(inst.rec);
+        await advance(500);
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+        expect(inst.all).toHaveLength(2);
+        act(() => { inst.rec.onstart(); });
+        hear(inst.rec, ["to pepsi", true]);
+        fireEvent.click(mic()); engineEnds(inst.rec);
+        expect(input()).toBe("add riya to pepsi");
+    });
+
+    // ------------------------------------------------------------------------------------------------ 10. close / minimise / stale callbacks
+    it.each([["minimising", "pa-minimize"], ["closing", "pa-close"]])("%s the panel stops recognition, detaches its handlers, keeps the captured text in the box, and ignores every late event", async (_n, buttonId) => {
+        server(); const inst = fakeRecognition(); mount(); await open();
+        await begin(inst);
+        hear(inst.rec, ["move vidushi tiwari", true]);
+        const rec = inst.rec;
+        const late = { onresult: rec.onresult, onerror: rec.onerror, onend: rec.onend, onstart: rec.onstart };
+        fireEvent.click(screen.getByTestId(buttonId));
+        expect(rec.abort).toHaveBeenCalled();
+        expect(rec.onresult).toBeNull(); expect(rec.onend).toBeNull(); expect(rec.onerror).toBeNull();
+        act(() => {                                                                           // stale callbacks from the old recognition
+            late.onresult(results(["INTRUDER words", true]));
+            late.onerror({ error: "network" });
+            late.onend();
+            late.onstart();
+        });
+        if (buttonId === "pa-minimize") fireEvent.click(screen.getByTestId("pa-minimize")); else fireEvent.click(await screen.findByTestId("pa-launcher"));
+        await screen.findByTestId("pa-panel");
+        expect(input()).toBe("move vidushi tiwari");                                          // delivered once, no intruder, no error
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        await tap();                                                                          // reopening allows a fresh session
+        expect(inst.all).toHaveLength(2);
+    });
+
+    it("unmounting while listening aborts the session; late events touch nothing and nothing throws or warns about state updates", async () => {
+        const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+        server(); const inst = fakeRecognition(); const { unmount } = mount(); await open();
+        await begin(inst);
+        const rec = inst.rec;
+        const h = { onresult: rec.onresult, onerror: rec.onerror, onend: rec.onend };
+        unmount();
+        expect(rec.abort).toHaveBeenCalled();
+        act(() => { h.onresult?.(results(["late words", true])); h.onerror?.({ error: "network" }); h.onend?.(); });
+        expect(spy.mock.calls.filter((c) => /unmounted|not wrapped in act/i.test(String(c[0])))).toHaveLength(0);
+        spy.mockRestore();
+    });
+
+    // ------------------------------------------------------------------------------------------------ 11-12. isolation + once + never sent
+    it("one session's words can never leak into the next: handlers and text start from nothing every time", async () => {
+        server(); const inst = fakeRecognition(); mount(); await open();
+        await begin(inst);
+        hear(inst.rec, ["first command about pepsi", true]);
+        const old = inst.rec;
+        const oldHandlers = { onresult: old.onresult, onend: old.onend };
+        fireEvent.click(mic()); engineEnds(old);
+        expect(input()).toBe("first command about pepsi");
+        type("");                                                                              // the user clears the box
+        await begin(inst);
+        expect(inst.all).toHaveLength(2);
+        expect(inst.rec).not.toBe(old);
+        act(() => { oldHandlers.onresult?.(results(["STALE words", true])); oldHandlers.onend?.(); });   // the old recognition speaks again
+        hear(inst.rec, ["second command", true]);
+        fireEvent.click(mic()); engineEnds(inst.rec);
+        expect(input()).toBe("second command");                                                // no "first…", no "STALE…"
+    });
+
+    it("the finalized text is delivered exactly once (extra end/stop events add nothing) and is never sent by itself — the user still has to press Send", async () => {
+        const inst = await mountFake();
+        await begin(inst);
+        hear(inst.rec, ["send the casting call to the selected talents", true]);
+        const rec = inst.rec;
+        fireEvent.click(mic());
+        act(() => { rec.onend(); rec.onend?.(); rec.onend?.(); });
+        fireEvent.click(mic()); fireEvent.click(mic());                                         // taps after it is over start new sessions — they must not re-deliver
+        const afterStops = input();
+        expect(afterStops.startsWith("send the casting call to the selected talents")).toBe(true);
+        expect(afterStops.split("send the casting call").length - 1).toBe(1);
+        expect(posts("/message")).toHaveLength(0);
+        vi.useRealTimers();
+        const box = screen.getByLabelText("Command");
+        fireEvent.change(box, { target: { value: "send the casting call to the selected talents" } });
+        fireEvent.click(screen.getByTestId("pa-send"));
+        await waitFor(() => expect(posts("/message")).toHaveLength(1));
+        expect(posts("/message")[0][1].text).toBe("send the casting call to the selected talents");
+    });
+
+    // ------------------------------------------------------------------------------------------------ permission/policy/platform (kept from b5a55a8)
+    it("says plainly when the browser has no speech recognition, and the text box still works", async () => {
+        server(); mount(); await open();
+        expect(screen.getByTestId("pa-voice-unsupported")).toBeTruthy();
+        expect(mic().disabled).toBe(true);
+        type("Find Angela");
+        expect(screen.getByTestId("pa-send").disabled).toBe(false);
+    });
+
+    it("a touch device without speech recognition is pointed at the keyboard's own dictation key", async () => {
+        Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 5 });
+        server(); mount(); await open();
+        expect(screen.getByTestId("pa-voice-unsupported").textContent).toMatch(/microphone key on your keyboard/i);
+    });
+
+    it("a page whose security policy disables the microphone is reported as THAT (a site setup problem), never attempted, never blamed on the user's setting", async () => {
+        setPolicy(false); setPerm("denied");
+        server(); const inst = fakeRecognition(); mount(); await open();
+        await tap();
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(inst.all).toHaveLength(0);
+        expect(msg).toMatch(/security settings/i);
+        expect(msg).not.toMatch(/lock icon|blocked for/i);
+        expect(screen.getByTestId("pa-voice-diag").textContent).toMatch(/page policy blocked by site policy/);
+        expect(mic().disabled).toBe(false);
+    });
+
+    it("the browser reporting the microphone DENIED for this site never starts recognition and names the site", async () => {
+        setPolicy(true); setPerm("denied");
+        server(); const inst = fakeRecognition(); mount(); await open();
+        await tap();
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(inst.all).toHaveLength(0);
+        expect(msg).toContain(window.location.host);
+        expect(msg).toMatch(/site settings/i);
+        expect(screen.getByTestId("pa-voice-diag").textContent).toMatch(/browser permission denied · page policy allowed/);
+    });
+
+    it("policy allows + Chrome says Allow + recognition still refused → NOT 'grant permission again': the browser/OS refused speech", async () => {
+        setPolicy(true); setPerm("granted");
+        server(); const inst = fakeRecognition(); mount(); await open();
+        await tap();
+        expect(inst.all).toHaveLength(1);
         act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
         const msg = screen.getByTestId("pa-voice-error").textContent;
         expect(msg).toMatch(/is allowed for/i);
         expect(msg).toMatch(/still refused/i);
         expect(msg).not.toMatch(/lock icon|choose allow|blocked for/i);
         expect(screen.getByTestId("pa-voice-diag").textContent).toMatch(/error not-allowed · browser permission granted · page policy allowed/);
-        expect(screen.getByTestId("pa-mic").getAttribute("data-state")).toBe("failed");
     });
 
-    it("permission still 'prompt' when recognition fails with not-allowed → the prompt was dismissed/blocked: tap again and choose Allow", async () => {
+    it("permission 'prompt' when recognition fails with not-allowed → the prompt was dismissed/blocked: tap again and choose Allow", async () => {
         setPolicy(true); setPerm("prompt");
-        server(); const inst = fakeRec(); mount(); await open();
+        server(); const inst = fakeRecognition(); mount(); await open();
         await tap();
         act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
         expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/choose Allow/i);
@@ -1026,15 +1168,15 @@ describe("voice input — the 'blocked although allowed' bug and platform specif
         setPolicy(true);
         let state = "prompt";
         Object.defineProperty(navigator, "permissions", { configurable: true, value: { query: () => Promise.resolve({ state }) } });
-        server(); const inst = fakeRec(); mount(); await open();
+        server(); const inst = fakeRecognition(); mount(); await open();
         await tap();
-        state = "denied";                                                            // the prompt answer arrives with the error
+        state = "denied";
         act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
         await waitFor(() => expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/blocked for/i));
     });
 
-    it("a real not-allowed with policy 'unknown' and no Permissions API (Safari/Firefox) asks for the site setting for THIS site only", async () => {
-        server(); const inst = fakeRec(); mount(); await open();
+    it("not-allowed with an unknown permission state (Safari/Firefox have no microphone query) asks for the site setting for THIS site only", async () => {
+        server(); const inst = fakeRecognition(); mount(); await open();
         await tap();
         act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
         const msg = screen.getByTestId("pa-voice-error").textContent;
@@ -1042,128 +1184,91 @@ describe("voice input — the 'blocked although allowed' bug and platform specif
         expect(msg).toMatch(/exact site/i);
     });
 
-    it("stopping shows 'Finishing…' with the mic disabled; extra taps do nothing; the engine's end event delivers the words once and re-enables the mic", async () => {
-        server(); const inst = fakeRec(); mount(); await open();
-        await tap();
-        act(() => { inst.rec.onstart(); inst.rec.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "show everyone in hold" }], { isFinal: true })] }); });
-        fireEvent.click(screen.getByTestId("pa-mic"));                               // stop
-        expect(inst.rec.stop).toHaveBeenCalledTimes(1);
-        expect(screen.getByTestId("pa-state").textContent).toBe("Finishing…");
-        expect(screen.getByTestId("pa-mic").disabled).toBe(true);
-        expect(screen.getByTestId("pa-mic").getAttribute("data-state")).toBe("processing");
-        fireEvent.click(screen.getByTestId("pa-mic")); fireEvent.click(screen.getByTestId("pa-mic"));
-        expect(inst.rec.stop).toHaveBeenCalledTimes(1);                              // no double stop
-        const rec = inst.rec;
-        act(() => { rec.onend(); });
-        expect(screen.getByLabelText("Command").value).toBe("show everyone in hold");
-        expect(screen.getByTestId("pa-mic").disabled).toBe(false);
-        expect(screen.getByTestId("pa-mic").getAttribute("data-state")).toBe("idle");
-    });
-
-    it("rapid repeated taps while starting: the second cancels the start, no recognition object is created, the third starts one clean session", async () => {
-        let release;
-        Object.defineProperty(navigator, "permissions", { configurable: true, value: { query: () => new Promise((r) => { release = () => r({ state: "granted" }); }) } });
-        server(); const inst = fakeRec(); mount(); await open();
-        fireEvent.click(screen.getByTestId("pa-mic"));                               // starting… (waiting on the permission query)
-        fireEvent.click(screen.getByTestId("pa-mic"));                               // cancel
-        await act(async () => { release(); });
-        expect(inst.made).toBe(0);
+    it("a first start that never reports audio is reported within the start limit (genuine failure to START), idle again, mic usable", async () => {
+        const inst = await mountFake();
+        fireEvent.click(mic()); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        expect(screen.getByTestId("pa-listening")).toBeTruthy();
+        await advance(8_100);
         expect(screen.queryByTestId("pa-listening")).toBeNull();
-        Object.defineProperty(navigator, "permissions", { configurable: true, value: undefined });
-        await tap();
-        expect(inst.made).toBe(1);
-        expect(inst.starts).toBe(1);
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/didn't start/i);
+        expect(inst.rec.abort).toHaveBeenCalled();
+        expect(mic().disabled).toBe(false);
     });
 
     it("iPhone Safari: a start that never fires gets iPhone-specific guidance (microphone, Dictation, keyboard key)", async () => {
-        vi.useFakeTimers();
         setUA("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", { maxTouchPoints: 5 });
-        server(); fakeRec(); mount(); vi.useRealTimers(); await open(); vi.useFakeTimers();
-        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
-        await act(async () => { await vi.advanceTimersByTimeAsync(8100); });
+        await mountFake();
+        fireEvent.click(mic()); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        await advance(8_100);
         const msg = screen.getByTestId("pa-voice-error").textContent;
         expect(msg).toMatch(/Settings › Safari › Microphone/);
         expect(msg).toMatch(/Enable Dictation/);
         expect(msg).toMatch(/keyboard/i);
         expect(screen.getByTestId("pa-voice-diag").textContent).toMatch(/iOS/);
-        expect(screen.queryByTestId("pa-listening")).toBeNull();
     });
 
-    it("iPhone Home-Screen app: says voice doesn't start there and to open Safari instead (not a permission message)", async () => {
-        vi.useFakeTimers();
+    it("iPhone Home-Screen app: says voice doesn't start there and to open Safari instead", async () => {
         setUA("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148", { maxTouchPoints: 5, standalone: true });
-        server(); fakeRec(); mount(); vi.useRealTimers(); await open(); vi.useFakeTimers();
-        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
-        await act(async () => { await vi.advanceTimersByTimeAsync(8100); });
+        await mountFake();
+        fireEvent.click(mic()); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        await advance(8_100);
         expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/Home Screen app.*Safari/i);
     });
 
-    it("iPhone service-not-allowed points at Dictation / the microphone key, Android gets the generic service message", async () => {
+    it("service-not-allowed points iPhone users at Dictation / the keyboard key; Android gets the generic service message", async () => {
         setUA("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1", { maxTouchPoints: 5 });
-        server(); const inst = fakeRec(); mount(); await open();
+        server(); const inst = fakeRecognition(); mount(); await open();
         await tap();
         act(() => { inst.rec.onerror({ error: "service-not-allowed" }); inst.rec.onend?.(); });
         expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/Enable Dictation/);
         cleanup();
         setUA("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36", { maxTouchPoints: 5 });
-        server(); const inst2 = fakeRec(); mount(); await open();
+        server(); const inst2 = fakeRecognition(); mount(); await open();
         await tap();
         act(() => { inst2.rec.onerror({ error: "service-not-allowed" }); inst2.rec.onend?.(); });
         expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/speech service refused/i);
         expect(screen.getByTestId("pa-voice-error").textContent).not.toMatch(/Dictation/);
     });
 
-    it("each failure class has a distinct message and none of the non-permission ones mention permission or blocking", async () => {
-        const seen = new Set();
-        for (const [code, re] of [["no-speech", /didn't hear/i], ["network", /network connection/i], ["audio-capture", /No working microphone/i], ["language-not-supported", /language/i], ["whatever", /stopped unexpectedly/i]]) {
-            server(); const inst = fakeRec(); mount(); await open();
-            await tap();
-            act(() => { inst.rec.onerror({ error: code }); inst.rec.onend?.(); });
-            const msg = screen.getByTestId("pa-voice-error").textContent;
-            expect(msg).toMatch(re);
-            expect(msg).not.toMatch(/permission|blocked|allow/i);
-            seen.add(msg);
-            cleanup();
-        }
-        expect(seen.size).toBe(5);
-    });
-
-    it("reopening after a failure gives a clean slate: error gone, a fresh session can start", async () => {
-        server(); const inst = fakeRec(); mount(); await open();
+    it("an insecure (non-https) page says why voice can't work; a recognition that throws on construction or on start leaves the UI idle with a message", async () => {
+        Object.defineProperty(window, "isSecureContext", { configurable: true, value: false });
+        server(); const inst = fakeRecognition(); mount(); await open();
         await tap();
-        act(() => { inst.rec.onerror({ error: "network" }); inst.rec.onend?.(); });
-        expect(screen.getByTestId("pa-voice-error")).toBeTruthy();
-        await tap();                                                                 // a new tap clears the old message and starts again
-        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
-        expect(inst.made).toBe(2);
-    });
-
-    it("no event handler can touch React state after unmount (late error/end/result are ignored, nothing throws or warns)", async () => {
-        const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-        server(); const inst = fakeRec(); const { unmount } = mount(); await open();
+        expect(inst.all).toHaveLength(0);
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/secure/i);
+        cleanup(); Object.defineProperty(window, "isSecureContext", { configurable: true, value: true });
+        server(); window.webkitSpeechRecognition = function Rec() { this.start = () => { throw new Error("InvalidStateError"); }; this.abort = vi.fn(); this.stop = vi.fn(); };
+        mount(); await open();
         await tap();
-        act(() => { inst.rec.onstart(); });
-        const rec = inst.rec;
-        const handlers = { onresult: rec.onresult, onerror: rec.onerror, onend: rec.onend };
-        unmount();
-        act(() => {
-            handlers.onresult?.({ resultIndex: 0, results: [Object.assign([{ transcript: "late" }], { isFinal: true })] });
-            handlers.onerror?.({ error: "network" });
-            handlers.onend?.();
-        });
-        expect(spy.mock.calls.filter((c) => /unmounted|not wrapped in act/i.test(String(c[0])))).toHaveLength(0);
-        spy.mockRestore();
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/couldn't start/i);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        cleanup(); server(); window.webkitSpeechRecognition = function Rec() { throw new Error("boom"); };
+        mount(); await open();
+        await tap();
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/couldn't start/i);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
     });
 
     it("diagnostics carry only codes — never the words that were spoken", async () => {
         const dbg = vi.spyOn(console, "debug").mockImplementation(() => {});
-        server(); const inst = fakeRec(); mount(); await open();
-        await tap();
-        act(() => { inst.rec.onstart(); inst.rec.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "secret talent phone number" }], { isFinal: true })] }); inst.rec.onerror({ error: "network" }); inst.rec.onend?.(); });
+        server(); const inst = fakeRecognition(); mount(); await open();
+        await begin(inst);
+        hear(inst.rec, ["secret talent phone number", true]);
+        act(() => { inst.rec.onerror({ error: "network" }); inst.rec.onend?.(); });
         const logged = JSON.stringify(dbg.mock.calls);
         expect(logged).toMatch(/network/);
         expect(logged).not.toMatch(/secret|phone number/);
         expect(screen.getByTestId("pa-voice-diag").textContent).not.toMatch(/secret/);
         dbg.mockRestore();
+    });
+
+    it("every failure after a failed session leaves a clean slate: a new tap clears the old message and starts again", async () => {
+        server(); const inst = fakeRecognition(); mount(); await open();
+        await tap();
+        act(() => { inst.rec.onerror({ error: "network" }); inst.rec.onend?.(); });
+        expect(screen.getByTestId("pa-voice-error")).toBeTruthy();
+        await tap();
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+        expect(inst.all).toHaveLength(2);
     });
 });

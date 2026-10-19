@@ -212,7 +212,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     };
 
     const tasksFor = (commandId) => tasks.filter((t) => t.command_id === commandId).sort((a, b) => a.seq - b.seq);
-    const status = speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing…" : speech.listening ? "Listening…" : sending ? "Working on it…" : tasks.some((t) => t.status === "needs_clarification") ? "Needs your pick"
+    const status = speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing transcript…" : speech.listening ? "Listening — tap the mic to stop" : sending ? "Working on it…" : tasks.some((t) => t.status === "needs_clarification") ? "Needs your pick"
         : tasks.some((t) => t.status === "awaiting_confirmation") ? "Waiting for your OK" : hasActive ? "Running in the background" : "Ready";
 
     if (!open) return null;
@@ -319,7 +319,13 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                     </div>
 
                     <form className="border-t border-black/[0.08] p-2.5 shrink-0" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-                        {speech.listening && <p className="text-xs text-red-600 mb-1.5 flex items-center gap-1.5" data-testid="pa-listening"><span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {speech.phase === "starting" ? "Starting microphone… allow it if the browser asks" : speech.phase === "processing" ? "Finishing…" : <>Listening… {speech.interim || "speak now"}</>}</p>}
+                        {speech.listening && (
+                            <div className="mb-1.5" data-testid="pa-listening">
+                                <p className="text-xs text-red-600 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {speech.phase === "starting" ? "Starting microphone… allow it if the browser asks" : speech.phase === "processing" ? "Finishing transcript…" : "Listening — pause as long as you like, tap the mic to stop"}</p>
+                                {speech.phase !== "starting" && <p className="text-[11px] text-black/55 mt-0.5 line-clamp-3" data-testid="pa-live-text" aria-live="off">{speech.liveText || "speak now"}</p>}
+                            </div>
+                        )}
+                        {speech.notice && !speech.listening && <p className="text-xs text-black/65 mb-1.5" role="status" data-testid="pa-voice-notice">{speech.notice}</p>}
                         {speech.error && (
                             <div className="mb-1.5" role="alert" data-testid="pa-voice-error-box">
                                 <p className="text-xs text-amber-700" data-testid="pa-voice-error">{speech.error}</p>
@@ -331,8 +337,8 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                             <textarea ref={inputRef} value={text} onChange={(e) => setText(e.target.value)} rows={1} maxLength={2000} placeholder="Type a command…" aria-label="Command"
                                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
                                 className="flex-1 min-w-0 resize-none max-h-28 border border-black/[0.12] rounded-xl px-3 py-2.5 text-base sm:text-sm focus:outline-none focus:border-black/50" />
-                            <button type="button" onClick={speech.toggle} disabled={!speech.supported || speech.phase === "processing"} aria-pressed={speech.listening} data-state={speech.error && !speech.listening ? "failed" : speech.phase}
-                                aria-label={speech.phase === "processing" ? "Finishing voice input" : speech.listening ? "Stop listening" : "Start voice input"} data-testid="pa-mic"
+                            <button type="button" onClick={speech.toggle} disabled={!speech.supported} aria-pressed={speech.listening} data-state={speech.error && !speech.listening ? "failed" : speech.phase}
+                                aria-label={speech.phase === "processing" ? "Finishing transcript — tap to finish now" : speech.phase === "starting" ? "Starting microphone — tap to cancel" : speech.listening ? "Listening — tap to stop" : "Start voice input"} data-testid="pa-mic"
                                 className={`w-11 h-11 shrink-0 rounded-xl border flex items-center justify-center ${speech.listening ? "bg-red-500 text-white border-red-500" : speech.error ? "border-amber-400 text-amber-700" : "border-black/[0.15] text-black/70"} disabled:opacity-40`}>
                                 {speech.phase === "processing" || speech.phase === "starting" ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <Mic className="w-4 h-4" aria-hidden />}
                             </button>

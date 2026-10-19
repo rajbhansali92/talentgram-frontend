@@ -123,8 +123,12 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
         task["title"] = _title(task)
         await _share_preview(task, [])                 # refuses at once, with the exact reason — no point asking who to send it to
         return task
-    task["slots"] = compute_slots(task)
     warnings: List[str] = []
+    if task["kind"] == "update" and task["status"] not in S.TERMINAL and task["status"] not in S.ACTIVE and update_plan.all_unsupported(task):
+        task["slots"], task["title"] = [], _title(task)
+        task["status"], task["error"] = S.FAILED, update_plan.unsupported_message(task)       # nothing supported was asked for: do not ask "which talent?" first
+        return task
+    task["slots"] = compute_slots(task)
     task["title"] = _title(task)
     if task["status"] in S.TERMINAL or task["status"] in S.ACTIVE:
         return task
@@ -134,9 +138,6 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
 
     if task["kind"] == "update":
         # every talent / value / file question is answered: read the CURRENT profile (read-only), check each value, then show exactly what will change
-        if update_plan.all_unsupported(task):
-            task["status"], task["error"] = S.FAILED, "I can't update that from here. " + update_plan.SUPPORTED_TEXT
-            return task
         await update_plan.prepare(task)
         task["slots"] = compute_slots(task)
         if task["slots"]:

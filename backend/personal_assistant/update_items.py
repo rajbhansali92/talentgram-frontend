@@ -34,9 +34,9 @@ VIDEO_TYPES = ("video/mp4", "video/quicktime")
 _EXT_OK = {"video": r"\.(mp4|mov)$", "image": r"\.(jpe?g|png|webp|heic|heif)$"}
 
 _ITEM_PATTERNS: List[Tuple[str, str, str]] = [        # (kind, key, regex) — longest / most specific first
-    ("media", "video", r"intro(?:duction)?\s+video|video"),
-    ("media", "indian", r"indian\s+(?:look\s+)?(?:pictures?|photos?|images?|looks?|portfolio)|indian\s+look"),
-    ("media", "western", r"western\s+(?:look\s+)?(?:pictures?|photos?|images?|looks?|portfolio)|western\s+look"),
+    ("media", "video", r"intro(?:duction|ductory)?(?:\s+videos?)?|videos?"),
+    ("media", "indian", r"indian\s+(?:(?:look|portfolio)\s+)?(?:pictures?|photos?|images?)|indian\s+(?:looks?|portfolio)"),
+    ("media", "western", r"western\s+(?:(?:look|portfolio)\s+)?(?:pictures?|photos?|images?)|western\s+(?:looks?|portfolio)"),
     ("media", "portfolio", r"(?:additional|extra)\s+(?:portfolio|pictures?|photos?|images?)(?:\s+(?:pictures?|photos?|images?))?|portfolio(?:\s+(?:pictures?|photos?|images?))?"),
     ("field", "whatsapp_group_name", r"whats\s*app\s+group(?:\s+name)?|group\s+name"),
     ("field", "instagram_followers", r"insta(?:gram)?\s+followers|followers"),
@@ -60,10 +60,12 @@ def find_items(text: str) -> List[Tuple[int, int, str, str]]:
     return out
 
 
-_NAME_WORDS = r"[A-Za-z][A-Za-z.\-]*"
-_POSSESSIVE = re.compile(rf"(?P<n>{_NAME_WORDS}(?:\s+(?:and\s+|,\s*)?{_NAME_WORDS}){{0,7}})\s*(?:'|’)s\b", re.I)
 _SPLIT_NAMES = re.compile(r"\s*(?:,|\band\b|&)\s*", re.I)
 _LEAD = re.compile(r"^\s*(?:please\s+)?update\s+", re.I)             # only "update": "change X to Approved" stays a pipeline move
+_VALUE_MARK = re.compile(r"^\s*(?:(?:to|as|is|=|:|should\s+be|with)\s+|(?=\d))", re.I)
+_CONNECT_ONLY = re.compile(r"^[\s,&.!?]*(?:\b(?:and|also|then|plus)\b[\s,&.!?]*)*$", re.I)
+_POLITE = re.compile(r"\b(?:please|thanks|thank\s+you|for\s+me|now)\b", re.I)
+_NAMEISH = re.compile(r"^[A-Za-z][A-Za-z.\-']*(?:\s+[A-Za-z][A-Za-z.\-']*){0,7}$")
 
 
 def is_update(text: str) -> bool:
@@ -74,99 +76,131 @@ def _clean_names(raw: str) -> List[str]:
     return [n.strip(" .,") for n in _SPLIT_NAMES.split(raw or "") if n.strip(" .,")]
 
 
-def _items_with_values(tail: str) -> List[Dict[str, Any]]:
-    """Items in one talent's tail text ("age to 24 and location to Mumbai", "introduction video and age"), each with its raw value.
-    A value runs from after "to/as/is/=" to the start of the NEXT item keyword that follows an "and" / comma. The WhatsApp group name is
-    different: it takes EVERYTHING up to the end (or the closing quote) because a group name may contain words like "and" or "age"."""
-    items = find_items(tail)
-    out: List[Dict[str, Any]] = []
-    i = 0
-    while i < len(items):
-        s, e, kind, key = items[i]
-        nxt = items[i + 1][0] if i + 1 < len(items) else len(tail)
-        seg = tail[e:nxt]
-        raw = None
-        m = re.match(r"\s*(?:to|as|is|=|:|should\s+be|with)\s+(?P<v>.+)$", seg, re.S | re.I)
-        if key == "whatsapp_group_name":
-            m = re.match(r"\s*(?:to|as|is|=|:|should\s+be|with)\s+(?P<v>.+)$", tail[e:], re.S | re.I)
-            if m:
-                v = m.group("v").lstrip()
-                q = {'"': '"', "\u201c": "\u201d", "'": "'", "\u2018": "\u2019"}.get(v[:1])
-                close = v.find(q, 1) if q else -1
-                if q and close > 0:                       # a quoted name is taken exactly, and more items may follow it
-                    raw = v[1:close]
-                    nxt = e + (len(tail[e:]) - len(v)) + close + 1
-                else:                                     # unquoted: everything to the end (a name may contain "and", "age" …); only a sentence-final "." goes
-                    raw = re.sub(r"(?<=[^.\s])\.\s*$", "", v.rstrip())
-                    nxt = len(tail)
-        elif m:
-            raw = re.sub(r"\s*(?:,|\band\b)\s*$", "", m.group("v"), flags=re.I).strip()
-            raw = re.sub(r"\s*[.!?]+$", "", raw)           # the sentence's own full stop is not part of a value
-        out.append({"kind": kind, "key": key, "raw": raw if raw not in (None, "") else None, "said": tail[s:e].strip()})
-        if key == "whatsapp_group_name" and raw is not None and nxt >= len(tail):
-            break
-        i += 1
-        while i < len(items) and items[i][0] < nxt:
-            i += 1
-    # drop duplicates (the same item said twice keeps the last value)
-    dedup: Dict[str, Dict[str, Any]] = {}
-    for it in out:
-        dedup[f"{it['kind']}:{it['key']}"] = it
-    return list(dedup.values())
+def _name_phrase(gap: str) -> Optional[str]:
+    """The text between two items read as TALENT NAMES: connectors / "the" / a trailing possessive "'s" removed. → the cleaned phrase,
+    "" when there is nothing, None when it does not look like names (digits, symbols, too long) — the caller then fails closed."""
+    g = re.sub(r"(?:'|\u2019)s\b", "", gap or "")
+    g = re.sub(r"^[\s,&]*(?:(?:and|also|then|plus)\b[\s,&]*)*", "", g, flags=re.I)
+    g = re.sub(r"^(?:the\s+)", "", g.strip(" ,.&"), flags=re.I)
+    g = re.sub(r"[\s,&]*(?:\b(?:and|also|then|plus)\b[\s,&]*)*$", "", g, flags=re.I).strip(" ,.&")
+    if not g:
+        return ""
+    return g if _NAMEISH.match(g.replace(" and ", " ").replace(",", " ")) and len(g.split()) <= 10 else None
 
 
 def _unquote(v: str) -> str:
     v = v.strip()
-    for a, b in (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’")):
+    for a, b in (('"', '"'), ("'", "'"), ("\u201c", "\u201d"), ("\u2018", "\u2019")):
         if len(v) >= 2 and v[0] == a and v[-1] == b:
             return v[1:-1]
     return v
 
 
 def parse_update(text: str) -> List[Dict[str, Any]]:
-    """→ groups [{"names": [..], "ref": None|"previous", "items": [{kind,key,raw,said}]}] for one `update …` clause, or [] when it is not one.
-    One group per talent-list; a group applies the SAME items to each of its talents ("Angela and Priya's locations to Mumbai")."""
+    """→ groups [{"names": [..], "ref": None|"previous", "items": [{kind,key,raw,said}]}] for one `update …` clause, or [] when it cannot be
+    read COMPLETELY (a clause is never half-understood: leftover words that are neither names, items, values nor politeness make it [] and the
+    assistant says it did not understand).
+
+    One left-to-right scan, no possessive or word order required:
+        "Kashvi Kalani's introduction video"   "Kashvi Kalani introduction video"   "Kashvi intro"   "the introduction video of Kashvi"
+        "Angela and Priya's locations to Mumbai"   "Angela's age to 24 and location to Mumbai"   "Angela intro video and Priya Western photos"
+    The words BEFORE the first item are the talent names — an item word is never part of a name. Text between two items is either the previous
+    field's value (after to / as / is / =, or starting with a digit) or the NEXT talents' names. Groups apply their items to each of their talents.
+    The WhatsApp group name takes its value verbatim (to the closing quote or the end) because a name may contain words like "and" or "age"."""
     t = (text or "").strip()
     m = _LEAD.match(t)
     if not m:
         return []
     body = t[m.end():].strip()
-    groups: List[Dict[str, Any]] = []
-    # form 2:  "the introduction video of Angela Kumar", "update age for Angela to 24"
-    f2 = re.match(r"^(?:the\s+)?(?P<items>.+?)\s+(?:of|for)\s+(?P<names>[A-Za-z][^,]*?)(?:\s+(?:to|as|is)\s+(?P<val>.+))?$", body, re.I)
-    poss = list(_POSSESSIVE.finditer(body))
-    if not poss and f2 and find_items(f2.group("items")):
-        items = _items_with_values(f2.group("items") + (f" to {f2.group('val')}" if f2.group("val") else ""))
-        names = _clean_names(f2.group("names"))
-        return [{"names": names, "ref": None, "items": items}] if names and items else []
-    # pronoun form: "update her age to 24"
-    pm = re.match(r"^(?:her|his|their)\s+(?P<tail>.+)$", body, re.I)
-    if pm:
-        return [{"names": [], "ref": "previous", "items": _items_with_values(pm.group("tail"))}]
-    if not poss:
+    items = find_items(body)
+    if not items:
         return []
-    # form 1: "<names>'s <items> [and <names>'s <items>]…"
-    cuts = []                                         # (names_text, tail_start)
-    cursor = 0
-    for k, pm_ in enumerate(poss):
-        names_end = pm_.end("n")
-        region = body[cursor:names_end]
-        its = find_items(region)
-        if its:                                       # item words before this name belong to the previous group
-            names_start = cursor + its[-1][1]
-            names_text = body[names_start:names_end]
-            names_text = re.sub(r"^\s*(?:and|,|&)\s+", "", names_text, flags=re.I)
-        else:
-            names_start, names_text = cursor, body[cursor:names_end]
-        cuts.append((names_text.strip(), names_start, pm_.end()))
-        cursor = pm_.end()
-    for k, (names_text, names_start, tail_start) in enumerate(cuts):
-        tail_end = cuts[k + 1][1] if k + 1 < len(cuts) else len(body)
-        items = _items_with_values(body[tail_start:tail_end])
-        names = _clean_names(names_text)
-        if names and items:
-            groups.append({"names": names, "ref": None, "items": items})
-    return groups
+    pm = re.match(r"^(?:her|his|their)\s+", body, re.I)               # "update her age to 24" — the talent just discussed
+    if pm:
+        its, _ = _scan_items(body[pm.end():])
+        return [{"names": [], "ref": "previous", "items": its}] if its else []
+    head = body[: items[0][0]]
+    if not re.sub(r"^the\b\s*", "", head.strip(), flags=re.I):          # items first: "the introduction video of Angela [to …]"
+        fm = re.match(r"^(?P<items>.+?)\s+(?:of|for)\s+(?P<names>[A-Za-z][^,]*?)(?:\s+(?P<tail>(?:to|as|is)\s+.+))?$", body, re.I)
+        nm = _name_phrase(fm.group("names")) if fm else None
+        if not fm or not nm or not find_items(fm.group("items")):
+            return []
+        its, _ = _scan_items(fm.group("items") + (" " + fm.group("tail") if fm.group("tail") else ""))
+        return [{"names": _clean_names(nm), "ref": None, "items": its}] if its else []
+    first = _name_phrase(head)
+    if not first:
+        return []
+    groups: List[Dict[str, Any]] = []
+    cur: Dict[str, Any] = {"names": _clean_names(first), "ref": None, "items": []}
+    skip_until = 0
+    for i, (s_, e_, kind, key) in enumerate(items):
+        if s_ < skip_until:                                  # inside a verbatim group name
+            continue
+        nxt = next((x[0] for x in items[i + 1:] if x[0] >= max(skip_until, e_)), len(body))
+        gap = body[e_:nxt]
+        item = {"kind": kind, "key": key, "raw": None, "said": body[s_:e_].strip()}
+        residue = gap                                         # what is left after this item (and its value) up to the next item
+        vm = _VALUE_MARK.match(body[e_:]) if kind in ("field", "unsupported") else None      # an unsupported item's value is read too, so it is reported, not mis-read as names
+        if key == "whatsapp_group_name" and vm:
+            v = body[e_ + vm.end():].lstrip()
+            q = {'"': '"', "\u201c": "\u201d", "'": "'", "\u2018": "\u2019"}.get(v[:1])
+            close = v.find(q, 1) if q else -1
+            if q and close > 0:                               # a quoted name is taken exactly, and more items may follow it
+                item["raw"], vend = v[1:close], e_ + (len(body[e_:]) - len(v)) + close + 1
+            else:                                             # unquoted: everything to the end; only a sentence-final "." goes
+                item["raw"], vend = re.sub(r"(?<=[^.\s])\.\s*$", "", v.rstrip()), len(body)
+            skip_until = vend
+            nxt = next((x[0] for x in items if x[0] >= vend), len(body))
+            residue = body[vend:nxt]
+        elif vm:
+            val = gap[vm.end():] if _VALUE_MARK.match(gap) else ""
+            nxt_is_last = not any(x[0] >= nxt and x[0] > e_ for x in items[i + 1:])
+            # "… to Mumbai and Priya Sharma's age" — a possessive name phrase at the end of the value opens the next group
+            pm2 = None if nxt_is_last else re.search(r"(?:\s+and\s+|\s*,\s*)(?P<nm>[A-Za-z][A-Za-z.\-]*(?:\s+[A-Za-z][A-Za-z.\-]*){0,4})(?:'|\u2019)s\s*$", val, re.I)
+            new_names = pm2.group("nm") if pm2 else None
+            if pm2:
+                val = val[: pm2.start()]
+            val = re.sub(r"\s*(?:,|\band\b)\s*$", "", val, flags=re.I).strip()
+            item["raw"] = re.sub(r"\s*[.!?]+$", "", val) or None
+            cur["items"].append(item)
+            if new_names:
+                groups.append(cur)
+                cur = {"names": _clean_names(new_names), "ref": None, "items": []}
+            continue
+        cur["items"].append(item)
+        residue = _POLITE.sub("", residue)
+        if _CONNECT_ONLY.match(residue) or not residue.strip(" ,.&!?"):
+            continue
+        if nxt >= len(body):
+            return []                                         # trailing words that are not names, an item or a value: not understood
+        nm2 = _name_phrase(residue)
+        if not nm2:
+            return []
+        groups.append(cur)
+        cur = {"names": _clean_names(nm2), "ref": None, "items": []}
+    groups.append(cur)
+    return groups if all(g["names"] and g["items"] for g in groups) else []
+
+
+def _scan_items(text: str):
+    """Items (with values) of a tail where the names are already known (the "of Angela" and "her …" forms). → (items, residue) or None."""
+    its = find_items(text)
+    out: List[Dict[str, Any]] = []
+    for k, (s_, e_, kind, key) in enumerate(its):
+        nxt = its[k + 1][0] if k + 1 < len(its) else len(text)
+        gap = text[e_:nxt]
+        item = {"kind": kind, "key": key, "raw": None, "said": text[s_:e_].strip()}
+        if kind in ("field", "unsupported"):
+            vm = _VALUE_MARK.match(gap)
+            if vm:
+                val = gap[vm.end():] if key == "whatsapp_group_name" else re.sub(r"\s*[.!?]+$", "", re.sub(r"\s*(?:,|\band\b)\s*$", "", gap[vm.end():], flags=re.I).strip())
+                item["raw"] = (_unquote(val.strip()) if key == "whatsapp_group_name" else val) or None
+                out.append(item)
+                if key == "whatsapp_group_name":
+                    break
+                continue
+        out.append(item)
+    return out, ""
 
 
 # ------------------------------------------------------------------------------------------------------------- values

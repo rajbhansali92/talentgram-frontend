@@ -60,6 +60,18 @@ def all_unsupported(task: dict) -> bool:
     return not (u.get("fields") or u.get("media"))
 
 
+_GENERIC_PICTURES = {"picture", "pictures", "photo", "photos", "image", "images"}
+
+
+def unsupported_message(task: dict) -> str:
+    """Why nothing can be done. A bare "pictures / photos" names no category — ask which one rather than guess between three."""
+    said = [str(x).lower().strip() for x in (task["params"].get("updates") or {}).get("unsupported") or []]
+    if said and all(x in _GENERIC_PICTURES for x in said):
+        return ("Which pictures? Say the category: Indian look pictures, Western look pictures or additional portfolio "
+                "(for example “update Kashvi's Western pictures”). I won't guess between them.")
+    return "I can't update that from here. " + SUPPORTED_TEXT
+
+
 def apply_value(task: dict, key: str, text: str) -> bool:
     for f in task["params"]["updates"]["fields"]:
         if f["key"] == key:

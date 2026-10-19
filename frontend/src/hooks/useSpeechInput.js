@@ -74,29 +74,29 @@ const IOS_SPEECH_HELP = "On iPhone/iPad: allow the microphone for Safari (Settin
 
 export const MESSAGES = {
     policy: () => "Voice input is switched off by this site's own security settings, not by your browser — that's a setup problem on our side and it needs fixing. You can type instead.",
-    denied: () => `The microphone is blocked for ${siteName()}. In the browser's site settings (lock icon in the address bar) allow the microphone for exactly ${siteName()}, then hold the mic again — or type instead.`,
+    denied: () => `The microphone is blocked for ${siteName()}. In the browser's site settings (lock icon in the address bar) allow the microphone for exactly ${siteName()}, then tap the mic again — or type instead.`,
     // The page may use the microphone and the browser says the site IS allowed, yet recognition refused: not a "grant permission" problem.
     refused: () => `The microphone is allowed for ${siteName()}, but the browser's speech recognition was still refused. Check your device's microphone/speech privacy setting for this browser, that nothing else is using the microphone, and the network — or type instead.`,
-    promptDismissed: () => `The browser didn't get microphone permission for ${siteName()} (the prompt was dismissed or blocked). Hold the mic and choose Allow — or type instead.`,
+    promptDismissed: () => `The browser didn't get microphone permission for ${siteName()} (the prompt was dismissed or blocked). Tap the mic and choose Allow — or type instead.`,
     unknownDenied: () => `The browser refused microphone access for ${siteName()}. Allow it for this exact site in the browser's site settings, or type instead.`,
     serviceRefused: () => (isIOS() ? `The speech service refused to start. ${IOS_SPEECH_HELP}` : "The browser's speech service refused to start on this device. You can type instead."),
-    noSpeech: () => "I didn't hear anything. Hold the mic, speak, then release — or type.",
+    noSpeech: () => "I didn't hear anything. Tap the mic and try again, or type.",
     noDevice: () => "No working microphone was found (or another app is using it). Check it is connected and free, or type instead.",
     network: () => "Speech recognition needs a network connection right now (the browser's speech service is online). You can type instead.",
     language: () => "This browser doesn't support that language for voice. You can type instead.",
     startTimeout: () => (isIOS() && isStandaloneApp()
         ? "Voice input doesn't start inside a Home Screen app. Open this page in Safari, or tap the microphone key on your keyboard."
         : isIOS() ? `The microphone didn't start. ${IOS_SPEECH_HELP}`
-            : "The microphone didn't start. Answer the browser's permission prompt if one is showing, then hold the mic again — or type instead."),
-    unknown: () => "Voice input stopped unexpectedly. Hold the mic to try again, or type.",
+            : "The microphone didn't start. Answer the browser's permission prompt if one is showing, then tap the mic again — or type instead."),
+    unknown: () => "Voice input stopped unexpectedly. Tap the mic to try again, or type.",
     unsupported: () => (touchDevice() ? "Voice input isn't available in this browser. Type your command, or tap the microphone key on your keyboard to dictate." : "Voice input isn't available in this browser. You can type instead."),
     insecure: () => "Voice input needs a secure (https) connection. You can type instead.",
     startFailed: () => "Voice input couldn't start on this device. You can type instead.",
-    startThrew: () => "Voice input couldn't start. Wait a moment and hold the mic again, or type.",
+    startThrew: () => "Voice input couldn't start. Wait a moment and tap the mic again, or type.",
     // the engine kept ending on its own — what was heard is kept
-    keepsStopping: () => "The browser's speech recognition keeps stopping on its own here. I kept everything it heard — check it, then hold the mic to continue, or type.",
-    restartFailed: () => "The browser wouldn't resume listening by itself (some phones need a press each time). I kept everything it heard — hold the mic to continue, or type.",
-    maxReached: (secs) => `Voice input stopped at the ${Math.round(secs / 60) >= 1 ? `${Math.round(secs / 60)}-minute` : `${secs}-second`} limit. I kept everything it heard — hold the mic to continue.`,
+    keepsStopping: () => "The browser's speech recognition keeps stopping on its own here. I kept everything it heard — check it, then tap the mic to continue, or type.",
+    restartFailed: () => "The browser wouldn't resume listening by itself (some phones need a tap to start each time). I kept everything it heard — tap the mic to continue, or type.",
+    maxReached: (secs) => `Voice input stopped at the ${Math.round(secs / 60) >= 1 ? `${Math.round(secs / 60)}-minute` : `${secs}-second`} limit. I kept everything it heard — tap the mic to continue.`,
 };
 
 /** Which message explains a refused/denied microphone — decided from FACTS about this page, not assumed. */
@@ -119,6 +119,27 @@ const FATAL_MESSAGE = {
 const normalize = (s) => (s || "").replace(/\s+/g, " ").trim();
 const join = (parts) => normalize(parts.filter(Boolean).join(" "));
 
+// ---------------------------------------------------------------------------------------------------- transcript folding
+// WHY a phrase appeared several times ("Angela Kumar to approved Angela Kumar to approved in…"): some mobile engines (Android Chrome with
+// `continuous`) do not append new words as new results — each event carries NEW result entries that RESTATE everything said so far
+// ("angela kumar", then "angela kumar to approved", then "angela kumar to approved in amazon"), several of them even flagged final. Joining
+// every entry with spaces printed the sentence once per restatement. The fix is to treat a later entry that strictly EXTENDS an earlier one
+// (the earlier entry's words are exactly its first words) as a newer version of it, not as new speech. Words the person really repeated
+// ("very very good", "no no", the same sentence said twice as two separate entries that do not extend each other) are never removed.
+const wordsOf = (s) => normalize(s).toLowerCase().replace(/[.,!?;:"“”]/g, "").split(" ").filter(Boolean);
+export function extendsSegment(prev, next) {
+    const a = wordsOf(prev), b = wordsOf(next);
+    return a.length > 0 && b.length > a.length && a.every((w, i) => w === b[i]);
+}
+/** Add one finalized / current segment to an ordered list, replacing the previous entry when this one is a longer restatement of it. */
+export function addSegment(list, text) {
+    const t = normalize(text);
+    if (!t) return list;
+    if (list.length && extendsSegment(list[list.length - 1], t)) return [...list.slice(0, -1), t];
+    return [...list, t];
+}
+export const foldSegments = (texts) => (texts || []).reduce((acc, t) => addSegment(acc, t), []);
+
 export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS } = {}) {
     const Ctor = getRecognitionCtor();
     const [phase, setPhase] = useState("idle");              // idle | starting | listening | processing
@@ -138,7 +159,7 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         setDiagnostics(d);
         try { console.debug("[voice]", d); } catch { /* console unavailable */ }       // codes/states only — never audio or words
     };
-    const textOf = (s) => join([...s.committed, s.current]);
+    const textOf = (s) => join(addSegment(s.committed, s.current));
     const clearTimers = (s) => { Object.values(s.timers).forEach((t) => clearTimeout(t)); s.timers = {}; };
     const detach = (rec) => { if (rec) { rec.onresult = rec.onerror = rec.onend = rec.onstart = rec.onaudiostart = null; try { rec.abort?.(); } catch { /* already over */ } } };
 
@@ -182,19 +203,26 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         };
         rec.onstart = begun;
         rec.onaudiostart = begun;
+        rec.slots = [];                                       // this recognition's entries BY INDEX: an event only ever replaces the entries it reports
         rec.onresult = (e) => {
             if (s.finished || s.rec !== rec || rec.__done) return;
             begun();
-            // Rebuild from the WHOLE list every time (some engines resend earlier entries). Finals and the trailing interim stay in order,
-            // so an interim is replaced by its final instead of being appended beside it.
-            const pieces = []; let trailingInterim = "";
-            for (let i = 0; i < e.results.length; i += 1) {
-                const r = e.results[i];
-                pieces.push(r[0].transcript);
-                if (!r.isFinal) trailingInterim = r[0].transcript; else trailingInterim = "";
+            const list = e.results || [];
+            // A shorter list than before means the engine started a new result list under the same object: what we hold is finished — commit it
+            // once and start fresh (otherwise the old words would be overwritten and lost, or counted twice).
+            if (list.length < rec.slots.length) {
+                const done = foldSegments(rec.slots.map((x) => x.text));
+                s.committed = done.reduce((acc, t) => addSegment(acc, t), s.committed);
+                rec.slots = [];
             }
-            s.current = normalize(pieces.join(" "));
-            s.currentInterim = normalize(trailingInterim);
+            // `resultIndex` is the first entry that CHANGED: entries before it are already in `slots` (an engine that resends the whole list
+            // with resultIndex 0 simply overwrites them by index — nothing is appended twice).
+            const from = Number.isInteger(e.resultIndex) && e.resultIndex >= 0 && e.resultIndex <= rec.slots.length ? e.resultIndex : 0;
+            for (let i = from; i < list.length; i += 1) rec.slots[i] = { text: list[i][0].transcript, final: !!list[i].isFinal };
+            rec.slots.length = list.length;
+            const last = rec.slots[rec.slots.length - 1];
+            s.current = join(foldSegments(rec.slots.map((x) => x.text)));
+            s.currentInterim = last && !last.final ? normalize(last.text) : "";
             live();
         };
         rec.onerror = (e) => {
@@ -221,8 +249,9 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
             if (s.finished || s.rec !== rec || rec.__done) return;
             rec.__done = true;                                // a repeated `end` for this recognition can never restart anything twice
             const lasted = s.lastBeganAt ? Date.now() - s.lastBeganAt : 0;
-            // commit this recognition's words once; the next recognition starts from empty
-            if (s.current) s.committed.push(s.current);
+            // commit this recognition's words once; the next recognition starts from empty. If the next recognition replays the end of what
+            // we already hold (an engine restating its previous result), addSegment keeps ONE copy.
+            if (s.current) s.committed = addSegment(s.committed, s.current);
             s.current = ""; s.currentInterim = "";
             s.rec = null;
             setInterim(""); setLiveText(textOf(s));
@@ -271,7 +300,7 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         clearTimeout(s.timers.grace);
         s.timers.grace = setTimeout(() => {
             if (s.finished) return;
-            if (s.rec === rec && !rec.__done) { if (s.current) s.committed.push(s.current); s.current = ""; }
+            if (s.rec === rec && !rec.__done) { if (s.current) s.committed = addSegment(s.committed, s.current); s.current = ""; }
             finalize(s, { info: s.stopInfo });
         }, STOP_GRACE_MS);
     }, [finalize]);

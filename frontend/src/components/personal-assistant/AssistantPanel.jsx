@@ -86,16 +86,14 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const loaded = useRef(false);
     const fit = useKeyboardFit(open && !minimized);
 
-    // PRESS AND HOLD to speak: pressing starts one recording, releasing stops it and — only for a normal release with real words — submits the
-    // transcript ONCE through the same path as typing (planning only; every consequential action still waits for its approval). Every other way a
-    // recording can end (cancel, interruption, error, panel closing, a limit) leaves the words in the text box as a draft and sends nothing.
-    const holdRef = useRef(null);                            // {kind: "pointer"|"key", id} while a press is active; null otherwise
-    const releaseMode = useRef("draft");                     // "submit" only between a normal release and the delivery of that session's transcript
+    // TAP to start, TAP to stop. Stopping NEVER submits: the finalized transcript is placed in the command box as an editable draft and only the
+    // Send button (or Enter) plans anything. `sendingRef` makes a double Send impossible even if two handlers race.
     const sendingRef = useRef(false);
     const voiceFinal = useRef(null);
+    const [voiceReady, setVoiceReady] = useState(false);          // a transcript was just placed in the box and has not been edited or sent yet
     const speech = useSpeechInput({ onFinal: (t) => voiceFinal.current?.(t) });
     // the panel stays mounted while closed/minimised: a microphone session must not keep running with nothing on screen
-    useEffect(() => { if (!open || minimized) { holdRef.current = null; releaseMode.current = "draft"; speech.abort(); } }, [open, minimized]);          // eslint-disable-line react-hooks/exhaustive-deps
+    useEffect(() => { if (!open || minimized) speech.abort(); }, [open, minimized]);          // eslint-disable-line react-hooks/exhaustive-deps
 
     // history + persisted tasks once, the first time it opens (survives refresh: both live on the backend)
     useEffect(() => {
@@ -133,7 +131,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
 
     const context = useMemo(() => ({ project_id: ctx.projectId || projectIdFromPath(pathname) || null, talent_ids: ctx.talentIds || [], page: pathname }), [ctx, pathname]);
 
-    const submit = useCallback(async (override, { keepDraft = false } = {}) => {      // keepDraft: a spoken command must not touch what is typed in the box
+    const submit = useCallback(async (override) => {
         const body = (override ?? text).trim();
         if (!body || sending || sendingRef.current) return;
         sendingRef.current = true;
@@ -141,7 +139,8 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
         setSending(true);
         setFailed(null);
         if (!(failed && failed.text === body)) setMessages((cur) => [...cur, { id: `u-${rid}`, role: "user", text: body }]);
-        if (!keepDraft) setText("");
+        setText("");
+        setVoiceReady(false);
         try {
             const out = await sendAssistantMessage({ text: body, clientRequestId: rid, context });
             setMessages((cur) => [...cur, { id: `a-${out.command_id}`, role: "assistant", text: out.reply, command_id: out.command_id }]);
@@ -152,68 +151,25 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
             const msg = typeof detail === "string" ? detail : "I couldn't get an answer from the server. Nothing has been sent or changed (planning never does either) — tap Retry.";
             setMessages((cur) => [...cur, { id: `e-${rid}`, role: "assistant", text: msg, error: true }]);
             setFailed({ text: body, id: rid });
-            setText((cur) => (keepDraft ? (cur ? `${cur} ${body}` : body) : body));            // never lost: a failed spoken command lands in the box for editing / retry
+            setText(body);
         } finally {
             sendingRef.current = false;
             setSending(false);
         }
     }, [text, sending, failed, context, voiceOut]);
     voiceFinal.current = (t) => {
-        const mode = releaseMode.current;
-        releaseMode.current = "draft";
         const words = (t || "").trim();
-        if (!words) return;                                                       // nothing meaningful was said: never an empty command
-        if (mode === "submit" && !sendingRef.current) submit(words, { keepDraft: true });
-        else setText((cur) => (cur ? `${cur} ${words}` : words));                 // not a clean release (or another command is still being planned): keep it, send nothing
+        if (!words) return;                                                       // nothing meaningful was said: nothing to put in the box
+        setText((cur) => (cur.trim() ? `${cur.replace(/\s+$/, "")} ${words}` : words));       // appended after anything already typed; never replaces it
+        setVoiceReady(true);
+        setTimeout(() => inputRef.current?.focus(), 0);                          // ready to edit
     };
-
-    // --- the microphone button: a press is the recording -------------------------------------------------------------------------
-    const beginHold = (kind, id) => {
-        if (holdRef.current || !speech.supported) return false;                   // a second finger / key repeat can never start a second session
-        holdRef.current = { kind, id };
-        releaseMode.current = "draft";
-        speech.start();
-        return true;
-    };
-    const endHold = (how) => {                                                    // how: "submit" (released) | "draft" (interrupted) | "cancel" (discard)
-        if (!holdRef.current) return;
-        holdRef.current = null;
-        if (how === "cancel") { releaseMode.current = "draft"; speech.abort({ discard: true }); return; }
-        releaseMode.current = how === "submit" ? "submit" : "draft";
-        speech.stop();
-    };
-    const micHandlers = {
-        onPointerDown: (e) => {
-            if (e.pointerType === "mouse" && e.button !== 0) return;
-            if (!beginHold("pointer", e.pointerId)) return;
-            try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch { /* not capturable: the window listeners below still end the press */ }
-            e.preventDefault();
-        },
-        onPointerUp: (e) => { if (holdRef.current?.kind === "pointer" && holdRef.current.id === e.pointerId) endHold("submit"); },
-        onPointerCancel: (e) => { if (holdRef.current?.kind === "pointer" && holdRef.current.id === e.pointerId) endHold("draft"); },
-        onLostPointerCapture: (e) => { if (holdRef.current?.kind === "pointer" && holdRef.current.id === e.pointerId) endHold("draft"); },
-        onContextMenu: (e) => e.preventDefault(),                                 // a long press must not open the phone's context menu
-        onKeyDown: (e) => {
-            if (e.key !== " " && e.key !== "Enter") return;
-            e.preventDefault();                                                   // the browser's own click-on-key would toggle
-            if (!e.repeat) beginHold("key", "key");
-        },
-        onKeyUp: (e) => { if ((e.key === " " || e.key === "Enter") && holdRef.current?.kind === "key") { e.preventDefault(); endHold("submit"); } },
-        onBlur: () => { if (holdRef.current?.kind === "key") endHold("draft"); },
-        // A click that did NOT come from a pointer press (detail 0: assistive technology, voice control) toggles, so the button stays operable
-        // without holding. Real mouse/touch presses are handled by the pointer events above and their trailing click is ignored.
-        onClick: (e) => { if (e.detail === 0 && !holdRef.current) speech.toggle(); },
-    };
+    useEffect(() => { if (speech.listening) setVoiceReady(false); }, [speech.listening]);
     useEffect(() => {
-        // Safety nets: the page is hidden / loses focus, or a pointer is released somewhere we never hear about → the recording ends now.
-        const interrupt = () => endHold("draft");
-        const hidden = () => { if (document.visibilityState === "hidden") interrupt(); };
-        const up = (e) => { if (holdRef.current?.kind === "pointer" && holdRef.current.id === e.pointerId) endHold(e.type === "pointerup" ? "submit" : "draft"); };
-        window.addEventListener("blur", interrupt);
+        // A hidden page (another app, the screen locked) cannot keep recognising: end the recording now and keep the words as a draft.
+        const hidden = () => { if (document.visibilityState === "hidden") speech.abort(); };
         document.addEventListener("visibilitychange", hidden);
-        window.addEventListener("pointerup", up);
-        window.addEventListener("pointercancel", up);
-        return () => { window.removeEventListener("blur", interrupt); document.removeEventListener("visibilitychange", hidden); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up); };
+        return () => document.removeEventListener("visibilitychange", hidden);
     });                                                                             // eslint-disable-line react-hooks/exhaustive-deps
 
     const act = useCallback(async (taskId, fn) => {
@@ -328,7 +284,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const latest = tasks.filter((t) => t.command_id === latestCmd);
     const olderOpen = tasks.filter((t) => t.command_id !== latestCmd && ATTENTION_STATUSES.includes(t.status)).length;
     const older = olderOpen ? ` · ${olderOpen} older request${olderOpen === 1 ? "" : "s"} still open` : "";
-    const status = speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing transcript…" : speech.listening ? "Listening — release to send" : sending ? "Working on it…"
+    const status = speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing transcript…" : speech.listening ? "Listening — tap the mic to stop" : sending ? "Working on it…"
         : latest.some((t) => t.status === "needs_clarification") ? `Needs your pick${older}`
             : latest.some((t) => t.status === "awaiting_confirmation") ? `Waiting for your OK${older}`
                 : hasActive ? `Running in the background${older}` : `Ready${older}`;
@@ -338,7 +294,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     return (
         <section role="dialog" aria-label="Talentgram assistant" data-testid="pa-panel" style={mobileStyle}
             className={`fixed z-40 right-2 left-2 bottom-2 sm:left-auto sm:right-6 ${lifted ? "sm:bottom-28" : "sm:bottom-6"} ${expanded ? "sm:w-[560px]" : "sm:w-[400px]"} flex flex-col bg-white border border-black/[0.12] rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.22)] overflow-hidden ${minimized ? "" : expanded ? "h-[min(88dvh,820px)]" : lifted ? "h-[min(70dvh,640px)]" : "h-[min(78dvh,640px)]"}`}
-            onKeyDown={(e) => { if (e.key === "Escape") { if (speech.listening) { endHold("cancel"); speech.abort({ discard: true }); } else onClose(); } }}>
+            onKeyDown={(e) => { if (e.key === "Escape" && !speech.listening) onClose(); }}>
             <header className="flex items-center gap-2 px-3 py-2.5 border-b border-black/[0.08] shrink-0">
                 <Sparkles className="w-4 h-4 text-black/60" aria-hidden />
                 <div className="min-w-0 flex-1">
@@ -369,7 +325,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                             <>
                                 {messages.length === 0 && (
                                     <div className="text-sm text-black/60" data-testid="pa-empty">
-                                        <p>Hi — tell me what to do. You can type, or hold the mic to speak and release to send.</p>
+                                        <p>Hi — tell me what to do. You can type, or tap the mic, speak, tap it again, then edit and press Send.</p>
                                         <ul className="mt-2 flex flex-wrap gap-1.5">{EXAMPLES.map((e) => <li key={e}><button type="button" onClick={() => { setText(e); inputRef.current?.focus(); }} className="px-2.5 min-h-[32px] rounded-full border border-black/[0.12] text-[11px] text-black/65 hover:border-black/40">{e}</button></li>)}</ul>
                                     </div>
                                 )}
@@ -445,7 +401,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                     <form className="border-t border-black/[0.08] p-2.5 shrink-0" onSubmit={(e) => { e.preventDefault(); submit(); }}>
                         {speech.listening && (
                             <div className="mb-1.5" data-testid="pa-listening">
-                                <p className="text-xs text-red-600 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {speech.phase === "starting" ? "Starting microphone… allow it if the browser asks" : speech.phase === "processing" ? "Finishing transcript…" : "Listening — keep holding, pause as long as you like, release to send"}</p>
+                                <p className="text-xs text-red-600 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {speech.phase === "starting" ? "Starting microphone… allow it if the browser asks" : speech.phase === "processing" ? "Finishing transcript…" : "Listening — pause as long as you like, tap the mic to stop"}</p>
                                 {speech.phase !== "starting" && <p className="text-[11px] text-black/55 mt-0.5 line-clamp-3" data-testid="pa-live-text" aria-live="off">{speech.liveText || "speak now"}</p>}
                             </div>
                         )}
@@ -474,17 +430,22 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 <input type="file" multiple className="sr-only" accept="image/*,video/mp4,video/quicktime,.mp4,.mov,.heic,.heif" data-testid="pa-attach" aria-label="Attach files"
                                     onChange={(e) => { const add = Array.from(e.target.files || []); e.target.value = ""; setAttached((a) => [...a, ...add.filter((f) => !a.some((x) => x.name === f.name && x.size === f.size))].slice(0, 20)); }} />
                             </label>
-                            <textarea ref={inputRef} value={text} onChange={(e) => setText(e.target.value)} rows={1} maxLength={2000} placeholder="Type a command…" aria-label="Command"
+                            <textarea ref={inputRef} value={text} onChange={(e) => { setText(e.target.value); setVoiceReady(false); }} rows={1} maxLength={2000} placeholder="Type a command…" aria-label="Command"
                                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
                                 className="flex-1 min-w-0 resize-none max-h-28 border border-black/[0.12] rounded-xl px-3 py-2.5 text-base sm:text-sm focus:outline-none focus:border-black/50" />
-                            <button type="button" {...micHandlers} disabled={!speech.supported} aria-pressed={speech.listening} data-state={speech.error && !speech.listening ? "failed" : speech.phase}
-                                style={{ touchAction: "none", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }}
-                                aria-label={speech.phase === "processing" ? "Finishing transcript…" : speech.phase === "starting" ? "Starting microphone — release to cancel" : speech.listening ? "Listening — release to send" : "Hold to speak"} data-testid="pa-mic"
-                                className={`w-11 h-11 shrink-0 rounded-xl border flex items-center justify-center select-none touch-none ${speech.listening ? "bg-red-500 text-white border-red-500" : speech.error ? "border-amber-400 text-amber-700" : "border-black/[0.15] text-black/70"} disabled:opacity-40`}>
+                            <button type="button" onClick={speech.toggle} disabled={!speech.supported} aria-pressed={speech.listening} data-state={speech.error && !speech.listening ? "failed" : speech.phase}
+                                aria-label={speech.phase === "processing" ? "Finishing transcript — tap to finish now" : speech.phase === "starting" ? "Starting microphone — tap to cancel" : speech.listening ? "Listening — tap to stop" : "Tap to start"} data-testid="pa-mic"
+                                className={`w-11 h-11 shrink-0 rounded-xl border flex items-center justify-center ${speech.listening ? "bg-red-500 text-white border-red-500" : speech.error ? "border-amber-400 text-amber-700" : "border-black/[0.15] text-black/70"} disabled:opacity-40`}>
                                 {speech.phase === "processing" || speech.phase === "starting" ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <Mic className="w-4 h-4" aria-hidden />}
                             </button>
                             <button type="submit" disabled={!text.trim() || sending} aria-label="Send" data-testid="pa-send" className="w-11 h-11 shrink-0 rounded-xl bg-black text-white flex items-center justify-center disabled:opacity-40"><Send className="w-4 h-4" /></button>
                         </div>
+                        {speech.supported && (
+                            <p className={`text-[11px] mt-1 ${voiceReady && !speech.listening ? "text-emerald-700 font-medium" : "text-black/50"}`} data-testid="pa-voice-state" role="status" aria-live="polite">
+                                {speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing transcript…" : speech.listening ? "Listening — tap to stop"
+                                    : voiceReady ? "Transcript ready — edit before sending" : "Tap to start"}
+                            </p>
+                        )}
                         <div className="flex items-center justify-between mt-1.5">
                             <p className="text-[10px] text-black/40 truncate">{ctx.talentIds?.length ? `${ctx.talentIds.length} selected talent${ctx.talentIds.length === 1 ? "" : "s"} on screen` : "No talents selected on screen"}</p>
                             {messages.length > 0 && <button type="button" onClick={clearChat} className="text-[11px] text-black/50 underline min-h-[32px] px-1">Clear chat</button>}

@@ -693,7 +693,7 @@ describe("voice input", () => {
         expect(inst.starts).toBe(0);
         const msg = screen.getByTestId("pa-voice-error").textContent;
         expect(msg).toContain(window.location.host);
-        expect(msg).toMatch(/per website/i);
+        expect(msg).toMatch(/site settings/i);
         expect(screen.queryByTestId("pa-listening")).toBeNull();
         expect(screen.getByTestId("pa-mic").disabled).toBe(false);
     });
@@ -835,14 +835,17 @@ describe("entity resolution cards (2026-10-19)", () => {
 
     it("tapping a card marks it Selected at once and sends only its ID; the stale 'needs your pick' line becomes 'waiting for your OK' when the server says so", async () => {
         const el = await start(moveTask());
+        let release;
+        const pending = new Promise((r) => { release = r; });                                // the save is "in flight" until we say so (no timing luck)
         adminApi.post.mockImplementation((url) => {
-            if (url === "/personal-assistant/tasks/m1/clarify") return Promise.resolve({ data: { task: moveTask({ status: "awaiting_confirmation", title: "Move Viidushi Tiwari to Hold in Sebamed", slots: [], summary: ["1 talent: Viidushi Tiwari", "To Hold in Sebamed"] }) } });
+            if (url === "/personal-assistant/tasks/m1/clarify") return pending.then(() => ({ data: { task: moveTask({ status: "awaiting_confirmation", title: "Move Viidushi Tiwari to Hold in Sebamed", slots: [], summary: ["1 talent: Viidushi Tiwari", "To Hold in Sebamed"] }) } }));
             return Promise.reject(new Error(url));
         });
         tasksOnServer = [moveTask({ status: "awaiting_confirmation", title: "Move Viidushi Tiwari to Hold in Sebamed", slots: [], summary: ["1 talent: Viidushi Tiwari", "To Hold in Sebamed"] })];
         fireEvent.click(within(el).getByTestId("pa-option-v1"));
-        expect(within(el).getByTestId("pa-option-v1").getAttribute("aria-pressed")).toBe("true");
+        expect(within(el).getByTestId("pa-option-v1").getAttribute("aria-pressed")).toBe("true");     // visibly Selected while it is being saved
         await waitFor(() => expect(posts("/clarify")).toHaveLength(1));
+        release();
         expect(posts("/clarify")[0][1]).toEqual({ slot: "talent:0", choice_id: "v1" });
         await waitFor(() => expect(screen.getByTestId("pa-reply").textContent).toBe("Here's what I understood: 1 waiting for your OK."));
         expect(screen.queryByText(/needs your pick/i)).toBeNull();                         // nothing stale left on screen
@@ -963,5 +966,204 @@ describe("live reply line", () => {
     it("keeps the 'I didn't understand' part and leaves a message with no tasks untouched", () => {
         expect(liveReply("Here's what I understood: 1 needs your pick. I didn't understand: “blah”.", [t("completed")])).toBe("All done — see below. I didn't understand: “blah”.");
         expect(liveReply("I couldn't turn that into an action.", [])).toBe("I couldn't turn that into an action.");
+    });
+});
+
+describe("voice input — the 'blocked although allowed' bug and platform specifics (2026-10-20)", () => {
+    // Root cause reproduced for real in Chromium: with `Permissions-Policy: microphone=()` the DOCUMENT may not use the
+    // microphone, so document.featurePolicy.allowsFeature("microphone") is false, permissions.query says "denied" and
+    // getUserMedia throws NotAllowedError — whatever the user allowed in the site settings.
+    const setPolicy = (allowed) => Object.defineProperty(document, "featurePolicy", { configurable: true, value: allowed === undefined ? undefined : { allowsFeature: (f) => (f === "microphone" ? allowed : true) } });
+    const setPerm = (state) => Object.defineProperty(navigator, "permissions", { configurable: true, value: state ? { query: vi.fn(() => Promise.resolve({ state })) } : undefined });
+    const setUA = (ua, extra = {}) => { Object.defineProperty(navigator, "userAgent", { configurable: true, value: ua }); Object.entries(extra).forEach(([k, v]) => Object.defineProperty(navigator, k, { configurable: true, value: v })); };
+    const REAL_UA = navigator.userAgent;
+    beforeEach(() => { setPolicy(undefined); setPerm(undefined); Object.defineProperty(window, "isSecureContext", { configurable: true, value: true }); Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 }); setUA(REAL_UA, { standalone: undefined }); });
+    afterEach(() => { setPolicy(undefined); setPerm(undefined); setUA(REAL_UA, { standalone: undefined }); vi.useRealTimers(); });
+
+    function fakeRec() {
+        const inst = { starts: 0, made: 0 };
+        window.webkitSpeechRecognition = function Rec() { inst.made += 1; Object.assign(this, { start: vi.fn(() => { inst.starts += 1; }), stop: vi.fn(), abort: vi.fn() }); inst.rec = this; };
+        return inst;
+    }
+    const tap = async () => { fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => {}); };
+
+    it("a page whose security policy disables the microphone is reported as THAT (a site setup problem) — not as the user's permission — and recognition is never attempted", async () => {
+        setPolicy(false); setPerm("denied");                                         // exactly what Chrome reported on production
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(inst.made).toBe(0);
+        expect(msg).toMatch(/security settings/i);
+        expect(msg).toMatch(/our side/i);
+        expect(msg).not.toMatch(/site settings|lock icon|blocked for/i);               // it must NOT tell the user to change a setting that is already Allow
+        expect(screen.getByTestId("pa-voice-diag").textContent).toMatch(/page policy blocked by site policy/);
+        expect(screen.getByTestId("pa-mic").disabled).toBe(false);                   // recoverable
+    });
+
+    it("policy allows + Chrome says Allow + recognition still refused → NOT 'grant permission again': it says the browser/OS refused speech", async () => {
+        setPolicy(true); setPerm("granted");
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        expect(inst.starts).toBe(1);
+        act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(msg).toMatch(/is allowed for/i);
+        expect(msg).toMatch(/still refused/i);
+        expect(msg).not.toMatch(/lock icon|choose allow|blocked for/i);
+        expect(screen.getByTestId("pa-voice-diag").textContent).toMatch(/error not-allowed · browser permission granted · page policy allowed/);
+        expect(screen.getByTestId("pa-mic").getAttribute("data-state")).toBe("failed");
+    });
+
+    it("permission still 'prompt' when recognition fails with not-allowed → the prompt was dismissed/blocked: tap again and choose Allow", async () => {
+        setPolicy(true); setPerm("prompt");
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/choose Allow/i);
+    });
+
+    it("the wording is refined with the permission state AFTER the failure (user clicked Block in the prompt → now 'denied')", async () => {
+        setPolicy(true);
+        let state = "prompt";
+        Object.defineProperty(navigator, "permissions", { configurable: true, value: { query: () => Promise.resolve({ state }) } });
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        state = "denied";                                                            // the prompt answer arrives with the error
+        act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
+        await waitFor(() => expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/blocked for/i));
+    });
+
+    it("a real not-allowed with policy 'unknown' and no Permissions API (Safari/Firefox) asks for the site setting for THIS site only", async () => {
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(msg).toContain(window.location.host);
+        expect(msg).toMatch(/exact site/i);
+    });
+
+    it("stopping shows 'Finishing…' with the mic disabled; extra taps do nothing; the engine's end event delivers the words once and re-enables the mic", async () => {
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        act(() => { inst.rec.onstart(); inst.rec.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "show everyone in hold" }], { isFinal: true })] }); });
+        fireEvent.click(screen.getByTestId("pa-mic"));                               // stop
+        expect(inst.rec.stop).toHaveBeenCalledTimes(1);
+        expect(screen.getByTestId("pa-state").textContent).toBe("Finishing…");
+        expect(screen.getByTestId("pa-mic").disabled).toBe(true);
+        expect(screen.getByTestId("pa-mic").getAttribute("data-state")).toBe("processing");
+        fireEvent.click(screen.getByTestId("pa-mic")); fireEvent.click(screen.getByTestId("pa-mic"));
+        expect(inst.rec.stop).toHaveBeenCalledTimes(1);                              // no double stop
+        const rec = inst.rec;
+        act(() => { rec.onend(); });
+        expect(screen.getByLabelText("Command").value).toBe("show everyone in hold");
+        expect(screen.getByTestId("pa-mic").disabled).toBe(false);
+        expect(screen.getByTestId("pa-mic").getAttribute("data-state")).toBe("idle");
+    });
+
+    it("rapid repeated taps while starting: the second cancels the start, no recognition object is created, the third starts one clean session", async () => {
+        let release;
+        Object.defineProperty(navigator, "permissions", { configurable: true, value: { query: () => new Promise((r) => { release = () => r({ state: "granted" }); }) } });
+        server(); const inst = fakeRec(); mount(); await open();
+        fireEvent.click(screen.getByTestId("pa-mic"));                               // starting… (waiting on the permission query)
+        fireEvent.click(screen.getByTestId("pa-mic"));                               // cancel
+        await act(async () => { release(); });
+        expect(inst.made).toBe(0);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        Object.defineProperty(navigator, "permissions", { configurable: true, value: undefined });
+        await tap();
+        expect(inst.made).toBe(1);
+        expect(inst.starts).toBe(1);
+    });
+
+    it("iPhone Safari: a start that never fires gets iPhone-specific guidance (microphone, Dictation, keyboard key)", async () => {
+        vi.useFakeTimers();
+        setUA("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1", { maxTouchPoints: 5 });
+        server(); fakeRec(); mount(); vi.useRealTimers(); await open(); vi.useFakeTimers();
+        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(8100); });
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(msg).toMatch(/Settings › Safari › Microphone/);
+        expect(msg).toMatch(/Enable Dictation/);
+        expect(msg).toMatch(/keyboard/i);
+        expect(screen.getByTestId("pa-voice-diag").textContent).toMatch(/iOS/);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+    });
+
+    it("iPhone Home-Screen app: says voice doesn't start there and to open Safari instead (not a permission message)", async () => {
+        vi.useFakeTimers();
+        setUA("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148", { maxTouchPoints: 5, standalone: true });
+        server(); fakeRec(); mount(); vi.useRealTimers(); await open(); vi.useFakeTimers();
+        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(8100); });
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/Home Screen app.*Safari/i);
+    });
+
+    it("iPhone service-not-allowed points at Dictation / the microphone key, Android gets the generic service message", async () => {
+        setUA("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1", { maxTouchPoints: 5 });
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        act(() => { inst.rec.onerror({ error: "service-not-allowed" }); inst.rec.onend?.(); });
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/Enable Dictation/);
+        cleanup();
+        setUA("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36", { maxTouchPoints: 5 });
+        server(); const inst2 = fakeRec(); mount(); await open();
+        await tap();
+        act(() => { inst2.rec.onerror({ error: "service-not-allowed" }); inst2.rec.onend?.(); });
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/speech service refused/i);
+        expect(screen.getByTestId("pa-voice-error").textContent).not.toMatch(/Dictation/);
+    });
+
+    it("each failure class has a distinct message and none of the non-permission ones mention permission or blocking", async () => {
+        const seen = new Set();
+        for (const [code, re] of [["no-speech", /didn't hear/i], ["network", /network connection/i], ["audio-capture", /No working microphone/i], ["language-not-supported", /language/i], ["whatever", /stopped unexpectedly/i]]) {
+            server(); const inst = fakeRec(); mount(); await open();
+            await tap();
+            act(() => { inst.rec.onerror({ error: code }); inst.rec.onend?.(); });
+            const msg = screen.getByTestId("pa-voice-error").textContent;
+            expect(msg).toMatch(re);
+            expect(msg).not.toMatch(/permission|blocked|allow/i);
+            seen.add(msg);
+            cleanup();
+        }
+        expect(seen.size).toBe(5);
+    });
+
+    it("reopening after a failure gives a clean slate: error gone, a fresh session can start", async () => {
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        act(() => { inst.rec.onerror({ error: "network" }); inst.rec.onend?.(); });
+        expect(screen.getByTestId("pa-voice-error")).toBeTruthy();
+        await tap();                                                                 // a new tap clears the old message and starts again
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+        expect(inst.made).toBe(2);
+    });
+
+    it("no event handler can touch React state after unmount (late error/end/result are ignored, nothing throws or warns)", async () => {
+        const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+        server(); const inst = fakeRec(); const { unmount } = mount(); await open();
+        await tap();
+        act(() => { inst.rec.onstart(); });
+        const rec = inst.rec;
+        const handlers = { onresult: rec.onresult, onerror: rec.onerror, onend: rec.onend };
+        unmount();
+        act(() => {
+            handlers.onresult?.({ resultIndex: 0, results: [Object.assign([{ transcript: "late" }], { isFinal: true })] });
+            handlers.onerror?.({ error: "network" });
+            handlers.onend?.();
+        });
+        expect(spy.mock.calls.filter((c) => /unmounted|not wrapped in act/i.test(String(c[0])))).toHaveLength(0);
+        spy.mockRestore();
+    });
+
+    it("diagnostics carry only codes — never the words that were spoken", async () => {
+        const dbg = vi.spyOn(console, "debug").mockImplementation(() => {});
+        server(); const inst = fakeRec(); mount(); await open();
+        await tap();
+        act(() => { inst.rec.onstart(); inst.rec.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "secret talent phone number" }], { isFinal: true })] }); inst.rec.onerror({ error: "network" }); inst.rec.onend?.(); });
+        const logged = JSON.stringify(dbg.mock.calls);
+        expect(logged).toMatch(/network/);
+        expect(logged).not.toMatch(/secret|phone number/);
+        expect(screen.getByTestId("pa-voice-diag").textContent).not.toMatch(/secret/);
+        dbg.mockRestore();
     });
 });

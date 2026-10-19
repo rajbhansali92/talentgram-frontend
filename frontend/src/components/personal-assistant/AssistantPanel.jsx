@@ -35,6 +35,12 @@ export function liveReply(saved, tasks) {
     return (failed ? "Finished — some steps need attention, see below." : n("cancelled") ? "Done — the cancelled steps were not run." : "All done — see below.") + tail;
 }
 
+// Codes only (never audio or words): what the browser said, so a failure report says WHY it failed.
+export function describeVoiceDiagnostics(d) {
+    const pol = d.policy === false ? "blocked by site policy" : d.policy === true ? "allowed" : "unknown";
+    return [d.error ? `error ${d.error}` : d.result ? d.result : null, d.permission ? `browser permission ${d.permission}` : null, `page policy ${pol}`, d.ios ? "iOS" : null, d.standalone ? "home-screen app" : null].filter(Boolean).join(" · ");
+}
+
 const readPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch { return d; } };
 const writePref = (k, v) => { try { localStorage.setItem(k, v ? "1" : "0"); } catch { /* storage blocked */ } };
 
@@ -206,7 +212,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     };
 
     const tasksFor = (commandId) => tasks.filter((t) => t.command_id === commandId).sort((a, b) => a.seq - b.seq);
-    const status = speech.phase === "starting" ? "Starting microphone…" : speech.listening ? "Listening…" : sending ? "Working on it…" : tasks.some((t) => t.status === "needs_clarification") ? "Needs your pick"
+    const status = speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing…" : speech.listening ? "Listening…" : sending ? "Working on it…" : tasks.some((t) => t.status === "needs_clarification") ? "Needs your pick"
         : tasks.some((t) => t.status === "awaiting_confirmation") ? "Waiting for your OK" : hasActive ? "Running in the background" : "Ready";
 
     if (!open) return null;
@@ -313,15 +319,23 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                     </div>
 
                     <form className="border-t border-black/[0.08] p-2.5 shrink-0" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-                        {speech.listening && <p className="text-xs text-red-600 mb-1.5 flex items-center gap-1.5" data-testid="pa-listening"><span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {speech.phase === "starting" ? "Starting microphone… allow it if the browser asks" : <>Listening… {speech.interim || "speak now"}</>}</p>}
-                        {speech.error && <p className="text-xs text-amber-700 mb-1.5" role="alert" data-testid="pa-voice-error">{speech.error}</p>}
+                        {speech.listening && <p className="text-xs text-red-600 mb-1.5 flex items-center gap-1.5" data-testid="pa-listening"><span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {speech.phase === "starting" ? "Starting microphone… allow it if the browser asks" : speech.phase === "processing" ? "Finishing…" : <>Listening… {speech.interim || "speak now"}</>}</p>}
+                        {speech.error && (
+                            <div className="mb-1.5" role="alert" data-testid="pa-voice-error-box">
+                                <p className="text-xs text-amber-700" data-testid="pa-voice-error">{speech.error}</p>
+                                {speech.diagnostics && <p className="text-[10px] text-black/40 mt-0.5" data-testid="pa-voice-diag">Technical detail: {describeVoiceDiagnostics(speech.diagnostics)}</p>}
+                            </div>
+                        )}
                         {!speech.supported && <p className="text-[11px] text-black/45 mb-1.5" data-testid="pa-voice-unsupported">Voice input isn&apos;t available in this browser — type your command instead{typeof navigator !== "undefined" && navigator.maxTouchPoints > 0 ? ", or tap the microphone key on your keyboard to dictate" : ""}.</p>}
                         <div className="flex items-end gap-2">
                             <textarea ref={inputRef} value={text} onChange={(e) => setText(e.target.value)} rows={1} maxLength={2000} placeholder="Type a command…" aria-label="Command"
                                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
                                 className="flex-1 min-w-0 resize-none max-h-28 border border-black/[0.12] rounded-xl px-3 py-2.5 text-base sm:text-sm focus:outline-none focus:border-black/50" />
-                            <button type="button" onClick={speech.toggle} disabled={!speech.supported} aria-pressed={speech.listening} aria-label={speech.listening ? "Stop listening" : "Start voice input"} data-testid="pa-mic"
-                                className={`w-11 h-11 shrink-0 rounded-xl border flex items-center justify-center ${speech.listening ? "bg-red-500 text-white border-red-500" : "border-black/[0.15] text-black/70"} disabled:opacity-40`}><Mic className="w-4 h-4" /></button>
+                            <button type="button" onClick={speech.toggle} disabled={!speech.supported || speech.phase === "processing"} aria-pressed={speech.listening} data-state={speech.error && !speech.listening ? "failed" : speech.phase}
+                                aria-label={speech.phase === "processing" ? "Finishing voice input" : speech.listening ? "Stop listening" : "Start voice input"} data-testid="pa-mic"
+                                className={`w-11 h-11 shrink-0 rounded-xl border flex items-center justify-center ${speech.listening ? "bg-red-500 text-white border-red-500" : speech.error ? "border-amber-400 text-amber-700" : "border-black/[0.15] text-black/70"} disabled:opacity-40`}>
+                                {speech.phase === "processing" || speech.phase === "starting" ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : <Mic className="w-4 h-4" aria-hidden />}
+                            </button>
                             <button type="submit" disabled={!text.trim() || sending} aria-label="Send" data-testid="pa-send" className="w-11 h-11 shrink-0 rounded-xl bg-black text-white flex items-center justify-center disabled:opacity-40"><Send className="w-4 h-4" /></button>
                         </div>
                         <div className="flex items-center justify-between mt-1.5">

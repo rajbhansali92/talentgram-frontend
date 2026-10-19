@@ -25,8 +25,14 @@ const securityHeaders = [
     value: "strict-origin-when-cross-origin",
   },
   {
+    // microphone=(self): the admin assistant's voice input (Web Speech API) and the feedback voice-note recorder need the
+    // microphone in THIS document. The old value, microphone=(), disables it for every document on the site — including our
+    // own — so the browser reports the microphone as denied (Permissions API "denied", getUserMedia NotAllowedError,
+    // SpeechRecognition "not-allowed") no matter what the user's per-site setting says. `(self)` still blocks every
+    // cross-origin frame (and X-Frame-Options/frame-ancestors already forbid embedding); the browser's own permission
+    // prompt still applies. Camera and geolocation stay disabled. Guarded by nextConfig.permissionsPolicy.test.js.
     key: "Permissions-Policy",
-    value: "geolocation=(), microphone=(), camera=()",
+    value: "geolocation=(), microphone=(self), camera=()",
   },
   {
     // CSP: allows Next.js inline scripts/styles + Cloudinary media + Google OAuth.

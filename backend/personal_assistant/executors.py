@@ -88,7 +88,19 @@ async def _profile_card(tid: str, label: str, with_media_link: bool = False) -> 
     # resolve_media_link mints the talent's opaque link on first use — a write — so only an EXPLICIT media-link /
     # photos request does that; a plain profile / history lookup never changes data.
     link = await resolve_media_link(tid) if with_media_link else None
-    return {**card, "profile_path": f"/admin/talents/{tid}", "skills": (t.get("skills") or [])[:8],
+    contents, reason = None, None
+    if with_media_link:
+        from routers.talent_media import _collect
+        g = _collect(t)
+        contents = {"indian": len(g["indian"]), "western": len(g["western"]), "portfolio": len(g["portfolio"]), "video": bool(g["video"])}
+        contents["total"] = contents["indian"] + contents["western"] + contents["portfolio"] + (1 if contents["video"] else 0)
+        if link is None:
+            reason = "That talent no longer exists."
+        elif not link[1]:
+            reason = "The media link is switched off for this talent (or the profile is archived/merged), so there is no link to give out."
+        elif contents["total"] == 0:
+            reason = "The link works, but this talent has no photos or video on their profile yet, so it would open an empty page."
+    return {**card, "media_contents": contents, "media_link_reason": reason, "profile_path": f"/admin/talents/{tid}", "skills": (t.get("skills") or [])[:8],
             "photo_count": len(photos), "photos": [{"thumb": _thumb_url(m), "url": m["url"]} for m in photos[:6]],
             "video_url": video_watch_url(video) if video else None,
             "media_link": (link[1] if link else None), "media_link_available": bool(link and link[1]), "media_link_requested": with_media_link,
@@ -217,6 +229,33 @@ async def _run_send(user: dict, task: dict, worker_id: str) -> dict:
                        "projects": [b.get("project_name") for b in batches]}}
 
 
+UNVERIFIED = "unverified"
+
+
+async def group_hold(task: dict, worker_id: Optional[str], ack_unverified: bool = False) -> Optional[tuple]:
+    """For a share to a project's casting group: why this worker must NOT send there yet → (kind, reason), or None.
+      * "blocked"    — the worker's latest attempt at this very group ended "not found in chat list": it is not a member. Always held.
+      * "unverified" — there is NO evidence either way (nothing in the job history; the app has no registry of which chats a worker
+                       belongs to and no non-sending way to ask). Held until the user explicitly acknowledges it — never silently.
+    The worker itself still opens the chat by name and verifies it before typing; a missing chat fails the job and is reported."""
+    p = task["params"]
+    if task["kind"] != "share" or (p.get("recipient") or {}).get("kind") != "project_group" or not worker_id:
+        return None
+    proj = (p.get("projects") or [None])[0]
+    doc = await db.projects.find_one({"id": (proj or {}).get("id")}, {"_id": 0, "whatsapp_casting_group_name": 1}) if proj else None
+    group = ((doc or {}).get("whatsapp_casting_group_name") or "").strip()
+    if not group:
+        return None
+    ev = (await R.group_evidence(group)).get(worker_id)
+    if ev and ev["state"] == "failed_before":
+        return ("blocked", f"WhatsApp worker “{ev['label']}” could not find the group “{group}” the last time it tried"
+                f"{' (' + ev['when'] + ')' if ev.get('when') else ''}, so it isn't a member. Pick a different worker, or add that number to the group first.")
+    if ev and ev["state"] == "unknown" and not ack_unverified:
+        return (UNVERIFIED, f"“{group}” hasn't been confirmed for WhatsApp worker “{ev['label']}”: it has never sent there, and the app can't check which chats a worker "
+                "belongs to. Tick “send anyway” to accept that risk (if the worker isn't in the group, nothing is delivered and the failure is shown), or pick another worker.")
+    return None
+
+
 async def _run_share(user: dict, task: dict, worker_id: str) -> dict:
     from agents.modules.talentgram_fetcher import _render_media_link, _render_talent_profile
     from routers.whatsapp import BatchIn, ManualContact, SourceParams, _create_batch_internal
@@ -250,6 +289,9 @@ async def _run_share(user: dict, task: dict, worker_id: str) -> dict:
         params = SourceParams(contacts=[ManualContact(name=doc.get("brand_name") or "", phone="", whatsapp_group_name=group)])
     if params is None:
         return {"status": S.FAILED, "result": None, "error": "I don't have a resolved recipient for this."}
+    held = await group_hold(task, worker_id, ack_unverified=True)          # the user's acknowledgement was checked at confirm; only a hard block stops here
+    if held:
+        return {"status": S.FAILED, "result": None, "error": held[1]}
     blocks, skipped = [], []
     for t in p["talents"]:
         text = await (_render_media_link(t["id"]) if p.get("lookup") == "media_link" else _render_talent_profile(t["id"], t["label"]))

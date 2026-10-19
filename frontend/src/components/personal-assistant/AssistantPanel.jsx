@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { Loader2, Maximize2, Mic, Minimize2, Minus, Send, Sparkles, Volume2, VolumeX, X } from "lucide-react";
 import {
-    ACTIVE_STATUSES, ATTENTION_STATUSES, cancelTask, clarifyTask, clearAssistantHistory, confirmAll, confirmTask, followUpSend,
+    ACTIVE_STATUSES, ATTENTION_STATUSES, cancelCommand, cancelTask, changedPlan, clarifyTask, errorDetail, clearAssistantHistory, confirmAll, confirmTask, followUpSend,
     getAssistantHistory, getAssistantWorkers, isTimeoutError, listAssistantTasks, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage, statusLabel,
 } from "@/lib/personalAssistant";
 import { useAssistantContext } from "@/lib/assistantContext";
@@ -74,6 +74,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const [busy, setBusy] = useState({});
     const [errors, setErrors] = useState({});
     const [batchWorker, setBatchWorker] = useState("");
+    const [planAck, setPlanAck] = useState({});                   // command id → the user ticked "send anyway" for an unverified group
     const [workerNames, setWorkerNames] = useState({});          // worker id → registry label, only to name workers on tasks saved before labels were stored
     const workerNamesAsked = useRef(false);
     const inputRef = useRef(null);
@@ -152,7 +153,9 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
         try {
             mergeTask(await fn());
         } catch (err) {
-            const detail = err?.response?.data?.detail;
+            const changed = changedPlan(err);
+            if (changed) (changed.tasks || []).forEach(mergeTask);          // the plan moved since it was shown: show the revised one for a fresh approval
+            const detail = changed ? changed.message : errorDetail(err);
             setErrors((e) => ({ ...e, [taskId]: typeof detail === "string" ? detail
                 : isTimeoutError(err) ? "No answer from the server — it may still have run. I've refreshed this task from the server; check its status before trying again."
                 : "That didn't work — I've refreshed this task from the server." }));
@@ -167,44 +170,38 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
         listAssistantTasks(40).then(setTasks).catch(() => {});      // dependents of this task may have changed too
         return updated;
     });
-    const onConfirm = (t, worker) => act(t.id, () => confirmTask(t.id, worker));
+    const onConfirm = (t, worker, ack) => act(t.id, () => confirmTask(t.id, worker, t.fingerprint, !!ack));
     const onCancel = (t) => act(t.id, () => cancelTask(t.id));
     const onRetry = (t) => act(t.id, () => retryTask(t.id));
     const onFollowUp = (t, templateId) => act(t.id, () => followUpSend(t.id, templateId));
 
-    // One approval for a plan whose first step fills a missing pipeline entry: step 1 (the add) runs, and ONLY if it fully
-    // succeeded does step 2 (the send) run — the server enforces that order again, so this can't skip it.
-    const approvePlan = async (add, send, worker) => {
-        const ids = [add.id, send.id];
+    // One approval for a whole plan (several different actions from one message). The server re-checks every waiting action against
+    // what was shown BEFORE running any of them; it runs them in dependency order and a step whose dependency did not succeed does
+    // not run. If anything changed meanwhile, nothing runs and the revised actions come back for a fresh look.
+    const approvePlan = async (commandId, waiting, ack) => {
+        const ids = waiting.map((t) => t.id);
         ids.forEach((i) => setBusy((b) => ({ ...b, [i]: true })));
         try {
-            const first = await confirmTask(add.id);
-            mergeTask(first);
-            if (first.status === "completed") mergeTask(await confirmTask(send.id, worker));
-            else toast.error("Step 1 didn't fully succeed, so nothing was sent. Retry it from its card; step 2 runs after it succeeds.");
+            const fps = waiting.every((t) => t.fingerprint) ? Object.fromEntries(waiting.map((t) => [t.id, t.fingerprint])) : undefined;
+            const results = await confirmAll(commandId, batchWorker, fps, !!ack);
+            const held = Object.entries(results || {}).filter(([, r]) => r.error);
+            setErrors((e) => ({ ...e, ...Object.fromEntries(held.map(([id, r]) => [id, r.error])) }));
+            if (held.length) toast.error(`${held.length} step${held.length === 1 ? " was" : "s were"} not run — see the reason on ${held.length === 1 ? "its" : "each"} card.`);
         } catch (err) {
-            const detail = err?.response?.data?.detail;
-            toast.error(typeof detail === "string" ? detail : "That didn't work — I've refreshed from the server.");
+            const changed = changedPlan(err);
+            if (changed) (changed.tasks || []).forEach(mergeTask);
+            const detail = changed ? changed.message : errorDetail(err);
+            toast.error(typeof detail === "string" ? detail : "Couldn't approve the plan — I've refreshed from the server.");
         } finally {
             setTasks(await listAssistantTasks(40).catch(() => tasks));
             ids.forEach((i) => setBusy((b) => ({ ...b, [i]: false })));
         }
     };
-    const cancelPlan = async (add, send) => {
-        await Promise.all([cancelTask(send.id), cancelTask(add.id)].map((p) => p.catch(() => null)));
+    const cancelPlan = async (commandId, ids) => {
+        ids.forEach((i) => setBusy((b) => ({ ...b, [i]: true })));
+        try { await cancelCommand(commandId); } catch { toast.error("Couldn't cancel the whole plan — I've refreshed from the server."); }
         setTasks(await listAssistantTasks(40).catch(() => tasks));
-    };
-
-    const doConfirmAll = async (commandId, ids) => {
-        ids.forEach((i) => setBusy((b) => ({ ...b, [i]: true })));
-        try {
-            await confirmAll(commandId, batchWorker);
-        } catch (err) {
-            toast.error(err?.response?.data?.detail || "Couldn't confirm those.");
-        } finally {
-            setTasks(await listAssistantTasks(40).catch(() => tasks));
-            ids.forEach((i) => setBusy((b) => ({ ...b, [i]: false })));
-        }
+        ids.forEach((i) => setBusy((b) => ({ ...b, [i]: false })));
     };
 
     const clearChat = async () => {
@@ -212,8 +209,16 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     };
 
     const tasksFor = (commandId) => tasks.filter((t) => t.command_id === commandId).sort((a, b) => a.seq - b.seq);
-    const status = speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing transcript…" : speech.listening ? "Listening — tap the mic to stop" : sending ? "Working on it…" : tasks.some((t) => t.status === "needs_clarification") ? "Needs your pick"
-        : tasks.some((t) => t.status === "awaiting_confirmation") ? "Waiting for your OK" : hasActive ? "Running in the background" : "Ready";
+    // The header describes the CURRENT request. An older request that was never answered stays visible as a quiet note, not as the
+    // state of what you just asked.
+    const latestCmd = tasks.length ? [...tasks].sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)))[0].command_id : null;
+    const latest = tasks.filter((t) => t.command_id === latestCmd);
+    const olderOpen = tasks.filter((t) => t.command_id !== latestCmd && ATTENTION_STATUSES.includes(t.status)).length;
+    const older = olderOpen ? ` · ${olderOpen} older request${olderOpen === 1 ? "" : "s"} still open` : "";
+    const status = speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing transcript…" : speech.listening ? "Listening — tap the mic to stop" : sending ? "Working on it…"
+        : latest.some((t) => t.status === "needs_clarification") ? `Needs your pick${older}`
+            : latest.some((t) => t.status === "awaiting_confirmation") ? `Waiting for your OK${older}`
+                : hasActive ? `Running in the background${older}` : `Ready${older}`;
 
     if (!open) return null;
     const mobileStyle = fit ? { maxHeight: fit.height - 12, bottom: fit.bottom + 6 } : undefined;
@@ -243,7 +248,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                             <button key={k} type="button" onClick={() => setTab(k)} aria-pressed={tab === k} data-testid={`pa-tab-${k}`}
                                 className={`px-3 min-h-[32px] rounded-full text-xs ${tab === k ? "bg-black text-white" : "text-black/60 hover:bg-black/[0.05]"}`}>{label}</button>
                         ))}
-                        {attention > 0 && <span className="ml-auto self-center text-[11px] text-amber-700" data-testid="pa-attention">{attention} need{attention === 1 ? "s" : ""} you</span>}
+                        {attention > 0 && <span className="ml-auto self-center text-[11px] text-amber-700" data-testid="pa-attention">{attention} need{attention === 1 ? "s" : ""} you{olderOpen > 0 && olderOpen < attention ? ` (${olderOpen} older)` : ""}</span>}
                     </nav>
 
                     <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0" data-testid="pa-scroll">
@@ -258,12 +263,14 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 {messages.map((m) => {
                                     const ts = m.command_id && m.role === "assistant" ? tasksFor(m.command_id) : [];
                                     const waiting = ts.filter((t) => t.status === "awaiting_confirmation");
-                                    // a plan = an add that exists only to fill a send's missing pipeline entry + that send, both still waiting
-                                    const planSend = waiting.find((t) => t.kind === "send" && t.params?.prereq_task && waiting.some((w) => w.id === t.params.prereq_task));
-                                    const planAdd = planSend ? waiting.find((w) => w.id === planSend.params.prereq_task) : null;
-                                    const inPlan = (t) => !!planSend && (t.id === planSend.id || t.id === planAdd.id);
-                                    const otherWaiting = waiting.filter((t) => !inPlan(t));
-                                    const needsW = otherWaiting.some((t) => t.kind === "send" || t.kind === "share");
+                                    // a PLAN = several actions of one message waiting together. Anything in a dependency chain is approved only through the plan.
+                                    const open_ = ts.filter((t) => t.status === "awaiting_confirmation" || t.status === "needs_clarification");
+                                    const isPlan = waiting.length > 1;
+                                    const chained = (t) => isPlan && ((t.depends_on || []).some((d) => waiting.some((w) => w.id === d)) || waiting.some((w) => (w.depends_on || []).includes(t.id)));
+                                    const needsW = waiting.some((t) => t.kind === "send" || t.kind === "share");
+                                    const unverified = needsW && waiting.filter((t) => t.kind === "share" && t.preview?.worker_access?.[batchWorker]?.state === "unknown").map((t) => t.preview.group);
+                                    const blocked = needsW && waiting.some((t) => t.kind === "share" && t.preview?.worker_access?.[batchWorker]?.state === "failed_before");
+                                    const hint = waiting.find((t) => t.params?.worker_hint)?.params.worker_hint;
                                     return (
                                         <div key={m.id} className={m.role === "user" ? "flex justify-end" : ""}>
                                             <div className={m.role === "user" ? "max-w-[85%] bg-black text-white rounded-2xl rounded-br-md px-3 py-2 text-sm" : "max-w-full w-full"}>
@@ -273,25 +280,28 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                                         {m.error && failed && <button type="button" onClick={() => submit(failed.text)} className="mt-1 text-xs underline" data-testid="pa-retry-send">Retry</button>}
                                                         {ts.length > 0 && (
                                                             <div className="mt-2 space-y-2">
-                                                                {ts.map((t) => <TaskCard key={t.id} task={t} busy={!!busy[t.id]} actionError={errors[t.id]} inPlan={inPlan(t)} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }} />)}
-                                                                {planSend && (
+                                                                {ts.map((t) => <TaskCard key={t.id} task={t} busy={!!busy[t.id]} actionError={errors[t.id]} inPlan={chained(t)} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }} />)}
+                                                                {isPlan && (
                                                                     <div className="rounded-xl border border-black/[0.15] p-3 bg-black/[0.02] space-y-2" data-testid="pa-plan">
-                                                                        <p className="text-xs font-medium text-black/85">One approval covers both steps, in this order:</p>
-                                                                        <ol className="text-[11px] text-black/65 list-decimal pl-4 space-y-0.5">
-                                                                            <li>{planAdd.title}</li>
-                                                                            <li>{planSend.title} — only after step 1 fully succeeds</li>
+                                                                        <p className="text-xs font-medium text-black/85">Plan — {waiting.length} actions. One approval covers exactly these, in this order:</p>
+                                                                        <ol className="text-[11px] text-black/65 list-decimal pl-4 space-y-0.5" data-testid="pa-plan-steps">
+                                                                            {open_.map((t, i) => {
+                                                                                const after = (t.depends_on || []).map((d) => open_.findIndex((x) => x.id === d) + 1).filter((n) => n > 0);
+                                                                                return <li key={t.id} className={t.status === "needs_clarification" ? "text-amber-700" : ""}>{t.title}{after.length ? ` — after step ${after.join(", ")}, only if it succeeds` : ""}{t.status === "needs_clarification" ? " — needs your pick first; it will not run" : ""}</li>;
+                                                                            })}
                                                                         </ol>
-                                                                        <WorkerPicker value={batchWorker} onChange={setBatchWorker} hint={planSend.params?.worker_hint} disabled={!!busy[planSend.id]} />
+                                                                        {needsW && <WorkerPicker value={batchWorker} onChange={setBatchWorker} hint={hint} disabled={waiting.some((t) => busy[t.id])} />}
+                                                                        {blocked && <p className="text-[11px] text-red-700" role="alert" data-testid="pa-plan-blocked">This worker could not find a destination group last time, so the plan is held. Pick another worker.</p>}
+                                                                        {unverified.length > 0 && !blocked && (
+                                                                            <label className="flex items-start gap-2 text-[11px] text-amber-800" data-testid="pa-plan-ack">
+                                                                                <input type="checkbox" className="mt-0.5" checked={!!planAck[m.command_id]} onChange={(e) => setPlanAck((a) => ({ ...a, [m.command_id]: e.target.checked }))} />
+                                                                                <span>This worker has never been seen sending to {unverified.map((g) => `“${g}”`).join(", ")} and the app can&apos;t check which chats it belongs to. Send anyway — if it isn&apos;t in the group nothing is delivered and the failure is shown.</span>
+                                                                            </label>
+                                                                        )}
                                                                         <div className="flex gap-2">
-                                                                            <button type="button" disabled={!batchWorker || !!busy[planSend.id]} onClick={() => approvePlan(planAdd, planSend, batchWorker)} data-testid="pa-plan-approve" className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40">Approve plan</button>
-                                                                            <button type="button" disabled={!!busy[planSend.id]} onClick={() => cancelPlan(planAdd, planSend)} data-testid="pa-plan-cancel" className="px-3 min-h-[40px] rounded-lg border border-black/[0.15] text-xs text-black/65">Cancel plan</button>
+                                                                            <button type="button" disabled={(needsW && !batchWorker) || blocked || (unverified.length > 0 && !planAck[m.command_id]) || waiting.some((t) => busy[t.id])} onClick={() => approvePlan(m.command_id, waiting, unverified.length > 0 && planAck[m.command_id])} data-testid="pa-plan-approve" className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40">Approve plan</button>
+                                                                            <button type="button" disabled={waiting.some((t) => busy[t.id])} onClick={() => cancelPlan(m.command_id, open_.map((t) => t.id))} data-testid="pa-plan-cancel" className="px-3 min-h-[40px] rounded-lg border border-black/[0.15] text-xs text-black/65">Cancel plan</button>
                                                                         </div>
-                                                                    </div>
-                                                                )}
-                                                                {otherWaiting.length > 1 && (
-                                                                    <div className="rounded-xl border border-black/[0.1] p-3 bg-black/[0.02] space-y-2" data-testid="pa-confirm-all">
-                                                                        {needsW && <WorkerPicker value={batchWorker} onChange={setBatchWorker} disabled={false} />}
-                                                                        <button type="button" disabled={needsW && !batchWorker} onClick={() => doConfirmAll(m.command_id, otherWaiting.map((t) => t.id))} className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40">Confirm all {otherWaiting.length}</button>
                                                                     </div>
                                                                 )}
                                                             </div>

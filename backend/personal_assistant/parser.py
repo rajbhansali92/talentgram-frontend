@@ -156,7 +156,7 @@ def _template(raw: str) -> Optional[str]:
 
 
 # --- intent detection --------------------------------------------------------------------------------------
-_SHARE_OBJ = re.compile(r"\b(?:profile|media\s*link|media|portfolio|audition|photos?|pictures?|video|intro(?:duction)?\s+video)\b", re.I)
+_SHARE_OBJ = re.compile(r"\b(?:profile|media\s*(?:link|kit)|media|portfolio|audition|photos?|pictures?|video|intro(?:duction)?\s+video)\b", re.I)
 _RECIPIENT_GROUP = re.compile(r"\b(?:the\s+|this\s+)?(?:project|casting|whatsapp)\s+group\b", re.I)
 _RECIPIENT_DIRECTOR = re.compile(r"\b(?:the\s+)?casting\s+director\b", re.I)
 
@@ -198,17 +198,17 @@ def _parse_share(text: str, seg: Segment) -> None:
         _project(pm.group("p"), seg)
     body = text
     # "share Angela's media link" / "send Angela Kumar's audition to ..." / "share the profile of Angela"
-    m = re.search(rf"(?P<n>{_NAME})(?:'|’)s\s+(?:profile|media\s*link|media|portfolio|audition|photos?|video)", body, re.I)
+    m = re.search(rf"(?P<n>{_NAME})(?:'|’)s\s+(?:profile|media\s*(?:link|kit)|media|portfolio|audition|photos?|video)", body, re.I)
     if not m:
-        m = re.search(rf"(?:profile|media\s*link|media|portfolio|audition)\s+(?:of|for)\s+(?P<n>{_NAME})", body, re.I)
+        m = re.search(rf"(?:profile|media\s*(?:link|kit)|media|portfolio|audition)\s+(?:of|for)\s+(?P<n>{_NAME})", body, re.I)
     if m:
         # "…media link of Angela with the casting director": the name stops at the preposition that starts the recipient
         seg.talents = split_names(re.split(r"\s+(?:with|to|for|via|at)\b", m.group("n"), maxsplit=1, flags=re.I)[0])
-    elif re.search(r"\b(?:her|his|their)\s+(?:profile|audition|media\s*link|photos?)\b", body, re.I):
+    elif re.search(r"\b(?:her|his|their)\s+(?:profile|audition|media\s*(?:link|kit)|photos?)\b", body, re.I):
         seg.talent_ref = "previous"     # "send her media link to …" — the talent just discussed
-    elif re.search(r"\b(?:this|the|that)\s+(?:profile|audition|media\s*link)\b|\bit\b|\bthem\b", body, re.I):
+    elif re.search(r"\b(?:this|the|that)\s+(?:profile|audition|media\s*(?:link|kit))\b|\bit\b|\bthem\b", body, re.I):
         seg.talent_ref = "selected"     # "send this profile to …" — the one on screen / selected
-    seg.lookup = "media_link" if re.search(r"media\s*link|media", body, re.I) else ("audition" if re.search(r"audition", body, re.I) else "profile")
+    seg.lookup = "media_link" if re.search(r"media\s*(?:link|kit)|media", body, re.I) else ("audition" if re.search(r"audition", body, re.I) else "profile")
 
 
 _PRON = r"(?:she|he|they|her|him|them|their|his)"
@@ -227,7 +227,7 @@ def _parse_pronoun_lookup(text: str, seg: Segment) -> bool:
         kind = "projects"
     elif re.search(r"\b(?:her|his|their)\s+submission\s+history\b", low):
         kind = "submissions"
-    elif re.search(r"\b(?:her|his|their)\s+media\s*link\b", low):
+    elif re.search(r"\b(?:her|his|their)\s+media\s*(?:link|kit)\b", low):
         kind = "media_link"
     elif re.search(r"\b(?:her|his|their)\s+(?:photos?|videos?)\b", low):
         kind = "media"
@@ -258,17 +258,17 @@ def _parse_lookup(text: str, seg: Segment) -> bool:
         if m:
             names, kind = m.group("n"), "submissions"
     if not names:
-        m = re.search(rf"(?P<n>{_NAME})(?:'|’)s\s+(?P<what>profile|media\s*link|media|photos?(?:\s+and\s+intro\w*\s+video)?|videos?|intro\w*\s+video|history)", text, re.I)
+        m = re.search(rf"(?P<n>{_NAME})(?:'|’)s\s+(?P<what>profile|media\s*(?:link|kit)|media|photos?(?:\s+and\s+intro\w*\s+video)?|videos?|intro\w*\s+video|history)", text, re.I)
         if m:
             names = m.group("n")
-            what = m.group("what").lower()
-            kind = "media_link" if what.startswith("media link") else "media" if what.startswith(("media", "photo", "video", "intro")) else "profile"
+            what = re.sub(r"\s+", " ", m.group("what").lower())
+            kind = "media_link" if re.match(r"media ?(link|kit)", what) else "media" if what.startswith(("media", "photo", "video", "intro")) else "profile"
     if not names:
-        m = re.search(rf"\b(?P<what>profile|media\s*link|photos?|videos?)\s+(?:of|for)\s+(?P<n>{_NAME})", text, re.I)
+        m = re.search(rf"\b(?P<what>profile|media\s*(?:link|kit)|photos?|videos?)\s+(?:of|for)\s+(?P<n>{_NAME})", text, re.I)
         if m:
             names = m.group("n")
-            what = m.group("what").lower()
-            kind = "media_link" if what.startswith("media link") else "media" if what.startswith(("photo", "video")) else "profile"
+            what = re.sub(r"\s+", " ", m.group("what").lower())
+            kind = "media_link" if re.match(r"media ?(link|kit)", what) else "media" if what.startswith(("photo", "video")) else "profile"
     if not names:
         m = re.match(rf"\s*(?:find|search\s+for|look\s*up|locate|who\s+is)\s+(?P<n>{_NAME})\s*$", text, re.I)
         if m:
@@ -277,6 +277,9 @@ def _parse_lookup(text: str, seg: Segment) -> bool:
         m = re.match(rf"\s*(?:show|get|open|pull\s+up|give)(?:\s+me)?\s+(?P<n>{_NAME})\s*$", text, re.I)
         if m and not re.match(r"(?:everyone|all|the|my|me)\b", m.group("n"), re.I):
             names, kind = m.group("n"), "profile"
+            tail = re.search(r"\s+media\s*(?:link|kit)$", names, re.I)        # "show angela kumar media kit" — the object, not part of the name
+            if tail:
+                names, kind = names[: tail.start()], "media_link"
     if not names:
         return False
     seg.intent, seg.lookup = "lookup", kind
@@ -316,6 +319,9 @@ def parse_segment(text: str) -> Segment:
             return seg
         # "<template> [for <project>] to <who> [for <project>]"
         m = re.match(r"(?P<tpl>.+?)(?:\s+for\s+(?P<p1>.+?))?\s+to\s+(?P<who>.+?)(?:\s+for\s+(?P<p2>.+))?$", rest, re.I)
+        if m and _norm_space(m.group("tpl")).lower() in _BARE_PRONOUNS:
+            seg.intent = "unknown"                                  # "send it to Embassy One" with nothing it could refer to: say so, never guess
+            return seg
         if m:
             seg.template = _template(m.group("tpl"))
             _who(m.group("who"), seg)
@@ -408,6 +414,24 @@ def _stage_and_project(rest: str, seg: Segment) -> None:
     _project(_after_prep(remaining) or (remaining if re.search(r"\b(?:current|this)\s+project\b", remaining, re.I) else None), seg)
 
 
+_BARE_PRONOUNS = {"it", "this", "that", "them", "him", "her", "these", "those"}
+_SEND_IT = re.compile(r"^(?:send|share|forward)\s+(?:it|this|that|the\s+link|the\s+media\s*(?:link|kit)|the\s+kit)\s+(?:to|with)\s+(?P<r>.+?)\s*$", re.I)
+
+
+def _follow_up_share(seg: Segment, prev: Optional[Segment]) -> Optional[Segment]:
+    """"Show me Angela's media kit and send it to Embassy One": the second clause has no template and no talent of its own — "it" is
+    the link just shown. Without this it was read as a template send to a *talent* called "Embassy One". Only when the previous
+    clause was a lookup/share of a profile or media link; anything else is left to the normal rules (and stays unresolved)."""
+    if prev is None or prev.intent not in ("lookup", "share") or prev.lookup not in ("media_link", "media", "profile"):
+        return None
+    m = _SEND_IT.match(seg.text.strip(" .,;"))
+    if not m:
+        return None
+    out = Segment(text=seg.text, intent="share", talent_ref="previous", lookup="media_link" if prev.lookup in ("media_link", "media") else "profile")
+    out.recipient = _recipient(f"send it to {m.group('r')}")
+    return out
+
+
 def parse_message(message: str) -> List[Segment]:
     """Split a message into ordered segments and parse each. Empty input → []."""
     text = (message or "").strip()
@@ -418,5 +442,7 @@ def parse_message(message: str) -> List[Segment]:
         for piece in _CONNECT.split(sentence):
             piece = (piece or "").strip()
             if piece and re.search(r"[A-Za-z0-9]", piece):
-                out.append(parse_segment(piece))
+                seg = parse_segment(piece)
+                follow = _follow_up_share(seg, out[-1] if out else None) if seg.intent in ("send", "unknown") else None
+                out.append(follow or seg)
     return out

@@ -52,10 +52,35 @@ async def ensure_indexes() -> None:
     _indexes_ready = True
 
 
+def fingerprint(task: dict) -> str:
+    """A short hash of everything an approval is for: the action kind and the exact resolved entities (talent / project ids, stage,
+    template, recipient / destination group, and the content to be sent — a media link counts as "a link", not its token, so merely
+    minting it later does not change it). Approving sends this back; if the plan has changed in any material way the hash differs and
+    the approval is refused. Names and warnings are deliberately NOT part of it."""
+    import hashlib
+    import json
+    p = task.get("params") or {}
+    rec = p.get("recipient") or {}
+    prev = task.get("preview") or {}
+    body = {
+        "k": task.get("kind"), "dep": sorted(task.get("depends_on") or []),
+        "t": [e.get("id") for e in p.get("talents") or []], "p": [e.get("id") for e in p.get("projects") or []],
+        "stage": p.get("stage"), "tpl": p.get("template_id"), "lk": p.get("lookup"),
+        "rec": [rec.get("kind"), rec.get("id"), rec.get("project_id"), rec.get("phone"), rec.get("state")] if rec else None,
+        "grp": prev.get("group"),
+        "items": [[i.get("name"), i.get("state") or i.get("text")] for i in prev.get("items") or []],
+        "dest": [[d.get("name"), d.get("kind"), d.get("text")] for d in prev.get("destinations") or []],
+        "pre": sorted({(m.get("talent_id"), m.get("project_id")) for m in (p.get("prereq") or {}).get("missing") or [] if isinstance(m, dict)}),
+    }
+    return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()[:20]
+
+
 def public(doc: Optional[dict]) -> Optional[dict]:
     if not doc:
         return doc
-    return {k: v for k, v in doc.items() if k not in ("_id", "owner_id", "idempotency_key")}
+    out = {k: v for k, v in doc.items() if k not in ("_id", "owner_id", "idempotency_key")}
+    out["fingerprint"] = fingerprint(doc)
+    return out
 
 
 # -------------------------------------------------------------------------------------------------- commands

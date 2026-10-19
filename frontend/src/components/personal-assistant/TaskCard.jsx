@@ -28,6 +28,8 @@ function Thumb({ src, alt = "", className = "" }) {
     return <img src={src} alt={alt} loading="lazy" decoding="async" onError={() => setBad(true)} className={`object-cover ${className}`} />;
 }
 
+const IDENTIFY = { talent: "Who do you mean?", project: "Which project?", template: "Which template?", recipient: "Where should it go?", stage: "Which stage?" };
+const CONSEQUENTIAL = ["add", "send", "move", "share"];
 const STATUS_CHIP = { ongoing: "Ongoing", complete: "Complete", completed: "Complete", hold: "On hold", locked: "Locked" };
 
 /**
@@ -137,6 +139,12 @@ function Outcomes({ rows }) {
     );
 }
 
+function mediaContentsText(c) {
+    if (!c) return "Anyone with this link can view and download the talent's photos and intro video.";
+    const parts = [c.indian && `${c.indian} Indian look`, c.western && `${c.western} Western look`, c.portfolio && `${c.portfolio} portfolio`, c.video && "intro video"].filter(Boolean);
+    return `Opens a page where anyone with the link can view and download: ${parts.length ? parts.join(" · ") : "nothing yet"}.`;
+}
+
 function CopyBtn({ text }) {
     const [ok, setOk] = useState(false);
     return (
@@ -188,9 +196,17 @@ function TalentResult({ card, kind, onPrefill }) {
                 </div>
             </div>
             {!card.media_link_requested ? null : card.media_link_available ? (
-                <p className="mt-1.5 text-[11px] flex items-center gap-1 text-black/60 min-w-0"><span className="truncate">{card.media_link}</span><CopyBtn text={card.media_link} /></p>
+                <div className="mt-1.5 text-[11px] text-black/60" data-testid="pa-media-kit">
+                    <p className="flex items-center gap-1.5 min-w-0">
+                        <a href={card.media_link} target="_blank" rel="noreferrer" className="truncate underline" data-testid="pa-media-link">{card.media_link}</a>
+                        <a href={card.media_link} target="_blank" rel="noreferrer" aria-label="Open media link" className="shrink-0 inline-flex items-center gap-1 min-h-[32px] px-1 hover:text-black">Open <ExternalLink className="w-3 h-3" /></a>
+                        <CopyBtn text={card.media_link} />
+                    </p>
+                    <p className="text-black/50" data-testid="pa-media-contents">{mediaContentsText(card.media_contents)}</p>
+                    {card.media_link_reason && <p className="text-amber-700" data-testid="pa-media-reason">{card.media_link_reason}</p>}
+                </div>
             ) : (
-                <p className="mt-1.5 text-[11px] text-black/45">Media download link is unavailable for this talent.</p>
+                <p className="mt-1.5 text-[11px] text-amber-700" data-testid="pa-media-reason">{card.media_link_reason || "Media download link is unavailable for this talent."}</p>
             )}
             {!historyOnly && card.photos?.length > 0 && (
                 <div className="flex gap-1.5 mt-1.5 overflow-x-auto" data-testid="pa-photos">
@@ -205,7 +221,13 @@ function TalentResult({ card, kind, onPrefill }) {
                     {h.submissions.length > 0 && <><p className="text-black/40 uppercase tracking-wider text-[9px] mt-1">Submissions</p><ul>{h.submissions.slice(0, 10).map((x, i) => <li key={`${x.project_id}-${i}`} className="flex justify-between gap-2"><span className="truncate">{x.project}</span><span className="text-black/50 shrink-0">{x.status}{x.date ? ` · ${x.date}` : ""}</span></li>)}</ul></>}
                 </div>
             )}
-            {!historyOnly && <button type="button" onClick={() => onPrefill(`Share ${card.label}'s media link with `)} className="mt-1.5 text-[11px] underline text-black/60 min-h-[32px]">Share this…</button>}
+            {!historyOnly && card.media_link_available && (
+                <div className="mt-1.5">
+                    <button type="button" onClick={() => onPrefill(`Send ${card.label}'s media link to `)} data-testid="pa-share-whatsapp" className="text-[11px] underline text-black/70 min-h-[32px]">Share on WhatsApp…</button>
+                    <p className="text-[10px] text-black/40">Name a project, a saved contact or a number — you'll see the exact destination and approve before anything is sent.</p>
+                </div>
+            )}
+            {!historyOnly && !card.media_link_available && <button type="button" onClick={() => onPrefill(`Share ${card.label}'s media link with `)} className="mt-1.5 text-[11px] underline text-black/60 min-h-[32px]">Share this…</button>}
         </div>
     );
 }
@@ -246,6 +268,11 @@ function Result({ task, onPrefill, onFollowUp, busy }) {
 
 export default function TaskCard({ task, busy, actionError, inPlan = false, onClarify, onConfirm, onCancel, onRetry, onFollowUp, onPrefill }) {
     const [worker, setWorker] = useState("");
+    const [ack, setAck] = useState(false);
+    const access = task.kind === "share" && task.status === "awaiting_confirmation" && worker ? task.preview?.worker_access?.[worker] : null;
+    const unverified = access?.state === "unknown";
+    const blocked = access?.state === "failed_before";
+    useEffect(() => { setAck(false); }, [worker, task.fingerprint]);        // an acknowledgement belongs to one worker and one version of the plan
     const needsWorker = (task.kind === "send" || task.kind === "share") && task.status === "awaiting_confirmation";
     const canCancel = ["needs_clarification", "awaiting_confirmation", "ready"].includes(task.status) || task.status === "queued";
     const dep = task.depends_on?.length > 0 && task.status === "awaiting_confirmation";
@@ -256,21 +283,38 @@ export default function TaskCard({ task, busy, actionError, inPlan = false, onCl
                 <h4 className="text-[13px] font-medium text-black/90 leading-snug">{task.title}</h4>
                 <StatusChip status={task.status} kind={task.kind} uncertain={!!task.uncertain} />
             </header>
+            {task.status === "awaiting_confirmation" && (
+                <p className="mt-1.5 text-[11px] font-medium text-sky-800" data-testid="pa-approve-head">
+                    Approve this action?<span className="font-normal text-black/50"> Nothing has been {task.kind === "send" || task.kind === "share" ? "sent" : "changed"} yet.</span>
+                </p>
+            )}
             {task.summary?.length > 0 && task.status === "awaiting_confirmation" && (
-                <ul className="mt-1.5 text-xs text-black/65 space-y-0.5" data-testid="pa-preview">{task.summary.map((l, i) => <li key={i} className={/twice|skipped|switched off|Not in/.test(l) ? "text-amber-700" : ""}>{l}</li>)}</ul>
+                <ul className="mt-1.5 text-xs text-black/65 space-y-0.5" data-testid="pa-preview">{task.summary.map((l, i) => <li key={i} className={/twice|skipped|switched off|Not in|not verified|NOT find|can't confirm|also the casting group|is (?!ongoing)\w+, not ongoing/.test(l) ? "text-amber-700" : ""}>{l}</li>)}</ul>
             )}
             {dep && <p className="mt-1 text-[11px] text-black/45">Runs after the step before it succeeds.</p>}
             {task.params?.worker_label && task.status !== "awaiting_confirmation" && <p className="mt-1 text-[11px] text-black/45" data-testid="pa-worker-used">Worker: {task.params.worker_label}</p>}
             {task.status_detail && <p className="mt-1 text-[11px] text-black/55" data-testid="pa-detail">{task.status_detail}</p>}
             {task.error && <p className="mt-1.5 text-xs text-red-700 flex gap-1.5" role="alert"><AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden />{task.error}</p>}
             {actionError && <p className="mt-1.5 text-xs text-red-700" role="alert">{actionError}</p>}
+            {task.status === "needs_clarification" && (
+                <p className="mt-1.5 text-[11px] font-medium text-amber-800" data-testid="pa-identify-head">
+                    {IDENTIFY[task.slots?.[0]?.kind] || "Which one do you mean?"}{CONSEQUENTIAL.includes(task.kind) ? <span className="font-normal text-black/50"> Picking only identifies it — nothing happens until you approve.</span> : null}
+                </p>
+            )}
             {task.status === "needs_clarification" && task.slots?.map((s, i) => <ClarifySlot key={s.key} slot={s} busy={busy} command={i === 0 ? task.source_text : null} onPick={(key, body) => onClarify(task, key, body)} />)}
             {needsWorker && !inPlan && <div className="mt-2.5"><WorkerPicker value={worker} onChange={setWorker} hint={task.params?.worker_hint} disabled={busy} /></div>}
+            {blocked && !inPlan && <p className="mt-1.5 text-xs text-red-700" role="alert" data-testid="pa-group-blocked">“{task.preview?.group}”: this worker could not find the group last time, so it is held. Pick a different worker.</p>}
+            {unverified && !inPlan && (
+                <label className="mt-1.5 flex items-start gap-2 text-xs text-amber-800" data-testid="pa-group-ack">
+                    <input type="checkbox" className="mt-0.5" checked={ack} disabled={busy} onChange={(e) => setAck(e.target.checked)} />
+                    <span>{access.label} has never been seen sending to “{task.preview?.group}”, and the app can&apos;t check which chats a worker belongs to. Send anyway — if it isn&apos;t in the group nothing is delivered and the failure is shown.</span>
+                </label>
+            )}
             <Result task={task} onPrefill={onPrefill} onFollowUp={onFollowUp} busy={busy} />
             <Outcomes rows={["completed", "partial", "failed", "running", "queued", "cancelled"].includes(task.status) ? rows : []} />
             <footer className="flex flex-wrap items-center gap-2 mt-2.5">
                 {task.status === "awaiting_confirmation" && !inPlan && (
-                    <button type="button" disabled={busy || (needsWorker && !worker)} onClick={() => onConfirm(task, worker)} data-testid="pa-confirm"
+                    <button type="button" disabled={busy || (needsWorker && !worker) || blocked || (unverified && !ack)} onClick={() => onConfirm(task, worker, unverified && ack)} data-testid="pa-confirm"
                         className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40 inline-flex items-center gap-1.5">
                         {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />} {task.duplicate_risk ? "Send again anyway" : "Confirm"}
                     </button>

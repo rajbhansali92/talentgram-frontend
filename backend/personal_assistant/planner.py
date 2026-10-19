@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 from typing import Any, Dict, List, Optional
 
 from core import db
@@ -74,6 +75,14 @@ def compute_slots(task: dict) -> List[dict]:
 
 def _all_resolved(entries: List[dict]) -> bool:
     return bool(entries) and all(e["state"] == "resolved" for e in entries)
+
+
+def adopt_recipient_project(p: dict) -> None:
+    """A recipient that IS a project's casting group ("…to Amazon Now") makes that project the task's project, so the preview, the
+    group lookup and the send all read the one chosen project — never a name re-typed or re-guessed later."""
+    rec = p.get("recipient") or {}
+    if rec.get("state") == "resolved" and rec.get("kind") == "project_group" and rec.get("project_id"):
+        p["projects"] = [{"phrase": rec.get("label") or "", "state": "resolved", "id": rec["project_id"], "label": rec.get("label") or ""}]
 
 
 def _title(task: dict) -> str:
@@ -314,6 +323,19 @@ async def _share_preview(task: dict, warnings: List[str]) -> None:
             task["status"], task["error"] = S.FAILED, f"{p['projects'][0]['label']} has no WhatsApp casting group set, so there is nowhere to send to."
             return
         prev["group"] = group
+        pdoc = await db.projects.find_one({"id": pid}, {"_id": 0, "status": 1})
+        status = (pdoc or {}).get("status") or "ongoing"
+        if status != "ongoing":
+            warnings.append(f"{p['projects'][0]['label']} is {status}, not ongoing — check this is the group you want.")
+        col = await R.group_collisions(group, pid)
+        if col["others"]:
+            warnings.append(f"“{group}” is also the casting group of {col['others']} other project{'s' if col['others'] != 1 else ''}"
+                            f"{' (' + str(col['ongoing']) + ' ongoing)' if col['ongoing'] else ''} — the message lands in that one shared chat.")
+        access = await R.group_evidence(group)
+        prev["worker_access"] = access
+        if access and not any(a["state"] == "verified" for a in access.values()):
+            warnings.append("No WhatsApp worker has sent to this group before, so I can't confirm the one you pick is a member. "
+                            "If it isn't, nothing is delivered and the failure shows in the result.")
     if rec.get("kind") in ("crm",) and not rec.get("phone_present"):
         task["status"], task["error"] = S.FAILED, f"{rec.get('label')} has no phone number saved in the CRM."
         return
@@ -326,10 +348,25 @@ async def _share_preview(task: dict, warnings: List[str]) -> None:
                     "missing": "talent not found — will be skipped"}[pk["state"]]
             if pk["state"] in ("off", "missing"):
                 warnings.append(f"{t['label']}: {text}")
+            elif rec.get("kind") == "project_group" and pk["state"] == "ready" and pk.get("url") and await _recent_group_share(prev.get("group"), pk["url"]):
+                warnings.append(f"{t['label']}'s media link was already sent or queued to this group in the last 24 h — sending again would post it twice.")
+                task["duplicate_risk"] = True
         else:
             text = "profile / portfolio link, as the Fetcher sends it"
-        prev["items"].append({"name": t["label"], "text": text})
+        st = "profile"
+        if p.get("lookup") == "media_link":
+            st = "link" if pk["state"] in ("ready", "will_create") else pk["state"]       # a link counts as "a link"; its token is irrelevant
+        prev["items"].append({"name": t["label"], "text": text, "state": st})
     task["preview"] = prev
+
+
+async def _recent_group_share(group: Optional[str], url: str) -> bool:
+    from datetime import datetime, timedelta, timezone
+    if not (group and url):
+        return False
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    return bool(await db.whatsapp_jobs.find_one({"destination_type": "group", "destination": group, "created_at": {"$gte": since}, "is_dry_run": {"$ne": True},
+                                                 "status": {"$in": ["pending", "sending", "sent", "sent_unverified"]}, "message_body": {"$regex": re.escape(url)}}, {"_id": 1}))
 
 
 def summary_lines(task: dict) -> List[str]:
@@ -358,6 +395,11 @@ def summary_lines(task: dict) -> List[str]:
         lines = [f"Recipient: {dest}", f"Content: {'media link' if p.get('lookup') == 'media_link' else 'profile'} of {n} talent{'s' if n != 1 else ''}:"]
         for it in (task.get("preview") or {}).get("items", []):
             lines.append(f"  • {it['name']} — {it['text']}")
+        acc = (task.get("preview") or {}).get("worker_access") or {}
+        for a in acc.values():
+            note = {"verified": f"has sent to this group before{' (' + a['when'] + ')' if a.get('when') else ''}", "failed_before": f"could NOT find this group last time{' (' + a['when'] + ')' if a.get('when') else ''} — sending is held for it",
+                    "unknown": "not verified for this group yet"}[a["state"]]
+            lines.append(f"Worker {a['label']}: {note}")
         lines.append("Sent through the existing WhatsApp queue — pick the worker below.")
     return lines + list(task.get("warnings") or [])
 
@@ -405,8 +447,8 @@ async def _talent_entries(seg: Segment, prev: Optional[dict], context: dict) -> 
     selected = await _validated_selection((context or {}).get("talent_ids") or [])
     if selected:
         return selected, None
-    if prev and prev["params"].get("talents") and seg.talent_ref in ("selected", None):
-        return copy.deepcopy(prev["params"]["talents"]), prev["id"]
+    # Another clause's talents are NEVER inherited just because they came first: only an explicit pronoun ("send THEM…") — handled above —
+    # points at the previous action. A clause that names nobody and has no on-screen selection asks, instead of acting on someone else.
     return [{"phrase": "", "state": "none", "prompt": "No talents are selected. Type the names you want (e.g. “Angela and Riya”)."}], None
 
 
@@ -459,6 +501,7 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
             p["lookup"] = seg.lookup
         if kind == "share":
             p["recipient"] = await R.resolve_recipient(seg.recipient or {"kind": "unspecified"})
+            adopt_recipient_project(p)
         # a send / move for talents that an earlier add in THIS message is putting into the same project waits for it
         if kind in ("send", "move") and not t["depends_on"]:
             for earlier in tasks:

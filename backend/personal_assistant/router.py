@@ -52,6 +52,13 @@ class ClarifyIn(BaseModel):
 
 class ConfirmIn(BaseModel):
     worker_id: Optional[str] = Field(default=None, max_length=80)
+    # The approval is for exactly what the user was shown. `fingerprint` (one task) / `fingerprints` ({task_id: fingerprint}, a plan)
+    # are the hashes the server put on those tasks; if the plan has since changed in any material way the approval is refused and
+    # the revised task is returned instead. Optional only so an older open tab keeps working.
+    fingerprint: Optional[str] = Field(default=None, max_length=64)
+    fingerprints: Optional[Dict[str, str]] = None
+    # "Send anyway": the user accepts that the chosen worker has never been seen sending to this group (see executors.group_hold).
+    ack_unverified: bool = False
 
 
 class FollowUpIn(BaseModel):
@@ -244,6 +251,7 @@ async def _apply_recipient(task: dict, choice_id: Optional[str], text: Optional[
     if not new:
         return False
     p["recipient"] = new
+    P.adopt_recipient_project(p)
     return True
 
 
@@ -281,11 +289,43 @@ async def _resolve_worker(task: dict, requested: Optional[str]) -> Optional[str]
     return (requested or "").strip() or await X.worker_id_for_hint(task["params"].get("worker_hint"))
 
 
-async def _confirm_one(user: dict, task: dict, requested_worker: Optional[str]) -> dict:
+class PlanChanged(HTTPException):
+    """The plan differs from what the user approved. Carries the revised task(s) so the UI can show them for a fresh approval."""
+    def __init__(self, detail: str, tasks: List[dict]):
+        super().__init__(409, detail)
+        self.tasks = tasks
+
+
+async def _revalidate(owner: str, task: dict, shown: Optional[str]) -> None:
+    """Re-plan the waiting task from its stored resolved entities (read-only on a copy: no link is minted, nothing is sent) and compare
+    with the approval. Raises PlanChanged — after saving the revised task, so the next view shows it — when anything material moved:
+    the user approved a different version than the stored one, or the world (a project's group, a talent's availability, a link toggle,
+    a pipeline membership) now yields a different plan."""
+    import copy
+    stored_fp = S.fingerprint(task)
+    if shown and shown != stored_fp:
+        raise PlanChanged("This changed since you looked at it — please review the updated request and approve it again.", [task])
+    fresh = copy.deepcopy(task)
+    await P.finalize(fresh)
+    if fresh["status"] == S.AWAITING_CONFIRMATION and S.fingerprint(fresh) == stored_fp:
+        return
+    keys = ("params", "slots", "status", "title", "summary", "warnings", "error", "preview", "duplicate_risk")
+    saved = await S.update_task(owner, task["id"], {k: fresh[k] for k in keys if k in fresh}, only_status=[S.AWAITING_CONFIRMATION])
+    raise PlanChanged("Something changed since this was planned, so I did not run it. Review the updated request and approve it again.", [saved or fresh])
+
+
+def _hold_error(held: tuple) -> HTTPException:
+    kind, msg = held
+    return HTTPException(409, {"message": msg, "needs_ack": True} if kind == X.UNVERIFIED else msg)
+
+
+async def _confirm_one(user: dict, task: dict, requested_worker: Optional[str], shown: Optional[str] = None, ack: bool = False) -> dict:
     owner = user["id"]
     if task["status"] != S.AWAITING_CONFIRMATION:
         return task                                       # already confirmed / moved: never run twice
     await _fresh(owner, task)
+    if shown is not None:
+        await _revalidate(owner, task, shown)
     block = await X.dependency_block(owner, task)
     if block:
         raise HTTPException(409, block)
@@ -296,13 +336,19 @@ async def _confirm_one(user: dict, task: dict, requested_worker: Optional[str]) 
             raise HTTPException(400, "Choose which WhatsApp worker to send from.")
         from routers.whatsapp_workers import require_sendable_worker
         await require_sendable_worker(worker)             # 404 / 403 / 409 — an explicit choice is never swapped for another worker
+        held = await X.group_hold(task, worker, ack)
+        if held:
+            raise _hold_error(held)                       # the task stays awaiting confirmation: pick another worker / acknowledge
     return await X.run_task(user, task, worker)
 
 
 @router.post("/tasks/{task_id}/confirm")
 async def confirm(task_id: str, body: ConfirmIn = ConfirmIn(), user: Dict[str, Any] = Depends(assistant_user)):
     task = await _own(user, task_id)
-    done = await _confirm_one(user, task, body.worker_id)
+    try:
+        done = await _confirm_one(user, task, body.worker_id, body.fingerprint, body.ack_unverified)
+    except PlanChanged as exc:
+        raise HTTPException(409, {"message": exc.detail, "changed": True, "tasks": [_pub(t) for t in exc.tasks]})
     return {"task": _pub(await X.refresh_task(user["id"], done))}
 
 
@@ -320,11 +366,39 @@ async def confirm_all(command_id: str, body: ConfirmIn = ConfirmIn(), user: Dict
     async def one(t: dict) -> None:
         async with sem:
             try:
-                results[t["id"]] = {"task": _pub(await X.refresh_task(owner, await _confirm_one(user, t, body.worker_id)))}
+                results[t["id"]] = {"task": _pub(await X.refresh_task(owner, await _confirm_one(user, t, body.worker_id, None, body.ack_unverified)))}
             except HTTPException as exc:
                 results[t["id"]] = {"task": _pub(t), "error": exc.detail if isinstance(exc.detail, str) else str(exc.detail)}
 
     waiting = [t for t in tasks if t["status"] == S.AWAITING_CONFIRMATION]
+    # All-or-nothing PRE-FLIGHT: when the client says which version it approved, every waiting task is re-checked BEFORE anything runs.
+    # One changed task invalidates the whole approval (nothing executes) and the revised tasks come back for a fresh review; a worker
+    # that must be held for a group, or a missing worker choice, likewise stops the plan before step 1 rather than half-way through.
+    if body.fingerprints is not None:
+        changed: List[dict] = []
+        for t in list(waiting):
+            try:
+                await _fresh(owner, t)
+            except HTTPException:
+                waiting.remove(t)                         # expired: now cancelled, so it simply isn't part of this approval
+                continue
+            try:
+                await _revalidate(owner, t, body.fingerprints.get(t["id"]) or "-")
+            except PlanChanged as exc:
+                changed += exc.tasks
+        if changed:
+            raise HTTPException(409, {"message": "The plan changed since you reviewed it, so nothing was run. Review the updated actions and approve again.",
+                                      "changed": True, "tasks": [_pub(t) for t in changed]})
+    for t in waiting:
+        if t["kind"] in NEEDS_WORKER:
+            w = await _resolve_worker(t, body.worker_id)
+            if not w:
+                raise HTTPException(400, "Choose which WhatsApp worker to send from.")
+            from routers.whatsapp_workers import require_sendable_worker
+            await require_sendable_worker(w)
+            held = await X.group_hold(t, w, body.ack_unverified)
+            if held:
+                raise _hold_error(held)
     first = [t for t in waiting if not t.get("depends_on")]
     later = [t for t in waiting if t.get("depends_on")]
     await asyncio.gather(*[one(t) for t in first])
@@ -335,6 +409,28 @@ async def confirm_all(command_id: str, body: ConfirmIn = ConfirmIn(), user: Dict
 
 
 # ------------------------------------------------------------------------------------- cancel / retry / follow-up
+@router.post("/commands/{command_id}/cancel")
+async def cancel_command(command_id: str, user: Dict[str, Any] = Depends(assistant_user)):
+    """Cancel everything in a plan that has not started. Tasks already running / done are left exactly as they are (the response says
+    which). A plan that is mid-run stops at the next step: a step that has not been claimed yet sees `cancelled` and never runs."""
+    owner = user["id"]
+    tasks = sorted(await S.list_tasks(owner, 60, command_id=command_id), key=lambda t: t["seq"])
+    if not tasks:
+        raise HTTPException(404, "Command not found")
+    out, cancelled, kept = [], 0, 0
+    for t in tasks:
+        if t["status"] in (S.NEEDS_CLARIFICATION, S.AWAITING_CONFIRMATION, "ready"):
+            try:
+                t = await X.cancel_task(user, t)
+            except HTTPException:
+                pass
+            cancelled += 1 if t["status"] == S.CANCELLED else 0
+        elif t["status"] not in S.TERMINAL:
+            kept += 1
+        out.append(_pub(t))
+    return {"tasks": out, "cancelled": cancelled, "still_running": kept}
+
+
 @router.post("/tasks/{task_id}/cancel")
 async def cancel(task_id: str, user: Dict[str, Any] = Depends(assistant_user)):
     task = await _own(user, task_id)

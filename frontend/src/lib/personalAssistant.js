@@ -22,13 +22,37 @@ export async function clarifyTask(taskId, body) {
     const { data } = await adminApi.post(`${BASE}/tasks/${taskId}/clarify`, body, T);
     return data.task;
 }
-export async function confirmTask(taskId, workerId) {
-    const { data } = await adminApi.post(`${BASE}/tasks/${taskId}/confirm`, workerId ? { worker_id: workerId } : {}, T);
+// An approval is for exactly what was shown: the server's `fingerprint` of the task (a hash of the resolved entities, destination
+// and content) goes back with the approval. If the plan has changed since, the server refuses and returns the revised task(s).
+export async function confirmTask(taskId, workerId, fingerprint, ackUnverified = false) {
+    const body = {};
+    if (workerId) body.worker_id = workerId;
+    if (fingerprint) body.fingerprint = fingerprint;
+    if (ackUnverified) body.ack_unverified = true;      // "send anyway": the worker has never been seen sending to this group
+    const { data } = await adminApi.post(`${BASE}/tasks/${taskId}/confirm`, body, T);
     return data.task;
 }
-export async function confirmAll(commandId, workerId) {
-    const { data } = await adminApi.post(`${BASE}/commands/${commandId}/confirm-all`, workerId ? { worker_id: workerId } : {}, T);
+export async function confirmAll(commandId, workerId, fingerprints, ackUnverified = false) {
+    const body = {};
+    if (workerId) body.worker_id = workerId;
+    if (fingerprints) body.fingerprints = fingerprints;
+    if (ackUnverified) body.ack_unverified = true;
+    const { data } = await adminApi.post(`${BASE}/commands/${commandId}/confirm-all`, body, T);
     return data.results;
+}
+export async function cancelCommand(commandId) {
+    const { data } = await adminApi.post(`${BASE}/commands/${commandId}/cancel`, undefined, T);
+    return data;
+}
+/** The human message of an error: a plain string detail, or {message} (plan changed / needs acknowledgement). */
+export function errorDetail(err) {
+    const d = err?.response?.data?.detail;
+    return typeof d === "string" ? d : d && typeof d === "object" && typeof d.message === "string" ? d.message : null;
+}
+/** A 409 whose detail is {message, changed, tasks}: the plan changed after it was shown. → that detail, else null. */
+export function changedPlan(err) {
+    const d = err?.response?.data?.detail;
+    return d && typeof d === "object" && d.changed ? d : null;
 }
 export async function cancelTask(taskId) {
     const { data } = await adminApi.post(`${BASE}/tasks/${taskId}/cancel`, undefined, T);

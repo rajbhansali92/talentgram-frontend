@@ -361,22 +361,59 @@ async def resolve_recipient(rec: dict) -> dict:
         q = (rec.get("value") or "").strip()
         from agents.modules.whatsapp_campaign_agent import _fetch_contact_lists, _fetch_group_lists
         contacts = await _crm_contacts()
-        m = name_match.tiered_name_match(q, contacts, lambda c: c["name"], id_fn=lambda c: c["id"], what="contact")
         by_id = {c["id"]: c for c in contacts}
+        # The OLD behaviour (contact → list → group, first category with an answer wins) is kept exactly. Projects (a project's saved
+        # casting group) are added on top: a precise project hit that conflicts with another category, or a project-only name, is
+        # never guessed — the user taps which one they meant. Spelling-corrected project guesses only appear when nothing else matched.
+        orig: Optional[dict] = None
+        cat_hits: List[dict] = []          # every category with a precise answer {"option","recipient"}
+        m = name_match.tiered_name_match(q, contacts, lambda c: c["name"], id_fn=lambda c: c["id"], what="contact")
         if m.item is not None:
             c = m.item
-            return {"state": "resolved", "kind": "crm", "id": c["id"], "label": c["name"], "display": f"{c['name']} ({mask_phone(c['phone'])}) — saved CRM contact", "phone_present": bool(c["phone"])}
-        if m.ambiguous:
-            return {"state": "ambiguous", "kind": "named", "prompt": f'Which contact did you mean by "{q}"?', "options": [_contact_option(by_id[a["id"]]) for a in m.ambiguous if a["id"] in by_id]}
+            r = {"state": "resolved", "kind": "crm", "id": c["id"], "label": c["name"], "display": f"{c['name']} ({mask_phone(c['phone'])}) — saved CRM contact", "phone_present": bool(c["phone"])}
+            orig = orig or r
+            cat_hits.append({"option": _contact_option(c), "recipient": r})
+        elif m.ambiguous:
+            orig = orig or {"state": "ambiguous", "kind": "named", "prompt": f'Which contact did you mean by "{q}"?', "options": [_contact_option(by_id[a["id"]]) for a in m.ambiguous if a["id"] in by_id]}
         for fetch, key, label in ((_fetch_contact_lists, "list", "saved contact list"), (_fetch_group_lists, "group", "saved group list")):
             items = await fetch()
             lm = name_match.tiered_name_match(q, items, lambda it: it.get("name") or "", id_fn=lambda it: it["id"], what=label)
             if lm.item is not None:
-                return {"state": "resolved", "kind": key, "id": lm.item["id"], "label": lm.item["name"], "display": f"{lm.item['name']} — {label}"}
-            if lm.ambiguous:
-                return {"state": "ambiguous", "kind": "named", "prompt": f'Which {label} did you mean?', "options": [{"id": f"{key}:{a['id']}", "label": a["label"], "sublabel": label.title(), "thumb": None} for a in lm.ambiguous]}
-        return {"state": "none", "kind": "named", "prompt": f"I couldn't find a saved contact, list or group called “{q}”. Give me a WhatsApp number, or save them in the CRM first.", "options": []}
+                r = {"state": "resolved", "kind": key, "id": lm.item["id"], "label": lm.item["name"], "display": f"{lm.item['name']} — {label}"}
+                orig = orig or r
+                cat_hits.append({"option": {"id": f"{key}:{lm.item['id']}", "label": lm.item["name"], "sublabel": label.title(), "thumb": None}, "recipient": r})
+            elif lm.ambiguous:
+                orig = orig or {"state": "ambiguous", "kind": "named", "prompt": f'Which {label} did you mean?', "options": [{"id": f"{key}:{a['id']}", "label": a["label"], "sublabel": label.title(), "thumb": None} for a in lm.ambiguous]}
+        proj_q = re.sub(r"(?i)^\s*(?:the\s+)?|\s*\b(?:whatsapp\s+|casting\s+)?(?:group|project)\s*$", "", q).strip() or q
+        proj_hits: List[dict] = []
+        proj_opts: List[dict] = []
+        for e in await resolve_projects(proj_q, prefer_active=False):
+            if e["state"] == "resolved":
+                pr = await recipient_from_option(f"project:{e['id']}")
+                if pr:
+                    proj_hits.append({"option": _project_recipient_option(pr), "recipient": pr})
+            elif e["state"] == "ambiguous":
+                proj_opts += [{**o, "id": f"project:{o['id']}", "sublabel": " · ".join(x for x in ["Project · casting group", o.get("sublabel") or ""] if x)} for o in e.get("options") or []]
+        if not proj_hits and (orig is not None):
+            return orig                                           # no precise project hit: exactly the previous behaviour
+        everything = cat_hits + proj_hits
+        if len(everything) == 1 and not proj_opts:
+            return everything[0]["recipient"]
+        options = [h["option"] for h in everything] + (proj_opts if not everything else [])
+        if not options and orig is None:
+            return {"state": "none", "kind": "named", "prompt": f"I couldn't find a saved contact, list, group or project called “{q}”. Give me a WhatsApp number, or save them in the CRM first.", "options": []}
+        if not options:
+            return orig
+        seen, uniq = set(), []
+        for o in options:
+            if o["id"] not in seen:
+                seen.add(o["id"]); uniq.append(o)
+        return {"state": "ambiguous", "kind": "named", "prompt": f'Which did you mean by "{q}"? A project\'s casting group, or a saved contact/list/group?' if len(everything) > 1 else f'Which project\'s casting group did you mean by "{q}"?', "options": uniq[:MAX_OPTIONS]}
     return {"state": "none", "kind": "unspecified", "prompt": "Who should I send it to? Give me a WhatsApp number, a saved contact's name, or say “the project group”.", "options": []}
+
+
+def _project_recipient_option(pr: dict) -> dict:
+    return {"id": f"project:{pr['project_id']}", "label": pr["label"], "sublabel": f"Project · {str(pr.get('project_status') or 'ongoing').title()} · casting group", "thumb": None}
 
 
 async def recipient_from_option(option_id: str) -> Optional[dict]:
@@ -391,6 +428,13 @@ async def recipient_from_option(option_id: str) -> Optional[dict]:
         if not d:
             return None
         return {"state": "resolved", "kind": "crm", "id": rid, "label": d.get("name") or "", "display": f"{d.get('name')} ({mask_phone(d.get('phone_number') or '')}) — saved CRM contact", "phone_present": bool(d.get("phone_number"))}
+    if kind == "project":
+        d = await db.projects.find_one({"id": rid}, {"_id": 0, "id": 1, "brand_name": 1, "status": 1, "whatsapp_casting_group_name": 1})
+        if not d or d.get("status") == "deleted" or not (d.get("brand_name") or "").strip():
+            return None
+        brand = d["brand_name"]
+        return {"state": "resolved", "kind": "project_group", "project_id": d["id"], "label": brand, "project_status": d.get("status") or "ongoing",
+                "display": f"the WhatsApp casting group of {brand}"}
     if kind in ("list", "group"):
         coll = db.whatsapp_contact_lists if kind == "list" else db.whatsapp_group_lists
         d = await coll.find_one({"id": rid, "deleted": {"$ne": True}}, {"_id": 0, "id": 1, "name": 1})
@@ -399,6 +443,44 @@ async def recipient_from_option(option_id: str) -> Optional[dict]:
         label = "saved contact list" if kind == "list" else "saved group list"
         return {"state": "resolved", "kind": kind, "id": rid, "label": d.get("name") or "", "display": f"{d.get('name')} — {label}"}
     return None
+
+
+# --------------------------------------------------------------------------------------- group destination checks
+_GROUP_NOT_FOUND = "not found in chat list"
+
+
+async def group_evidence(group: str) -> Dict[str, dict]:
+    """What the job history says about each registered worker and ONE group chat (by name). There is no registry of which groups a
+    worker's WhatsApp account belongs to — the worker finds the chat by name when it sends — so the only evidence is what already
+    happened: a later successful send means it can reach it; a latest failure "not found in chat list" means it could not.
+      → {worker_id: {"state": "verified" | "failed_before" | "unknown", "label", "when"}}"""
+    out: Dict[str, dict] = {}
+    group = (group or "").strip()
+    for w in await db.whatsapp_workers.find({}, {"_id": 0, "id": 1, "label": 1}).to_list(50):
+        wid = w["id"]
+        wf = {"worker_id": wid} if wid != "default" else {"$or": [{"worker_id": "default"}, {"worker_id": None}, {"worker_id": {"$exists": False}}]}
+        rows = await db.whatsapp_jobs.find({"destination_type": "group", "destination": group, **wf},
+                                           {"_id": 0, "status": 1, "error_message": 1, "created_at": 1}).sort("created_at", -1).limit(15).to_list(15)
+        state, when = "unknown", None
+        for r in rows:
+            if r.get("status") in ("sent", "sent_unverified"):
+                state, when = "verified", r.get("created_at")
+                break
+            if r.get("status") == "failed" and _GROUP_NOT_FOUND in (r.get("error_message") or ""):
+                state, when = "failed_before", r.get("created_at")
+                break
+        out[wid] = {"state": state, "label": w.get("label") or wid, "when": (when or "")[:10] or None}
+    return out
+
+
+async def group_collisions(group: str, project_id: Optional[str]) -> Dict[str, int]:
+    """How many OTHER projects are configured with this same group chat (one chat is routinely reused by several projects). The
+    destination chat is the same either way; it is shown so the user knows the message lands in a shared group."""
+    group = (group or "").strip()
+    if not group:
+        return {"others": 0, "ongoing": 0}
+    rows = await db.projects.find({"whatsapp_casting_group_name": group, "id": {"$ne": project_id}, "status": {"$ne": "deleted"}}, {"_id": 0, "status": 1}).to_list(200)
+    return {"others": len(rows), "ongoing": sum(1 for r in rows if (r.get("status") or "ongoing") == "ongoing")}
 
 
 # ---------------------------------------------------------------------------------------- link previews

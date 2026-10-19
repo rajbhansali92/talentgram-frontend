@@ -423,16 +423,72 @@ describe("confirmation, workers and statuses", () => {
         expect(screen.getByTestId("pa-retry")).toBeTruthy();
     });
 
-    it("confirm-all appears for several waiting tasks, and dependent steps are labelled", async () => {
-        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "2 waiting", tasks: [task({ id: "a1" }), task({ id: "s1", seq: 1, kind: "send", title: "Send", depends_on: ["a1"] })], unrecognised: [] } }) });
+    it("several waiting actions get ONE plan with an approval; dependent steps are labelled, and the worker is sent with it", async () => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "2 waiting", tasks: [task({ id: "a1", title: "Add Angela" }), task({ id: "s1", seq: 1, kind: "send", title: "Send", depends_on: ["a1"] })], unrecognised: [] } }) });
         mount(); await open(); type("add and send"); fireEvent.click(screen.getByTestId("pa-send"));
-        await screen.findByTestId("pa-confirm-all");
-        expect(screen.getByText("Runs after the step before it succeeds.")).toBeTruthy();
-        fireEvent.click(await within(screen.getByTestId("pa-confirm-all")).findByTestId("pa-worker-default"));
-        adminApi.post.mockImplementation((url) => Promise.resolve({ data: { results: {} } }));
-        fireEvent.click(screen.getByText("Confirm all 2"));
+        const plan = await screen.findByTestId("pa-plan");
+        expect(within(plan).getByTestId("pa-plan-steps").textContent).toMatch(/Send — after step 1, only if it succeeds/);
+        expect(screen.queryAllByTestId("pa-confirm")).toHaveLength(0);                       // the chained steps are approved only through the plan
+        fireEvent.click(await within(plan).findByTestId("pa-worker-default"));
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { results: {} } }));
+        fireEvent.click(within(plan).getByTestId("pa-plan-approve"));
         await waitFor(() => expect(posts("/commands/c1/confirm-all")).toHaveLength(1));
         expect(posts("/commands/c1/confirm-all")[0][1]).toEqual({ worker_id: "default" });
+    });
+
+    it("the approval carries the fingerprint of exactly what was shown (one task and a whole plan)", async () => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "2", tasks: [task({ id: "m1", kind: "move", fingerprint: "fp-m1" }), task({ id: "m2", seq: 1, kind: "move", fingerprint: "fp-m2" })], unrecognised: [] } }) });
+        mount(); await open(); type("two moves"); fireEvent.click(screen.getByTestId("pa-send"));
+        const plan = await screen.findByTestId("pa-plan");
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { results: {} } }));
+        fireEvent.click(within(plan).getByTestId("pa-plan-approve"));
+        await waitFor(() => expect(posts("/commands/c1/confirm-all")).toHaveLength(1));
+        expect(posts("/commands/c1/confirm-all")[0][1]).toEqual({ fingerprints: { m1: "fp-m1", m2: "fp-m2" } });
+        const one = task({ id: "m3", command_id: "c9", kind: "move", fingerprint: "fp-m3" });
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c9", reply: "1", tasks: [one], unrecognised: [] } }) });
+        cleanup(); mount(); await open(); type("one move"); fireEvent.click(screen.getByTestId("pa-send"));
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { task: { ...one, status: "completed" } } }));
+        fireEvent.click(await screen.findByTestId("pa-confirm"));
+        await waitFor(() => expect(posts("/tasks/m3/confirm")).toHaveLength(1));
+        expect(posts("/tasks/m3/confirm")[0][1]).toEqual({ fingerprint: "fp-m3" });
+    });
+
+    it("if the plan changed after it was shown, NOTHING ran: the revised action is shown with the reason, ready for a fresh approval", async () => {
+        const a = task({ id: "s1", kind: "share", fingerprint: "old", title: "Share media link of Angela with the Amazon Now WhatsApp group", summary: ["Recipient: WhatsApp group “OLD GROUP” of Amazon Now"] });
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "1", tasks: [a], unrecognised: [] } }) });
+        mount(); await open(); type("share"); fireEvent.click(screen.getByTestId("pa-send"));
+        await screen.findByTestId("pa-approve-head");
+        const revised = { ...a, fingerprint: "new", summary: ["Recipient: WhatsApp group “NEW GROUP” of Amazon Now"] };
+        tasksOnServer = [revised];                                                              // the server saved the revised task
+        adminApi.post.mockImplementation(() => Promise.reject({ response: { status: 409, data: { detail: { changed: true, message: "Something changed since this was planned, so I did not run it.", tasks: [revised] } } } }));
+        fireEvent.click(await within(await screen.findByTestId("pa-task-s1")).findByTestId("pa-worker-default"));
+        fireEvent.click(screen.getByTestId("pa-confirm"));
+        expect((await screen.findAllByText(/did not run it/)).length).toBeGreaterThan(0);
+        expect(screen.getByTestId("pa-preview").textContent).toMatch(/NEW GROUP/);
+        expect(screen.getByTestId("pa-preview").textContent).not.toMatch(/OLD GROUP/);
+        expect(screen.getByTestId("pa-confirm")).toBeTruthy();                                 // still waiting for a fresh approval
+    });
+
+    it("tells 'who do you mean' (identity only) apart from 'approve this action' — and the header status follows the CURRENT request", async () => {
+        const stale = task({ id: "old1", command_id: "c0", kind: "lookup", status: "needs_clarification", created_at: "2026-10-19T08:00:00Z", title: "Look up", summary: [], slots: [{ key: "talent:0", kind: "talent", prompt: "Which?", options: [] }] });
+        const mv = task({ id: "mv1", command_id: "c1", kind: "move", status: "needs_clarification", created_at: "2026-10-19T09:00:00Z", title: "Move Soumya", summary: [],
+            slots: [{ key: "talent:0", kind: "talent", prompt: "Which Soumya?", options: [{ id: "t-1", label: "Soumya Shukla", sublabel: "27y" }] }] });
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "1 needs your pick", tasks: [mv], unrecognised: [] } }) });
+        tasksOnServer = [stale];
+        mount(); await open();
+        await waitFor(() => expect(screen.getByTestId("pa-state").textContent).toMatch(/Needs your pick/));
+        type("Move Soumya Shukla to Approved in Amazon Now"); fireEvent.click(screen.getByTestId("pa-send"));
+        expect(await screen.findByTestId("pa-identify-head")).toBeTruthy();
+        expect(screen.getByTestId("pa-identify-head").textContent).toMatch(/Who do you mean\?.*nothing happens until you approve/);
+        expect(screen.queryByTestId("pa-approve-head")).toBeNull();
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { task: { ...mv, status: "awaiting_confirmation", fingerprint: "f", slots: [], summary: ["1 talent: Soumya Shukla", "To Approved in Amazon Now"] } } }));
+        adminApi.get.mockImplementation((url) => Promise.resolve({ data: url.endsWith("/tasks") ? { tasks: [{ ...mv, status: "awaiting_confirmation", slots: [] }, stale] } : url.endsWith("/workers") ? { workers } : { messages: [] } }));
+        fireEvent.click(await screen.findByTestId("pa-option-t-1"));
+        const head = await screen.findByTestId("pa-approve-head");
+        expect(head.textContent).toMatch(/Approve this action\?.*Nothing has been changed yet/);
+        expect(screen.queryByTestId("pa-identify-head")).toBeNull();
+        // the old, unanswered lookup no longer decides the header: this request is waiting for OK, the old one is a quiet note
+        expect(screen.getByTestId("pa-state").textContent).toBe("Waiting for your OK · 1 older request still open");
     });
 
     it("queued work is polled from the backend (status comes from persisted state, not the browser)", async () => {
@@ -627,47 +683,52 @@ describe("combined 'add to the pipeline, then send' plan (2026-10-19)", () => {
         const plan = await begin([add(), send()]);
         const steps = within(plan).getAllByRole("listitem").map((l) => l.textContent);
         expect(steps[0]).toMatch(/First: add Kripa Trivedi/);
-        expect(steps[1]).toMatch(/Send Casting Call.*only after step 1 fully succeeds/);
+        expect(steps[1]).toMatch(/Send Casting Call.*after step 1, only if it succeeds/);
         expect(await within(plan).findByTestId("pa-workers")).toBeTruthy();
         expect(screen.queryAllByTestId("pa-confirm")).toHaveLength(0);
         expect(within(plan).getByTestId("pa-plan-approve").disabled).toBe(true);                // a worker must be chosen (two are connected: never guessed)
         expect(screen.getByText(/Not in the pipeline yet: Kripa Trivedi/)).toBeTruthy();         // what is missing is spelled out
     });
 
-    it("approving runs step 1 first and step 2 only after step 1 reports completed", async () => {
+    it("approving sends ONE plan approval; the server runs step 1 first and step 2 only after step 1 succeeds", async () => {
         const plan = await begin([add(), send()]);
-        const order = [];
-        adminApi.post.mockImplementation((url, body) => {
-            order.push(url.replace("/personal-assistant", ""));
-            if (url.endsWith("/tasks/a1/confirm")) return Promise.resolve({ data: { task: add({ status: "completed", outcomes: [{ name: "Kripa Trivedi", project: "Sebamed - Trend film", status: "added" }] }) } });
-            if (url.endsWith("/tasks/s1/confirm")) return Promise.resolve({ data: { task: send({ status: "queued" }) } });
-            return Promise.reject(new Error(url));
-        });
-        fireEvent.click(await within(plan).findByTestId("pa-worker-default"));
-        fireEvent.click(within(plan).getByTestId("pa-plan-approve"));
-        await waitFor(() => expect(order).toEqual(["/tasks/a1/confirm", "/tasks/s1/confirm"]));
-        expect(posts("/tasks/s1/confirm")[0][1]).toEqual({ worker_id: "default" });
-    });
-
-    it("if step 1 only partly worked the send is NOT requested, and the user is told nothing was sent", async () => {
-        const plan = await begin([add(), send()]);
-        const { toast } = await import("sonner");
         adminApi.post.mockImplementation((url) => {
-            if (url.endsWith("/tasks/a1/confirm")) return Promise.resolve({ data: { task: add({ status: "partial", error: "Couldn't add everyone to: Sebamed - Trend film", outcomes: [{ name: "Kripa Trivedi", project: "Sebamed - Trend film", status: "failed", reason: "boom" }] }) } });
+            if (url.endsWith("/commands/c1/confirm-all")) return Promise.resolve({ data: { results: { a1: { task: add({ status: "completed" }) }, s1: { task: send({ status: "queued" }) } } } });
             return Promise.reject(new Error(url));
         });
         fireEvent.click(await within(plan).findByTestId("pa-worker-default"));
         fireEvent.click(within(plan).getByTestId("pa-plan-approve"));
-        await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/nothing was sent/i)));
+        await waitFor(() => expect(posts("/commands/c1/confirm-all")).toHaveLength(1));
+        expect(posts("/commands/c1/confirm-all")[0][1]).toEqual({ worker_id: "default" });
+        expect(posts("/tasks/a1/confirm")).toHaveLength(0);                                    // ordering is the server's job now, not a browser loop
         expect(posts("/tasks/s1/confirm")).toHaveLength(0);
     });
 
-    it("Cancel plan cancels both steps and sends nothing", async () => {
+    it("if step 1 only partly worked, the server does not run the send: the reason is shown on its card and the user is told it was not run", async () => {
         const plan = await begin([add(), send()]);
-        adminApi.post.mockImplementation((url) => Promise.resolve({ data: { task: add({ status: "cancelled" }) } }));
+        const { toast } = await import("sonner");
+        toast.error.mockClear();
+        tasksOnServer = [add({ status: "partial", error: "Couldn't add everyone to: Sebamed - Trend film" }), send()];
+        adminApi.post.mockImplementation((url) => {
+            if (url.endsWith("/commands/c1/confirm-all")) return Promise.resolve({ data: { results: {
+                a1: { task: add({ status: "partial", error: "Couldn't add everyone to: Sebamed - Trend film" }) },
+                s1: { task: send(), error: "Step 1 only partly succeeded, so this send did not run." } } } });
+            return Promise.reject(new Error(url));
+        });
+        fireEvent.click(await within(plan).findByTestId("pa-worker-default"));
+        fireEvent.click(within(plan).getByTestId("pa-plan-approve"));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/not run/i)));
+        expect((await screen.findAllByText(/this send did not run/)).length).toBeGreaterThan(0);
+        expect(posts("/tasks/s1/confirm")).toHaveLength(0);
+    });
+
+    it("Cancel plan cancels the whole command in ONE request and sends nothing", async () => {
+        const plan = await begin([add(), send()]);
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { tasks: [], cancelled: 2, still_running: 0 } }));
         fireEvent.click(within(plan).getByTestId("pa-plan-cancel"));
-        await waitFor(() => expect(posts("/cancel")).toHaveLength(2));
+        await waitFor(() => expect(posts("/commands/c1/cancel")).toHaveLength(1));
         expect(posts("/confirm")).toHaveLength(0);
+        expect(posts("/confirm-all")).toHaveLength(0);
     });
 
     it("after step 1 has failed or partly worked the plan banner is gone: the send keeps its own Confirm (with worker) and the add shows Retry + per-project outcomes", async () => {
@@ -680,6 +741,74 @@ describe("combined 'add to the pipeline, then send' plan (2026-10-19)", () => {
         expect(outcomes).toMatch(/Sebamed - Testimonial film.*added/);
         expect(outcomes).toMatch(/Sebamed - Trend film.*failed — boom/);
         expect(screen.getAllByTestId("pa-confirm")).toHaveLength(1);                         // the (still blocked on the server) send's own Confirm
+    });
+});
+
+describe("media kit card (2026-10-19)", () => {
+    const kit = (over = {}) => ({ id: "tal-1", label: "Angela Kumar", sublabel: "28y", thumb: null, profile_path: "/admin/talents/tal-1", portfolio_url: null, video_url: null, photos: [], photo_count: 0,
+        media_link_requested: true, media_link_available: true, media_link: "https://talentgram.in/talent-media/abc123", media_link_reason: null,
+        media_contents: { indian: 5, western: 3, portfolio: 2, video: true, total: 11 }, ...over });
+    const show = async (c) => {
+        const t = task({ id: "q1", kind: "lookup", status: "completed", title: "Media link · Angela Kumar", summary: [], result: { kind: "media_link", cards: [c] } });
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "x", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("q"); fireEvent.click(screen.getByTestId("pa-send")); return screen.findByTestId("pa-task-q1");
+    };
+
+    it("shows the link with Open and Copy, explains what it contains, and offers Share on WhatsApp", async () => {
+        const el = await show(kit());
+        const link = within(el).getByTestId("pa-media-link");
+        expect(link.getAttribute("href")).toBe("https://talentgram.in/talent-media/abc123");
+        expect(link.getAttribute("target")).toBe("_blank");
+        expect(within(el).getByLabelText("Open media link")).toBeTruthy();
+        expect(within(el).getByLabelText("Copy link")).toBeTruthy();
+        expect(within(el).getByTestId("pa-media-contents").textContent).toBe("Opens a page where anyone with the link can view and download: 5 Indian look · 3 Western look · 2 portfolio · intro video.");
+        fireEvent.click(within(el).getByTestId("pa-share-whatsapp"));
+        expect(screen.getByLabelText("Command").value).toBe("Send Angela Kumar's media link to ");     // the destination is named by the user, then previewed and approved
+        expect(adminApi.post.mock.calls.filter((c) => /confirm|message/.test(c[0])).length).toBe(1);   // only the original message; sharing sent nothing
+    });
+
+    it("says plainly when the link is off or the profile has no media (no invented link)", async () => {
+        const off = await show(kit({ media_link: null, media_link_available: false, media_link_reason: "The media link is switched off for this talent (or the profile is archived/merged), so there is no link to give out." }));
+        expect(within(off).getByTestId("pa-media-reason").textContent).toMatch(/switched off/);
+        expect(within(off).queryByTestId("pa-media-link")).toBeNull();
+        expect(within(off).queryByTestId("pa-share-whatsapp")).toBeNull();
+        cleanup();
+        const bare = await show(kit({ media_contents: { indian: 0, western: 0, portfolio: 0, video: false, total: 0 }, media_link_reason: "The link works, but this talent has no photos or video on their profile yet, so it would open an empty page." }));
+        expect(within(bare).getByTestId("pa-media-reason").textContent).toMatch(/no photos or video/);
+    });
+});
+
+describe("destination group evidence (2026-10-19)", () => {
+    const share = (access) => task({ id: "s1", kind: "share", fingerprint: "fp", title: "Share media link of Angela with the Amazon Now WhatsApp group", summary: ["Recipient: WhatsApp group “GRP” of Amazon Now"],
+        preview: { group: "GRP", worker_access: access }, params: { talents: [], projects: [], recipient: { kind: "project_group" } } });
+    const begin = async (t) => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "1", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("share"); fireEvent.click(screen.getByTestId("pa-send"));
+        const card = await screen.findByTestId("pa-task-s1");
+        fireEvent.click(await within(card).findByTestId("pa-worker-default"));
+        return card;
+    };
+
+    it("a worker never seen sending to the group needs an explicit 'send anyway' tick before Confirm is possible, and the tick is sent", async () => {
+        const card = await begin(share({ default: { state: "unknown", label: "Worker 1" }, "worker-2": { state: "unknown", label: "Worker 2" } }));
+        expect(within(card).getByTestId("pa-group-ack").textContent).toMatch(/never been seen sending to “GRP”/);
+        expect(within(card).getByTestId("pa-confirm").disabled).toBe(true);
+        fireEvent.click(within(card).getByRole("checkbox"));
+        expect(within(card).getByTestId("pa-confirm").disabled).toBe(false);
+        adminApi.post.mockImplementation(() => Promise.resolve({ data: { task: { ...share({}), status: "queued" } } }));
+        fireEvent.click(within(card).getByTestId("pa-confirm"));
+        await waitFor(() => expect(posts("/tasks/s1/confirm")).toHaveLength(1));
+        expect(posts("/tasks/s1/confirm")[0][1]).toEqual({ worker_id: "default", fingerprint: "fp", ack_unverified: true });
+    });
+
+    it("a verified worker needs no tick; a worker that could not find the group is held and cannot be confirmed", async () => {
+        const ok = await begin(share({ default: { state: "verified", label: "Worker 1" } }));
+        expect(within(ok).queryByTestId("pa-group-ack")).toBeNull();
+        expect(within(ok).getByTestId("pa-confirm").disabled).toBe(false);
+        cleanup();
+        const held = await begin(share({ default: { state: "failed_before", label: "Worker 1" } }));
+        expect(within(held).getByTestId("pa-group-blocked").textContent).toMatch(/could not find the group/);
+        expect(within(held).getByTestId("pa-confirm").disabled).toBe(true);
     });
 });
 

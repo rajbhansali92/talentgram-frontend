@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup, act, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, act, within, configure } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 vi.mock("sonner", () => ({ toast: Object.assign(() => {}, { error: vi.fn(), success: vi.fn() }) }));
@@ -12,6 +12,9 @@ import { adminApi } from "@/lib/api";
 import { setAssistantContext } from "@/lib/assistantContext";
 import PersonalAssistant from "./PersonalAssistant";
 import { liveReply } from "./AssistantPanel";
+
+// The whole suite runs in parallel workers; a 1 s findBy/waitFor budget flakes when the machine is busy (seen on clean commits too). Same assertions, more patience.
+configure({ asyncUtilTimeout: 4000 });
 
 afterEach(() => { cleanup(); vi.useRealTimers(); delete window.SpeechRecognition; delete window.webkitSpeechRecognition; setAssistantContext({ projectId: null, talentIds: [] }); });
 
@@ -963,7 +966,7 @@ describe("live reply line", () => {
 // ending by itself (silence, a pause, a service limit) must not end it, and every word captured must arrive exactly once.
 // All browser behaviour here is MOCKED (SpeechRecognition, Permissions API, timers): deterministic, but not proof of real devices.
 // ================================================================================================================================
-describe("voice input — tap to start, tap to stop", () => {
+describe("voice input — recognition lifecycle, accumulation and press and hold", () => {
     const setPolicy = (allowed) => Object.defineProperty(document, "featurePolicy", { configurable: true, value: allowed === undefined ? undefined : { allowsFeature: (f) => (f === "microphone" ? allowed : true) } });
     const setPerm = (state) => Object.defineProperty(navigator, "permissions", { configurable: true, value: state ? { query: vi.fn(() => Promise.resolve({ state })) } : undefined });
     const setUA = (ua, extra = {}) => { Object.defineProperty(navigator, "userAgent", { configurable: true, value: ua }); Object.entries(extra).forEach(([k, v]) => Object.defineProperty(navigator, k, { configurable: true, value: v })); };
@@ -992,16 +995,16 @@ describe("voice input — tap to start, tap to stop", () => {
     // ------------------------------------------------------------------------------------------------ 1. the toggle
     it("first tap starts listening and the button says so; the second tap stops it, the engine's last words arrive, and the text lands in the box", async () => {
         server(); const inst = fakeRecognition(); mount(); await open();
-        expect(mic().getAttribute("aria-label")).toBe("Start voice input");
+        expect(mic().getAttribute("aria-label")).toBe("Hold to speak");
         await tap();
         expect(inst.all).toHaveLength(1);
         expect(inst.rec.start).toHaveBeenCalledTimes(1);
         expect(inst.rec.continuous).toBe(true);                                         // keeps listening through pauses where supported
         expect(screen.getByTestId("pa-listening").textContent).toMatch(/starting microphone/i);
         act(() => { inst.rec.onstart(); });
-        expect(mic().getAttribute("aria-label")).toBe("Listening — tap to stop");
+        expect(mic().getAttribute("aria-label")).toBe("Listening — release to send");
         expect(mic().getAttribute("aria-pressed")).toBe("true");
-        expect(screen.getByTestId("pa-state").textContent).toMatch(/Listening — tap the mic to stop/);
+        expect(screen.getByTestId("pa-state").textContent).toMatch(/Listening — release to send/);
         hear(inst.rec, ["show me angela kumar's profile", true]);
         fireEvent.click(mic());                                                           // the intentional stop
         expect(inst.rec.stop).toHaveBeenCalledTimes(1);
@@ -1011,7 +1014,7 @@ describe("voice input — tap to start, tap to stop", () => {
         engineEnds(inst.rec);
         expect(input()).toBe("show me angela kumar's profile");
         expect(screen.queryByTestId("pa-listening")).toBeNull();
-        expect(mic().getAttribute("aria-label")).toBe("Start voice input");
+        expect(mic().getAttribute("aria-label")).toBe("Hold to speak");
         expect(posts("/message")).toHaveLength(0);                                        // never sent by itself
     });
 
@@ -1051,7 +1054,7 @@ describe("voice input — tap to start, tap to stop", () => {
         expect(inst.rec.stop).not.toHaveBeenCalled();
         expect(inst.all).toHaveLength(1);
         expect(screen.queryByTestId("pa-voice-error")).toBeNull();
-        expect(mic().getAttribute("aria-label")).toBe("Listening — tap to stop");
+        expect(mic().getAttribute("aria-label")).toBe("Listening — release to send");
         expect(screen.getByTestId("pa-live-text").textContent).toBe("add these talents");     // and the live preview still shows what was captured
     });
 
@@ -1192,7 +1195,7 @@ describe("voice input — tap to start, tap to stop", () => {
         await advance(500);
         expect(screen.queryByTestId("pa-listening")).toBeNull();
         expect(input()).toBe("add riya to pepsi");
-        expect(screen.getByTestId("pa-voice-notice").textContent).toMatch(/tap the mic to continue/i);
+        expect(screen.getByTestId("pa-voice-notice").textContent).toMatch(/hold the mic to continue/i);
     });
 
     it("a restart that never begins ends the session within a few seconds (text kept) instead of hanging", async () => {
@@ -1526,5 +1529,329 @@ describe("voice input — tap to start, tap to stop", () => {
         await tap();
         expect(screen.queryByTestId("pa-voice-error")).toBeNull();
         expect(inst.all).toHaveLength(2);
+    });
+
+    // ================================================================================================ PRESS AND HOLD (2026-10-20)
+    // The press IS the recording: pointer down starts it, pointer up stops it and submits the transcript once. Everything else that can end a
+    // recording (cancel, interruption, error, the panel closing) keeps the words as a DRAFT in the box and sends nothing.
+    describe("press and hold to speak", () => {
+        const down = async (id = 1, type = "mouse", extra = {}) => { fireEvent.pointerDown(mic(), { pointerId: id, pointerType: type, button: 0, ...extra }); await act(async () => {}); };
+        const up = (id = 1, type = "mouse") => fireEvent.pointerUp(mic(), { pointerId: id, pointerType: type, button: 0 });
+        const hold = async (inst, id = 1, type = "mouse") => { await down(id, type); act(() => { inst.rec.onstart(); }); };
+        const sent = () => posts("/message").map((c) => c[1].text);
+
+        it("pressing starts ONE recording; a second finger or a repeated press cannot start another", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            expect(mic().getAttribute("aria-label")).toBe("Hold to speak");
+            await down(1, "touch");
+            fireEvent.pointerDown(mic(), { pointerId: 1, pointerType: "touch", button: 0 });  // the same pointer again
+            await down(2, "touch");                                                          // a second finger
+            expect(inst.all).toHaveLength(1);
+            expect(inst.rec.start).toHaveBeenCalledTimes(1);
+            expect(inst.rec.continuous).toBe(true);
+            expect(mic().getAttribute("aria-label")).toBe("Starting microphone — release to cancel");
+            act(() => { inst.rec.onstart(); });
+            expect(mic().getAttribute("aria-label")).toBe("Listening — release to send");
+            expect(mic().getAttribute("aria-pressed")).toBe("true");
+            expect(screen.getByTestId("pa-listening").textContent).toMatch(/keep holding.*release to send/);
+            expect(screen.getByTestId("pa-state").textContent).toMatch(/Listening — release to send/);
+            expect(mic().style.touchAction).toBe("none");                                    // the browser must not scroll/zoom/select under the finger
+            up(2, "touch");                                                                  // the SECOND finger lifting is not the end of the press
+            expect(inst.rec.stop).not.toHaveBeenCalled();
+            up(1, "touch");                                                                  // only the finger that started it ends it
+            expect(inst.rec.stop).toHaveBeenCalledTimes(1);
+        });
+
+        it("holding through natural pauses keeps capturing; nothing is stopped, restarted or sent while the finger is down", async () => {
+            const inst = await mountFake();
+            await hold(inst);
+            hear(inst.rec, ["add angela to amazon now", true]);
+            await advance(90 * 1000);                                                        // a minute and a half of "thinking" (the session cap is two minutes)
+            expect(inst.rec.stop).not.toHaveBeenCalled();
+            expect(inst.all).toHaveLength(1);
+            expect(screen.getByTestId("pa-listening")).toBeTruthy();
+            hear(inst.rec, ["add angela to amazon now", true], ["and send the casting call", true]);
+            expect(screen.getByTestId("pa-live-text").textContent).toBe("add angela to amazon now and send the casting call");
+            expect(sent()).toHaveLength(0);
+        });
+
+        it("releasing stops at once, finalizes the engine's last words and submits the transcript exactly once", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await hold(inst);
+            hear(inst.rec, ["show me angela kumar's profile", true]);
+            up();
+            expect(inst.rec.stop).toHaveBeenCalledTimes(1);
+            expect(mic().getAttribute("aria-label")).toBe("Finishing transcript…");
+            expect(sent()).toHaveLength(0);                                                  // still waiting for the engine's final words
+            hear(inst.rec, ["show me angela kumar's profile", true], ["please", true]);      // a late final result arrives before `end`
+            engineEnds(inst.rec);
+            await waitFor(() => expect(sent()).toHaveLength(1));
+            expect(sent()[0]).toBe("show me angela kumar's profile please");
+            expect(input()).toBe("");
+            engineEnds(inst.rec); up(); fireEvent.pointerUp(mic(), { pointerId: 1 }); await act(async () => {});
+            expect(sent()).toHaveLength(1);                                                  // repeated events change nothing
+            expect(inst.all).toHaveLength(1);
+        });
+
+        it("the typed draft is left alone: only the spoken words are submitted", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            type("half a thought");
+            await hold(inst); hear(inst.rec, ["list ask to test in amazon", true]); up(); engineEnds(inst.rec);
+            await waitFor(() => expect(sent()).toEqual(["list ask to test in amazon"]));
+            expect(input()).toBe("half a thought");
+        });
+
+        it("an empty or whitespace-only transcript is never submitted, and says so", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await hold(inst); hear(inst.rec, ["   ", true]); up(); engineEnds(inst.rec);
+            await act(async () => {});
+            expect(sent()).toHaveLength(0);
+            expect(input()).toBe("");
+            expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/hold the mic, speak, then release/i);
+        });
+
+        it("press and release before the engine has even begun cancels cleanly: nothing sent, nothing left recording", async () => {
+            const inst = await mountFake();
+            await down(); up();
+            await advance(3000);                                                             // past the grace period
+            expect(sent()).toHaveLength(0);
+            expect(screen.queryByTestId("pa-listening")).toBeNull();
+            expect(mic().getAttribute("aria-label")).toBe("Hold to speak");
+            await down(); act(() => { inst.rec.onstart(); }); up(); engineEnds(inst.rec);   // and it can be used again right away
+            expect(sent()).toHaveLength(0);
+        });
+
+        it("touch: the emulated mouse events and the trailing click of a real touch press cause no second start and no second submission", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            fireEvent.touchStart(mic()); await down(5, "touch");
+            fireEvent.mouseDown(mic());                                                      // browsers emit these after a touch
+            act(() => { inst.rec.onstart(); });
+            hear(inst.rec, ["move disha to approved in amazon now", true]);
+            fireEvent.touchEnd(mic()); up(5, "touch"); fireEvent.mouseUp(mic());
+            fireEvent.click(mic(), { detail: 1 });                                           // a pointer-generated click carries detail >= 1
+            engineEnds(inst.rec);
+            await waitFor(() => expect(sent()).toHaveLength(1));
+            fireEvent.click(mic(), { detail: 1 });                                           // a late pointer-generated click must not toggle a new session on
+            await act(async () => {});
+            expect(inst.all).toHaveLength(1);
+            expect(inst.rec.start).toHaveBeenCalledTimes(1);
+            expect(sent()).toHaveLength(1);
+        });
+
+        it("the mouse works the same way, and only the primary button counts", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            fireEvent.pointerDown(mic(), { pointerId: 1, pointerType: "mouse", button: 2 }); await act(async () => {});
+            expect(inst.all).toHaveLength(0);                                                // right-click: nothing
+            await hold(inst, 1, "mouse"); hear(inst.rec, ["hello there", true]); up(1, "mouse"); engineEnds(inst.rec);
+            await waitFor(() => expect(sent()).toEqual(["hello there"]));
+        });
+
+        it("the finger sliding off the button still ends the press (pointer capture / window listener), and the recording stops", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            const cap = vi.fn(); mic().setPointerCapture = cap;
+            await hold(inst, 3, "touch");
+            expect(cap).toHaveBeenCalledWith(3);                                             // the button keeps receiving the finger's events
+            hear(inst.rec, ["add neha to pepsi", true]);
+            fireEvent.pointerUp(window, { pointerId: 3, pointerType: "touch" });             // released somewhere else on the page
+            expect(inst.rec.stop).toHaveBeenCalledTimes(1);
+            engineEnds(inst.rec);
+            await waitFor(() => expect(sent()).toEqual(["add neha to pepsi"]));
+        });
+
+        it("pointercancel (the OS took the gesture) stops the recording and keeps the words as a DRAFT — nothing is sent", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await hold(inst, 4, "touch"); hear(inst.rec, ["move disha to approved", true]);
+            fireEvent.pointerCancel(mic(), { pointerId: 4, pointerType: "touch" });
+            expect(inst.rec.stop).toHaveBeenCalledTimes(1);
+            engineEnds(inst.rec);
+            await act(async () => {});
+            expect(sent()).toHaveLength(0);
+            expect(input()).toBe("move disha to approved");
+            fireEvent.pointerUp(mic(), { pointerId: 4 });
+            expect(sent()).toHaveLength(0);
+            await hold(inst, 5, "touch"); fireEvent.lostPointerCapture(mic(), { pointerId: 5 });      // losing capture is an interruption too
+            expect(inst.rec.stop).toHaveBeenCalled();
+        });
+
+        it("permission denied: nothing starts, the reason is shown, and releasing does nothing", async () => {
+            setPerm("denied"); server(); const inst = fakeRecognition(); mount(); await open();
+            await down(); await act(async () => {});
+            expect(inst.all).toHaveLength(0);
+            expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/blocked/i);
+            up(); await act(async () => {});
+            expect(sent()).toHaveLength(0);
+            expect(mic().getAttribute("aria-label")).toBe("Hold to speak");
+        });
+
+        it("a recognition error while holding ends the session with the words kept as a draft; the later release sends nothing", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await hold(inst); hear(inst.rec, ["send the casting call", true]);
+            act(() => { inst.rec.onerror({ error: "network" }); });
+            expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/network connection/i);
+            expect(input()).toBe("send the casting call");
+            up(); await act(async () => {});
+            expect(sent()).toHaveLength(0);
+            expect(screen.queryByTestId("pa-listening")).toBeNull();
+        });
+
+        it("if the engine ends by itself while held it is restarted, the words from both recognitions are kept, and the release ends it for good", async () => {
+            const inst = await mountFake();
+            await hold(inst); hear(inst.rec, ["add sahal to toba", true]);
+            engineEnds(inst.rec);                                                            // the phone's engine gave up after a pause
+            await advance(400);
+            expect(inst.all).toHaveLength(2);                                                // restarted because the finger is still down
+            act(() => { inst.all[1].onstart(); });
+            hear(inst.all[1], ["and move disha to hold", true]);
+            up();
+            expect(inst.all[1].stop).toHaveBeenCalledTimes(1);
+            engineEnds(inst.all[1]);
+            await advance(0);
+            await vi.waitFor(() => expect(sent()).toHaveLength(1));
+            expect(sent()[0]).toBe("add sahal to toba and move disha to hold");
+            await advance(5000);
+            expect(inst.all).toHaveLength(2);                                                // no restart after the release
+        });
+
+        it("releasing during a restart pause finalizes immediately and no restart happens afterwards", async () => {
+            const inst = await mountFake();
+            await hold(inst); hear(inst.rec, ["list who is in hold", true]);
+            engineEnds(inst.rec);                                                            // restart is now pending
+            up();
+            await advance(0);
+            await vi.waitFor(() => expect(sent()).toEqual(["list who is in hold"]));
+            await advance(5000);
+            expect(inst.all).toHaveLength(1);
+        });
+
+        it("closing or minimising the panel while holding stops the microphone and sends nothing; the words wait in the box", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await hold(inst); hear(inst.rec, ["move disha to approved", true]);
+            fireEvent.click(screen.getByTestId("pa-minimize"));
+            expect(inst.rec.abort).toHaveBeenCalled();
+            await act(async () => {});
+            expect(sent()).toHaveLength(0);
+            fireEvent.click(screen.getByTestId("pa-minimize"));
+            expect(input()).toBe("move disha to approved");
+            fireEvent.pointerUp(mic(), { pointerId: 1 });
+            expect(sent()).toHaveLength(0);
+        });
+
+        it("unmounting while holding releases the microphone and nothing can submit afterwards", async () => {
+            server(); const inst = fakeRecognition(); const { unmount } = mount(); await open();
+            await hold(inst); hear(inst.rec, ["add angela to amazon", true]);
+            const rec = inst.rec;
+            unmount();
+            expect(rec.abort).toHaveBeenCalled();
+            expect(() => { rec.onresult?.(results(["late words", true])); rec.onend?.(); }).not.toThrow();
+            await act(async () => {});
+            expect(sent()).toHaveLength(0);
+        });
+
+        it("a stale recognition from a released or newer session can never submit or change anything", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await hold(inst); hear(inst.rec, ["first command", true]); up();
+            const old = inst.rec;
+            engineEnds(old);
+            await waitFor(() => expect(sent()).toEqual(["first command"]));
+            await hold(inst);                                                                // a NEW press, a new recognition
+            expect(inst.all).toHaveLength(2);
+            act(() => { old.onresult?.(results(["ghost words", true])); old.onend?.(); old.onerror?.({ error: "network" }); });
+            hear(inst.all[1], ["second command", true]);
+            expect(screen.getByTestId("pa-live-text").textContent).toBe("second command");   // the ghost left no trace
+            expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+            up(); engineEnds(inst.all[1]);
+            await waitFor(() => expect(sent()).toEqual(["first command", "second command"]));
+        });
+
+        it("if the previous command is still being planned, a released transcript waits in the box instead of being lost or doubled", async () => {
+            let release; const pending = new Promise((r) => { release = r; });
+            server({ onMessage: () => pending }); const inst = fakeRecognition(); mount(); await open();
+            type("first typed command"); fireEvent.click(screen.getByTestId("pa-send"));
+            await waitFor(() => expect(sent()).toHaveLength(1));
+            await hold(inst); hear(inst.rec, ["second spoken command", true]); up(); engineEnds(inst.rec);
+            await act(async () => {});
+            expect(sent()).toHaveLength(1);                                                  // not sent twice, not sent concurrently
+            expect(input()).toBe("second spoken command");                                   // and not lost
+            release({ data: { command_id: "c1", reply: "ok", tasks: [], unrecognised: [] } });
+        });
+
+        it("the session's two-minute cap still applies while holding: it ends, keeps the words as a draft with a notice, and the later release sends nothing", async () => {
+            const inst = await mountFake();
+            await hold(inst); hear(inst.rec, ["a very long list of names", true]);
+            await advance(121 * 1000);
+            expect(inst.rec.stop).toHaveBeenCalledTimes(1);
+            engineEnds(inst.rec); await advance(0);
+            expect(screen.getByTestId("pa-voice-notice").textContent).toMatch(/2-minute limit/);
+            expect(input()).toBe("a very long list of names");
+            up(); await advance(0);
+            expect(sent()).toHaveLength(0);
+            await advance(5000);
+            expect(inst.all).toHaveLength(1);
+        });
+
+        it("if sending the spoken command fails, the words are not lost: they wait in the box (after any typed draft) with the retry option", async () => {
+            server({ onMessage: () => Promise.reject({ response: { data: { detail: "boom" } } }) }); const inst = fakeRecognition(); mount(); await open();
+            type("draft ");
+            await hold(inst); hear(inst.rec, ["list who is in hold", true]); up(); engineEnds(inst.rec);
+            await waitFor(() => expect(input()).toBe("draft  list who is in hold"));
+            expect(sent()).toHaveLength(1);
+            expect(screen.getByTestId("pa-retry-send")).toBeTruthy();
+        });
+
+        it("keyboard: Space/Enter held records, released sends; repeat is ignored; losing focus or Escape never sends", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            fireEvent.keyDown(mic(), { key: " " }); await act(async () => {});
+            fireEvent.keyDown(mic(), { key: " ", repeat: true });
+            expect(inst.all).toHaveLength(1);
+            act(() => { inst.rec.onstart(); }); hear(inst.rec, ["hello from keyboard", true]);
+            fireEvent.keyUp(mic(), { key: " " }); engineEnds(inst.rec);
+            await waitFor(() => expect(sent()).toEqual(["hello from keyboard"]));
+            fireEvent.keyDown(mic(), { key: "Enter" }); await act(async () => {});
+            act(() => { inst.all[1].onstart(); }); hear(inst.all[1], ["never sent", true]);
+            fireEvent.blur(mic()); engineEnds(inst.all[1]);                                  // focus left while the key was down
+            await act(async () => {});
+            expect(sent()).toHaveLength(1);
+            expect(input()).toBe("never sent");
+            fireEvent.change(screen.getByLabelText("Command"), { target: { value: "" } });
+            fireEvent.keyDown(mic(), { key: " " }); await act(async () => {});
+            act(() => { inst.all[2].onstart(); }); hear(inst.all[2], ["cancelled words", true]);
+            fireEvent.keyDown(screen.getByTestId("pa-panel"), { key: "Escape" });            // Escape while recording cancels it (the panel stays open)
+            await act(async () => {});
+            expect(inst.all[2].abort).toHaveBeenCalled();
+            expect(sent()).toHaveLength(1);
+            expect(input()).toBe("");
+            expect(screen.getByTestId("pa-panel")).toBeTruthy();
+        });
+
+        it("the page being hidden or losing focus mid-press stops the recording (a released finger would never be heard)", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await hold(inst); hear(inst.rec, ["move disha to approved", true]);
+            Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+            act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+            Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+            expect(inst.rec.stop).toHaveBeenCalledTimes(1);
+            engineEnds(inst.rec); await act(async () => {});
+            expect(sent()).toHaveLength(0);
+            expect(input()).toBe("move disha to approved");
+        });
+
+        it("assistive technology can still operate the button: a click with no pointer press toggles (start, then stop) and leaves the words as a draft", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            fireEvent.click(mic()); await act(async () => {});                               // detail 0 = not a pointer click
+            act(() => { inst.rec.onstart(); }); hear(inst.rec, ["list everyone in hold", true]);
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            await act(async () => {});
+            expect(input()).toBe("list everyone in hold");
+            expect(sent()).toHaveLength(0);
+        });
+
+        it("a spoken command goes through the same planner as typing: the plan still waits for its own approval (nothing is confirmed by voice)", async () => {
+            server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "1 waiting for your OK", unrecognised: [], tasks: [task({ id: "m9", kind: "move", fingerprint: "fp9", title: "Move Disha to Approved" })] } }) });
+            const inst = fakeRecognition(); mount(); await open();
+            await hold(inst); hear(inst.rec, ["move disha to approved in amazon now", true]); up(); engineEnds(inst.rec);
+            expect(await screen.findByTestId("pa-task-m9")).toBeTruthy();
+            expect(posts("/confirm")).toHaveLength(0);
+            expect(screen.getByTestId("pa-confirm")).toBeTruthy();                           // an explicit Confirm is still required
+        });
     });
 });

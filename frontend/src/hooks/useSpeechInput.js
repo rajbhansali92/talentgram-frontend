@@ -74,29 +74,29 @@ const IOS_SPEECH_HELP = "On iPhone/iPad: allow the microphone for Safari (Settin
 
 export const MESSAGES = {
     policy: () => "Voice input is switched off by this site's own security settings, not by your browser — that's a setup problem on our side and it needs fixing. You can type instead.",
-    denied: () => `The microphone is blocked for ${siteName()}. In the browser's site settings (lock icon in the address bar) allow the microphone for exactly ${siteName()}, then tap the mic again — or type instead.`,
+    denied: () => `The microphone is blocked for ${siteName()}. In the browser's site settings (lock icon in the address bar) allow the microphone for exactly ${siteName()}, then hold the mic again — or type instead.`,
     // The page may use the microphone and the browser says the site IS allowed, yet recognition refused: not a "grant permission" problem.
     refused: () => `The microphone is allowed for ${siteName()}, but the browser's speech recognition was still refused. Check your device's microphone/speech privacy setting for this browser, that nothing else is using the microphone, and the network — or type instead.`,
-    promptDismissed: () => `The browser didn't get microphone permission for ${siteName()} (the prompt was dismissed or blocked). Tap the mic and choose Allow — or type instead.`,
+    promptDismissed: () => `The browser didn't get microphone permission for ${siteName()} (the prompt was dismissed or blocked). Hold the mic and choose Allow — or type instead.`,
     unknownDenied: () => `The browser refused microphone access for ${siteName()}. Allow it for this exact site in the browser's site settings, or type instead.`,
     serviceRefused: () => (isIOS() ? `The speech service refused to start. ${IOS_SPEECH_HELP}` : "The browser's speech service refused to start on this device. You can type instead."),
-    noSpeech: () => "I didn't hear anything. Tap the mic and try again, or type.",
+    noSpeech: () => "I didn't hear anything. Hold the mic, speak, then release — or type.",
     noDevice: () => "No working microphone was found (or another app is using it). Check it is connected and free, or type instead.",
     network: () => "Speech recognition needs a network connection right now (the browser's speech service is online). You can type instead.",
     language: () => "This browser doesn't support that language for voice. You can type instead.",
     startTimeout: () => (isIOS() && isStandaloneApp()
         ? "Voice input doesn't start inside a Home Screen app. Open this page in Safari, or tap the microphone key on your keyboard."
         : isIOS() ? `The microphone didn't start. ${IOS_SPEECH_HELP}`
-            : "The microphone didn't start. Answer the browser's permission prompt if one is showing, then tap the mic again — or type instead."),
-    unknown: () => "Voice input stopped unexpectedly. Tap the mic to try again, or type.",
+            : "The microphone didn't start. Answer the browser's permission prompt if one is showing, then hold the mic again — or type instead."),
+    unknown: () => "Voice input stopped unexpectedly. Hold the mic to try again, or type.",
     unsupported: () => (touchDevice() ? "Voice input isn't available in this browser. Type your command, or tap the microphone key on your keyboard to dictate." : "Voice input isn't available in this browser. You can type instead."),
     insecure: () => "Voice input needs a secure (https) connection. You can type instead.",
     startFailed: () => "Voice input couldn't start on this device. You can type instead.",
-    startThrew: () => "Voice input couldn't start. Wait a moment and tap the mic again, or type.",
+    startThrew: () => "Voice input couldn't start. Wait a moment and hold the mic again, or type.",
     // the engine kept ending on its own — what was heard is kept
-    keepsStopping: () => "The browser's speech recognition keeps stopping on its own here. I kept everything it heard — check it, then tap the mic to continue, or type.",
-    restartFailed: () => "The browser wouldn't resume listening by itself (some phones need a tap to start each time). I kept everything it heard — tap the mic to continue, or type.",
-    maxReached: (secs) => `Voice input stopped at the ${Math.round(secs / 60) >= 1 ? `${Math.round(secs / 60)}-minute` : `${secs}-second`} limit. I kept everything it heard — tap the mic to continue.`,
+    keepsStopping: () => "The browser's speech recognition keeps stopping on its own here. I kept everything it heard — check it, then hold the mic to continue, or type.",
+    restartFailed: () => "The browser wouldn't resume listening by itself (some phones need a press each time). I kept everything it heard — hold the mic to continue, or type.",
+    maxReached: (secs) => `Voice input stopped at the ${Math.round(secs / 60) >= 1 ? `${Math.round(secs / 60)}-minute` : `${secs}-second`} limit. I kept everything it heard — hold the mic to continue.`,
 };
 
 /** Which message explains a refused/denied microphone — decided from FACTS about this page, not assumed. */

@@ -92,7 +92,7 @@ async def _talent_pool(phrase: str) -> List[nlu.Candidate]:
 #   partial  every typed word starts a stored word, or the typed text sits inside the name ("Angela" → "Angela Kumar")
 #   close    only reachable through a spelling correction ("Vidushi" → "Viidushi") — NEVER chosen without a tap
 _WORD_MIN = 0.75
-_MATCH_RANK = {"exact": 0, "partial": 1, "close": 2, "sounds_like": 2}
+_MATCH_RANK = {"exact": 0, "partial": 1, "prefix": 2, "close": 2, "sounds_like": 2}
 
 
 def _word_sim(a: str, b: str) -> float:
@@ -140,8 +140,11 @@ def score_name(query: str, label: str) -> Optional[Tuple[str, float]]:
     cover = sum(per) / len(per)
     whole = difflib.SequenceMatcher(None, q, l).ratio()
     extra = max(0, len(lt) - len(qt))
-    partial = q in l or all(any(x.startswith(t) for x in lt) for t in qt)
-    kind = "partial" if partial else ("sounds_like" if by_sound else "close")
+    # "partial" (may be chosen without a tap) needs every typed word to BE a whole stored word ("Angela" → "Angela Kumar"). A typed word that
+    # is only the START of a longer one ("Sahi" → "Sahil", "Disha" → "Dishant") could just as well be a different person: that is a card.
+    whole_words = all(t in lt for t in qt)
+    prefix = q in l or all(any(x.startswith(t) for x in lt) for t in qt)
+    kind = "partial" if whole_words else ("prefix" if prefix else ("sounds_like" if by_sound else "close"))
     return kind, round(cover - 0.03 * extra + 0.1 * whole, 4)
 
 
@@ -279,7 +282,7 @@ async def resolve_talent(phrase: str, project_ids: Optional[List[str]] = None) -
             opt["sublabel"] = " · ".join(x for x in [where, opt.get("sublabel")] if x)
             opt["in_project"] = True
         lead = score - kinds[ids[1]][1] if len(ids) > 1 and ids[1] in kinds else 1.0
-        if i == 0 and kind in ("partial", "close") and score >= 0.85 and (len(ids) == 1 or lead >= 0.05):
+        if i == 0 and kind in ("partial", "prefix", "close") and score >= 0.85 and (len(ids) == 1 or lead >= 0.05):
             opt["best"] = True                       # proposed, never assumed: the card still has to be tapped; two near-equals → none is flagged
         elif kind == "exact" and tid in ctx and sum(1 for x in ids if x in ctx) == 1:
             opt["best"] = True                       # two talents with the SAME name: the one already in this project's pipeline is proposed
@@ -302,8 +305,18 @@ def _opt(p: dict, best: bool = False) -> dict:
     return o
 
 
+_NUMWORDS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10"}
+
+
+def _pn(text: str) -> str:
+    """Project text as compared: the usual normalisation plus spoken numbers as digits on BOTH sides ("Film Two" = "Film 2"; speech engines
+    write numbers either way). "One" in "Embassy One" becomes 1 on the stored name too, so exact names still match exactly."""
+    n = nlu._normalize_project_label(text)
+    return " ".join(_NUMWORDS.get(w, w) for w in n.split())
+
+
 def _strong(span: str, label: str) -> bool:
-    n, l = nlu._normalize_project_label(span), nlu._normalize_project_label(label)
+    n, l = _pn(span), _pn(label)
     if not n:
         return False
     if n in l:
@@ -319,8 +332,35 @@ def _strong_matches(span: str, projects: List[dict]) -> List[dict]:
 
 
 def _exact_matches(span: str, projects: List[dict]) -> List[dict]:
-    n = nlu._normalize_project_label(span)
-    return [p for p in projects if n and nlu._normalize_project_label(p["label"]) == n]
+    n = _pn(span)
+    return [p for p in projects if n and _pn(p["label"]) == n]
+
+
+def _sound_matches(span: str, projects: List[dict]) -> List[dict]:
+    """Projects in which EVERY spoken word is accounted for by spelling or sound, and at least one only by sound ("Cebamed" ~ "Sebamed").
+    Offered as cards — a sound-alike project is never chosen, and never supplies a WhatsApp group by itself."""
+    words = [w for w in _pn(span).split() if len(w) >= 3 or w.isdigit()]
+    if not words:
+        return []
+    out = []
+    for p in projects:
+        lt = _pn(p["label"]).split()
+        by_sound, ok = False, True
+        for w in words:
+            best, snd = 0.0, False
+            for x in lt:
+                v, vs = _word_sim_ext(w, x)
+                if w == x:
+                    v, vs = 1.0, False
+                if v > best:
+                    best, snd = v, vs
+            if best < _WORD_MIN:
+                ok = False
+                break
+            by_sound = by_sound or snd
+        if ok and by_sound:
+            out.append(p)
+    return _ordered(out)[:5]
 
 
 _LIVE_PROJECT = ("ongoing", "upcoming")        # statuses a casting call / add can really target ("upcoming" is not used in the data today)
@@ -401,6 +441,7 @@ async def resolve_projects(text: str, *, prefer_active: bool = True, projects: O
         labels = [{"id": p["id"], "label": p["label"]} for p in projects]
         m = nlu.resolve_project_by_name(span, labels)
         by_id = {p["id"]: p for p in projects}
+        snd = _sound_matches(span, projects)
         if m.project and m.project["id"] in by_id:
             try:
                 precise = {projects[k]["id"] for k in nlu._project_token_subset_matches(span, [p["label"] for p in projects])}
@@ -411,10 +452,14 @@ async def resolve_projects(text: str, *, prefer_active: bool = True, projects: O
             else:
                 rest = [by_id[c["id"]] for c in (m.suggestions or []) if c["id"] in by_id and c["id"] != m.project["id"]]
                 opts = [_opt(by_id[m.project["id"]], best=True)] + [_opt(r) for r in rest[: MAX_OPTIONS - 1]]
+                opts += [_opt(p) for p in snd if p["id"] not in {o["id"] for o in opts}][: MAX_OPTIONS - len(opts)]
                 out.append({"phrase": span, "state": "ambiguous", "options": opts})
         elif m.ambiguous or m.suggestions:
             opts = [_opt(by_id[c["id"]]) for c in (m.ambiguous or m.suggestions) if c["id"] in by_id][:MAX_OPTIONS]
+            opts += [_opt(p) for p in snd if p["id"] not in {o["id"] for o in opts}][: MAX_OPTIONS - len(opts)]
             out.append({"phrase": span, "state": "ambiguous" if opts else "none", "options": opts})
+        elif snd:
+            out.append({"phrase": span, "state": "ambiguous", "options": [_opt(p) for p in snd]})
         else:
             out.append({"phrase": span, "state": "none"})
         i += 1

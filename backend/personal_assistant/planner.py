@@ -372,6 +372,20 @@ async def _recent_group_share(group: Optional[str], url: str) -> bool:
                                                  "status": {"$in": ["pending", "sending", "sent", "sent_unverified"]}, "message_body": {"$regex": re.escape(url)}}, {"_id": 1}))
 
 
+def _heard_lines(p: dict) -> List[str]:
+    """Raw words → what they were resolved to, wherever the two differ ("You said “doha kumar” → Disha Kumar"), so the approval shows both
+    the user's own words and the record that will really be used."""
+    from agents.modules import casting_pipeline_nlu as nlu
+    out: List[str] = []
+    for key, norm in (("talents", nlu._normalize_name), ("projects", nlu._normalize_project_label)):
+        for e in p.get(key) or []:
+            if e.get("state") == "resolved" and e.get("phrase") and e.get("label") and norm(e["phrase"]) != norm(e["label"]):
+                out.append(f"You said “{e['phrase']}” → {e['label']}")
+    if p.get("stage") and p.get("stage_text"):
+        out.append(f"You said “{p['stage_text']}” → {stage_label(p['stage'])}")
+    return out[:6]
+
+
 def summary_lines(task: dict) -> List[str]:
     p, k = task["params"], task["kind"]
     lines: List[str] = []
@@ -404,7 +418,7 @@ def summary_lines(task: dict) -> List[str]:
                     "unknown": "not verified for this group yet"}[a["state"]]
             lines.append(f"Worker {a['label']}: {note}")
         lines.append("Sent through the existing WhatsApp queue — pick the worker below.")
-    return lines + list(task.get("warnings") or [])
+    return lines + _heard_lines(p) + list(task.get("warnings") or [])
 
 
 # ------------------------------------------------------------------------------------------------ planning

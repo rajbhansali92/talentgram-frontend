@@ -477,7 +477,33 @@ def _follow_up_share(seg: Segment, prev: Optional[Segment]) -> Optional[Segment]
 # Spoken hesitations are noise; a spoken CORRECTION is not — "move Doha Kumar, no wait, Disha Kumar" contains two names and no way to
 # know which one was meant, so neither is acted on (the clause before the correction is held too) and the user is asked to say it once.
 _FILLER = re.compile(r"(?<![\w'])(?:um+|uhm+|uh+|erm+|hmm+)(?![\w'])[,.]?\s*", re.I)
-_CORRECTION = re.compile(r"\b(?:no\s*,?\s*wait|wait\s*,?\s*no|i\s+mean(?:t)?|sorry|scratch\s+that|correction|make\s+that|or\s+rather|actually)\b", re.I)
+# KNOWN LIMITATION (deliberate, fail-safe): a clause containing a standalone "No" between words ("Say No More", "Project No. 5") is read as a
+# self-correction and held — the user is told to say it once — so such a real name cannot be used by voice. Typed commands go through the
+# same parser; use a different spelling or the card search for those names.
+_CORRECTION = re.compile(
+    r"\b(?:no\s*,?\s*wait|wait\s*,?\s*no|i\s+mean(?:t)?|sorry|scratch\s+that|never\s*mind|cancel\s+that|correction|make\s+that|or\s+rather|actually)\b"
+    r"|[\u2014\u2013]\s*no\b|--\s*no\b"                                         # "Doha—no, Disha"
+    r"|\b\w+[,.]?\s+no[,.]\s+\w+"                                              # "Doha, no, Disha"
+    r"|(?<=[A-Za-z])\s+no\s+(?=[A-Za-z])", re.I)                                  # "Doha no Disha" (speech engines drop the punctuation)
+
+
+_COMMAND_VERB = re.compile(r"\s+(?=(?:add|include|move|shift|put|send|forward|share|show|mark|list)\b)", re.I)
+
+
+def _verb_split(piece: str) -> List[str]:
+    """Browser speech recognition usually inserts NO punctuation, so "add Sahal to Toba move Disha to Follow Up in Amazon send the casting
+    call to Vikram" reaches us as one run-on clause. Split it before a command verb — but only where BOTH halves are then complete,
+    understood commands (a verb inside a name, or a half-finished clause, is never split), leftmost first."""
+    words_at = [m.end() for m in _COMMAND_VERB.finditer(piece)]
+    for cut in words_at:
+        left, right = piece[:cut].strip(), piece[cut:].strip()
+        if len(left.split()) < 3 or len(right.split()) < 3:
+            continue
+        left_seg = parse_segment(left)
+        right_ok = parse_segment(right).intent != "unknown" or bool(_SEND_IT.match(right.strip(" .,;")))      # "…send it to X" refers to the clause before it
+        if left_seg.intent != "unknown" and right_ok:
+            return [left] + _verb_split(right)
+    return [piece]
 
 
 def parse_message(message: str) -> List[Segment]:
@@ -486,16 +512,16 @@ def parse_message(message: str) -> List[Segment]:
     if not text:
         return []
     out: List[Segment] = []
-    for sentence in _SENTENCE.split(text):
-        for piece in _CONNECT.split(sentence):
-            piece = (piece or "").strip()
-            if piece and re.search(r"[A-Za-z0-9]", piece) and _CORRECTION.search(piece):
-                if out and out[-1].intent != "unknown":
-                    out[-1] = Segment(text=out[-1].text, intent="unknown", correction=True)      # the clause being corrected is held as well
-                out.append(Segment(text=piece, intent="unknown", correction=True))
-                continue
-            if piece and re.search(r"[A-Za-z0-9]", piece):
-                seg = parse_segment(piece)
-                follow = _follow_up_share(seg, out[-1] if out else None) if seg.intent in ("send", "unknown") else None
-                out.append(follow or seg)
+    pieces = [sub for sentence in _SENTENCE.split(text) for piece in _CONNECT.split(sentence) for sub in _verb_split((piece or "").strip())]
+    for piece in pieces:
+        piece = (piece or "").strip()
+        if piece and re.search(r"[A-Za-z0-9]", piece) and _CORRECTION.search(piece):
+            if out and out[-1].intent != "unknown":
+                out[-1] = Segment(text=out[-1].text, intent="unknown", correction=True)      # the clause being corrected is held as well
+            out.append(Segment(text=piece, intent="unknown", correction=True))
+            continue
+        if piece and re.search(r"[A-Za-z0-9]", piece):
+            seg = parse_segment(piece)
+            follow = _follow_up_share(seg, out[-1] if out else None) if seg.intent in ("send", "unknown") else None
+            out.append(follow or seg)
     return out

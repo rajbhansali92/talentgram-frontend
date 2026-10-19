@@ -52,12 +52,12 @@ def compute_slots(task: dict) -> List[dict]:
         if e["state"] != "resolved":
             slots.append({"key": f"talent:{i}", "kind": "talent", "phrase": e["phrase"], "options": e.get("options") or [],
                           "prompt": (f'Which "{e["phrase"]}" did you mean?' if e["state"] == "ambiguous"
-                                     else (e.get("prompt") or f'I couldn\'t find a talent matching "{e["phrase"]}". Type the name again.'))})
+                                     else (e.get("prompt") or f'I couldn\'t find anyone matching "{e["phrase"]}". Check the spelling, or search with part of the name.'))})
     for i, e in enumerate(p.get("projects") or []):
         if e["state"] != "resolved":
             slots.append({"key": f"project:{i}", "kind": "project", "phrase": e["phrase"], "options": e.get("options") or [],
                           "prompt": (f'Which project did you mean by "{e["phrase"]}"?' if e["state"] == "ambiguous"
-                                     else (e.get("prompt") or f'I couldn\'t find a project matching "{e["phrase"]}".'))})
+                                     else (e.get("prompt") or f'I couldn\'t find a project matching "{e["phrase"]}". Check the spelling, or search with part of the name.'))})
     rec = p.get("recipient")
     if task["kind"] == "share" and rec and rec.get("state") != "resolved":
         slots.append({"key": "recipient", "kind": "recipient", "phrase": rec.get("label") or "", "options": rec.get("options") or [],
@@ -80,7 +80,7 @@ def _title(task: dict) -> str:
     p, k = task["params"], task["kind"]
     ts, ps = _names(p.get("talents") or []), _names(p.get("projects") or [])
     if k == "add":
-        return f"Add {ts} to {ps}"
+        return (f"First: add {ts} to {ps}" if p.get("prereq_for") else f"Add {ts} to {ps}")
     if k == "send":
         return f"Send {p.get('template_name') or p.get('template_phrase') or 'a template'} to {ts}" + (f" for {ps}" if p.get("projects") else "")
     if k == "move":
@@ -144,15 +144,20 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
     if task["kind"] in ("send", "move") and len(pids) >= 1 and _all_resolved(p.get("talents") or []) and not task.get("depends_on"):
         tids = [t["id"] for t in p["talents"]]
         rows = await db.casting_pipeline.find({"project_id": {"$in": pids}, "talent_id": {"$in": tids}}, {"_id": 0, "project_id": 1, "talent_id": 1}).to_list(5000)
-        in_proj = {r["talent_id"] for r in rows if r["project_id"] in pids}
-        missing = [t for t in p["talents"] if t["id"] not in in_proj]
-        if missing and len(missing) == len(tids):
-            task["status"] = S.FAILED
-            lead = "That talent isn't" if len(tids) == 1 else "None of these talents are"
-            task["error"] = f"{lead} in the {_names(projects)} pipeline yet. Add them first."
-            return task
-        if missing:
-            warnings.append(f"Not in {_names(projects)}: {_names(missing)} — will be skipped")
+        if task["kind"] == "send":
+            await _plan_prerequisite(task, rows)             # missing memberships become a first step of the SAME plan
+            if task["status"] == S.FAILED:
+                return task
+        else:
+            in_proj = {r["talent_id"] for r in rows if r["project_id"] in pids}
+            missing = [t for t in p["talents"] if t["id"] not in in_proj]
+            if missing and len(missing) == len(tids):
+                task["status"] = S.FAILED
+                lead = "That talent isn't" if len(tids) == 1 else "None of these talents are"
+                task["error"] = f"{lead} in the {_names(projects)} pipeline yet. Add them first."
+                return task
+            if missing:
+                warnings.append(f"Not in {_names(projects)}: {_names(missing)} — will be skipped")
 
     if task["kind"] == "send":
         await _duplicate_check(task, warnings)
@@ -170,6 +175,66 @@ async def finalize(task: dict, siblings: Optional[List[dict]] = None) -> dict:
     else:
         task["status"] = "ready"
     return task
+
+
+async def _plan_prerequisite(task: dict, rows: List[dict]) -> None:
+    """A casting call can only go to talents who are IN the project's pipeline. When some (talent, project) pairs are missing,
+    don't dead-end: record exactly which pairs are missing (`params.prereq`) so the add that fills them can be planned as step 1
+    of the same plan. Only the requested talents and projects are ever involved. If a project can't take new talents (it isn't
+    ongoing) say so plainly instead of substituting another one."""
+    p = task["params"]
+    present = {(r["project_id"], r["talent_id"]) for r in rows}
+    tl = {t["id"]: t.get("label") or t.get("phrase") for t in p["talents"]}
+    pl = {e["id"]: e.get("label") or e.get("phrase") for e in p["projects"] if e.get("id")}
+    missing = [{"talent_id": tid, "talent": tl[tid], "project_id": pid, "project": pl[pid]} for tid in tl for pid in pl if (pid, tid) not in present]
+    p.pop("prereq", None)
+    if not missing:
+        return
+    mpids = list(dict.fromkeys(m["project_id"] for m in missing))
+    docs = await db.projects.find({"id": {"$in": mpids}}, {"_id": 0, "id": 1, "brand_name": 1, "status": 1}).to_list(len(mpids))
+    bad = [d for d in docs if d.get("status") != "ongoing"]
+    if bad:
+        who = ", ".join(dict.fromkeys(m["talent"] for m in missing if m["project_id"] in {b["id"] for b in bad}))
+        names = ", ".join(f"{b.get('brand_name')} ({b.get('status')})" for b in bad)
+        task["status"] = S.FAILED
+        task["error"] = (f"{who} {'is' if ',' not in who else 'are'} not in the pipeline of {names}, and talents can only be added to ongoing projects, so "
+                         "I can't add them there. Choose an ongoing project, or reopen that one first.")
+        return
+    p["prereq"] = {"talent_ids": list(dict.fromkeys(m["talent_id"] for m in missing)), "project_ids": mpids, "missing": missing,
+                   "already": [{"talent": tl[tid], "project": pl[pid]} for tid in tl for pid in pl if (pid, tid) in present]}
+
+
+async def build_prereq_task(owner_id: str, send: dict) -> dict:
+    """The add that fills a send's missing pipeline entries, planned as an ordinary `add` task (so the existing add operation,
+    its validation, idempotency and audit all apply) that the send depends on."""
+    pre = send["params"]["prereq"]
+    ts = S.now()
+    talents = [dict(e) for e in send["params"]["talents"] if e.get("id") in pre["talent_ids"]]
+    projects = [dict(e) for e in send["params"]["projects"] if e.get("id") in pre["project_ids"]]
+    add = {"id": S.new_id(), "owner_id": owner_id, "command_id": send["command_id"], "seq": send.get("seq", 0), "kind": "add", "status": S.NEEDS_CLARIFICATION,
+           "source_text": send.get("source_text") or "", "slots": [], "depends_on": [], "warnings": [], "summary": [], "result": None, "outcomes": [],
+           "batch_ids": [], "error": None, "created_at": ts, "updated_at": ts,
+           "params": {"talents": talents, "projects": projects, "prereq_for": send["id"], "missing": pre["missing"], "already": pre["already"]}}
+    await finalize(add)
+    return add
+
+
+def link_prerequisite(send: dict, add: dict) -> None:
+    send["depends_on"] = [add["id"]]
+    send["params"]["strict_dependency"] = True                # the send waits for the add to FULLY succeed, not just partly
+    send["params"]["prereq_task"] = add["id"]
+
+
+async def attach_prerequisite(owner_id: str, send: dict) -> Optional[dict]:
+    """For a task that already exists (planned earlier, completed by a clarification): create + persist the add step before it."""
+    if not send["params"].get("prereq") or send.get("depends_on"):
+        return None
+    add = await build_prereq_task(owner_id, send)
+    add["seq"] = send.get("seq", 0) - 0.5
+    link_prerequisite(send, add)
+    await S.insert_tasks([add])
+    await finalize(send)
+    return add
 
 
 async def _duplicate_check(task: dict, warnings: List[str]) -> None:
@@ -273,9 +338,14 @@ def summary_lines(task: dict) -> List[str]:
     n = len(p.get("talents") or [])
     if k == "add":
         lines = [f"{n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}", f"Into: {_names(p['projects'], 6)}"]
+        if p.get("prereq_for"):
+            lines = ["Step 1 of 2 — only the missing pipeline entries are created:"] + [f"  • {m['talent']} → {m['project']} (not in the pipeline yet)" for m in (p.get("missing") or [])[:8]] \
+                + [f"  • {a['talent']} → {a['project']} (already there)" for a in (p.get("already") or [])[:4]]
     elif k == "send":
         dests = (task.get("preview") or {}).get("destinations") or []
-        lines = [f"Template: {p.get('template_name')}", f"To {n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}"]
+        pre = p.get("prereq") or {}
+        lines = ([f"Step 2 of 2 — runs only after step 1 succeeds. Not in the pipeline yet: {', '.join(dict.fromkeys(m['talent'] for m in pre.get('missing') or []))}"] if pre else [])
+        lines += [f"Template: {p.get('template_name')}", f"To {n} talent{'s' if n != 1 else ''}: {_names(p['talents'], 6)}"]
         lines += [f"  • {d['name']} → {d['text']}" for d in dests[:8]] + ([f"  • …and {len(dests) - 8} more"] if len(dests) > 8 else [])
         lines += [f"Project: {_names(p['projects'], 6)}", "Sent through the existing WhatsApp queue — pick the worker below."]
     elif k == "move":
@@ -397,6 +467,13 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
         if kind == "add" and t["params"].get("talents") == [] :
             t["params"]["talents"] = [{"phrase": "", "state": "none", "prompt": "Who should I add?"}]
         await finalize(t)
+        if t["kind"] == "send" and t["status"] == S.AWAITING_CONFIRMATION and p.get("prereq") and not t["depends_on"]:
+            add_t = await build_prereq_task(owner_id, t)
+            add_t["seq"] = len(tasks)
+            tasks.append(add_t)
+            t["seq"] = len(tasks)
+            link_prerequisite(t, add_t)
+            await finalize(t)                                  # recompute the summary now that step 1 exists
         tasks.append(t)
         prev = t
     return tasks, unrecognised, []

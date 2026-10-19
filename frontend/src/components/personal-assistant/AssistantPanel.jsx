@@ -17,6 +17,24 @@ const EXAMPLES = [
     "Show me everyone in Ask to Test",
 ];
 
+// The reply text saved with a message describes the moment it was planned ("1 needs your pick"). Once the user has answered, that
+// line would be stale — so it is recomputed from the tasks' CURRENT statuses. Messages without tasks (errors) keep their text.
+export function liveReply(saved, tasks) {
+    if (!tasks.length) return saved;
+    const n = (st) => tasks.filter((t) => t.status === st).length;
+    const need = n("needs_clarification"); const conf = n("awaiting_confirmation");
+    const busy = tasks.filter((t) => ["queued", "running"].includes(t.status)).length;
+    const bits = [];
+    if (need) bits.push(`${need} need${need === 1 ? "s" : ""} your pick`);
+    if (conf) bits.push(`${conf} waiting for your OK`);
+    if (busy) bits.push(`${busy} in progress`);
+    const tail = (saved || "").match(/ I didn't understand: .*$/)?.[0] || "";
+    if (bits.length) return `Here's what I understood: ${bits.join(", ")}.${tail}`;
+    const failed = n("failed") + n("partial");
+    if (n("cancelled") === tasks.length) return "Cancelled — nothing was run or changed." + tail;
+    return (failed ? "Finished — some steps need attention, see below." : n("cancelled") ? "Done — the cancelled steps were not run." : "All done — see below.") + tail;
+}
+
 const readPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch { return d; } };
 const writePref = (k, v) => { try { localStorage.setItem(k, v ? "1" : "0"); } catch { /* storage blocked */ } };
 
@@ -58,6 +76,8 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const fit = useKeyboardFit(open && !minimized);
 
     const speech = useSpeechInput({ onFinal: (t) => setText((cur) => (cur ? `${cur} ${t}` : t)) });
+    // the panel stays mounted while closed/minimised: a microphone session must not keep running with nothing on screen
+    useEffect(() => { if (!open || minimized) speech.abort(); }, [open, minimized]);          // eslint-disable-line react-hooks/exhaustive-deps
 
     // history + persisted tasks once, the first time it opens (survives refresh: both live on the backend)
     useEffect(() => {
@@ -146,6 +166,29 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const onRetry = (t) => act(t.id, () => retryTask(t.id));
     const onFollowUp = (t, templateId) => act(t.id, () => followUpSend(t.id, templateId));
 
+    // One approval for a plan whose first step fills a missing pipeline entry: step 1 (the add) runs, and ONLY if it fully
+    // succeeded does step 2 (the send) run — the server enforces that order again, so this can't skip it.
+    const approvePlan = async (add, send, worker) => {
+        const ids = [add.id, send.id];
+        ids.forEach((i) => setBusy((b) => ({ ...b, [i]: true })));
+        try {
+            const first = await confirmTask(add.id);
+            mergeTask(first);
+            if (first.status === "completed") mergeTask(await confirmTask(send.id, worker));
+            else toast.error("Step 1 didn't fully succeed, so nothing was sent. Retry it from its card; step 2 runs after it succeeds.");
+        } catch (err) {
+            const detail = err?.response?.data?.detail;
+            toast.error(typeof detail === "string" ? detail : "That didn't work — I've refreshed from the server.");
+        } finally {
+            setTasks(await listAssistantTasks(40).catch(() => tasks));
+            ids.forEach((i) => setBusy((b) => ({ ...b, [i]: false })));
+        }
+    };
+    const cancelPlan = async (add, send) => {
+        await Promise.all([cancelTask(send.id), cancelTask(add.id)].map((p) => p.catch(() => null)));
+        setTasks(await listAssistantTasks(40).catch(() => tasks));
+    };
+
     const doConfirmAll = async (commandId, ids) => {
         ids.forEach((i) => setBusy((b) => ({ ...b, [i]: true })));
         try {
@@ -163,7 +206,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     };
 
     const tasksFor = (commandId) => tasks.filter((t) => t.command_id === commandId).sort((a, b) => a.seq - b.seq);
-    const status = speech.listening ? "Listening…" : sending ? "Working on it…" : tasks.some((t) => t.status === "needs_clarification") ? "Needs your pick"
+    const status = speech.phase === "starting" ? "Starting microphone…" : speech.listening ? "Listening…" : sending ? "Working on it…" : tasks.some((t) => t.status === "needs_clarification") ? "Needs your pick"
         : tasks.some((t) => t.status === "awaiting_confirmation") ? "Waiting for your OK" : hasActive ? "Running in the background" : "Ready";
 
     if (!open) return null;
@@ -209,21 +252,40 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 {messages.map((m) => {
                                     const ts = m.command_id && m.role === "assistant" ? tasksFor(m.command_id) : [];
                                     const waiting = ts.filter((t) => t.status === "awaiting_confirmation");
-                                    const needsW = waiting.some((t) => t.kind === "send" || t.kind === "share");
+                                    // a plan = an add that exists only to fill a send's missing pipeline entry + that send, both still waiting
+                                    const planSend = waiting.find((t) => t.kind === "send" && t.params?.prereq_task && waiting.some((w) => w.id === t.params.prereq_task));
+                                    const planAdd = planSend ? waiting.find((w) => w.id === planSend.params.prereq_task) : null;
+                                    const inPlan = (t) => !!planSend && (t.id === planSend.id || t.id === planAdd.id);
+                                    const otherWaiting = waiting.filter((t) => !inPlan(t));
+                                    const needsW = otherWaiting.some((t) => t.kind === "send" || t.kind === "share");
                                     return (
                                         <div key={m.id} className={m.role === "user" ? "flex justify-end" : ""}>
                                             <div className={m.role === "user" ? "max-w-[85%] bg-black text-white rounded-2xl rounded-br-md px-3 py-2 text-sm" : "max-w-full w-full"}>
                                                 {m.role === "user" ? m.text : (
                                                     <>
-                                                        <p className={`text-sm ${m.error ? "text-red-700" : "text-black/80"}`}>{m.text}</p>
+                                                        <p className={`text-sm ${m.error ? "text-red-700" : "text-black/80"}`} data-testid="pa-reply">{m.error ? m.text : liveReply(m.text, ts)}</p>
                                                         {m.error && failed && <button type="button" onClick={() => submit(failed.text)} className="mt-1 text-xs underline" data-testid="pa-retry-send">Retry</button>}
                                                         {ts.length > 0 && (
                                                             <div className="mt-2 space-y-2">
-                                                                {ts.map((t) => <TaskCard key={t.id} task={t} busy={!!busy[t.id]} actionError={errors[t.id]} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }} />)}
-                                                                {waiting.length > 1 && (
+                                                                {ts.map((t) => <TaskCard key={t.id} task={t} busy={!!busy[t.id]} actionError={errors[t.id]} inPlan={inPlan(t)} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }} />)}
+                                                                {planSend && (
+                                                                    <div className="rounded-xl border border-black/[0.15] p-3 bg-black/[0.02] space-y-2" data-testid="pa-plan">
+                                                                        <p className="text-xs font-medium text-black/85">One approval covers both steps, in this order:</p>
+                                                                        <ol className="text-[11px] text-black/65 list-decimal pl-4 space-y-0.5">
+                                                                            <li>{planAdd.title}</li>
+                                                                            <li>{planSend.title} — only after step 1 fully succeeds</li>
+                                                                        </ol>
+                                                                        <WorkerPicker value={batchWorker} onChange={setBatchWorker} hint={planSend.params?.worker_hint} disabled={!!busy[planSend.id]} />
+                                                                        <div className="flex gap-2">
+                                                                            <button type="button" disabled={!batchWorker || !!busy[planSend.id]} onClick={() => approvePlan(planAdd, planSend, batchWorker)} data-testid="pa-plan-approve" className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40">Approve plan</button>
+                                                                            <button type="button" disabled={!!busy[planSend.id]} onClick={() => cancelPlan(planAdd, planSend)} data-testid="pa-plan-cancel" className="px-3 min-h-[40px] rounded-lg border border-black/[0.15] text-xs text-black/65">Cancel plan</button>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                                {otherWaiting.length > 1 && (
                                                                     <div className="rounded-xl border border-black/[0.1] p-3 bg-black/[0.02] space-y-2" data-testid="pa-confirm-all">
                                                                         {needsW && <WorkerPicker value={batchWorker} onChange={setBatchWorker} disabled={false} />}
-                                                                        <button type="button" disabled={needsW && !batchWorker} onClick={() => doConfirmAll(m.command_id, waiting.map((t) => t.id))} className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40">Confirm all {waiting.length}</button>
+                                                                        <button type="button" disabled={needsW && !batchWorker} onClick={() => doConfirmAll(m.command_id, otherWaiting.map((t) => t.id))} className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40">Confirm all {otherWaiting.length}</button>
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -251,9 +313,9 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                     </div>
 
                     <form className="border-t border-black/[0.08] p-2.5 shrink-0" onSubmit={(e) => { e.preventDefault(); submit(); }}>
-                        {speech.listening && <p className="text-xs text-red-600 mb-1.5 flex items-center gap-1.5" data-testid="pa-listening"><span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> Listening… {speech.interim || "speak now"}</p>}
+                        {speech.listening && <p className="text-xs text-red-600 mb-1.5 flex items-center gap-1.5" data-testid="pa-listening"><span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {speech.phase === "starting" ? "Starting microphone… allow it if the browser asks" : <>Listening… {speech.interim || "speak now"}</>}</p>}
                         {speech.error && <p className="text-xs text-amber-700 mb-1.5" role="alert" data-testid="pa-voice-error">{speech.error}</p>}
-                        {!speech.supported && <p className="text-[11px] text-black/45 mb-1.5" data-testid="pa-voice-unsupported">Voice input isn&apos;t available in this browser — type your command instead.</p>}
+                        {!speech.supported && <p className="text-[11px] text-black/45 mb-1.5" data-testid="pa-voice-unsupported">Voice input isn&apos;t available in this browser — type your command instead{typeof navigator !== "undefined" && navigator.maxTouchPoints > 0 ? ", or tap the microphone key on your keyboard to dictate" : ""}.</p>}
                         <div className="flex items-end gap-2">
                             <textarea ref={inputRef} value={text} onChange={(e) => setText(e.target.value)} rows={1} maxLength={2000} placeholder="Type a command…" aria-label="Command"
                                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}

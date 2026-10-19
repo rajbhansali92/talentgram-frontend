@@ -218,6 +218,9 @@ async def test_same_name_records_ask_which_one_with_photo_card_details_and_conti
 
 async def test_minor_spelling_mistakes_still_find_the_right_talent_and_nonsense_asks_again(anon, alice, world):
     t = (await say(anon, alice, "Show me Rivka Zenyth's profile"))["tasks"][0]
+    # A spelling correction is PROPOSED as a card (best match flagged), never silently chosen — one tap resolves it.
+    assert t["status"] == "needs_clarification" and t["slots"][0]["options"][0]["id"] == world["rivka"] and t["slots"][0]["options"][0].get("best") is True
+    t = (await anon.post(f"{BASE}/tasks/{t['id']}/clarify", headers=alice["headers"], json={"slot": t["slots"][0]["key"], "choice_id": world["rivka"]})).json()["task"]
     assert t["status"] == "completed" and t["result"]["cards"][0]["id"] == world["rivka"]
     n = (await say(anon, alice, "Show me Zqjxv Wplm's profile"))["tasks"][0]
     assert n["status"] == "needs_clarification" and n["slots"][0]["options"] == []
@@ -496,11 +499,14 @@ async def test_example_four_these_other_talents_is_not_the_selection_on_screen(a
 
 
 async def test_partial_surname_only_and_misspelt_names_resolve_but_nothing_runs_without_confirmation(anon, alice, world):
-    for phrase in ("Rivka", "Zenith", "Rivca Zenyth", "rivka zenith"):
+    for phrase in ("Rivka", "Zenith", "rivka zenith"):                                                 # exact / partial → understood at once
         t = (await say(anon, alice, f"Add {phrase} to Streaming Now"))["tasks"][0]
         assert t["status"] == "awaiting_confirmation" and t["params"]["talents"][0]["id"] == world["rivka"], phrase
         assert "Qzx Rivka Zenith" in t["title"]                                                      # the user sees who it understood
         await anon.post(f"{BASE}/tasks/{t['id']}/cancel", headers=alice["headers"])
+    typo = (await say(anon, alice, "Add Rivca Zenyth to Streaming Now"))["tasks"][0]                  # misspelt → a card to tap, not a guess
+    assert typo["status"] == "needs_clarification" and typo["slots"][0]["options"][0]["id"] == world["rivka"]
+    await anon.post(f"{BASE}/tasks/{typo['id']}/cancel", headers=alice["headers"])
     assert await _stage(world["amazon"], world["rivka"]) is None
     nick = (await say(anon, alice, "Add Riv to Streaming Now"))["tasks"][0]                          # a nickname is never silently trusted
     assert nick["status"] in ("needs_clarification", "awaiting_confirmation") and await _stage(world["amazon"], world["rivka"]) is None
@@ -521,12 +527,16 @@ async def test_two_ongoing_projects_with_similar_names_must_be_chosen_and_a_miss
         await anon.post(f"{BASE}/tasks/{x['id']}/cancel", headers=alice["headers"])
 
 
-async def test_a_talent_who_exists_but_is_not_in_the_project_cannot_be_sent_to_or_moved(anon, alice, world):
-    s = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"][0]
-    assert s["status"] == "failed" and "Add them first" in s["error"] or "in the Qzx Streaming Now pipeline yet" in s["error"]
+async def test_a_talent_who_exists_but_is_not_in_the_project_gets_the_add_planned_first_and_a_move_still_refuses(anon, alice, world):
+    out = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"]
+    add, send = out
+    assert (add["kind"], send["kind"]) == ("add", "send") and send["depends_on"] == [add["id"]]      # step 1 is the add, step 2 the send
+    assert add["status"] == send["status"] == "awaiting_confirmation" and add["title"].startswith("First: add")
     m = (await say(anon, alice, "Move Rivka Zenith to Approved in Streaming Now"))["tasks"][0]
-    assert m["status"] == "failed" and "pipeline" in m["error"]
-    assert await _jobs([world["rivka"]]) == []
+    assert m["status"] == "failed" and "pipeline" in m["error"]                                       # a move has no add to plan: still a clear refusal
+    assert await _jobs([world["rivka"]]) == [] and await _stage(world["amazon"], world["rivka"]) is None
+    for t in (add, send):
+        await anon.post(f"{BASE}/tasks/{t['id']}/cancel", headers=alice["headers"])
 
 
 async def test_two_simultaneous_confirms_of_one_send_create_exactly_one_batch_and_one_message(anon, alice, world):
@@ -754,14 +764,14 @@ async def test_double_tapping_retry_requeues_each_failed_message_once_and_never_
     assert after[jobs[1]["id"]]["status"] == "pending"                                                # the failed one is re-queued exactly once
 
 
-async def test_the_not_in_the_pipeline_message_reads_correctly_for_one_and_for_several_talents(anon, alice, world):
-    one = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"][0]
-    assert one["status"] == "failed"
-    assert one["error"] == "That talent isn't in the Qzx Streaming Now pipeline yet. Add them first."       # was "That talent is in …" (missing "not")
-    two = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith and Nehara Zolt for Streaming Now"))["tasks"][0]
-    assert two["status"] == "failed"
-    assert two["error"] == "None of these talents are in the Qzx Streaming Now pipeline yet. Add them first."
-    assert await _jobs([world["rivka"], world["nehara"]]) == []                                              # still nothing queued
+async def test_the_missing_pipeline_step_names_who_and_where_for_one_and_for_several_talents(anon, alice, world):
+    one = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith for Streaming Now"))["tasks"]
+    assert any("Qzx Rivka Zenith → Qzx Streaming Now (not in the pipeline yet)" in l for l in one[0]["summary"])
+    two = (await say(anon, alice, "Send the Qzx Casting Call to Rivka Zenith and Nehara Zolt for Streaming Now"))["tasks"]
+    assert sum("(not in the pipeline yet)" in l for l in two[0]["summary"]) == 2
+    assert await _jobs([world["rivka"], world["nehara"]]) == []                                              # nothing queued, nothing added yet
+    for t in one + two:
+        await anon.post(f"{BASE}/tasks/{t['id']}/cancel", headers=alice["headers"])
 
 
 async def test_which_projects_has_a_named_talent_tested_for_returns_that_talents_history(anon, alice, world):

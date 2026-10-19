@@ -134,13 +134,39 @@ async def run_list(task: dict) -> dict:
 
 # ---------------------------------------------------------------------------------------- consequential
 async def _run_add(user: dict, task: dict) -> dict:
+    """The existing bulk add, called ONE PROJECT AT A TIME so every project has its own outcome (a failure in one never hides
+    the others, and a re-run only creates what is still missing — the add skips pairs already there). Nothing is reported as
+    added unless the pipeline row is actually there afterwards."""
     from routers.casting_pipeline import BulkProjectAddIn, bulk_add_talents_to_projects
     p = task["params"]
-    res = await bulk_add_talents_to_projects(BulkProjectAddIn(project_ids=_ids(p["projects"]), talent_ids=_ids(p["talents"])), admin=user)
+    tids = _ids(p["talents"])
+    outcomes: List[dict] = []
+    for proj in p["projects"]:
+        before = {r["talent_id"] for r in await db.casting_pipeline.find({"project_id": proj["id"], "talent_id": {"$in": tids}}, {"_id": 0, "talent_id": 1}).to_list(len(tids) + 5)}
+        reason = None
+        try:
+            await bulk_add_talents_to_projects(BulkProjectAddIn(project_ids=[proj["id"]], talent_ids=tids), admin=user)
+        except HTTPException as exc:
+            reason = _detail(exc)
+        after = {r["talent_id"] for r in await db.casting_pipeline.find({"project_id": proj["id"], "talent_id": {"$in": tids}}, {"_id": 0, "talent_id": 1}).to_list(len(tids) + 5)}
+        for t in p["talents"]:
+            st = "already_there" if t["id"] in before else ("added" if t["id"] in after else "failed")
+            row = {"talent_id": t["id"], "name": t["label"], "project": proj["label"], "status": st}
+            if st == "failed":
+                row["reason"] = reason or "It wasn't added to the pipeline."
+            outcomes.append(row)
+    added = sum(1 for o in outcomes if o["status"] == "added")
+    already = sum(1 for o in outcomes if o["status"] == "already_there")
+    failed = [o for o in outcomes if o["status"] == "failed"]
+    st = S.COMPLETED if not failed else (S.PARTIAL if (added or already) else S.FAILED)
+    err = None
+    if failed:
+        bad = ", ".join(dict.fromkeys(f"{o['project']}" for o in failed))
+        err = f"Couldn't add everyone to: {bad}" + (f" — {failed[0].get('reason')}" if failed[0].get("reason") else "") + ". What was added stays added; retry to finish the rest."
     cc = await db.whatsapp_templates.find_one({"slug": "casting_call"}, {"_id": 0, "id": 1, "name": 1})
-    return {"status": S.COMPLETED, "error": None,
-            "result": {"added": res.get("added", 0), "already_there": res.get("skipped", 0), "projects": [e["label"] for e in p["projects"]],
-                       "suggestions": ([{"type": "send_template", "label": f"Send the {cc['name']}", "template_id": cc["id"]}] if cc else [])}}
+    return {"status": st, "error": err, "outcomes": outcomes,
+            "result": {"added": added, "already_there": already, "failed": len(failed), "projects": [e["label"] for e in p["projects"]],
+                       "suggestions": ([{"type": "send_template", "label": f"Send the {cc['name']}", "template_id": cc["id"]}] if cc and not p.get("prereq_for") else [])}}
 
 
 async def _run_move(user: dict, task: dict) -> dict:
@@ -250,6 +276,8 @@ async def dependency_block(owner_id: str, task: dict) -> Optional[str]:
             return f"It depends on “{dep['title']}”, which {dep['status']}."
         if dep["status"] not in (S.COMPLETED, S.PARTIAL, S.QUEUED):
             return f"Waiting for “{dep['title']}” first."
+        if dep["status"] == S.PARTIAL and (task.get("params") or {}).get("strict_dependency"):
+            return f"“{dep['title']}” only partly worked, so nothing has been sent. Retry that step; this one runs once it has fully succeeded."
     return None
 
 
@@ -264,7 +292,10 @@ async def run_task(user: dict, task: dict, worker_id: Optional[str]) -> dict:
     if claimed is None:
         return await S.get_task(owner, task["id"])
     try:
-        if kind == "add":
+        stale = await stale_reason(claimed)
+        if stale:
+            out = {"status": S.FAILED, "error": stale, "result": None}
+        elif kind == "add":
             out = await _run_add(user, claimed)
         elif kind == "move":
             out = await _run_move(user, claimed)
@@ -297,6 +328,27 @@ async def run_task(user: dict, task: dict, worker_id: Optional[str]) -> dict:
 
 
 S_CONSEQUENTIAL = {"add", "move", "send", "share"}
+
+
+async def stale_reason(task: dict) -> Optional[str]:
+    """Just before anything runs: is every talent / project the user picked still there? (A selection can go stale between
+    the tap and the approval — a talent archived or merged, a project deleted.) Returns the reason, or None if fine."""
+    p = task.get("params") or {}
+    tids = _ids(p.get("talents") or [])
+    if tids:
+        docs = await db.talents.find({"id": {"$in": tids}}, {"_id": 0, "id": 1, "name": 1, "status": 1}).to_list(len(tids))
+        by = {d["id"]: d for d in docs}
+        gone = [t["label"] for t in p["talents"] if t.get("id") and (t["id"] not in by or str(by[t["id"]].get("status") or "").lower() in ("archived", "merged"))]
+        if gone:
+            return f"{', '.join(gone[:3])} is no longer available (archived, merged or removed) since you picked them, so I did not run this. Ask me again."
+    pids = _ids(p.get("projects") or [])
+    if pids:
+        docs = await db.projects.find({"id": {"$in": pids}}, {"_id": 0, "id": 1, "status": 1}).to_list(len(pids))
+        by = {d["id"]: d for d in docs}
+        gone = [e["label"] for e in p["projects"] if e.get("id") and (e["id"] not in by or by[e["id"]].get("status") == "deleted")]
+        if gone:
+            return f"{', '.join(gone[:3])} no longer exists since you picked it, so I did not run this. Ask me again."
+    return None
 
 
 # ------------------------------------------------------------------------------ delivery status read-back

@@ -28,32 +28,57 @@ function Thumb({ src, alt = "", className = "" }) {
     return <img src={src} alt={alt} loading="lazy" decoding="async" onError={() => setBad(true)} className={`object-cover ${className}`} />;
 }
 
-/** Tap-to-pick options (talents with photo + details, projects, templates, stages) + a type-to-correct fallback. */
-function ClarifySlot({ slot, busy, onPick }) {
+const STATUS_CHIP = { ongoing: "Ongoing", complete: "Complete", completed: "Complete", hold: "On hold", locked: "Locked" };
+
+/**
+ * Tap-to-pick options (talents with photo + details, projects with their status, templates, stages) plus a search box.
+ * A card the user taps is the user's own decision for THAT question only: it is visibly marked while it is being saved and
+ * is sent by ID. A name the user types is searched on the server and comes back as cards to tap — typing never resolves
+ * silently, and the original command stays visible above.
+ */
+function ClarifySlot({ slot, busy, onPick, command }) {
     const [text, setText] = useState("");
+    const [picked, setPicked] = useState(null);
+    const [searched, setSearched] = useState("");
+    useEffect(() => { if (!busy) setPicked(null); }, [busy]);
+    const searchable = slot.kind === "talent" || slot.kind === "project" || slot.kind === "template" || slot.kind === "recipient";
+    const noMatch = searchable && !slot.options?.length;
     return (
         <div className="mt-2" data-testid={`pa-slot-${slot.key}`}>
+            {command && <p className="text-[11px] text-black/45 mb-1.5" data-testid="pa-command-echo">Your command: “{command}”</p>}
             <p className="text-xs text-black/70 mb-2">{slot.prompt}</p>
+            {searched && slot.options?.length > 0 && <p className="text-[11px] text-black/50 mb-1.5" data-testid="pa-search-note">Closest matches for “{searched}” — tap the right one:</p>}
             {slot.options?.length > 0 && (
                 <ul className="grid gap-1.5">
-                    {slot.options.map((o) => (
-                        <li key={o.id}>
-                            <button type="button" disabled={busy} onClick={() => onPick(slot.key, { choice_id: o.id })} data-testid={`pa-option-${o.id}`}
-                                className="w-full flex items-center gap-2.5 text-left p-2 rounded-lg border border-black/[0.1] hover:border-black/40 bg-white disabled:opacity-50 min-h-[44px]">
-                                {slot.kind === "talent" && <Thumb src={o.thumb} className="w-9 h-11 rounded shrink-0" />}
-                                <span className="min-w-0">
-                                    <span className="block text-sm text-black/85 truncate">{o.label}</span>
-                                    {o.sublabel && <span className="block text-[11px] text-black/50 truncate">{o.sublabel}</span>}
-                                </span>
-                            </button>
-                        </li>
-                    ))}
+                    {slot.options.map((o) => {
+                        const on = picked === o.id;
+                        const chip = slot.kind === "project" ? (STATUS_CHIP[o.status] || (o.status ? String(o.status) : "")) : "";
+                        const sub = chip && o.sublabel ? o.sublabel.replace(new RegExp(`^${chip}\\s*·?\\s*`, "i"), "") : o.sublabel;      // the status is the chip, not repeated
+                        return (
+                            <li key={o.id}>
+                                <button type="button" disabled={busy} aria-pressed={on} onClick={() => { setPicked(o.id); onPick(slot.key, { choice_id: o.id }); }} data-testid={`pa-option-${o.id}`}
+                                    className={`w-full flex items-center gap-2.5 text-left p-2 rounded-lg border bg-white disabled:opacity-60 min-h-[44px] ${on ? "border-black ring-1 ring-black" : o.best ? "border-emerald-500/70" : "border-black/[0.1] hover:border-black/40"}`}>
+                                    {slot.kind === "talent" && <Thumb src={o.thumb} className="w-9 h-11 rounded shrink-0" />}
+                                    <span className="min-w-0 flex-1">
+                                        <span className="block text-sm text-black/85 truncate">{o.label}</span>
+                                        {sub && <span className="block text-[11px] text-black/50 truncate">{sub}</span>}
+                                    </span>
+                                    <span className="shrink-0 flex flex-col items-end gap-0.5">
+                                        {o.best && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200" data-testid={`pa-best-${o.id}`}>Best match</span>}
+                                        {chip && <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${o.status === "ongoing" ? "bg-sky-50 text-sky-800 border-sky-200" : "bg-black/[0.04] text-black/60 border-black/10"}`}>{chip}</span>}
+                                        {on && <span className="text-[10px] text-black/70 inline-flex items-center gap-1"><Check className="w-3 h-3" aria-hidden /> Selected</span>}
+                                    </span>
+                                </button>
+                            </li>
+                        );
+                    })}
                 </ul>
             )}
-            <form className="flex gap-2 mt-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { onPick(slot.key, { text: text.trim() }); setText(""); } }}>
-                <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Or type the name again…" aria-label={`Correct: ${slot.prompt}`}
+            {noMatch && <p className="text-xs text-amber-700 mt-1" data-testid="pa-no-match" role="status">{searched ? `Nothing matched “${searched}”.` : "No close matches."} Try another spelling or just part of the name.</p>}
+            <form className="flex gap-2 mt-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { setSearched(text.trim()); onPick(slot.key, { text: text.trim() }); setText(""); } }}>
+                <input value={text} onChange={(e) => setText(e.target.value)} placeholder={slot.options?.length ? "Not here? Type the name again…" : "Type the name again…"} aria-label={`Search again: ${slot.prompt}`}
                     className="flex-1 min-w-0 border border-black/[0.12] rounded-lg px-3 min-h-[40px] text-sm focus:outline-none focus:border-black/50" />
-                <button type="submit" disabled={busy || !text.trim()} className="px-3 min-h-[40px] rounded-lg border border-black/[0.12] text-xs disabled:opacity-40">Use</button>
+                <button type="submit" disabled={busy || !text.trim()} className="px-3 min-h-[40px] rounded-lg border border-black/[0.12] text-xs disabled:opacity-40">Search</button>
             </form>
         </div>
     );
@@ -102,8 +127,8 @@ function Outcomes({ rows }) {
         <ul className="mt-2 space-y-0.5 text-[11px]" data-testid="pa-outcomes">
             {rows.slice(0, 20).map((r, i) => (
                 <li key={`${r.talent_id || r.name}-${i}`} className="flex gap-2 justify-between">
-                    <span className="truncate text-black/70">{r.name || r.project || "—"}</span>
-                    <span className={`shrink-0 ${r.status === "sent" || r.status === "moved" ? "text-emerald-700" : r.status === "failed" ? "text-red-600" : "text-black/50"}`}>
+                    <span className="truncate text-black/70">{r.name && r.project ? `${r.name} → ${r.project}` : (r.name || r.project || "—")}</span>
+                    <span className={`shrink-0 ${["sent", "moved", "added", "already_there"].includes(r.status) ? "text-emerald-700" : r.status === "failed" ? "text-red-600" : "text-black/50"}`}>
                         {r.status === "sent" ? (r.verified ? "sent ✓ verified" : "sent") : String(r.status || "").replace(/_/g, " ")}{r.reason || r.error ? ` — ${r.reason || r.error}` : ""}
                     </span>
                 </li>
@@ -207,7 +232,7 @@ function Result({ task, onPrefill, onFollowUp, busy }) {
     if (task.kind === "add") {
         return (
             <div className="mt-2 text-xs text-black/70" data-testid="pa-add-result">
-                Added {r.added}{r.already_there ? ` · ${r.already_there} already there` : ""}.
+                Added {r.added}{r.already_there ? ` · ${r.already_there} already there` : ""}{r.failed ? ` · ${r.failed} could not be added` : ""}.
                 {r.suggestions?.map((s) => (
                     <button key={s.template_id} type="button" disabled={busy} onClick={() => onFollowUp(task, s.template_id)} data-testid="pa-suggest-send"
                         className="ml-2 px-2.5 min-h-[32px] rounded-full border border-black/20 hover:border-black/50 text-[11px] disabled:opacity-50">{s.label}?</button>
@@ -219,7 +244,7 @@ function Result({ task, onPrefill, onFollowUp, busy }) {
     return null;
 }
 
-export default function TaskCard({ task, busy, actionError, onClarify, onConfirm, onCancel, onRetry, onFollowUp, onPrefill }) {
+export default function TaskCard({ task, busy, actionError, inPlan = false, onClarify, onConfirm, onCancel, onRetry, onFollowUp, onPrefill }) {
     const [worker, setWorker] = useState("");
     const needsWorker = (task.kind === "send" || task.kind === "share") && task.status === "awaiting_confirmation";
     const canCancel = ["needs_clarification", "awaiting_confirmation", "ready"].includes(task.status) || task.status === "queued";
@@ -239,12 +264,12 @@ export default function TaskCard({ task, busy, actionError, onClarify, onConfirm
             {task.status_detail && <p className="mt-1 text-[11px] text-black/55" data-testid="pa-detail">{task.status_detail}</p>}
             {task.error && <p className="mt-1.5 text-xs text-red-700 flex gap-1.5" role="alert"><AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden />{task.error}</p>}
             {actionError && <p className="mt-1.5 text-xs text-red-700" role="alert">{actionError}</p>}
-            {task.status === "needs_clarification" && task.slots?.map((s) => <ClarifySlot key={s.key} slot={s} busy={busy} onPick={(key, body) => onClarify(task, key, body)} />)}
-            {needsWorker && <div className="mt-2.5"><WorkerPicker value={worker} onChange={setWorker} hint={task.params?.worker_hint} disabled={busy} /></div>}
+            {task.status === "needs_clarification" && task.slots?.map((s, i) => <ClarifySlot key={s.key} slot={s} busy={busy} command={i === 0 ? task.source_text : null} onPick={(key, body) => onClarify(task, key, body)} />)}
+            {needsWorker && !inPlan && <div className="mt-2.5"><WorkerPicker value={worker} onChange={setWorker} hint={task.params?.worker_hint} disabled={busy} /></div>}
             <Result task={task} onPrefill={onPrefill} onFollowUp={onFollowUp} busy={busy} />
             <Outcomes rows={["completed", "partial", "failed", "running", "queued", "cancelled"].includes(task.status) ? rows : []} />
             <footer className="flex flex-wrap items-center gap-2 mt-2.5">
-                {task.status === "awaiting_confirmation" && (
+                {task.status === "awaiting_confirmation" && !inPlan && (
                     <button type="button" disabled={busy || (needsWorker && !worker)} onClick={() => onConfirm(task, worker)} data-testid="pa-confirm"
                         className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40 inline-flex items-center gap-1.5">
                         {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />} {task.duplicate_risk ? "Send again anyway" : "Confirm"}

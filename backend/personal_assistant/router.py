@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/personal-assistant", tags=["Personal Assistant"])
 
 MAX_CONCURRENT = 3
+PENDING_TTL_SEC = 12 * 3600          # an unanswered question / unapproved action older than this is stale and will not run
 NEEDS_WORKER = {"send", "share"}
 HELP = ("I can look up a talent (“show Angela's profile / media link / submission history”), add talents to projects, "
         "send a casting call or any template, move talents between pipeline stages, list who is in a stage, and share a media link or profile.")
@@ -81,6 +82,19 @@ def _reply(tasks: List[dict], unrecognised: List[str]) -> str:
     if unrecognised:
         text += " I didn't understand: “" + "”, “".join(unrecognised[:2]) + "”."
     return text
+
+
+async def _fresh(owner: str, task: dict) -> dict:
+    """A task that has been waiting for the user longer than PENDING_TTL_SEC is expired — the selection it holds may be
+    outdated (talents / projects change) — so it is cancelled instead of being clarified or executed."""
+    if task["status"] in (S.NEEDS_CLARIFICATION, S.AWAITING_CONFIRMATION, "ready") and X._age_seconds(task.get("updated_at")) > PENDING_TTL_SEC:
+        cur = await S.update_task(owner, task["id"], {"status": S.CANCELLED, "completed_at": S.now(),
+                                                       "error": "This request expired because it waited too long — ask again so it uses current information."},
+                                  only_status=[S.NEEDS_CLARIFICATION, S.AWAITING_CONFIRMATION, "ready"])
+        if cur:
+            await S.audit({"id": owner}, "expire", cur, "expired")
+        raise HTTPException(409, "This request expired because it waited too long — ask again so it uses current information.")
+    return task
 
 
 async def _own(user: dict, task_id: str) -> dict:
@@ -236,7 +250,7 @@ async def _apply_recipient(task: dict, choice_id: Optional[str], text: Optional[
 @router.post("/tasks/{task_id}/clarify")
 async def clarify(task_id: str, body: ClarifyIn, user: Dict[str, Any] = Depends(assistant_user)):
     owner = user["id"]
-    task = await _own(user, task_id)
+    task = await _fresh(owner, await _own(user, task_id))
     if task["status"] != S.NEEDS_CLARIFICATION:
         raise HTTPException(409, "This task doesn't need clarification any more.")
     if not (body.choice_id or (body.text or "").strip()):
@@ -252,9 +266,14 @@ async def clarify(task_id: str, body: ClarifyIn, user: Dict[str, Any] = Depends(
     if saved is None:
         raise HTTPException(409, "This task was just changed — refresh and try again.")
     await _propagate(owner, saved)
+    added = None
+    if saved["status"] == S.AWAITING_CONFIRMATION and saved["kind"] == "send" and saved["params"].get("prereq") and not saved.get("depends_on"):
+        added = await P.attach_prerequisite(owner, saved)          # the picks are done and a pipeline entry is missing: plan the add first
+        if added:
+            saved = await S.update_task(owner, saved["id"], {k: saved[k] for k in ("params", "depends_on", "slots", "status", "title", "summary", "warnings", "error", "preview", "duplicate_risk") if k in saved}) or saved
     if saved["status"] == "ready":
         saved = await X.run_task(user, saved, None)
-    return {"task": _pub(saved)}
+    return {"task": _pub(saved), **({"added_tasks": [_pub(added)]} if added else {})}
 
 
 # ----------------------------------------------------------------------------------------------- confirm
@@ -266,6 +285,7 @@ async def _confirm_one(user: dict, task: dict, requested_worker: Optional[str]) 
     owner = user["id"]
     if task["status"] != S.AWAITING_CONFIRMATION:
         return task                                       # already confirmed / moved: never run twice
+    await _fresh(owner, task)
     block = await X.dependency_block(owner, task)
     if block:
         raise HTTPException(409, block)

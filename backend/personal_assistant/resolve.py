@@ -12,6 +12,7 @@ new logic is how the candidate pools are built so we never load the whole roster
 """
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,32 +66,104 @@ async def talent_cards(ids: List[str]) -> Dict[str, dict]:
 
 
 async def _talent_pool(phrase: str) -> List[nlu.Candidate]:
+    """Candidates for a typed name, narrowed in MongoDB so the whole roster is never loaded. A spelling mistake can hit
+    the start of a word ("Vidushi" vs "Viidushi"), so each word contributes BOTH its first and its last letters."""
     words = [w for w in re.findall(r"[A-Za-z]{2,}", phrase or "")][:4]
     if not words:
         return []
-    ors = [{"name": {"$regex": re.escape(w[: max(2, min(3, len(w)))]), "$options": "i"}} for w in words]
+    ors = []
+    for w in words:
+        ors.append({"name": {"$regex": re.escape(w[: max(2, min(3, len(w)))]), "$options": "i"}})
+        if len(w) >= 5:
+            ors.append({"name": {"$regex": re.escape(w[-3:]), "$options": "i"}})
     query = active_only({"$or": ors}, exclude_archived=True)
     query["status"] = {"$nin": ["ARCHIVED", "merged", "MERGED", "DRAFT"]}
     docs = await db.talents.find(query, {"_id": 0, "id": 1, "name": 1}).limit(_CANDIDATE_CAP).to_list(_CANDIDATE_CAP)
     return [nlu.Candidate(id=d["id"], label=d.get("name") or "") for d in docs if d.get("name")]
 
 
+# How a typed name is judged against a stored name. EVERY word the user typed must be accounted for (a stored name that
+# merely shares one word — another "Tiwari" — is never offered), and a candidate is classed by how it matched:
+#   exact    the same name, ignoring case / spacing / punctuation
+#   partial  every typed word starts a stored word, or the typed text sits inside the name ("Angela" → "Angela Kumar")
+#   close    only reachable through a spelling correction ("Vidushi" → "Viidushi") — NEVER chosen without a tap
+_WORD_MIN = 0.75
+_MATCH_RANK = {"exact": 0, "partial": 1, "close": 2}
+
+
+def _word_sim(a: str, b: str) -> float:
+    if a == b:
+        return 1.0
+    if len(a) <= 2 or len(b) <= 2:
+        return 0.0                                  # a 1-2 letter "match" is noise, not evidence
+    if len(a) >= 3 and b.startswith(a):
+        return 0.95
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def score_name(query: str, label: str) -> Optional[Tuple[str, float]]:
+    """→ (kind, score) when `label` is a plausible match for `query`, else None. Pure (no I/O)."""
+    q, l = nlu._normalize_name(query), nlu._normalize_name(label)
+    qt, lt = q.split(), l.split()
+    if not qt or not lt:
+        return None
+    if q == l:
+        return "exact", 1.0
+    per = [max(_word_sim(t, x) for x in lt) for t in qt]
+    if min(per) < _WORD_MIN:
+        return None                                  # at least one typed word matches nothing in this name
+    cover = sum(per) / len(per)
+    whole = difflib.SequenceMatcher(None, q, l).ratio()
+    extra = max(0, len(lt) - len(qt))
+    partial = q in l or all(any(x.startswith(t) for x in lt) for t in qt)
+    return ("partial" if partial else "close"), round(cover - 0.03 * extra + 0.1 * whole, 4)
+
+
+def rank_talents(query: str, candidates: List[nlu.Candidate]) -> List[Tuple[nlu.Candidate, str, float]]:
+    scored = []
+    for c in candidates:
+        r = score_name(query, c.label)
+        if r:
+            scored.append((c, r[0], r[1]))
+    scored.sort(key=lambda x: (_MATCH_RANK[x[1]], -x[2], x[0].label.lower()))
+    return scored
+
+
 async def resolve_talent(phrase: str) -> dict:
-    """→ {"state": "resolved", "id", "label"} | {"state": "ambiguous", "options": [...]} | {"state": "none"}"""
+    """→ {"state": "resolved", "id", "label"} | {"state": "ambiguous", "options": [...]} | {"state": "none"}
+
+    Chosen automatically ONLY for an exact name, or a partial name that exactly one talent fits ("Angela"). Anything that
+    needed a spelling correction — or fits several people — comes back as real talent cards to tap (best match first and
+    flagged), so a misheard or mistyped name can never silently become the wrong person."""
     phrase = (phrase or "").strip()
     if not phrase or phrase.isdigit():
         return {"state": "none"}
     pool = await _talent_pool(phrase)
-    if not pool:
+    ranked = rank_talents(phrase, pool)
+    if not ranked:
         return {"state": "none"}
-    res = nlu.resolve_against_candidates(nlu.SelectorResult(ok=True, name_query=phrase), pool)
-    if res.ok and len(res.talent_ids) == 1:
-        return {"state": "resolved", "id": res.talent_ids[0], "label": res.talent_labels[0]}
-    if res.ambiguous_candidates:
-        ids = [c.id for c in res.ambiguous_candidates][:MAX_OPTIONS]
-        cards = await talent_cards(ids)
-        return {"state": "ambiguous", "options": [cards[i] for i in ids if i in cards]}
-    return {"state": "none"}
+    exact = [r for r in ranked if r[1] == "exact"]
+    partial = [r for r in ranked if r[1] == "partial"]
+    if len(exact) == 1:
+        return {"state": "resolved", "id": exact[0][0].id, "label": exact[0][0].label}
+    if not exact and len(partial) == 1:
+        return {"state": "resolved", "id": partial[0][0].id, "label": partial[0][0].label}
+    shown = (exact or partial or ranked)[:MAX_OPTIONS]      # duplicate names → those; else partial fits; else spelling-corrected guesses
+    ids = [c.id for c, _k, _s in shown]
+    cards = await talent_cards(ids)
+    kinds = {c.id: (k, sc) for c, k, sc in shown}
+    options = []
+    for i, tid in enumerate(ids):
+        if tid not in cards:
+            continue
+        opt = dict(cards[tid])
+        kind, score = kinds[tid]
+        opt["match"] = kind
+        lead = score - kinds[ids[1]][1] if len(ids) > 1 and ids[1] in kinds else 1.0
+        if i == 0 and kind != "exact" and score >= 0.85 and (len(ids) == 1 or lead >= 0.05):
+            opt["best"] = True                       # proposed, never assumed: the card still has to be tapped; two near-equals → none is flagged
+        options.append(opt)
+    return {"state": "ambiguous", "options": options} if options else {"state": "none"}
 
 
 # --------------------------------------------------------------------------------------------------- projects
@@ -99,8 +172,12 @@ async def load_projects() -> List[dict]:
     return [{"id": d["id"], "label": d.get("brand_name") or "", "status": d.get("status") or "ongoing", "character": d.get("character") or ""} for d in docs if d.get("brand_name")]
 
 
-def _opt(p: dict) -> dict:
-    return {"id": p["id"], "label": p["label"], "sublabel": " · ".join(x for x in [p.get("status", "").title(), p.get("character") or ""] if x), "thumb": None}
+def _opt(p: dict, best: bool = False) -> dict:
+    o = {"id": p["id"], "label": p["label"], "sublabel": " · ".join(x for x in [p.get("status", "").title(), p.get("character") or ""] if x),
+         "thumb": None, "status": p.get("status") or "ongoing"}
+    if best:
+        o["best"] = True
+    return o
 
 
 def _strong(span: str, label: str) -> bool:
@@ -116,12 +193,32 @@ def _strong_matches(span: str, projects: List[dict]) -> List[dict]:
     return [p for p in projects if _strong(span, p["label"])]
 
 
+def _exact_matches(span: str, projects: List[dict]) -> List[dict]:
+    n = nlu._normalize_project_label(span)
+    return [p for p in projects if n and nlu._normalize_project_label(p["label"]) == n]
+
+
 def _pick_by_status(matches: List[dict], prefer_active: bool) -> List[dict]:
+    """Several PRECISE fits and exactly one of them is ongoing → that one (a closed project can't take adds, and a casting
+    call is meant for the live job). Only ever applied to precise word matches, never to a spelling correction."""
     if prefer_active and len(matches) > 1:
         active = [m for m in matches if m["status"] == "ongoing"]
         if len(active) == 1:
             return active
     return matches
+
+
+def _ordered(matches: List[dict]) -> List[dict]:
+    """Ongoing projects first (they are the ones a casting call / add can actually target), then by name."""
+    return sorted(matches, key=lambda m: (0 if m.get("status") == "ongoing" else 1, (m.get("label") or "").lower()))
+
+
+def _options(matches: List[dict]) -> List[dict]:
+    """Cards for several candidate projects. The single ongoing one is PROPOSED (flagged), never chosen for the user — two
+    similarly named projects can belong to different casting groups."""
+    ordered = _ordered(matches)[:MAX_OPTIONS]
+    ongoing = [m for m in ordered if m.get("status") == "ongoing"]
+    return [_opt(m, best=bool(ongoing) and len(ongoing) == 1 and m is ongoing[0]) for m in ordered]
 
 
 def _pieces(text: str) -> List[Tuple[int, int]]:
@@ -137,7 +234,12 @@ def _pieces(text: str) -> List[Tuple[int, int]]:
 
 
 async def resolve_projects(text: str, *, prefer_active: bool = True, projects: Optional[List[dict]] = None) -> List[dict]:
-    """→ one entry per project mentioned: {"phrase", "state": resolved|ambiguous|none, "id"?, "label"?, "options"?}"""
+    """→ one entry per project mentioned: {"phrase", "state": resolved|ambiguous|none, "id"?, "label"?, "options"?}
+
+    A project is chosen automatically only when the words typed ARE that project's name (same words, any case / hyphens),
+    or are a precise part of exactly one name. Several fits — or anything that needed a spelling correction — come back
+    as cards to tap, so a message can never go to the wrong casting group because a name was spoken a little off.
+    (`prefer_active`: when exactly one precise fit is ongoing it wins over closed ones; ongoing projects are listed first.)"""
     projects = projects if projects is not None else await load_projects()
     text = (text or "").strip()
     spans = _pieces(text)
@@ -147,22 +249,33 @@ async def resolve_projects(text: str, *, prefer_active: bool = True, projects: O
         taken = False
         for j in range(len(spans), i, -1):                  # longest run of pieces first
             span = text[spans[i][0]: spans[j - 1][1]]
-            strong = _pick_by_status(_strong_matches(span, projects), prefer_active)
-            if len(strong) == 1 and (j - i > 1 or True):
+            exact = _exact_matches(span, projects)
+            strong = exact or _pick_by_status(_strong_matches(span, projects), prefer_active)
+            if len(exact) == 1 or (not exact and len(strong) == 1):
                 out.append({"phrase": span, "state": "resolved", "id": strong[0]["id"], "label": strong[0]["label"]})
                 i, taken = j, True
                 break
-            if len(strong) > 1 and j - i >= 1:
-                out.append({"phrase": span, "state": "ambiguous", "options": [_opt(p) for p in strong[:MAX_OPTIONS]]})
+            if len(strong) > 1:
+                out.append({"phrase": span, "state": "ambiguous", "options": _options(strong)})
                 i, taken = j, True
                 break
         if taken:
             continue
-        span = text[spans[i][0]: spans[i][1]]                # nothing strong: typo-tolerant NLU match for this one piece
-        m = nlu.resolve_project_by_name(span, [{"id": p["id"], "label": p["label"]} for p in projects])
+        span = text[spans[i][0]: spans[i][1]]                # nothing precise: typo-tolerant match for this one piece — always a card to tap
+        labels = [{"id": p["id"], "label": p["label"]} for p in projects]
+        m = nlu.resolve_project_by_name(span, labels)
         by_id = {p["id"]: p for p in projects}
-        if m.project:
-            out.append({"phrase": span, "state": "resolved", "id": m.project["id"], "label": m.project["label"]})
+        if m.project and m.project["id"] in by_id:
+            try:
+                precise = {projects[k]["id"] for k in nlu._project_token_subset_matches(span, [p["label"] for p in projects])}
+            except Exception:
+                precise = set()
+            if m.project["id"] in precise:
+                out.append({"phrase": span, "state": "resolved", "id": m.project["id"], "label": m.project["label"]})
+            else:
+                rest = [by_id[c["id"]] for c in (m.suggestions or []) if c["id"] in by_id and c["id"] != m.project["id"]]
+                opts = [_opt(by_id[m.project["id"]], best=True)] + [_opt(r) for r in rest[: MAX_OPTIONS - 1]]
+                out.append({"phrase": span, "state": "ambiguous", "options": opts})
         elif m.ambiguous or m.suggestions:
             opts = [_opt(by_id[c["id"]]) for c in (m.ambiguous or m.suggestions) if c["id"] in by_id][:MAX_OPTIONS]
             out.append({"phrase": span, "state": "ambiguous" if opts else "none", "options": opts})
@@ -187,6 +300,10 @@ async def resolve_template(phrase: Optional[str], templates: Optional[List[dict]
     usable = [t for t in templates if t.get("slug") != "custom"]          # the free-text template is the assistant's share channel, not a pick
     if not phrase:
         return {"state": "none", "options": template_options(usable)}
+    if re.sub(r"[^a-z ]", "", phrase.lower()).strip() in ("casting", "casting call", "casting calls", "the casting", "the casting call"):
+        cc = next((t for t in usable if t.get("slug") == "casting_call"), None)        # "send the casting" can only mean the Casting Call
+        if cc is not None:
+            return {"state": "resolved", "id": cc["id"], "label": cc["name"]}
     m = name_match.tiered_name_match(phrase, usable, lambda t: t.get("name") or "", id_fn=lambda t: t["id"], what="template")
     if m.item is not None:
         return {"state": "resolved", "id": m.item["id"], "label": m.item["name"]}

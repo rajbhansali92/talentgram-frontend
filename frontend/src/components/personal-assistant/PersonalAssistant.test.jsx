@@ -11,6 +11,7 @@ vi.mock("@/lib/api", () => ({
 import { adminApi } from "@/lib/api";
 import { setAssistantContext } from "@/lib/assistantContext";
 import PersonalAssistant from "./PersonalAssistant";
+import { liveReply } from "./AssistantPanel";
 
 afterEach(() => { cleanup(); vi.useRealTimers(); delete window.SpeechRecognition; delete window.webkitSpeechRecognition; setAssistantContext({ projectId: null, talentIds: [] }); });
 
@@ -332,7 +333,7 @@ describe("clarification cards", () => {
         fireEvent.click(screen.getByTestId("pa-send"));
         const slot = await screen.findByTestId("pa-slot-talent:0");
         fireEvent.change(within(slot).getByPlaceholderText(/type the name again/i), { target: { value: "Angela Kumar" } });
-        fireEvent.click(within(slot).getByText("Use"));
+        fireEvent.click(within(slot).getByText("Search"));
         await waitFor(() => expect(posts("/clarify")[0][1]).toEqual({ slot: "talent:0", text: "Angela Kumar" }));
     });
 });
@@ -545,6 +546,30 @@ describe("honest wording and failure handling", () => {
 });
 
 describe("voice input", () => {
+    const setPermission = (state) => {
+        Object.defineProperty(navigator, "permissions", { configurable: true, value: state === "throws" ? { query: () => Promise.reject(new Error("unsupported")) } : state ? { query: vi.fn(() => Promise.resolve({ state })) } : undefined });
+    };
+    const resetEnv = () => {
+        setPermission(undefined);
+        Object.defineProperty(window, "isSecureContext", { configurable: true, value: true });
+        Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 });
+    };
+    beforeEach(resetEnv);
+    afterEach(() => { resetEnv(); vi.useRealTimers(); });
+
+    function fakeRecognition() {
+        const inst = { starts: 0 };
+        window.webkitSpeechRecognition = function Rec() {
+            Object.assign(this, { start: vi.fn(() => { inst.starts += 1; }), stop: vi.fn(), abort: vi.fn() });
+            inst.rec = this;
+        };
+        return inst;
+    }
+    const result = (...parts) => ({ resultIndex: 0, results: parts.map(([t, isFinal]) => Object.assign([{ transcript: t }], { isFinal })) });
+    const tapMic = async () => { fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => {}); };
+    const say = (inst, ...parts) => act(() => { inst.rec.onresult(result(...parts)); });
+    const end = (inst) => act(() => { inst.rec.onend(); });
+
     it("says plainly when the browser has no speech recognition, and the text box still works", async () => {
         server();
         mount(); await open();
@@ -554,44 +579,389 @@ describe("voice input", () => {
         expect(screen.getByTestId("pa-send").disabled).toBe(false);
     });
 
-    function fakeRecognition() {
-        const inst = {};
-        window.webkitSpeechRecognition = function Rec() { Object.assign(this, { start: vi.fn(() => { inst.started = true; }), stop: vi.fn(() => this.onend?.()), abort: vi.fn() }); inst.rec = this; };
-        return inst;
-    }
+    it("a touch device without speech recognition is pointed at the keyboard's own dictation key", async () => {
+        Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 5 });
+        server(); mount(); await open();
+        expect(screen.getByTestId("pa-voice-unsupported").textContent).toMatch(/microphone key on your keyboard/i);
+    });
 
-    it("tap to listen shows the indicator, puts the words in the text box for review, and does NOT send by itself", async () => {
+    it("tap shows 'Starting…' until the browser reports audio, then Listening; the words go in the text box for review and are NOT sent", async () => {
         server();
         const inst = fakeRecognition();
         mount(); await open();
-        fireEvent.click(screen.getByTestId("pa-mic"));
-        expect(inst.started).toBe(true);
-        expect(screen.getByTestId("pa-listening")).toBeTruthy();
+        await tapMic();
+        expect(inst.starts).toBe(1);
+        expect(screen.getByTestId("pa-listening").textContent).toMatch(/starting microphone/i);
         expect(inst.rec.continuous).toBe(false);                                   // push-to-talk, never continuous
-        act(() => { inst.rec.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: "show me angela kumar's profile" }], { isFinal: true })] }); });
-        act(() => { inst.rec.onend(); });
+        act(() => { inst.rec.onstart(); });
+        expect(screen.getByTestId("pa-listening").textContent).toMatch(/listening/i);
+        await say(inst, ["show me angela kumar's profile", true]);
+        await end(inst);
         expect(screen.getByLabelText("Command").value).toBe("show me angela kumar's profile");
         expect(posts("/message")).toHaveLength(0);                                 // the user reviews / edits, then sends
         expect(screen.queryByTestId("pa-listening")).toBeNull();
     });
 
-    it("tapping again stops listening", async () => {
+    it("keeps what was already typed and appends the transcript once, however many end/stop events arrive", async () => {
         server();
         const inst = fakeRecognition();
         mount(); await open();
-        fireEvent.click(screen.getByTestId("pa-mic"));
-        fireEvent.click(screen.getByTestId("pa-mic"));
-        expect(inst.rec.stop).toHaveBeenCalled();
+        type("Move");
+        await tapMic();
+        act(() => { inst.rec.onstart(); });
+        await say(inst, ["Vidushi Tiwari to hold", true]);
+        const rec = inst.rec;
+        await end(inst);
+        act(() => { rec.onend?.(); rec.onend?.(); });                              // late / repeated events from the finished session
+        expect(screen.getByLabelText("Command").value).toBe("Move Vidushi Tiwari to hold");
     });
 
-    it.each([["not-allowed", /blocked/i], ["no-speech", /didn't hear/i], ["network", /network/i], ["audio-capture", /No microphone/i]])("handles the %s error with a useful message and keeps the keyboard fallback", async (code, re) => {
+    it("a result list that is re-sent in full (some engines do) does not duplicate words, and the whole utterance is kept", async () => {
         server();
         const inst = fakeRecognition();
         mount(); await open();
+        await tapMic();
+        act(() => { inst.rec.onstart(); });
+        await say(inst, ["send the casting for sebamed", false]);
+        await say(inst, ["send the casting for sebamed testimonial film", false]);
+        await say(inst, ["send the casting for sebamed testimonial film and trend film with kripa trivedi", true]);
+        await end(inst);
+        expect(screen.getByLabelText("Command").value).toBe("send the casting for sebamed testimonial film and trend film with kripa trivedi");
+    });
+
+    it("words that were only ever interim (no final event before the engine stopped) are still delivered", async () => {
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        await tapMic();
+        act(() => { inst.rec.onstart(); });
+        await say(inst, ["add neha to pepsi", false]);
+        await end(inst);
+        expect(screen.getByLabelText("Command").value).toBe("add neha to pepsi");
+    });
+
+    it("tapping again stops listening, and a stop that never produces an end event is forced after a moment (no stuck spinner) while keeping the words", async () => {
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();                                                     // real timers while the UI mounts…
+        vi.useFakeTimers();                                                        // …fake ones only for the voice session's own clocks
+        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        act(() => { inst.rec.onstart(); inst.rec.onresult(result(["find angela", true])); });
         fireEvent.click(screen.getByTestId("pa-mic"));
-        act(() => { inst.rec.onerror({ error: code }); inst.rec.onend(); });
+        expect(inst.rec.stop).toHaveBeenCalled();
+        expect(screen.getByTestId("pa-listening")).toBeTruthy();                   // still waiting for the engine's end event…
+        await act(async () => { await vi.advanceTimersByTimeAsync(2600); });       // …which never comes
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(screen.getByLabelText("Command").value).toBe("find angela");
+        expect(screen.getByTestId("pa-mic").disabled).toBe(false);                 // usable again
+    });
+
+    it("never hangs on 'Starting…': no start event within the limit → back to idle with a message and the mic usable again", async () => {
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();                                                     // real timers while the UI mounts…
+        vi.useFakeTimers();                                                        // …fake ones only for the voice session's own clocks
+        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        expect(screen.getByTestId("pa-listening")).toBeTruthy();
+        await act(async () => { await vi.advanceTimersByTimeAsync(8100); });
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/didn't start/i);
+        expect(inst.rec.abort).toHaveBeenCalled();
+        expect(screen.getByTestId("pa-mic").disabled).toBe(false);
+    });
+
+    it("stops by itself after the maximum listening time and still hands over the words", async () => {
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();                                                     // real timers while the UI mounts…
+        vi.useFakeTimers();                                                        // …fake ones only for the voice session's own clocks
+        fireEvent.click(screen.getByTestId("pa-mic")); await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        act(() => { inst.rec.onstart(); inst.rec.onresult(result(["list ask to test", true])); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(30100); });
+        expect(inst.rec.stop).toHaveBeenCalled();
+        await act(async () => { await vi.advanceTimersByTimeAsync(2600); });
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(screen.getByLabelText("Command").value).toBe("list ask to test");
+    });
+
+    it("the browser reporting the microphone DENIED for this site never starts recognition and names the site (permissions are per website)", async () => {
+        setPermission("denied");
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        await tapMic();
+        expect(inst.starts).toBe(0);
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(msg).toContain(window.location.host);
+        expect(msg).toMatch(/per website/i);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(screen.getByTestId("pa-mic").disabled).toBe(false);
+    });
+
+    it("not-allowed while the site IS allowed is reported as a refusal of speech (OS setting / other app) — not 'blocked in site settings'", async () => {
+        setPermission("granted");
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        await tapMic();
+        expect(inst.starts).toBe(1);                                               // permission is fine, so recognition is attempted
+        act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(msg).toMatch(/allowed for/i);
+        expect(msg).toMatch(/still refused/i);
+        expect(msg).toMatch(/privacy setting/i);
+        expect(msg).not.toMatch(/is blocked for/i);
+    });
+
+    it("not-allowed with an unknown permission state (Safari/Firefox have no microphone query) says it can't tell and names the site", async () => {
+        setPermission("throws");
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        await tapMic();
+        act(() => { inst.rec.onerror({ error: "not-allowed" }); inst.rec.onend?.(); });
+        const msg = screen.getByTestId("pa-voice-error").textContent;
+        expect(msg).toContain(window.location.host);
+        expect(msg).toMatch(/site settings/i);
+    });
+
+    it.each([["no-speech", /didn't hear/i], ["network", /network/i], ["audio-capture", /No working microphone/i], ["service-not-allowed", /speech service refused/i], ["language-not-supported", /language/i], ["weird-new-code", /stopped unexpectedly/i]])("handles the %s error with its own message, returns to idle and keeps the keyboard fallback", async (code, re) => {
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        type("typed before");
+        await tapMic();
+        act(() => { inst.rec.onerror({ error: code }); inst.rec.onend?.(); });
         expect(screen.getByTestId("pa-voice-error").textContent).toMatch(re);
-        type("typed instead");
-        expect(screen.getByLabelText("Command").value).toBe("typed instead");
+        expect(screen.getByTestId("pa-voice-error").textContent).not.toMatch(/blocked/i);          // unrelated failures are not "permission blocked"
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        expect(screen.getByLabelText("Command").value).toBe("typed before");                      // nothing lost
+        expect(screen.getByTestId("pa-mic").disabled).toBe(false);
+    });
+
+    it("an aborted recognition is silent (no error) and keeps what was heard", async () => {
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        await tapMic();
+        act(() => { inst.rec.onstart(); });
+        await say(inst, ["add riya", true]);
+        act(() => { inst.rec.onerror({ error: "aborted" }); inst.rec.onend?.(); });
+        expect(screen.queryByTestId("pa-voice-error")).toBeNull();
+        expect(screen.getByLabelText("Command").value).toBe("add riya");
+    });
+
+    it("an insecure (non-https) page says why voice can't work instead of failing silently", async () => {
+        Object.defineProperty(window, "isSecureContext", { configurable: true, value: false });
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        await tapMic();
+        expect(inst.starts).toBe(0);
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/secure/i);
+    });
+
+    it("a recognition object that throws on start is reported and leaves the UI idle", async () => {
+        server();
+        window.webkitSpeechRecognition = function Rec() { this.start = () => { throw new Error("InvalidStateError"); }; this.abort = vi.fn(); this.stop = vi.fn(); };
+        mount(); await open();
+        await tapMic();
+        expect(screen.getByTestId("pa-voice-error").textContent).toMatch(/couldn't start/i);
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+    });
+
+    it("closing or minimising the panel aborts a microphone session (it must not keep listening with nothing on screen)", async () => {
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        await tapMic();
+        act(() => { inst.rec.onstart(); });
+        fireEvent.click(screen.getByTestId("pa-minimize"));
+        expect(inst.rec.abort).toHaveBeenCalled();
+        fireEvent.click(screen.getByTestId("pa-minimize"));
+        expect(screen.queryByTestId("pa-listening")).toBeNull();
+        await tapMic();                                                            // and it can start a fresh session
+        expect(inst.starts).toBe(2);
+        fireEvent.click(screen.getByTestId("pa-close"));
+        expect(inst.rec.abort).toHaveBeenCalled();
+    });
+
+    it("unmounting while listening aborts the session and a late result is ignored", async () => {
+        server();
+        const inst = fakeRecognition();
+        const { unmount } = mount(); await open();
+        await tapMic();
+        act(() => { inst.rec.onstart(); });
+        const rec = inst.rec;
+        unmount();
+        expect(rec.abort).toHaveBeenCalled();
+        expect(() => rec.onresult?.(result(["late words", true]))).not.toThrow();
+    });
+
+    it("spoken text goes through the normal command path only when the user sends it (no automatic action)", async () => {
+        server();
+        const inst = fakeRecognition();
+        mount(); await open();
+        await tapMic();
+        act(() => { inst.rec.onstart(); });
+        await say(inst, ["send the casting call to the selected talents", true]);
+        await end(inst);
+        expect(posts("/message")).toHaveLength(0);
+        fireEvent.click(screen.getByTestId("pa-send"));
+        await waitFor(() => expect(posts("/message")).toHaveLength(1));
+        expect(posts("/message")[0][1].text).toBe("send the casting call to the selected talents");
+    });
+});
+
+describe("entity resolution cards (2026-10-19)", () => {
+    const slot = (over = {}) => ({ key: "talent:0", kind: "talent", phrase: "Vidushi Tiwari", prompt: 'Which "Vidushi Tiwari" did you mean?', options: [
+        { id: "v1", label: "Viidushi Tiwari", sublabel: "26y · 5'5\" · Mumbai, India · @viid", thumb: null, best: true, match: "close" }], ...over });
+    const moveTask = (over = {}) => task({ id: "m1", kind: "move", status: "needs_clarification", title: "Move ? to Hold in Sebamed", source_text: "Move Vidushi Tiwari to Hold in Sebamed", slots: [slot()], ...over });
+    const start = async (t) => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "Here's what I understood: 1 needs your pick.", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("Move Vidushi Tiwari to Hold in Sebamed"); fireEvent.click(screen.getByTestId("pa-send"));
+        return screen.findByTestId("pa-slot-talent:0");
+    };
+
+    it("shows the actual database candidate with its details, flags the best match, echoes the original command, and never shows an empty 'Use' button", async () => {
+        const el = await start(moveTask());
+        expect(within(el).getByText("Viidushi Tiwari")).toBeTruthy();
+        expect(within(el).getByText(/26y · 5'5" · Mumbai, India · @viid/)).toBeTruthy();
+        expect(within(el).getByTestId("pa-best-v1").textContent).toBe("Best match");
+        expect(within(el).getByTestId("pa-command-echo").textContent).toContain("Move Vidushi Tiwari to Hold in Sebamed");
+        expect(within(el).queryByText("Use")).toBeNull();
+        expect(within(el).getByText("Search")).toBeTruthy();
+    });
+
+    it("tapping a card marks it Selected at once and sends only its ID; the stale 'needs your pick' line becomes 'waiting for your OK' when the server says so", async () => {
+        const el = await start(moveTask());
+        adminApi.post.mockImplementation((url) => {
+            if (url === "/personal-assistant/tasks/m1/clarify") return Promise.resolve({ data: { task: moveTask({ status: "awaiting_confirmation", title: "Move Viidushi Tiwari to Hold in Sebamed", slots: [], summary: ["1 talent: Viidushi Tiwari", "To Hold in Sebamed"] }) } });
+            return Promise.reject(new Error(url));
+        });
+        tasksOnServer = [moveTask({ status: "awaiting_confirmation", title: "Move Viidushi Tiwari to Hold in Sebamed", slots: [], summary: ["1 talent: Viidushi Tiwari", "To Hold in Sebamed"] })];
+        fireEvent.click(within(el).getByTestId("pa-option-v1"));
+        expect(within(el).getByTestId("pa-option-v1").getAttribute("aria-pressed")).toBe("true");
+        await waitFor(() => expect(posts("/clarify")).toHaveLength(1));
+        expect(posts("/clarify")[0][1]).toEqual({ slot: "talent:0", choice_id: "v1" });
+        await waitFor(() => expect(screen.getByTestId("pa-reply").textContent).toBe("Here's what I understood: 1 waiting for your OK."));
+        expect(screen.queryByText(/needs your pick/i)).toBeNull();                         // nothing stale left on screen
+        expect(screen.getAllByTestId("pa-confirm")).toHaveLength(1);                         // exactly ONE approval for the action
+    });
+
+    it("a typed correction is a SEARCH: the server's cards come back with a 'closest matches' note — typing alone never selects", async () => {
+        const el = await start(moveTask({ slots: [slot({ options: [], prompt: 'I couldn\'t find anyone matching "Vdsh Tw". Check the spelling, or search with part of the name.' })] }));
+        expect(within(el).getByTestId("pa-no-match").textContent).toMatch(/try another spelling/i);
+        adminApi.post.mockImplementation((url) => Promise.resolve({ data: { task: moveTask() } }));
+        tasksOnServer = [moveTask()];
+        fireEvent.change(within(el).getByPlaceholderText(/type the name again/i), { target: { value: "Vidushi Tiwari" } });
+        fireEvent.click(within(el).getByText("Search"));
+        await waitFor(() => expect(posts("/clarify")[0][1]).toEqual({ slot: "talent:0", text: "Vidushi Tiwari" }));
+        await waitFor(() => expect(screen.getByTestId("pa-search-note").textContent).toMatch(/closest matches for “Vidushi Tiwari”/i));
+        expect(screen.getByTestId("pa-option-v1")).toBeTruthy();
+        expect(screen.getByTestId("pa-task-m1").textContent).toMatch(/Needs your pick/);       // still unresolved until a card is tapped
+    });
+
+    it("project cards show their real status (Ongoing / Complete) and the proposed one is flagged; nothing is chosen for the user", async () => {
+        const t = task({ id: "p1", kind: "send", status: "needs_clarification", title: "Send Casting Call", source_text: "send the casting for sebamed", slots: [{ key: "project:0", kind: "project", phrase: "Sibamed Trend", prompt: 'Which project did you mean by "Sibamed Trend"?', options: [
+            { id: "pr1", label: "Sebamed - Trend film", sublabel: "Ongoing", status: "ongoing", best: true },
+            { id: "pr2", label: "Sebamed - Old film", sublabel: "Complete", status: "complete" }] }] });
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "x", tasks: [t], unrecognised: [] } }) });
+        mount(); await open(); type("x"); fireEvent.click(screen.getByTestId("pa-send"));
+        const el = await screen.findByTestId("pa-slot-project:0");
+        expect(within(within(el).getByTestId("pa-option-pr1")).getByText("Ongoing")).toBeTruthy();
+        expect(within(within(el).getByTestId("pa-option-pr2")).getByText("Complete")).toBeTruthy();
+        expect(within(el).getByTestId("pa-best-pr1")).toBeTruthy();
+        expect(within(el).queryByTestId("pa-best-pr2")).toBeNull();
+        expect(screen.queryAllByTestId("pa-confirm")).toHaveLength(0);
+    });
+});
+
+describe("combined 'add to the pipeline, then send' plan (2026-10-19)", () => {
+    const add = (over = {}) => task({ id: "a1", seq: 0, kind: "add", status: "awaiting_confirmation", title: "First: add Kripa Trivedi to Sebamed - Trend film",
+        summary: ["Step 1 of 2 — only the missing pipeline entries are created:", "  • Kripa Trivedi → Sebamed - Trend film (not in the pipeline yet)"], params: { talents: [], projects: [], prereq_for: "s1" }, ...over });
+    const send = (over = {}) => task({ id: "s1", seq: 1, kind: "send", status: "awaiting_confirmation", title: "Send Casting Call to Kripa Trivedi for Sebamed - Trend film", depends_on: ["a1"],
+        summary: ["Step 2 of 2 — runs only after step 1 succeeds. Not in the pipeline yet: Kripa Trivedi"], params: { talents: [], projects: [], prereq_task: "a1", strict_dependency: true }, ...over });
+    const begin = async (tasks) => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "Here's what I understood: 2 waiting for your OK.", tasks, unrecognised: [] } }) });
+        mount(); await open(); type("send the casting"); fireEvent.click(screen.getByTestId("pa-send"));
+        return screen.findByTestId("pa-plan");
+    };
+
+    it("shows ONE combined approval that lists both steps in order, with the worker choice, and no separate Confirm buttons on the two cards", async () => {
+        const plan = await begin([add(), send()]);
+        const steps = within(plan).getAllByRole("listitem").map((l) => l.textContent);
+        expect(steps[0]).toMatch(/First: add Kripa Trivedi/);
+        expect(steps[1]).toMatch(/Send Casting Call.*only after step 1 fully succeeds/);
+        expect(await within(plan).findByTestId("pa-workers")).toBeTruthy();
+        expect(screen.queryAllByTestId("pa-confirm")).toHaveLength(0);
+        expect(within(plan).getByTestId("pa-plan-approve").disabled).toBe(true);                // a worker must be chosen (two are connected: never guessed)
+        expect(screen.getByText(/Not in the pipeline yet: Kripa Trivedi/)).toBeTruthy();         // what is missing is spelled out
+    });
+
+    it("approving runs step 1 first and step 2 only after step 1 reports completed", async () => {
+        const plan = await begin([add(), send()]);
+        const order = [];
+        adminApi.post.mockImplementation((url, body) => {
+            order.push(url.replace("/personal-assistant", ""));
+            if (url.endsWith("/tasks/a1/confirm")) return Promise.resolve({ data: { task: add({ status: "completed", outcomes: [{ name: "Kripa Trivedi", project: "Sebamed - Trend film", status: "added" }] }) } });
+            if (url.endsWith("/tasks/s1/confirm")) return Promise.resolve({ data: { task: send({ status: "queued" }) } });
+            return Promise.reject(new Error(url));
+        });
+        fireEvent.click(await within(plan).findByTestId("pa-worker-default"));
+        fireEvent.click(within(plan).getByTestId("pa-plan-approve"));
+        await waitFor(() => expect(order).toEqual(["/tasks/a1/confirm", "/tasks/s1/confirm"]));
+        expect(posts("/tasks/s1/confirm")[0][1]).toEqual({ worker_id: "default" });
+    });
+
+    it("if step 1 only partly worked the send is NOT requested, and the user is told nothing was sent", async () => {
+        const plan = await begin([add(), send()]);
+        const { toast } = await import("sonner");
+        adminApi.post.mockImplementation((url) => {
+            if (url.endsWith("/tasks/a1/confirm")) return Promise.resolve({ data: { task: add({ status: "partial", error: "Couldn't add everyone to: Sebamed - Trend film", outcomes: [{ name: "Kripa Trivedi", project: "Sebamed - Trend film", status: "failed", reason: "boom" }] }) } });
+            return Promise.reject(new Error(url));
+        });
+        fireEvent.click(await within(plan).findByTestId("pa-worker-default"));
+        fireEvent.click(within(plan).getByTestId("pa-plan-approve"));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/nothing was sent/i)));
+        expect(posts("/tasks/s1/confirm")).toHaveLength(0);
+    });
+
+    it("Cancel plan cancels both steps and sends nothing", async () => {
+        const plan = await begin([add(), send()]);
+        adminApi.post.mockImplementation((url) => Promise.resolve({ data: { task: add({ status: "cancelled" }) } }));
+        fireEvent.click(within(plan).getByTestId("pa-plan-cancel"));
+        await waitFor(() => expect(posts("/cancel")).toHaveLength(2));
+        expect(posts("/confirm")).toHaveLength(0);
+    });
+
+    it("after step 1 has failed or partly worked the plan banner is gone: the send keeps its own Confirm (with worker) and the add shows Retry + per-project outcomes", async () => {
+        server({ onMessage: () => Promise.resolve({ data: { command_id: "c1", reply: "x", unrecognised: [], tasks: [
+            add({ status: "partial", error: "Couldn't add everyone to: Sebamed - Trend film. What was added stays added; retry to finish the rest.", outcomes: [{ name: "Kripa Trivedi", project: "Sebamed - Testimonial film", status: "added" }, { name: "Kripa Trivedi", project: "Sebamed - Trend film", status: "failed", reason: "boom" }] }), send()] } }) });
+        mount(); await open(); type("x"); fireEvent.click(screen.getByTestId("pa-send"));
+        await screen.findByTestId("pa-retry");
+        expect(screen.queryByTestId("pa-plan")).toBeNull();
+        const outcomes = screen.getByTestId("pa-outcomes").textContent;
+        expect(outcomes).toMatch(/Sebamed - Testimonial film.*added/);
+        expect(outcomes).toMatch(/Sebamed - Trend film.*failed — boom/);
+        expect(screen.getAllByTestId("pa-confirm")).toHaveLength(1);                         // the (still blocked on the server) send's own Confirm
+    });
+});
+
+describe("live reply line", () => {
+    const t = (status) => ({ status });
+    it("is recomputed from the tasks' current statuses, so it never says 'needs your pick' after the pick", () => {
+        const saved = "Here's what I understood: 1 needs your pick.";
+        expect(liveReply(saved, [t("needs_clarification")])).toBe("Here's what I understood: 1 needs your pick.");
+        expect(liveReply(saved, [t("awaiting_confirmation")])).toBe("Here's what I understood: 1 waiting for your OK.");
+        expect(liveReply(saved, [t("queued"), t("awaiting_confirmation")])).toBe("Here's what I understood: 1 waiting for your OK, 1 in progress.");
+        expect(liveReply(saved, [t("completed")])).toBe("All done — see below.");
+        expect(liveReply(saved, [t("completed"), t("failed")])).toBe("Finished — some steps need attention, see below.");
+        expect(liveReply(saved, [t("cancelled"), t("cancelled")])).toBe("Cancelled — nothing was run or changed.");
+        expect(liveReply(saved, [t("completed"), t("cancelled")])).toBe("Done — the cancelled steps were not run.");
+    });
+    it("keeps the 'I didn't understand' part and leaves a message with no tasks untouched", () => {
+        expect(liveReply("Here's what I understood: 1 needs your pick. I didn't understand: “blah”.", [t("completed")])).toBe("All done — see below. I didn't understand: “blah”.");
+        expect(liveReply("I couldn't turn that into an action.", [])).toBe("I couldn't turn that into an action.");
     });
 });

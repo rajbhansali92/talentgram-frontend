@@ -137,6 +137,19 @@ def _worker(text: str, seg: Segment) -> str:
     return text
 
 
+_WITH_TAIL = re.compile(r"^(?P<head>.+?)\s+with\s+(?P<who>[A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-z.'’\-]*){0,3}(?:\s*(?:,|&|\band\b)\s*[A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-z.'’\-]*){0,2})*)$", re.I)
+_NOT_NAMES = {"the", "a", "an", "this", "that", "these", "those", "worker", "template", "whatsapp", "casting", "group"}
+
+
+def _split_with(text: str) -> tuple:
+    """"A and B with Kripa Trivedi" → ("A and B", "Kripa Trivedi"). A tail that starts like a phrase rather than a name
+    ("with the casting director") is left where it was."""
+    m = _WITH_TAIL.match(_norm_space(text or ""))
+    if not m or m.group("who").split()[0].lower() in _NOT_NAMES:
+        return text, None
+    return m.group("head"), m.group("who")
+
+
 def _template(raw: str) -> Optional[str]:
     t = _norm_space(_TEMPLATE_CLEAN.sub(" ", raw or ""))
     return t or None
@@ -308,12 +321,17 @@ def parse_segment(text: str) -> Segment:
             _who(m.group("who"), seg)
             _project(m.group("p1") or m.group("p2"), seg)
             return seg
-        # "send the casting call for Amazon" (talents = selection / current context)
+        # "send the casting call for Amazon" (talents = selection / current context) — or, said the other way round,
+        # "send the casting for Amazon and Pepsi with Kripa Trivedi": the names after the LAST "with" are the talents
         m = re.match(r"(?P<tpl>.+?)\s+for\s+(?P<proj>.+)$", rest, re.I)
         if m:
             seg.template = _template(m.group("tpl"))
-            seg.talent_ref = "selected"
-            _project(m.group("proj"), seg)
+            proj, who = _split_with(m.group("proj"))
+            if who:
+                _who(who, seg)
+            else:
+                seg.talent_ref = "selected"
+            _project(proj, seg)
             return seg
         seg.template = _template(rest)
         seg.talent_ref = "selected"
@@ -352,13 +370,24 @@ def parse_segment(text: str) -> Segment:
         key, _amb, rest = nlu.extract_stage_phrase(t, PIPELINE_STAGE_ORDER)
         if key and not re.search(r"(?:'|’)s\b", t):
             seg.intent, seg.stage = "list", key
-            _project(_after_prep(rest), seg)
+            _project(_after_prep(_strip_stage_words(rest, key)), seg)
             return seg
 
     # lookups that read history / profile
     if _parse_lookup(t, seg):
         return seg
     return seg
+
+
+def _strip_stage_words(rest: str, key: Optional[str]) -> str:
+    """`extract_stage_phrase` leaves a hyphenated/compound stage name ("Follow-up", "Ask to Test") in the remainder; the project
+    clause must not start with the stage's own words, or a project name can never match them."""
+    if not key:
+        return rest
+    words = [w for w in re.split(r"[_\s-]+", key) if w]
+    if not words:
+        return rest
+    return re.sub(r"\b" + r"[\s_-]*".join(map(re.escape, words)) + r"\b", " ", rest, count=1, flags=re.I)
 
 
 def _after_prep(text: str) -> Optional[str]:

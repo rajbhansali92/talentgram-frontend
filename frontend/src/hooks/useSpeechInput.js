@@ -13,10 +13,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * Only these end a session: the user's tap, the panel closing/minimising, a hard maximum duration, or a failure that
  * cannot be recovered (permission, service, microphone, network). In every case the words captured so far are delivered.
  *
- * Transcript accumulation (why nothing is missing or doubled): a recognition's `results` list is the WHOLE utterance so far
- * (finals + one trailing interim, and some engines resend earlier entries), so the current text is rebuilt from that list on
- * every event instead of appended; when a recognition ends, its text is committed once to `committed`; the transcript is
- * committed + current. Interim words are replaced by their final, never added next to it.
+ * Transcript accumulation (why nothing is missing or doubled): a recognition's `results` list is read as a SNAPSHOT that is replaced on every event
+ * (interim entries are drafts and are never kept once superseded; only FINAL entries that vanish from a later list are archived). When a recognition
+ * ends its entries are committed once. The transcript is `reconcileTranscript()` of everything held — see that function for how engines that RESTATE
+ * earlier text (cumulative entries, repeated entries, echoed tails) are collapsed while genuinely repeated speech ("no no") is preserved.
  *
  * The transcript is handed to the caller to PUT IN THE TEXT BOX exactly once per session — it is never executed or sent.
  *
@@ -88,6 +88,7 @@ export const MESSAGES = {
         ? "Voice input doesn't start inside a Home Screen app. Open this page in Safari, or tap the microphone key on your keyboard."
         : isIOS() ? `The microphone didn't start. ${IOS_SPEECH_HELP}`
             : "The microphone didn't start. Answer the browser's permission prompt if one is showing, then tap the mic again — or type instead."),
+    repeated: () => "Some words may be repeated in what was heard — please check and correct the text before sending.",
     unknown: () => "Voice input stopped unexpectedly. Tap the mic to try again, or type.",
     unsupported: () => (touchDevice() ? "Voice input isn't available in this browser. Type your command, or tap the microphone key on your keyboard to dictate." : "Voice input isn't available in this browser. You can type instead."),
     insecure: () => "Voice input needs a secure (https) connection. You can type instead.",
@@ -119,26 +120,69 @@ const FATAL_MESSAGE = {
 const normalize = (s) => (s || "").replace(/\s+/g, " ").trim();
 const join = (parts) => normalize(parts.filter(Boolean).join(" "));
 
-// ---------------------------------------------------------------------------------------------------- transcript folding
-// WHY a phrase appeared several times ("Angela Kumar to approved Angela Kumar to approved in…"): some mobile engines (Android Chrome with
-// `continuous`) do not append new words as new results — each event carries NEW result entries that RESTATE everything said so far
-// ("angela kumar", then "angela kumar to approved", then "angela kumar to approved in amazon"), several of them even flagged final. Joining
-// every entry with spaces printed the sentence once per restatement. The fix is to treat a later entry that strictly EXTENDS an earlier one
-// (the earlier entry's words are exactly its first words) as a newer version of it, not as new speech. Words the person really repeated
-// ("very very good", "no no", the same sentence said twice as two separate entries that do not extend each other) are never removed.
+// ---------------------------------------------------------------------------------------------------- transcript reconciliation
+// WHY a phrase appeared several times ("muft muft Kripa muft Kripa Trivedi muft Kripa Trivedi to approved in …"). Engines do not all follow the
+// spec's "one entry per spoken segment". Some (Android Chrome, some desktop builds with `continuous`) deliver NEW entries that RESTATE everything
+// said so far — "muft", "muft Kripa", "muft Kripa" again, "muft Kripa Trivedi", … — and some echo the tail of a finished entry as a separate
+// entry ("… profile in Bangalore" + "in Bangalore"). Joining the entries printed the sentence once per restatement. The first fix compared each
+// entry only with the PREVIOUS one, so a single repeated entry broke the chain and everything after it stayed doubled; it also committed interim
+// text whenever the list shrank, which kept stale drafts.
+//
+// The model now: a recognition's entries are a SNAPSHOT (the latest `results` list, replaced as a whole — an interim entry is a draft and is never
+// kept once superseded). Only FINAL entries that vanish from or change in a later list are archived (a final never changes in a real engine, so a
+// changed one means the list restarted). The transcript is the reconciliation of everything held, in order:
+//   1. an entry whose words are exactly the FIRST words of the next different entry, which is longer, is that entry's earlier draft → dropped. Seeing this proves the
+//      engine is "restating", and only then:
+//   2. identical neighbours from that recognition are one entry repeated, not speech → one kept.
+//   3. an entry that is the proper TAIL of the entry right before it (≥2 words, or any length when it is still interim) is an echo → dropped.
+// (2 and 3 never apply to an engine that has not shown it restates: there a repeated entry or tail is what the person said.)
+// Everything else is kept as spoken: "no no", "very very good", the same sentence said twice (identical FINAL entries of an engine that does not
+// restate), and a real second segment. Known, accepted limit: a genuine "yes" followed by a separate "yes please" reads as one restated entry.
 const wordsOf = (s) => normalize(s).toLowerCase().replace(/[.,!?;:"“”]/g, "").split(" ").filter(Boolean);
-export function extendsSegment(prev, next) {
-    const a = wordsOf(prev), b = wordsOf(next);
-    return a.length > 0 && b.length > a.length && a.every((w, i) => w === b[i]);
+const isPrefix = (a, b) => a.length > 0 && b.length > a.length && a.every((w, i) => w === b[i]);
+const isTail = (a, b) => a.length > 0 && b.length > a.length && a.every((w, i) => w === b[b.length - a.length + i]);
+const sameWords = (a, b) => a.length === b.length && a.every((w, i) => w === b[i]);
+
+/** parts: [{text, final, rid}] in the order they were heard → { text, dropped, restating, suspect } */
+export function reconcileTranscript(parts) {
+    const list = (parts || []).map((p) => ({ ...p, text: normalize(p.text), w: wordsOf(p.text) })).filter((p) => p.w.length);
+    const keep = list.map(() => true);
+    const restatedRecs = new Set();
+    let suspect = false;
+    list.forEach((p, i) => {                                                    // 1. an earlier draft: the NEXT different entry restates it, longer
+        const nxt = list.slice(i + 1).find((q) => !sameWords(q.w, p.w));        // (a repeated identical entry in between does not break the chain)
+        if (nxt && isPrefix(p.w, nxt.w)) { keep[i] = false; restatedRecs.add(p.rid); }
+    });
+    const prevKept = (i) => { for (let k = i - 1; k >= 0; k -= 1) if (keep[k]) return k; return -1; };
+    list.forEach((p, i) => {
+        if (!keep[i]) return;
+        const k = prevKept(i);
+        if (k < 0) return;
+        const q = list[k];
+        if (sameWords(q.w, p.w) && p.rid === q.rid && restatedRecs.has(p.rid)) keep[k] = false;      // 2. the same entry repeated
+        else if (p.rid === q.rid && isTail(p.w, q.w) && (p.w.length >= 2 || !p.final)) {
+            if (restatedRecs.has(p.rid)) keep[i] = false;
+            else suspect = true;                                                    // could be an echo or the person repeating themselves: keep, but warn
+        }                                              // 3. an echoed tail
+    });
+    const kept = list.filter((_, i) => keep[i]);
+    return { text: join(kept.map((p) => p.text)), dropped: list.length - kept.length, restating: restatedRecs.size > 0, suspect };
 }
-/** Add one finalized / current segment to an ordered list, replacing the previous entry when this one is a longer restatement of it. */
-export function addSegment(list, text) {
-    const t = normalize(text);
-    if (!t) return list;
-    if (list.length && extendsSegment(list[list.length - 1], t)) return [...list.slice(0, -1), t];
-    return [...list, t];
+
+/** A transcript that still repeats a run of words three or more times is not trustworthy: say so (the text is kept either way). */
+export function looksRepeated(text) {
+    const w = wordsOf(text);
+    for (let n = 2; n <= 6; n += 1) {
+        const seen = new Map();
+        for (let i = 0; i + n <= w.length; i += 1) {
+            const key = w.slice(i, i + n).join(" ");
+            const c = (seen.get(key) || 0) + 1;
+            if (c >= 3) return true;
+            seen.set(key, c);
+        }
+    }
+    return false;
 }
-export const foldSegments = (texts) => (texts || []).reduce((acc, t) => addSegment(acc, t), []);
 
 export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS } = {}) {
     const Ctor = getRecognitionCtor();
@@ -159,7 +203,8 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         setDiagnostics(d);
         try { console.debug("[voice]", d); } catch { /* console unavailable */ }       // codes/states only — never audio or words
     };
-    const textOf = (s) => join(addSegment(s.committed, s.current));
+    const partsOf = (s) => [...s.committed, ...(s.rec ? [...s.rec.archive, ...s.rec.snap] : [])];
+    const textOf = (s) => reconcileTranscript(partsOf(s)).text;
     const clearTimers = (s) => { Object.values(s.timers).forEach((t) => clearTimeout(t)); s.timers = {}; };
     const detach = (rec) => { if (rec) { rec.onresult = rec.onerror = rec.onend = rec.onstart = rec.onaudiostart = null; try { rec.abort?.(); } catch { /* already over */ } } };
 
@@ -168,14 +213,19 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         if (!s || s.finished) return;
         s.finished = true;
         clearTimers(s);
+        const got = reconcileTranscript(partsOf(s));         // BEFORE the live recognition is detached: its entries are part of the transcript
+        const text = got.text;
         if (s.rec) { s.rec.__done = true; detach(s.rec); s.rec = null; }
         if (sessRef.current === s) sessRef.current = null;
-        const text = textOf(s);
         setPhase("idle");
         setInterim("");
         setLiveText("");
         if (err) { setError(err); if (diag) note(diag); }
+        // Shape of what the engine sent — counts only, never words — so a report can say whether it restated; a transcript that STILL repeats a run
+        // of words is kept as heard, with a plain notice instead of a silent guess.
+        if (text && (got.dropped || s.maxList > 1)) { if (!err) note({ stage: "transcript", events: s.events, maxEntries: s.maxList, collapsed: got.dropped, restating: got.restating }); }
         if (info) setNotice(info);
+        else if (deliver && text && (got.suspect || looksRepeated(text))) setNotice(MESSAGES.repeated());
         if (deliver && text) onFinalRef.current?.(text);
         else if (deliver && !text && !err && !info && !silentEmpty) setError(MESSAGES.noSpeech());   // nothing recognised: say so, never silent
     }, []);
@@ -193,7 +243,11 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         s.recSeq += 1;
         rec.__seq = s.recSeq;
         rec.__done = false;
-        const live = () => { setInterim(s.currentInterim); setLiveText(textOf(s)); };
+        const live = () => {
+            const last = rec.snap[rec.snap.length - 1];
+            setInterim(last && !last.final ? last.text : "");
+            setLiveText(textOf(s));
+        };
         const begun = () => {
             if (s.finished || s.rec !== rec) return;
             clearTimeout(s.timers.start);
@@ -203,26 +257,18 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         };
         rec.onstart = begun;
         rec.onaudiostart = begun;
-        rec.slots = [];                                       // this recognition's entries BY INDEX: an event only ever replaces the entries it reports
+        rec.snap = [];                                        // the latest `results` list: [{text, final, rid}] — replaced whole on every event
+        rec.archive = [];                                     // FINAL entries that vanished from / changed in a later list (the list restarted)
         rec.onresult = (e) => {
             if (s.finished || s.rec !== rec || rec.__done) return;
             begun();
             const list = e.results || [];
-            // A shorter list than before means the engine started a new result list under the same object: what we hold is finished — commit it
-            // once and start fresh (otherwise the old words would be overwritten and lost, or counted twice).
-            if (list.length < rec.slots.length) {
-                const done = foldSegments(rec.slots.map((x) => x.text));
-                s.committed = done.reduce((acc, t) => addSegment(acc, t), s.committed);
-                rec.slots = [];
-            }
-            // `resultIndex` is the first entry that CHANGED: entries before it are already in `slots` (an engine that resends the whole list
-            // with resultIndex 0 simply overwrites them by index — nothing is appended twice).
-            const from = Number.isInteger(e.resultIndex) && e.resultIndex >= 0 && e.resultIndex <= rec.slots.length ? e.resultIndex : 0;
-            for (let i = from; i < list.length; i += 1) rec.slots[i] = { text: list[i][0].transcript, final: !!list[i].isFinal };
-            rec.slots.length = list.length;
-            const last = rec.slots[rec.slots.length - 1];
-            s.current = join(foldSegments(rec.slots.map((x) => x.text)));
-            s.currentInterim = last && !last.final ? normalize(last.text) : "";
+            const next = [];
+            for (let i = 0; i < list.length; i += 1) next.push({ text: normalize(list[i]?.[0]?.transcript), final: !!list[i]?.isFinal, rid: rec.__seq });
+            // A final entry never changes in a real engine; if one is gone or different the list restarted: keep that final, drop interim drafts.
+            rec.snap.forEach((p, i) => { if (p.final && p.text && (!next[i] || next[i].text !== p.text)) rec.archive.push(p); });
+            rec.snap = next;
+            s.events += 1; s.maxList = Math.max(s.maxList, list.length);
             live();
         };
         rec.onerror = (e) => {
@@ -250,9 +296,8 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
             rec.__done = true;                                // a repeated `end` for this recognition can never restart anything twice
             const lasted = s.lastBeganAt ? Date.now() - s.lastBeganAt : 0;
             // commit this recognition's words once; the next recognition starts from empty. If the next recognition replays the end of what
-            // we already hold (an engine restating its previous result), addSegment keeps ONE copy.
-            if (s.current) s.committed = addSegment(s.committed, s.current);
-            s.current = ""; s.currentInterim = "";
+            // we already hold (an engine restating its previous result), the reconciliation keeps ONE copy.
+            s.committed = [...s.committed, ...rec.archive, ...rec.snap];
             s.rec = null;
             setInterim(""); setLiveText(textOf(s));
             if (s.stopping) { finalize(s, { info: s.stopInfo }); return; }          // the user (or the maximum) asked to stop: this end IS the stop
@@ -300,7 +345,6 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         clearTimeout(s.timers.grace);
         s.timers.grace = setTimeout(() => {
             if (s.finished) return;
-            if (s.rec === rec && !rec.__done) { if (s.current) s.committed = addSegment(s.committed, s.current); s.current = ""; }
             finalize(s, { info: s.stopInfo });
         }, STOP_GRACE_MS);
     }, [finalize]);
@@ -311,7 +355,7 @@ export function useSpeechInput({ lang = "en-IN", onFinal, maxMs = MAX_SESSION_MS
         if (!Ctor) { setError(MESSAGES.unsupported()); note({ stage: "start", result: "unsupported" }); return; }
         if (typeof window !== "undefined" && window.isSecureContext === false) { setError(MESSAGES.insecure()); note({ stage: "start", result: "insecure-context" }); return; }
         seqRef.current += 1;
-        const s = { id: seqRef.current, finished: false, stopping: false, stopInfo: null, committed: [], current: "", currentInterim: "", rec: null, recSeq: 0,
+        const s = { id: seqRef.current, finished: false, stopping: false, stopInfo: null, committed: [], rec: null, recSeq: 0, events: 0, maxList: 0,
             restarts: 0, fastEnds: 0, everBegun: false, lastBeganAt: 0, lastError: null, sawNoSpeech: false, timers: {}, perm: "unknown", policy: null };
         sessRef.current = s;                                  // a fresh object per session: nothing from a previous one can leak in
         setPhase("starting");

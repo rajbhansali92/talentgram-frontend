@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Loader2, Maximize2, Mic, Minimize2, Minus, Paperclip, Send, Sparkles, Volume2, VolumeX, X } from "lucide-react";
 import {
     ACTIVE_STATUSES, ATTENTION_STATUSES, cancelCommand, cancelTask, changedPlan, clarifyTask, errorDetail, clearAssistantHistory, confirmAll, confirmTask, followUpSend,
-    fileKey, getAssistantHistory, getAssistantWorkers, isTimeoutError, listAssistantTasks, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage, statusLabel, uploadUpdateMedia,
+    fileKey, getAssistantHistory, getAssistantWorkers, isTimeoutError, listAssistantTasksAll, newRequestId, projectIdFromPath, retryTask, sendAssistantMessage, statusLabel, uploadUpdateMedia,
 } from "@/lib/personalAssistant";
 import { useAssistantContext } from "@/lib/assistantContext";
 import { speak, speechOutputSupported, useSpeechInput } from "@/hooks/useSpeechInput";
@@ -38,6 +38,7 @@ export function liveReply(saved, tasks) {
 
 // Codes only (never audio or words): what the browser said, so a failure report says WHY it failed.
 export function describeVoiceDiagnostics(d) {
+    if (d.stage === "transcript") return [`${d.events} engine events`, `up to ${d.maxEntries} entries`, `${d.collapsed} repeated entr${d.collapsed === 1 ? "y" : "ies"} merged`, d.restating ? "engine restates earlier text" : null].filter(Boolean).join(" · ");
     const pol = d.policy === false ? "blocked by site policy" : d.policy === true ? "allowed" : "unknown";
     return [d.error ? `error ${d.error}` : d.result ? d.result : null, d.permission ? `browser permission ${d.permission}` : null, `page policy ${pol}`, d.ios ? "iOS" : null, d.standalone ? "home-screen app" : null].filter(Boolean).join(" · ");
 }
@@ -73,6 +74,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const [expanded, setExpanded] = useState(false);
     const [voiceOut, setVoiceOut] = useState(() => readPref("pa_voice_out", false));
     const [busy, setBusy] = useState({});
+    const [rowOpen, setRowOpen] = useState({});                  // Tasks tab: which history rows are expanded into their full card
     const [errors, setErrors] = useState({});
     const [batchWorker, setBatchWorker] = useState("");
     const [planAck, setPlanAck] = useState({});                   // command id → the user ticked "send anyway" for an unverified group
@@ -99,7 +101,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     useEffect(() => {
         if (!open || loaded.current) return;
         loaded.current = true;
-        Promise.all([getAssistantHistory().catch(() => []), listAssistantTasks(40).catch(() => [])]).then(([h, t]) => {
+        Promise.all([getAssistantHistory().catch(() => []), listAssistantTasksAll(40).catch(() => [])]).then(([h, t]) => {
             setMessages((cur) => (cur.length ? cur : h));
             setTasks(t);
         });
@@ -117,7 +119,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const hasActive = tasks.some((t) => ACTIVE_STATUSES.includes(t.status));
     useEffect(() => {
         if (!open || !hasActive) return undefined;
-        const id = setInterval(() => listAssistantTasks(40).then(setTasks).catch(() => {}), 4000);
+        const id = setInterval(() => listAssistantTasksAll(40).then(setTasks).catch(() => {}), 4000);
         return () => clearInterval(id);
     }, [open, hasActive]);
 
@@ -185,7 +187,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
             setErrors((e) => ({ ...e, [taskId]: typeof detail === "string" ? detail
                 : isTimeoutError(err) ? "No answer from the server — it may still have run. I've refreshed this task from the server; check its status before trying again."
                 : "That didn't work — I've refreshed this task from the server." }));
-            listAssistantTasks(40).then(setTasks).catch(() => {});          // the persisted state is the truth, not the failed request
+            listAssistantTasksAll(40).then(setTasks).catch(() => {});          // the persisted state is the truth, not the failed request
         } finally {
             setBusy((b) => ({ ...b, [taskId]: false }));
         }
@@ -193,7 +195,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
 
     const onClarify = (t, slot, body) => act(t.id, async () => {
         const updated = await clarifyTask(t.id, { slot, ...body });
-        listAssistantTasks(40).then(setTasks).catch(() => {});      // dependents of this task may have changed too
+        listAssistantTasksAll(40).then(setTasks).catch(() => {});      // dependents of this task may have changed too
         return updated;
     });
     // `update`: the server applies the approved FIELD changes, then each approved file is uploaded one by one through the existing authenticated
@@ -212,7 +214,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                 cur = await uploadUpdateMedia(task.id, category, x.key, f, (pct) => setUploadInfo((u) => ({ ...u, [task.id]: { name: x.name, index: n, total: todo.length, pct } })));
             } catch (err) {
                 setErrors((e) => ({ ...e, [task.id]: `${x.name}: ${errorDetail(err) || (isTimeoutError(err) ? "no answer from the server — check the result below before trying again." : "the upload failed.")}` }));
-                try { cur = (await listAssistantTasks(40)).find((t) => t.id === task.id) || cur; } catch { /* keep what we have */ }
+                try { cur = (await listAssistantTasksAll(40)).find((t) => t.id === task.id) || cur; } catch { /* keep what we have */ }
             }
         }
         setUploadInfo((u) => { const { [task.id]: _gone, ...rest } = u; return rest; });
@@ -262,19 +264,23 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
             const detail = changed ? changed.message : errorDetail(err);
             toast.error(typeof detail === "string" ? detail : "Couldn't approve the plan — I've refreshed from the server.");
         } finally {
-            setTasks(await listAssistantTasks(40).catch(() => tasks));
+            setTasks(await listAssistantTasksAll(40).catch(() => tasks));
             ids.forEach((i) => setBusy((b) => ({ ...b, [i]: false })));
         }
     };
     const cancelPlan = async (commandId, ids) => {
         ids.forEach((i) => setBusy((b) => ({ ...b, [i]: true })));
         try { await cancelCommand(commandId); } catch { toast.error("Couldn't cancel the whole plan — I've refreshed from the server."); }
-        setTasks(await listAssistantTasks(40).catch(() => tasks));
+        setTasks(await listAssistantTasksAll(40).catch(() => tasks));
         ids.forEach((i) => setBusy((b) => ({ ...b, [i]: false })));
     };
 
+    // Clears the CONVERSATION only. Tasks are persisted separately and stay exactly as they are (still counted, still answerable from the Tasks tab).
     const clearChat = async () => {
-        try { await clearAssistantHistory(); setMessages([]); } catch { toast.error("Couldn't clear the conversation."); }
+        try {
+            await clearAssistantHistory(); setMessages([]);
+            if (attention > 0) toast.message?.(`Chat cleared. ${attention} request${attention === 1 ? " still needs" : "s still need"} you — ${attention === 1 ? "it's" : "they're"} in Tasks.`);
+        } catch { toast.error("Couldn't clear the conversation."); }
     };
 
     const tasksFor = (commandId) => tasks.filter((t) => t.command_id === commandId).sort((a, b) => a.seq - b.seq);
@@ -284,10 +290,58 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
     const latest = tasks.filter((t) => t.command_id === latestCmd);
     const olderOpen = tasks.filter((t) => t.command_id !== latestCmd && ATTENTION_STATUSES.includes(t.status)).length;
     const older = olderOpen ? ` · ${olderOpen} older request${olderOpen === 1 ? "" : "s"} still open` : "";
+    // The Tasks tab is the persistent task center: it is built from the persisted tasks alone, so it is identical before and after the chat is cleared.
+    const needsIds = [...new Set(tasks.filter((t) => ATTENTION_STATUSES.includes(t.status)).map((t) => t.command_id))];
+    const historyTasks = tasks.filter((t) => !needsIds.includes(t.command_id));
+    const sourceOf = (ts) => ts.find((t) => t.source_text)?.source_text || "";
     const status = speech.phase === "starting" ? "Starting microphone…" : speech.phase === "processing" ? "Finishing transcript…" : speech.listening ? "Listening — tap the mic to stop" : sending ? "Working on it…"
         : latest.some((t) => t.status === "needs_clarification") ? `Needs your pick${older}`
             : latest.some((t) => t.status === "awaiting_confirmation") ? `Waiting for your OK${older}`
                 : hasActive ? `Running in the background${older}` : `Ready${older}`;
+
+    // One request's tasks as cards (+ the plan approval when several wait together). Used by the chat AND by the Tasks tab, so a task can be
+    // answered, approved or cancelled from either, with exactly the same handlers — the persisted task, not the chat message, is what is acted on.
+    const taskBlock = (commandId, ts) => {
+        const waiting = ts.filter((t) => t.status === "awaiting_confirmation");
+        // a PLAN = several actions of one message waiting together. Anything in a dependency chain is approved only through the plan.
+        const open_ = ts.filter((t) => t.status === "awaiting_confirmation" || t.status === "needs_clarification");
+        const isPlan = waiting.length > 1;
+        const chained = (t) => isPlan && ((t.depends_on || []).some((d) => waiting.some((w) => w.id === d)) || waiting.some((w) => (w.depends_on || []).includes(t.id)));
+        const needsW = waiting.some((t) => t.kind === "send" || t.kind === "share");
+        const unverified = needsW && waiting.filter((t) => t.kind === "share" && t.preview?.worker_access?.[batchWorker]?.state === "unknown").map((t) => t.preview.group);
+        const blocked = needsW && waiting.some((t) => t.kind === "share" && t.preview?.worker_access?.[batchWorker]?.state === "failed_before");
+        const hint = waiting.find((t) => t.params?.worker_hint)?.params.worker_hint;
+
+        return (
+            <div className="mt-2 space-y-2">
+                                                            {ts.map((t) => <TaskCard key={t.id} task={t} busy={!!busy[t.id]} actionError={errors[t.id]} inPlan={chained(t)} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }}
+                                                                attached={attached} onFiles={onFiles} uploadInfo={uploadInfo[t.id] || null} onRetryUploads={onRetryUploads} onReselect={onReselect} missingLocal={lacksLocalFiles(t)} />)}
+                                                            {isPlan && (
+                                                                <div className="rounded-xl border border-black/[0.15] p-3 bg-black/[0.02] space-y-2" data-testid="pa-plan">
+                                                                    <p className="text-xs font-medium text-black/85">Plan — {waiting.length} actions. One approval covers exactly these, in this order:</p>
+                                                                    <ol className="text-[11px] text-black/65 list-decimal pl-4 space-y-0.5" data-testid="pa-plan-steps">
+                                                                        {open_.map((t, i) => {
+                                                                            const after = (t.depends_on || []).map((d) => open_.findIndex((x) => x.id === d) + 1).filter((n) => n > 0);
+                                                                            return <li key={t.id} className={t.status === "needs_clarification" ? "text-amber-700" : ""}>{t.title}{after.length ? ` — after step ${after.join(", ")}, only if it succeeds` : ""}{t.status === "needs_clarification" ? " — needs your pick first; it will not run" : ""}</li>;
+                                                                        })}
+                                                                    </ol>
+                                                                    {needsW && <WorkerPicker value={batchWorker} onChange={setBatchWorker} hint={hint} disabled={waiting.some((t) => busy[t.id])} />}
+                                                                    {blocked && <p className="text-[11px] text-red-700" role="alert" data-testid="pa-plan-blocked">This worker could not find a destination group last time, so the plan is held. Pick another worker.</p>}
+                                                                    {unverified.length > 0 && !blocked && (
+                                                                        <label className="flex items-start gap-2 text-[11px] text-amber-800" data-testid="pa-plan-ack">
+                                                                            <input type="checkbox" className="mt-0.5" checked={!!planAck[commandId]} onChange={(e) => setPlanAck((a) => ({ ...a, [commandId]: e.target.checked }))} />
+                                                                            <span>This worker has never been seen sending to {unverified.map((g) => `“${g}”`).join(", ")} and the app can&apos;t check which chats it belongs to. Send anyway — if it isn&apos;t in the group nothing is delivered and the failure is shown.</span>
+                                                                        </label>
+                                                                    )}
+                                                                    <div className="flex gap-2">
+                                                                        <button type="button" disabled={(needsW && !batchWorker) || blocked || (unverified.length > 0 && !planAck[commandId]) || waiting.some((t) => busy[t.id])} onClick={() => approvePlan(commandId, waiting, unverified.length > 0 && planAck[commandId])} data-testid="pa-plan-approve" className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40">Approve plan</button>
+                                                                        <button type="button" disabled={waiting.some((t) => busy[t.id])} onClick={() => cancelPlan(commandId, open_.map((t) => t.id))} data-testid="pa-plan-cancel" className="px-3 min-h-[40px] rounded-lg border border-black/[0.15] text-xs text-black/65">Cancel plan</button>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+        );
+    };
 
     if (!open) return null;
     const mobileStyle = fit ? { maxHeight: fit.height - 12, bottom: fit.bottom + 6 } : undefined;
@@ -317,7 +371,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                             <button key={k} type="button" onClick={() => setTab(k)} aria-pressed={tab === k} data-testid={`pa-tab-${k}`}
                                 className={`px-3 min-h-[32px] rounded-full text-xs ${tab === k ? "bg-black text-white" : "text-black/60 hover:bg-black/[0.05]"}`}>{label}</button>
                         ))}
-                        {attention > 0 && <span className="ml-auto self-center text-[11px] text-amber-700" data-testid="pa-attention">{attention} need{attention === 1 ? "s" : ""} you{olderOpen > 0 && olderOpen < attention ? ` (${olderOpen} older)` : ""}</span>}
+                        {attention > 0 && <button type="button" onClick={() => setTab("tasks")} className="ml-auto self-center text-[11px] text-amber-700 underline-offset-2 hover:underline min-h-[28px]" data-testid="pa-attention" aria-label={`${attention} need${attention === 1 ? "s" : ""} you — open Tasks`}>{attention} need{attention === 1 ? "s" : ""} you{olderOpen > 0 && olderOpen < attention ? ` (${olderOpen} older)` : ""}</button>}
                     </nav>
 
                     <div className="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0" data-testid="pa-scroll">
@@ -326,20 +380,16 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 {messages.length === 0 && (
                                     <div className="text-sm text-black/60" data-testid="pa-empty">
                                         <p>Hi — tell me what to do. You can type, or tap the mic, speak, tap it again, then edit and press Send.</p>
+                                        {attention > 0 && (
+                                            <p className="mt-2 text-amber-800" data-testid="pa-open-hint">
+                                                <button type="button" onClick={() => setTab("tasks")} className="underline min-h-[32px]">{attention} request{attention === 1 ? "" : "s"} still need{attention === 1 ? "s" : ""} you — open Tasks</button>
+                                            </p>
+                                        )}
                                         <ul className="mt-2 flex flex-wrap gap-1.5">{EXAMPLES.map((e) => <li key={e}><button type="button" onClick={() => { setText(e); inputRef.current?.focus(); }} className="px-2.5 min-h-[32px] rounded-full border border-black/[0.12] text-[11px] text-black/65 hover:border-black/40">{e}</button></li>)}</ul>
                                     </div>
                                 )}
                                 {messages.map((m) => {
                                     const ts = m.command_id && m.role === "assistant" ? tasksFor(m.command_id) : [];
-                                    const waiting = ts.filter((t) => t.status === "awaiting_confirmation");
-                                    // a PLAN = several actions of one message waiting together. Anything in a dependency chain is approved only through the plan.
-                                    const open_ = ts.filter((t) => t.status === "awaiting_confirmation" || t.status === "needs_clarification");
-                                    const isPlan = waiting.length > 1;
-                                    const chained = (t) => isPlan && ((t.depends_on || []).some((d) => waiting.some((w) => w.id === d)) || waiting.some((w) => (w.depends_on || []).includes(t.id)));
-                                    const needsW = waiting.some((t) => t.kind === "send" || t.kind === "share");
-                                    const unverified = needsW && waiting.filter((t) => t.kind === "share" && t.preview?.worker_access?.[batchWorker]?.state === "unknown").map((t) => t.preview.group);
-                                    const blocked = needsW && waiting.some((t) => t.kind === "share" && t.preview?.worker_access?.[batchWorker]?.state === "failed_before");
-                                    const hint = waiting.find((t) => t.params?.worker_hint)?.params.worker_hint;
                                     return (
                                         <div key={m.id} className={m.role === "user" ? "flex justify-end" : ""}>
                                             <div className={m.role === "user" ? "max-w-[85%] bg-black text-white rounded-2xl rounded-br-md px-3 py-2 text-sm" : "max-w-full w-full"}>
@@ -347,35 +397,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                                     <>
                                                         <p className={`text-sm ${m.error ? "text-red-700" : "text-black/80"}`} data-testid="pa-reply">{m.error ? m.text : liveReply(m.text, ts)}</p>
                                                         {m.error && failed && <button type="button" onClick={() => submit(failed.text)} className="mt-1 text-xs underline" data-testid="pa-retry-send">Retry</button>}
-                                                        {ts.length > 0 && (
-                                                            <div className="mt-2 space-y-2">
-                                                                {ts.map((t) => <TaskCard key={t.id} task={t} busy={!!busy[t.id]} actionError={errors[t.id]} inPlan={chained(t)} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }}
-                                                                    attached={attached} onFiles={onFiles} uploadInfo={uploadInfo[t.id] || null} onRetryUploads={onRetryUploads} onReselect={onReselect} missingLocal={lacksLocalFiles(t)} />)}
-                                                                {isPlan && (
-                                                                    <div className="rounded-xl border border-black/[0.15] p-3 bg-black/[0.02] space-y-2" data-testid="pa-plan">
-                                                                        <p className="text-xs font-medium text-black/85">Plan — {waiting.length} actions. One approval covers exactly these, in this order:</p>
-                                                                        <ol className="text-[11px] text-black/65 list-decimal pl-4 space-y-0.5" data-testid="pa-plan-steps">
-                                                                            {open_.map((t, i) => {
-                                                                                const after = (t.depends_on || []).map((d) => open_.findIndex((x) => x.id === d) + 1).filter((n) => n > 0);
-                                                                                return <li key={t.id} className={t.status === "needs_clarification" ? "text-amber-700" : ""}>{t.title}{after.length ? ` — after step ${after.join(", ")}, only if it succeeds` : ""}{t.status === "needs_clarification" ? " — needs your pick first; it will not run" : ""}</li>;
-                                                                            })}
-                                                                        </ol>
-                                                                        {needsW && <WorkerPicker value={batchWorker} onChange={setBatchWorker} hint={hint} disabled={waiting.some((t) => busy[t.id])} />}
-                                                                        {blocked && <p className="text-[11px] text-red-700" role="alert" data-testid="pa-plan-blocked">This worker could not find a destination group last time, so the plan is held. Pick another worker.</p>}
-                                                                        {unverified.length > 0 && !blocked && (
-                                                                            <label className="flex items-start gap-2 text-[11px] text-amber-800" data-testid="pa-plan-ack">
-                                                                                <input type="checkbox" className="mt-0.5" checked={!!planAck[m.command_id]} onChange={(e) => setPlanAck((a) => ({ ...a, [m.command_id]: e.target.checked }))} />
-                                                                                <span>This worker has never been seen sending to {unverified.map((g) => `“${g}”`).join(", ")} and the app can&apos;t check which chats it belongs to. Send anyway — if it isn&apos;t in the group nothing is delivered and the failure is shown.</span>
-                                                                            </label>
-                                                                        )}
-                                                                        <div className="flex gap-2">
-                                                                            <button type="button" disabled={(needsW && !batchWorker) || blocked || (unverified.length > 0 && !planAck[m.command_id]) || waiting.some((t) => busy[t.id])} onClick={() => approvePlan(m.command_id, waiting, unverified.length > 0 && planAck[m.command_id])} data-testid="pa-plan-approve" className="px-3.5 min-h-[40px] rounded-lg bg-black text-white text-xs font-medium disabled:opacity-40">Approve plan</button>
-                                                                            <button type="button" disabled={waiting.some((t) => busy[t.id])} onClick={() => cancelPlan(m.command_id, open_.map((t) => t.id))} data-testid="pa-plan-cancel" className="px-3 min-h-[40px] rounded-lg border border-black/[0.15] text-xs text-black/65">Cancel plan</button>
-                                                                        </div>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        )}
+                                                        {ts.length > 0 && taskBlock(m.command_id, ts)}
                                                     </>
                                                 )}
                                             </div>
@@ -385,15 +407,45 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 {sending && <p className="text-xs text-black/50 flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Working on it…</p>}
                             </>
                         ) : (
-                            <ul className="space-y-2" data-testid="pa-queue">
-                                {tasks.length === 0 && <li className="text-sm text-black/50">No tasks yet.</li>}
-                                {tasks.map((t) => (
-                                    <li key={t.id} className="rounded-lg border border-black/[0.08] p-2.5">
-                                        <div className="flex items-start justify-between gap-2"><span className="text-xs text-black/85 leading-snug">{t.title}</span><StatusChip status={t.status} kind={t.kind} uncertain={!!t.uncertain} /></div>
-                                        <p className="text-[11px] text-black/45 mt-1">{t.status_detail || t.error || ""}{t.params?.worker_id ? `${t.status_detail || t.error ? " · " : ""}Worker: ${t.params.worker_label || workerNames[t.params.worker_id] || t.params.worker_id}` : ""}{t.updated_at ? ` · ${new Date(t.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</p>
-                                    </li>
-                                ))}
-                            </ul>
+                            <div className="space-y-4" data-testid="pa-task-center">
+                                {tasks.length === 0 && <p className="text-sm text-black/50">No tasks yet.</p>}
+                                {needsIds.length > 0 && (
+                                    <section aria-label="Needs you" data-testid="pa-needs-you" className="space-y-3">
+                                        <div>
+                                            <h3 className="text-xs font-semibold text-amber-800">Needs you ({attention})</h3>
+                                            <p className="text-[11px] text-black/50 mt-0.5">Saved on the server. Nothing runs until you approve it, and clearing the chat never cancels or removes these.</p>
+                                        </div>
+                                        {needsIds.map((cid) => {
+                                            const ts = tasksFor(cid);
+                                            const src = sourceOf(ts);
+                                            const when = ts[0]?.created_at ? new Date(ts[0].created_at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+                                            return (
+                                                <div key={cid} data-testid="pa-open-group">
+                                                    <p className="text-[11px] text-black/50" data-testid="pa-open-group-head">{src ? `“${src}”` : "Earlier request"}{when ? ` · ${when}` : ""}</p>
+                                                    {taskBlock(cid, ts)}
+                                                </div>
+                                            );
+                                        })}
+                                    </section>
+                                )}
+                                {(historyTasks.length > 0 || needsIds.length === 0) && (
+                                    <ul className="space-y-2" data-testid="pa-queue" aria-label="Task history">
+                                        {historyTasks.map((t) => (
+                                            <li key={t.id} className="rounded-lg border border-black/[0.08] p-2.5" data-testid={`pa-row-${t.id}`}>
+                                                <div className="flex items-start justify-between gap-2"><span className="text-xs text-black/85 leading-snug">{t.title}</span><StatusChip status={t.status} kind={t.kind} uncertain={!!t.uncertain} /></div>
+                                                <p className="text-[11px] text-black/45 mt-1">{t.status_detail || t.error || ""}{t.params?.worker_id ? `${t.status_detail || t.error ? " · " : ""}Worker: ${t.params.worker_label || workerNames[t.params.worker_id] || t.params.worker_id}` : ""}{t.updated_at ? ` · ${new Date(t.updated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</p>
+                                                <button type="button" onClick={() => setRowOpen((r) => ({ ...r, [t.id]: !r[t.id] }))} aria-expanded={!!rowOpen[t.id]} data-testid={`pa-row-toggle-${t.id}`} className="mt-1 text-[11px] text-black/55 underline min-h-[28px]">{rowOpen[t.id] ? "Hide details" : "Details"}</button>
+                                                {rowOpen[t.id] && (
+                                                    <div className="mt-2">
+                                                        <TaskCard task={t} busy={!!busy[t.id]} actionError={errors[t.id]} inPlan={false} onClarify={onClarify} onConfirm={onConfirm} onCancel={onCancel} onRetry={onRetry} onFollowUp={onFollowUp} onPrefill={(v) => { setText(v); inputRef.current?.focus(); }}
+                                                            attached={attached} onFiles={onFiles} uploadInfo={uploadInfo[t.id] || null} onRetryUploads={onRetryUploads} onReselect={onReselect} missingLocal={lacksLocalFiles(t)} />
+                                                    </div>
+                                                )}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                            </div>
                         )}
                         <div ref={endRef} />
                     </div>
@@ -405,7 +457,12 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 {speech.phase !== "starting" && <p className="text-[11px] text-black/55 mt-0.5 line-clamp-3" data-testid="pa-live-text" aria-live="off">{speech.liveText || "speak now"}</p>}
                             </div>
                         )}
-                        {speech.notice && !speech.listening && <p className="text-xs text-black/65 mb-1.5" role="status" data-testid="pa-voice-notice">{speech.notice}</p>}
+                        {speech.notice && !speech.listening && (
+                            <div className="mb-1.5" role="status">
+                                <p className="text-xs text-black/65" data-testid="pa-voice-notice">{speech.notice}</p>
+                                {speech.diagnostics?.stage === "transcript" && <p className="text-[10px] text-black/40 mt-0.5" data-testid="pa-voice-shape">Technical detail: {describeVoiceDiagnostics(speech.diagnostics)}</p>}
+                            </div>
+                        )}
                         {speech.error && (
                             <div className="mb-1.5" role="alert" data-testid="pa-voice-error-box">
                                 <p className="text-xs text-amber-700" data-testid="pa-voice-error">{speech.error}</p>
@@ -448,7 +505,7 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                         )}
                         <div className="flex items-center justify-between mt-1.5">
                             <p className="text-[10px] text-black/40 truncate">{ctx.talentIds?.length ? `${ctx.talentIds.length} selected talent${ctx.talentIds.length === 1 ? "" : "s"} on screen` : "No talents selected on screen"}</p>
-                            {messages.length > 0 && <button type="button" onClick={clearChat} className="text-[11px] text-black/50 underline min-h-[32px] px-1">Clear chat</button>}
+                            {messages.length > 0 && <button type="button" onClick={clearChat} title="Clears this conversation only — your tasks stay in the Tasks tab" className="text-[11px] text-black/50 underline min-h-[32px] px-1">Clear chat</button>}
                         </div>
                     </form>
                 </>

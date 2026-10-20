@@ -102,6 +102,24 @@ export async function listAssistantTasks(limit = 30) {
     const { data } = await adminApi.get(`${BASE}/tasks`, { params: { limit } });
     return data.tasks || [];
 }
+/** Everything still waiting for the user (any age, however many newer tasks exist). Read-only. */
+export async function listOpenAssistantTasks() {
+    const { data } = await adminApi.get(`${BASE}/tasks`, { params: { status: ATTENTION_STATUSES.join(","), limit: 200 } });
+    return data.tasks || [];
+}
+/**
+ * The task list the panel shows: the newest `limit` tasks PLUS every open one, merged by id (the copy updated last wins), newest first.
+ * Outstanding work is therefore found from the persisted tasks themselves — not from the chat on screen, and not from a newest-N window.
+ */
+export async function listAssistantTasksAll(limit = 40) {
+    const [recent, open] = await Promise.all([listAssistantTasks(limit), listOpenAssistantTasks().catch(() => [])]);
+    const byId = new Map();
+    [...recent, ...open].forEach((t) => {
+        const cur = byId.get(t.id);
+        if (!cur || String(t.updated_at || "") > String(cur.updated_at || "")) byId.set(t.id, t);
+    });
+    return [...byId.values()].sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || (a.seq || 0) - (b.seq || 0));
+}
 export async function getAssistantHistory() {
     const { data } = await adminApi.get(`${BASE}/history`);
     return data.messages || [];

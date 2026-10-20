@@ -115,10 +115,12 @@ async def get_task(owner_id: str, task_id: str) -> Optional[dict]:
     return await db.assistant_tasks.find_one({"owner_id": owner_id, "id": task_id}, {"_id": 0})
 
 
-async def list_tasks(owner_id: str, limit: int = 40, command_id: Optional[str] = None) -> List[dict]:
+async def list_tasks(owner_id: str, limit: int = 40, command_id: Optional[str] = None, statuses: Optional[List[str]] = None) -> List[dict]:
     q: Dict[str, Any] = {"owner_id": owner_id}
     if command_id:
         q["command_id"] = command_id
+    if statuses:
+        q["status"] = {"$in": list(statuses)}               # e.g. everything still waiting for the user, however old and however many newer tasks exist
     return await db.assistant_tasks.find(q, {"_id": 0}).sort([("created_at", -1), ("seq", 1)]).limit(limit).to_list(limit)
 
 

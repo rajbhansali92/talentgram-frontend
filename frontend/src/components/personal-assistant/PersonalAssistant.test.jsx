@@ -1759,4 +1759,240 @@ describe("voice input — tap to start, tap to stop, edit before sending", () =>
             expect(screen.getByTestId("pa-confirm")).toBeTruthy();                                  // explicit Confirm still required
         });
     });
+
+    // ------------------------------------------------------------------------------------------------ the production screenshots (2026-10-20)
+    // Deterministic simulations of the event SHAPES behind the reported text. They prove the app handles these shapes; they do not prove what a
+    // given phone or laptop sends.
+    describe("the repeated-phrase production failure (2026-10-20) at panel level", () => {
+        const growing = (chain, { allFinal = true } = {}) => chain.map((_, i) => chain.slice(0, i + 1).map((t, k, a) => [t, allFinal || k < a.length - 1]));
+        const feed = (rec, lists) => lists.forEach((l, i) => act(() => { rec.onresult({ resultIndex: i, results: l.map(([t, f]) => Object.assign([{ transcript: t }], { isFinal: f })) }); }));
+
+        it("cumulative restatements with repeated entries land in the box ONCE, nothing is sent, and one Send makes one request with the edited text", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await begin(inst);
+            const chain = ["muft", "muft Kripa", "muft Kripa", "muft Kripa Trivedi", "muft Kripa Trivedi", "muft Kripa Trivedi to", "muft Kripa Trivedi to approved in", "muft Kripa Trivedi to approved in", "muft Kripa Trivedi to approved in Amazon now"];
+            feed(inst.rec, growing(chain));
+            expect(screen.getByTestId("pa-live-text").textContent).toBe("muft Kripa Trivedi to approved in Amazon now");        // the live preview is not doubled either
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            expect(input()).toBe("muft Kripa Trivedi to approved in Amazon now");
+            expect(screen.getByTestId("pa-voice-state").textContent).toBe("Transcript ready — edit before sending");
+            await act(async () => {});
+            expect(posts("/message")).toHaveLength(0);
+            fireEvent.change(screen.getByLabelText("Command"), { target: { value: "move Kripa Trivedi to approved in Amazon now" } });     // the user fixes "muft"
+            fireEvent.click(screen.getByTestId("pa-send"));
+            await waitFor(() => expect(posts("/message")).toHaveLength(1));
+            expect(posts("/message")[0][1].text).toBe("move Kripa Trivedi to approved in Amazon now");
+        });
+
+        it("restatements plus an echoed tail ('… in Bangalore' + 'in Bangalore') → the sentence once", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await begin(inst);
+            const chain = ["show", "show me", "show me", "show me", "show me Angela", "show me Angela Kumar's profile", "show me Angela Kumar's profile in Bangalore"];
+            feed(inst.rec, [...growing(chain), [...chain.map((t) => [t, true]), ["in Bangalore", true]]]);
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            expect(input()).toBe("show me Angela Kumar's profile in Bangalore");
+        });
+
+        it("typed text is kept and the transcript is appended after it, once", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            fireEvent.change(screen.getByLabelText("Command"), { target: { value: "please" } });
+            await begin(inst);
+            feed(inst.rec, growing(["show", "show me", "show me Angela"], { allFinal: false }));
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            expect(input()).toBe("please show me Angela");
+        });
+
+        it("an ambiguous repeat is kept as heard and the user is told to check it (nothing invented, nothing sent)", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await begin(inst);
+            feed(inst.rec, [[["call Kripa Trivedi now", true]], [["call Kripa Trivedi now", true], ["call Kripa Trivedi now", true]], [["call Kripa Trivedi now", true], ["call Kripa Trivedi now", true], ["call Kripa Trivedi now", true]]]);
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            expect(input()).toBe("call Kripa Trivedi now call Kripa Trivedi now call Kripa Trivedi now");
+            expect(screen.getByTestId("pa-voice-notice").textContent).toMatch(/may be repeated/i);
+            expect(screen.getByTestId("pa-voice-shape").textContent).toMatch(/3 engine events · up to 3 entries/);          // counts only — never the words
+            expect(posts("/message")).toHaveLength(0);
+        });
+
+        it("a Send racing the tap-to-stop result cannot double-submit", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await begin(inst); hear(inst.rec, ["add neha to pepsi", true]);
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            fireEvent.click(screen.getByTestId("pa-send")); fireEvent.click(screen.getByTestId("pa-send"));
+            await waitFor(() => expect(posts("/message")).toHaveLength(1));
+        });
+    });
+});
+
+// ======================================================================================================================================
+// Clearing the chat never makes outstanding work unrecoverable (2026-10-20). The persisted tasks — not the chat on screen — are the source of truth,
+// and the Tasks tab can answer / approve / cancel them with the same handlers as the chat.
+// ======================================================================================================================================
+describe("persistent task center — clearing the chat leaves outstanding tasks recoverable", () => {
+    let msgs; let all; let clears;
+    const TASK_ACTIONS = /\/tasks\/[^/]+\/(confirm|cancel|retry|clarify|follow-up)$/;
+    // a faithful little server: history can be cleared, tasks persist, `status` filters regardless of how many newer tasks exist
+    function backend({ tasks, messages = [] }) {
+        all = tasks; msgs = messages; clears = 0;
+        sessionStorage.clear();
+        adminApi.get.mockImplementation((url, cfg) => {
+            if (url === "/personal-assistant/access") return Promise.resolve({ data: { allowed: true } });
+            if (url === "/personal-assistant/history") return Promise.resolve({ data: { messages: msgs } });
+            if (url === "/personal-assistant/workers") return Promise.resolve({ data: { workers: [W1, W2] } });
+            if (url === "/personal-assistant/tasks") {
+                const st = cfg?.params?.status ? cfg.params.status.split(",") : null;
+                const rows = st ? all.filter((t) => st.includes(t.status)) : all.slice(0, cfg?.params?.limit || 30);
+                return Promise.resolve({ data: { tasks: rows } });
+            }
+            return Promise.reject(new Error("unexpected GET " + url));
+        });
+        adminApi.post.mockImplementation((url, body) => {
+            if (url === "/personal-assistant/history/clear") { clears += 1; const n = msgs.length; msgs = []; return Promise.resolve({ data: { deleted: n } }); }
+            const m = url.match(/\/tasks\/([^/]+)\/(confirm|cancel|retry)$/);
+            if (m) {
+                const t = all.find((x) => x.id === m[1]);
+                const next = { confirm: "queued", cancel: "cancelled", retry: "queued" }[m[2]];
+                Object.assign(t, { status: next, updated_at: new Date().toISOString() });
+                return Promise.resolve({ data: { task: t } });
+            }
+            return Promise.reject(new Error("unexpected POST " + url));
+        });
+    }
+    const awaiting = (over = {}) => task({ id: "t1", command_id: "c1", fingerprint: "fp1", source_text: "Add Angela to Amazon Now", created_at: "2026-10-19T10:00:00Z", ...over });
+    const chatFor = (cmd = "c1") => [{ id: "m1", role: "user", text: "Add Angela to Amazon Now" }, { id: "m2", role: "assistant", text: "1 waiting", command_id: cmd }];
+    const clearChat = async () => { fireEvent.click(await screen.findByText("Clear chat")); await waitFor(() => expect(clears).toBe(1)); };
+    const goTasks = () => fireEvent.click(screen.getByTestId("pa-tab-tasks"));
+    const taskCalls = () => adminApi.post.mock.calls.filter((c) => TASK_ACTIONS.test(c[0]));
+
+    it("clear chat while a task awaits approval: the chat empties, the task stays counted and is actionable from the Tasks tab", async () => {
+        backend({ tasks: [awaiting()], messages: chatFor() });
+        mount(); await open();
+        expect(await screen.findByTestId("pa-task-t1")).toBeTruthy();                      // visible in the chat before clearing
+        await clearChat();
+        expect(screen.queryByTestId("pa-task-t1")).toBeNull();                              // the chat no longer shows it …
+        expect(screen.getByTestId("pa-attention").textContent).toMatch(/1 needs you/);      // … but it is still outstanding, counted from the persisted task
+        expect(screen.getByTestId("pa-open-hint").textContent).toMatch(/1 request still needs you/);
+        goTasks();
+        const center = await screen.findByTestId("pa-needs-you");
+        expect(within(center).getByTestId("pa-task-t1")).toBeTruthy();
+        expect(within(center).getByTestId("pa-approve-head")).toBeTruthy();
+        expect(within(center).getByTestId("pa-open-group-head").textContent).toContain("Add Angela to Amazon Now");      // the original request, from the task
+        expect(taskCalls()).toHaveLength(0);                                                // clearing and looking changed nothing
+    });
+
+    it("the attention badge and the hint open the Tasks tab", async () => {
+        backend({ tasks: [awaiting()], messages: [] });
+        mount(); await open();
+        fireEvent.click(within(await screen.findByTestId("pa-open-hint")).getByRole("button"));
+        expect(await screen.findByTestId("pa-needs-you")).toBeTruthy();
+        fireEvent.click(screen.getByTestId("pa-tab-chat"));
+        fireEvent.click(screen.getByTestId("pa-attention"));
+        expect(await screen.findByTestId("pa-needs-you")).toBeTruthy();
+    });
+
+    it("reload after clearing the chat: a brand-new panel (no chat history at all) still finds the task", async () => {
+        backend({ tasks: [awaiting()], messages: chatFor() });
+        const first = mount(); await open();
+        await clearChat();
+        first.unmount(); cleanup();
+        mount(); await open();                                                              // “reload”: nothing but the server remembers
+        expect(screen.queryByTestId("pa-task-t1")).toBeNull();
+        expect(await screen.findByTestId("pa-attention")).toBeTruthy();
+        goTasks();
+        expect(await within(await screen.findByTestId("pa-needs-you")).findByTestId("pa-task-t1")).toBeTruthy();
+    });
+
+    it("opening / listing / switching tabs never executes, cancels or retries anything", async () => {
+        backend({ tasks: [awaiting(), awaiting({ id: "t2", command_id: "c2", status: "needs_clarification", slots: [{ key: "talent:0", kind: "talent", prompt: "Which Angela?", options: [{ id: "a1", label: "Angela K" }] }], source_text: "Show Angela" }),
+            awaiting({ id: "t3", command_id: "c3", status: "failed", kind: "move", error: "boom", seq: 0 })] });
+        mount(); await open();
+        goTasks(); await screen.findByTestId("pa-needs-you");
+        fireEvent.click(screen.getByTestId("pa-row-toggle-t3"));
+        fireEvent.click(screen.getByTestId("pa-tab-chat")); goTasks();
+        await act(async () => {});
+        expect(taskCalls()).toHaveLength(0);
+        expect(adminApi.post).not.toHaveBeenCalled();
+    });
+
+    it("approving from the Tasks tab after clearing the chat sends ONE confirm with the server's fingerprint — and a double click cannot repeat it", async () => {
+        backend({ tasks: [awaiting()], messages: chatFor() });
+        mount(); await open();
+        await clearChat(); goTasks();
+        const btn = await screen.findByTestId("pa-confirm");
+        fireEvent.click(btn); fireEvent.click(btn);
+        await waitFor(() => expect(taskCalls()).toHaveLength(1));
+        expect(taskCalls()[0][0]).toBe("/personal-assistant/tasks/t1/confirm");
+        expect(taskCalls()[0][1]).toEqual({ fingerprint: "fp1" });
+        await waitFor(() => expect(screen.queryByTestId("pa-needs-you")).toBeNull());       // no longer waiting: leaves the 'needs you' section
+        expect(taskCalls()).toHaveLength(1);
+    });
+
+    it("cancelling from the Tasks tab goes through the existing cancel operation and shows the persisted terminal state", async () => {
+        backend({ tasks: [awaiting()], messages: chatFor() });
+        mount(); await open();
+        await clearChat(); goTasks();
+        fireEvent.click(await screen.findByTestId("pa-cancel"));
+        await waitFor(() => expect(taskCalls()).toHaveLength(1));
+        expect(taskCalls()[0][0]).toBe("/personal-assistant/tasks/t1/cancel");
+        await waitFor(() => expect(within(screen.getByTestId("pa-queue")).getByTestId("pa-row-t1").textContent).toMatch(/cancel/i));
+        expect(screen.queryByTestId("pa-attention")).toBeNull();                            // the counter follows the persisted state
+    });
+
+    it("a task that needs clarification stays recoverable: the question and the original command are shown without any chat", async () => {
+        backend({ tasks: [awaiting({ id: "t2", command_id: "c2", status: "needs_clarification", kind: "move", title: "Move Angela", source_text: "Move Angela to Approved",
+            slots: [{ key: "talent:0", kind: "talent", prompt: "Which Angela do you mean?", options: [{ id: "a1", label: "Angela Kumar" }, { id: "a2", label: "Angela Rao" }] }] })] });
+        mount(); await open();
+        goTasks();
+        const center = await screen.findByTestId("pa-needs-you");
+        expect(within(center).getByTestId("pa-identify-head")).toBeTruthy();
+        expect(within(center).getByTestId("pa-command-echo").textContent).toContain("Move Angela to Approved");
+        expect(within(center).getByText("Angela Rao")).toBeTruthy();
+        expect(taskCalls()).toHaveLength(0);
+    });
+
+    it("an open task older than the newest-40 window is still found (open work is fetched by status, not by recency)", async () => {
+        const recent = Array.from({ length: 45 }, (_, i) => awaiting({ id: `r${i}`, command_id: `cr${i}`, status: "completed", summary: [], created_at: `2026-10-19T12:${String(59 - (i % 60)).padStart(2, "0")}:00Z`, title: `Done ${i}` }));
+        const old = awaiting({ id: "old1", command_id: "cold", status: "awaiting_confirmation", title: "Move Neha to Approved", created_at: "2026-09-01T10:00:00Z", source_text: "Move Neha to Approved" });
+        backend({ tasks: [...recent, old] });
+        mount(); await open();
+        goTasks();
+        const center = await screen.findByTestId("pa-needs-you");
+        expect(within(center).getByTestId("pa-task-old1")).toBeTruthy();
+        expect(screen.getByTestId("pa-attention").textContent).toMatch(/1 needs you/);
+    });
+
+    it("failed tasks show the reason and only offer a retry the existing rules allow; completed and cancelled tasks offer no action", async () => {
+        backend({ tasks: [
+            awaiting({ id: "f1", command_id: "cf1", status: "failed", kind: "move", title: "Move A", error: "Stage not found" }),
+            awaiting({ id: "f2", command_id: "cf2", status: "failed", kind: "send", title: "Send B", error: "interrupted", uncertain: true, batch_ids: ["b"] }),
+            awaiting({ id: "d1", command_id: "cd1", status: "completed", kind: "move", title: "Move C", summary: [] }),
+            awaiting({ id: "x1", command_id: "cx1", status: "cancelled", kind: "move", title: "Move D", summary: [] }),
+        ] });
+        mount(); await open();
+        goTasks(); await screen.findByTestId("pa-queue");
+        for (const id of ["f1", "f2", "d1", "x1"]) fireEvent.click(screen.getByTestId(`pa-row-toggle-${id}`));
+        const card = (id) => within(screen.getByTestId(`pa-row-${id}`));
+        expect(card("f1").getByText("Stage not found")).toBeTruthy();
+        expect(card("f1").getByTestId("pa-retry")).toBeTruthy();                           // safe to retry a failed move
+        expect(card("f2").queryByTestId("pa-retry")).toBeNull();                           // an uncertain send is NEVER offered a retry
+        for (const id of ["d1", "x1"]) { expect(card(id).queryByTestId("pa-retry")).toBeNull(); expect(card(id).queryByTestId("pa-confirm")).toBeNull(); expect(card(id).queryByTestId("pa-cancel")).toBeNull(); }
+        expect(taskCalls()).toHaveLength(0);
+    });
+
+    it("the counters are derived from the persisted statuses only", async () => {
+        backend({ tasks: [awaiting({ id: "a" }), awaiting({ id: "b", command_id: "c2", status: "needs_clarification", slots: [] }), awaiting({ id: "c", command_id: "c3", status: "completed", summary: [] }), awaiting({ id: "d", command_id: "c4", status: "cancelled", summary: [] })], messages: chatFor() });
+        mount(); await open();
+        expect(await screen.findByTestId("pa-attention")).toBeTruthy();
+        expect(screen.getByTestId("pa-attention").textContent).toMatch(/^2 need you/);
+        expect(screen.getByTestId("pa-tab-tasks").textContent).toBe("Tasks (4)");
+        await clearChat();
+        expect(screen.getByTestId("pa-attention").textContent).toMatch(/^2 need you/);
+        expect(screen.getByTestId("pa-tab-tasks").textContent).toBe("Tasks (4)");
+    });
+
+    it("Clear chat only calls the history-clear endpoint: no task is created, cancelled or confirmed", async () => {
+        backend({ tasks: [awaiting()], messages: chatFor() });
+        mount(); await open();
+        await clearChat();
+        expect(adminApi.post.mock.calls.map((c) => c[0])).toEqual(["/personal-assistant/history/clear"]);
+    });
 });

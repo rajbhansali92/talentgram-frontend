@@ -503,10 +503,18 @@ async def follow_up(task_id: str, body: FollowUpIn, user: Dict[str, Any] = Depen
 
 
 # ---------------------------------------------------------------------------------------------- tasks / history
+_STATUSES = {S.NEEDS_CLARIFICATION, S.AWAITING_CONFIRMATION, S.QUEUED, S.RUNNING, S.COMPLETED, S.PARTIAL, S.FAILED, S.CANCELLED}
+
+
 @router.get("/tasks")
-async def tasks_list(limit: int = 30, command_id: Optional[str] = None, user: Dict[str, Any] = Depends(assistant_user)):
+async def tasks_list(limit: int = 30, command_id: Optional[str] = None, status: Optional[str] = None, user: Dict[str, Any] = Depends(assistant_user)):
+    """The persisted tasks of this user, newest first. `status` (comma-separated) narrows to those states regardless of how many newer tasks
+    exist — this is how outstanding work is found independently of the chat and of the newest-N window. Read-only: listing never runs anything."""
     owner = user["id"]
-    rows = await S.list_tasks(owner, max(1, min(limit, 60)), command_id=command_id)
+    wanted = [x.strip() for x in (status or "").split(",") if x.strip()]
+    if any(x not in _STATUSES for x in wanted):
+        raise HTTPException(422, "Unknown status filter")
+    rows = await S.list_tasks(owner, max(1, min(limit, 200 if wanted else 60)), command_id=command_id, statuses=wanted or None)
     rows = [await X.refresh_task(owner, t) for t in rows]
     return {"tasks": [_pub(t) for t in rows]}
 

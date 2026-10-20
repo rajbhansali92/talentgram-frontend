@@ -109,9 +109,10 @@ def _word_sim_ext(a: str, b: str) -> Tuple[float, bool]:
     """→ (similarity, reached_only_by_sound). Spelling similarity first; if the words merely SOUND alike (speech-recognition
     style errors) the phonetic score counts too, but is capped below an exact / prefix match and flagged so the caller can label it."""
     s = _word_sim(a, b)
-    if s >= _WORD_MIN:
-        return s, False
     p = phonetic.similarity(a, b)
+    if s >= _WORD_MIN:
+        # the same sound written differently ("Rajpoot" / "Rajput") is a better fit than a merely similar spelling: it ranks above one
+        return (max(s, min(p, 0.92)) if p >= phonetic.PHON_MIN else s), False
     if p >= phonetic.PHON_MIN:
         return min(p, 0.92), True
     return s, False
@@ -124,8 +125,8 @@ def score_name(query: str, label: str) -> Optional[Tuple[str, float]]:
     qt, lt = q.split(), l.split()
     if not qt or not lt:
         return None
-    if q == l:
-        return "exact", 1.0
+    if q == l or (len(q) >= 4 and q.replace(" ", "") == l.replace(" ", "")):
+        return "exact", 1.0                          # same letters, only the spacing differs ("Raj put" = "Rajput"): speech engines split / join words freely
     per, by_sound = [], False
     for t in qt:
         best, snd = 0.0, False
@@ -234,7 +235,38 @@ async def _pipeline_context(ids: List[str], project_ids: List[str]) -> Dict[str,
     return {r["talent_id"]: {"project": names.get(r["project_id"]) or "", "stage": str(r.get("stage") or "").replace("_", " ").title()} for r in rows}
 
 
+_HONORIFICS = {"ji", "sir", "madam", "maam", "mam", "bhai", "didi"}
+
+
+def _talent_variants(phrase: str) -> List[str]:
+    """Other readings of what was SAID, for a phrase that matched nobody as it is: a trailing honorific dropped ("Shivi Rajput ji"), and
+    adjacent words joined ("Raj put" → "Rajput"). Never invents letters, and every variant goes through the same ranking — a variant can only
+    ever lead to the same exact / partial / card outcomes as typing it would."""
+    words = phrase.split()
+    out: List[str] = []
+    if len(words) >= 2 and re.sub(r"[^a-z]", "", words[-1].lower()) in _HONORIFICS:
+        out.append(" ".join(words[:-1]))
+    base = out[0].split() if out else words
+    for i in range(len(base) - 1):
+        a, b = re.sub(r"[^A-Za-z]", "", base[i]), re.sub(r"[^A-Za-z]", "", base[i + 1])
+        if a and b and len(a) + len(b) >= 5:
+            out.append(" ".join(base[:i] + [a + b] + base[i + 2:]))
+    return list(dict.fromkeys(v for v in out if v and v != phrase))[:4]
+
+
 async def resolve_talent(phrase: str, project_ids: Optional[List[str]] = None) -> dict:
+    """As `_resolve_talent_once`, then — only if nobody matched the phrase as it was said — the speech variants of it (see `_talent_variants`)."""
+    res = await _resolve_talent_once(phrase, project_ids)
+    if res["state"] != "none":
+        return res
+    for v in _talent_variants((phrase or "").strip()):
+        alt = await _resolve_talent_once(v, project_ids)
+        if alt["state"] != "none":
+            return alt
+    return res
+
+
+async def _resolve_talent_once(phrase: str, project_ids: Optional[List[str]] = None) -> dict:
     """→ {"state": "resolved", "id", "label"} | {"state": "ambiguous", "options": [...]} | {"state": "none"}
 
     Chosen automatically ONLY for an exact name, or a partial name that exactly one talent fits ("Angela"). Anything that
@@ -401,7 +433,56 @@ def _pieces(text: str) -> List[Tuple[int, int]]:
     return spans
 
 
+# Only letter names that are not everyday words: "see you" / "oh why" / "are" must never be read as letters.
+_LETTER_NAMES = {"em": "m", "kay": "k", "bee": "b", "dee": "d", "eff": "f", "gee": "g", "aitch": "h", "jay": "j", "el": "l", "en": "n", "pee": "p", "cue": "q",
+                 "ess": "s", "tee": "t", "vee": "v", "zed": "z", "zee": "z"}
+
+
+def join_spoken_initials(text: str) -> str:
+    """"M K Jules film 1" / "M. K. Jules" / "em kay Jules" → "MK Jules film 1". Only a RUN of two or more single letters (or spoken letter names)
+    is joined, so ordinary words ("see", "you", "are") are never read as letters."""
+    toks = (text or "").split()
+    out: List[str] = []
+    i = 0
+    while i < len(toks):
+        j = i
+        letters = []
+        while j < len(toks):
+            t = re.sub(r"[.,]", "", toks[j]).lower()
+            if len(t) == 1 and t.isalpha():
+                letters.append(t)
+            elif t in _LETTER_NAMES:
+                letters.append(_LETTER_NAMES[t])
+            else:
+                break
+            j += 1
+        if len(letters) >= 2:
+            out.append("".join(letters).upper())
+            i = j
+        else:
+            out.append(toks[i])
+            i += 1
+    return " ".join(out)
+
+
+def _quality(res: List[dict]) -> int:
+    return sum({"resolved": 3, "ambiguous": 1}.get(r["state"], 0) for r in res)
+
+
 async def resolve_projects(text: str, *, prefer_active: bool = True, projects: Optional[List[dict]] = None) -> List[dict]:
+    """As `_resolve_projects_once`; when the words contain spoken initials ("M K", "em kay") the joined reading ("MK") is tried too and the better
+    outcome kept. The words as said are always tried first and win a tie."""
+    projects = projects if projects is not None else await load_projects()
+    first = await _resolve_projects_once(text, prefer_active=prefer_active, projects=projects)
+    alt_text = join_spoken_initials(text)
+    if alt_text != (text or "").strip() and _quality(first) < 3 * max(1, len(first)):
+        alt = await _resolve_projects_once(alt_text, prefer_active=prefer_active, projects=projects)
+        if _quality(alt) > _quality(first):
+            return alt
+    return first
+
+
+async def _resolve_projects_once(text: str, *, prefer_active: bool = True, projects: Optional[List[dict]] = None) -> List[dict]:
     """→ one entry per project mentioned: {"phrase", "state": resolved|ambiguous|none, "id"?, "label"?, "options"?}
 
     A project is chosen automatically only when the words typed ARE that project's name (same words, any case / hyphens),
@@ -459,7 +540,10 @@ async def resolve_projects(text: str, *, prefer_active: bool = True, projects: O
             opts += [_opt(p) for p in snd if p["id"] not in {o["id"] for o in opts}][: MAX_OPTIONS - len(opts)]
             out.append({"phrase": span, "state": "ambiguous" if opts else "none", "options": opts})
         elif snd:
-            out.append({"phrase": span, "state": "ambiguous", "options": [_opt(p) for p in snd]})
+            # a sound-alike is a card, never a choice. When exactly ONE live project fits every word (the other words match exactly and only
+            # one is heard differently: "MK Jules film 1" ~ "MK Jewels - film 1") it is PROPOSED: flagged as the best card, still tapped.
+            only_live = len(snd) == 1 and snd[0].get("status") in _LIVE_PROJECT
+            out.append({"phrase": span, "state": "ambiguous", "options": [_opt(p, best=only_live) for p in snd]})
         else:
             out.append({"phrase": span, "state": "none"})
         i += 1

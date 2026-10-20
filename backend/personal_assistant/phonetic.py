@@ -16,10 +16,12 @@ from typing import Tuple
 
 _DIGRAPHS = (("chh", "C"), ("ch", "C"), ("sh", "S"), ("zh", "S"), ("ph", "f"), ("bh", "b"), ("dh", "d"), ("gh", "g"), ("kh", "k"),
              ("th", "t"), ("jh", "j"), ("ck", "k"), ("qu", "kv"), ("ee", "i"), ("ea", "i"), ("oo", "u"), ("ou", "u"), ("aa", "a"),
-             ("ai", "e"), ("ay", "e"), ("ey", "e"), ("ie", "i"))
+             ("ai", "e"), ("ay", "e"), ("ey", "e"), ("ie", "i"), ("ew", "u"))
 _SINGLE = {"w": "v", "q": "k", "c": "k", "x": "ks", "z": "s"}
 _VOWELS = set("aeiou")
 _GROUPS = [set("kg"), set("td"), set("pb"), set("fv"), set("szSh"), set("mn"), set("jC"), set("rl")]
+_SIBILANT = set("SC")                 # sh and ch are the sounds speech engines swap most for Indian names ("Shivi" ~ "Chivi")
+_FIRST_FAMILIES = (set("szSC"), set("jC"))    # first sounds that count as "the same kind" besides identical classes
 PHON_MIN = 0.78                       # per-word phonetic similarity needed to be offered as "sounds like"
 
 
@@ -34,6 +36,8 @@ def key(word: str) -> str:
     w = "".join(_SINGLE.get(ch, ch) for ch in w)
     w = w[0] + w[1:].replace("y", "i")                                 # a y after the first letter is a vowel ("Ashley"); a leading y stays
     w = re.sub(r"(.)\1+", r"\1", w)                                    # double letters collapse
+    if len(w) >= 4 and w.endswith("e") and w[-2] not in _VOWELS:       # a final "e" after a consonant is silent ("jule", "share", "move")
+        w = w[:-1]
     return w
 
 
@@ -48,6 +52,8 @@ def _sub(a: str, b: str) -> float:
         return 0.3
     if _is_vowel(a) != _is_vowel(b):
         return 1.0
+    if a in _SIBILANT and b in _SIBILANT:
+        return 0.5
     return 0.5 if any(a in g and b in g for g in _GROUPS) else 1.0
 
 
@@ -74,7 +80,7 @@ def similarity(a: str, b: str) -> float:
         return 0.0
     if ka == kb:
         return 1.0
-    if _first_class(ka[0]) != _first_class(kb[0]):
+    if _first_class(ka[0]) != _first_class(kb[0]) and not any(ka[0] in f and kb[0] in f for f in _FIRST_FAMILIES):
         return 0.0
     if abs(len(ka) - len(kb)) > 2:
         return 0.0

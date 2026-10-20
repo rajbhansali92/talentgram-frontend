@@ -189,6 +189,11 @@ def _apply_choice(task: dict, slot: str, choice_id: str) -> bool:
             return False
         p["stage"] = choice_id
         return True
+    if kind == "action":                                        # "Did you mean to share?" — only the server-offered "yes" exists
+        if choice_id != "yes" or not p.get("verb_heard"):
+            return False
+        p["verb_confirmed"] = True
+        return True
     return False
 
 

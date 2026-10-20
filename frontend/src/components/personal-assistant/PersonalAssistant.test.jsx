@@ -339,6 +339,30 @@ describe("clarification cards", () => {
         fireEvent.click(within(slot).getByText("Search"));
         await waitFor(() => expect(posts("/clarify")[0][1]).toEqual({ slot: "talent:0", text: "Angela Kumar" }));
     });
+
+    it("a mis-heard action word is asked about: one 'Yes — share' card, no free-text box, and the answer sends only the server's option", async () => {
+        const q = () => task({ id: "t7", kind: "share", status: "needs_clarification", title: "Share profile of Shivi Rajput with …", source_text: "chair Shivi Rajput's profile",
+            slots: [{ key: "action", kind: "action", phrase: "chair", prompt: "I heard “chair” — did you mean to share? Nothing happens until you confirm and then approve.",
+                options: [{ id: "yes", label: "Yes — share", sublabel: "You said “chair”", thumb: null, best: true }] }] });
+        server();
+        adminApi.post.mockImplementation((url) => {
+            if (url === "/personal-assistant/message") return Promise.resolve({ data: { command_id: "c1", reply: "1 needs your pick", tasks: [q()], unrecognised: [] } });
+            if (url === "/personal-assistant/tasks/t7/clarify") return Promise.resolve({ data: { task: { ...q(), slots: [{ key: "recipient", kind: "recipient", prompt: "Who should I send it to?", options: [] }] } } });
+            return Promise.reject(new Error(url));
+        });
+        mount(); await open();
+        type("chair Shivi Rajput's profile");
+        fireEvent.click(screen.getByTestId("pa-send"));
+        const slot = await screen.findByTestId("pa-slot-action");
+        expect(screen.getByTestId("pa-identify-head").textContent).toMatch(/Is this the action you meant\?/);
+        expect(slot.textContent).toContain("did you mean to share");
+        expect(within(slot).getByTestId("pa-option-yes").textContent).toContain("Yes — share");
+        expect(within(slot).queryByPlaceholderText(/type the name again/i)).toBeNull();           // a typed answer is not accepted for this question
+        expect(screen.queryByTestId("pa-confirm")).toBeNull();                                      // nothing can be approved before it is answered
+        fireEvent.click(within(slot).getByTestId("pa-option-yes"));
+        await waitFor(() => expect(posts("/clarify")).toHaveLength(1));
+        expect(posts("/clarify")[0][1]).toEqual({ slot: "action", choice_id: "yes" });
+    });
 });
 
 describe("confirmation, workers and statuses", () => {
@@ -1819,6 +1843,33 @@ describe("voice input — tap to start, tap to stop, edit before sending", () =>
             fireEvent.click(mic()); engineEnds(inst.rec);
             fireEvent.click(screen.getByTestId("pa-send")); fireEvent.click(screen.getByTestId("pa-send"));
             await waitFor(() => expect(posts("/message")).toHaveLength(1));
+        });
+    });
+
+    // ---------------------------------------------------------------------------------------------- browser → backend handoff (2026-10-20)
+    describe("what the browser produces is what the backend receives", () => {
+        it("a transcript with a mis-heard action word and no punctuation reaches POST /message exactly as edited, only after Send, once", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await begin(inst);
+            hear(inst.rec, ["chair shivi rajput profile", true]);
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            expect(input()).toBe("chair shivi rajput profile");                     // the box holds the words as heard: nothing is "corrected" in the browser
+            await act(async () => {});
+            expect(posts("/message")).toHaveLength(0);                              // the interpretation is the SERVER's job, and only on Send
+            fireEvent.click(screen.getByTestId("pa-send"));
+            await waitFor(() => expect(posts("/message")).toHaveLength(1));
+            expect(posts("/message")[0][1].text).toBe("chair shivi rajput profile");
+        });
+
+        it("a corrected word is what is sent, not the original transcript", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await begin(inst);
+            hear(inst.rec, ["moove shivi rajput to approved in mk jules film one", true]);
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            fireEvent.change(screen.getByLabelText("Command"), { target: { value: "move shivi rajput to approved in mk jules film one" } });
+            fireEvent.click(screen.getByTestId("pa-send"));
+            await waitFor(() => expect(posts("/message")).toHaveLength(1));
+            expect(posts("/message")[0][1].text).toBe("move shivi rajput to approved in mk jules film one");
         });
     });
 });

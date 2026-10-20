@@ -149,7 +149,9 @@ def test_values_are_read_only_in_the_fields_own_format_and_never_guessed():
     assert U.parse_value("location", "Mumbai")[0] == [{"city": "Mumbai", "country": "India"}] and "India assumed" in U.parse_value("location", "Mumbai")[2]
     assert U.parse_value("location", "Dubai, UAE")[0] == [{"city": "Dubai", "country": "UAE"}]
     assert U.parse_value("instagram_handle", "https://www.instagram.com/some.one/")[0] == "some.one"
-    for key, bad in (("age", "twenty four"), ("age", "150"), ("height", "tall"), ("height", "9 feet 2"), ("instagram_handle", "not a handle!"), ("instagram_followers", "lots")):
+    # spoken numbers are read deterministically (2026-10-20): "twenty four" is 24, "five feet seven" is 5'7" — anything not a whole number word is still refused
+    assert U.parse_value("age", "twenty four")[0] == 24 and U.parse_value("height", "five feet seven")[0] == "5'7\""
+    for key, bad in (("age", "twenty four hundred"), ("age", "150"), ("height", "tall"), ("height", "9 feet 2"), ("height", "one seventy"), ("instagram_handle", "not a handle!"), ("instagram_followers", "lots")):
         with pytest.raises(U.BadValue):
             U.parse_value(key, bad)
 

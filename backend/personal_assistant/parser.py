@@ -43,6 +43,8 @@ class Segment:
     lookup: Optional[str] = None                          # profile|media_link|media|history|projects|submissions|tested|find
     recipient: Optional[dict] = None                      # {"kind": number|project_group|casting_director, "value": ...}
     worker_hint: Optional[str] = None                     # "worker 1" | "worker 2" as typed
+    verb_heard: Optional[dict] = None                     # {"said": "chair", "meant": "share"}: the action word only SOUNDS like a command word — asked, never assumed
+    alt: Optional["Segment"] = None                       # the reading WITHOUT the verb repair (kept so the planner can prefer it when its names are real)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -56,7 +58,8 @@ _CONNECT = re.compile(
     r"|\s*,\s*(?=tell\s+me\b)",
     re.I,
 )
-_LEAD = re.compile(r"^(?:(?:hey|hi|ok|okay|so|please|pls|kindly|can\s+you|could\s+you|would\s+you|i\s+want\s+you\s+to|i'd\s+like\s+you\s+to)\b[\s,]*)+", re.I)
+_LEAD = re.compile(r"^(?:(?:hey|hi|ok|okay|so|please|pls|kindly|can\s+you|could\s+you|would\s+you|i\s+want\s+you\s+to|i'd\s+like\s+you\s+to|"
+                   r"i'?d\s+like\s+to|i\s+would\s+like\s+to|i\s+want\s+to|i\s+need\s+to|let'?s|go\s+ahead\s+and|just|well|now|alright|right)\b[\s,]*)+", re.I)
 
 _WORKER = re.compile(r"\b(?:(?:via|using|from|through|with|on)\s+)?worker\s*(?:no\.?\s*)?(1|2|one|two)\b", re.I)
 _PHONE = re.compile(r"(\+?\d[\d\s\-()]{7,}\d)")
@@ -206,6 +209,8 @@ def _parse_share(text: str, seg: Segment) -> None:
     m = re.search(rf"(?P<n>{_NAME})(?:'|’)s\s+(?:profile|media\s*(?:link|kit)|media|portfolio|audition|photos?|video)", body, re.I)
     if not m:
         m = re.search(rf"(?:profile|media\s*(?:link|kit)|media|portfolio|audition)\s+(?:of|for)\s+(?P<n>{_NAME})", body, re.I)
+    if not m:
+        m = _share_name_without_possessive(body)
     if m:
         # "…media link of Angela with the casting director": the name stops at the preposition that starts the recipient
         seg.talents = split_names(re.split(r"\s+(?:with|to|for|via|at)\b", m.group("n"), maxsplit=1, flags=re.I)[0])
@@ -214,6 +219,22 @@ def _parse_share(text: str, seg: Segment) -> None:
     elif re.search(r"\b(?:this|the|that)\s+(?:profile|audition|media\s*(?:link|kit))\b|\bit\b|\bthem\b", body, re.I):
         seg.talent_ref = "selected"     # "send this profile to …" — the one on screen / selected
     seg.lookup = "media_link" if re.search(r"media\s*(?:link|kit)|media", body, re.I) else ("audition" if re.search(r"audition", body, re.I) else "profile")
+
+
+_OBJ = r"(?:profile|media\s*(?:link|kit)|media|portfolio|audition|photos?|videos?)"
+_NOT_A_NAME_START = {"with", "to", "for", "via", "at", "the", "this", "that", "it", "them", "her", "his", "their", "these", "those", "of", "and", "my"}
+
+
+def _share_name_without_possessive(body: str):
+    """Speech engines often drop the "'s": "share shivi rajput profile" / "share shivi rajput media link to the group" / "share profile shivi rajput".
+    The name is the words next to the item word; a recipient preposition or a pronoun is never the start of a name."""
+    m = re.match(rf"\s*(?:share|forward|send)\s+(?:the\s+)?(?P<n>[A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-z.'’\-]*){{0,3}}?)\s+{_OBJ}\b", body, re.I)
+    if m and m.group("n").split()[0].lower() not in _NOT_A_NAME_START and not re.fullmatch(_OBJ, m.group("n"), re.I):
+        return m
+    m = re.match(rf"\s*(?:share|forward|send)\s+(?:the\s+)?{_OBJ}\s+(?P<n>[A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-z.'’\-]*){{0,3}})", body, re.I)
+    if m and m.group("n").split()[0].lower() not in _NOT_A_NAME_START:
+        return m
+    return None
 
 
 _PRON = r"(?:she|he|they|her|him|them|their|his)"
@@ -292,13 +313,37 @@ def _parse_lookup(text: str, seg: Segment) -> bool:
     return True
 
 
+_UPDATE_SYNONYM = re.compile(r"^\s*(?:please\s+)?(?:set|change|edit|modify|amend|correct|fix|alter)\s+(?!status\b)", re.I)
+
+
+def _as_update(text: str) -> str:
+    """"set / change / edit … <talent>'s height" is an UPDATE when it names a profile item the update command supports (height, age, location,
+    Instagram, WhatsApp group, introduction video, pictures); without such an item ("change Shivi to Approved") it stays what it was — a move."""
+    m = _UPDATE_SYNONYM.match(text or "")
+    if not m:
+        return text
+    rest = text[m.end():]
+    if any(kind in ("field", "media") for _a, _b, kind, _k in update_items.find_items(rest)):
+        return "update " + rest
+    return text
+
+
 def parse_segment(text: str) -> Segment:
+    """One clause → one Segment. The clause is read as said; only if that yields no command (or glued the action word into a name) is the action word
+    repaired — an inflection ("moves", "sent", "updated", "up date") silently, a SOUND-ALIKE ("shear", "moove", "sand") with a question attached."""
+    seg = _parse_core(text)
+    fixed = _repair_verb(text, seg)
+    return fixed or seg
+
+
+def _parse_core(text: str) -> Segment:
     seg = Segment(text=_norm_space(text))
     t = _worker(_LEAD.sub("", seg.text), seg)
     t = _norm_space(t)
     low = t.lower()
     if not t:
         return seg
+    text = _as_update(text)
 
     # update <talent>'s <profile items>   (fields / media) — see update_items. The RAW text is parsed so a pasted group name keeps its exact spacing.
     if update_items.is_update(text):
@@ -306,6 +351,11 @@ def parse_segment(text: str) -> Segment:
         if groups:
             seg.intent, seg.update_groups = "update", groups
         return seg
+
+    # "In MK Jewels film 1 move Shivi to Approved" — the project said first
+    lead = _project_first(t)
+    if lead:
+        return lead
 
     # ask whether … (follow-up question about sending — attaches to the previous add)
     if re.match(r"(?:and\s+)?(?:ask|check|prompt|remind)\b.*\b(?:send|casting|message|template)\b", low) or re.match(r"(?:and\s+)?(?:ask\s+)?(?:me\s+)?(?:whether|if)\b.*\b(?:send|casting)", low):
@@ -325,6 +375,13 @@ def parse_segment(text: str) -> Segment:
         # pronoun form: "send them the Casting Call [for Amazon]"
         m = re.match(rf"(?P<who>them|her|him|these(?:\s+\w+){{0,3}}|those(?:\s+\w+){{0,3}}|the\s+selected\s+\w+|selected\s+\w+)\s+(?:the\s+)?(?P<tpl>.+?)(?:\s+for\s+(?P<proj>.+))?$", rest, re.I)
         if m and (_PRONOUN.match(m.group("who")) or _SELECTED.search(m.group("who"))):
+            _who(m.group("who"), seg)
+            seg.template = _template(m.group("tpl"))
+            _project(m.group("proj"), seg)
+            return seg
+        # "send Shivi Rajput the casting call [for MK Jewels film 1]" — the named talent first
+        m = re.match(r"(?P<who>[A-Za-z][A-Za-z.'’\-]*(?:\s+[A-Za-z][A-Za-z.'’\-]*){0,3}?)\s+the\s+(?P<tpl>.+?)(?:\s+for\s+(?P<proj>.+))?$", rest, re.I)
+        if m and m.group("who").split()[0].lower() not in _NOT_A_NAME_START and not _PRONOUN.match(m.group("who")):
             _who(m.group("who"), seg)
             seg.template = _template(m.group("tpl"))
             _project(m.group("proj"), seg)
@@ -371,6 +428,10 @@ def parse_segment(text: str) -> Segment:
 
     # move
     m = re.match(r"(?:move|shift|put|change)\s+(?P<who>.+?)\s+(?:to|into)\s+(?P<rest>.+)$", t, re.I)
+    if not m:
+        pm = re.match(r"put\s+(?P<who>.+?)\s+in\s+(?P<rest>.+)$", t, re.I)       # "put Shivi in approved in <project>": "in" is a stage only if a stage follows
+        if pm and _exact_stage_in(" ".join(pm.group("rest").split()[:3])):
+            m = pm
     if m:
         seg.intent = "move"
         _who(m.group("who"), seg)
@@ -395,6 +456,94 @@ def parse_segment(text: str) -> Segment:
     if _parse_lookup(t, seg):
         return seg
     return seg
+
+
+# --- speech tolerance for the ACTION word ------------------------------------------------------------------------------------------------
+# An inflection of a command word ("moves", "sent", "updated", "up date") is the same word: read as that command. A word that merely SOUNDS like a
+# command word ("shear", "chair" → share; "moove" → move; "sand" → send) is only a hypothesis: the clause must then be a complete, well-formed
+# command of that kind, the planner must find the names in it in the real data, and the task asks "Did you mean to share?" before anything else.
+# Nothing here ever executes anything — every consequential action still waits for the normal approval.
+_INFLECT = {"shares": "share", "shared": "share", "sharing": "share", "moves": "move", "moved": "move", "moving": "move", "sends": "send", "sent": "send",
+            "sending": "send", "updates": "update", "updated": "update", "updating": "update", "adds": "add", "added": "add", "adding": "add",
+            "shows": "show", "showing": "show"}
+_SOUNDS = {"shear": "share", "sheer": "share", "sher": "share", "chair": "share", "cher": "share", "shair": "share", "shayre": "share", "shere": "share",
+           "moove": "move", "mooved": "move", "muve": "move", "moov": "move", "mood": "move", "sand": "send", "cent": "send", "sned": "send"}
+_EXPECT = {"share": {"share"}, "move": {"move"}, "send": {"send", "share"}, "update": {"update"}, "add": {"add"}, "show": {"lookup", "list"}}
+_COMMAND_WORDS = set(_EXPECT) | {"find", "mark", "put", "shift", "include", "forward", "list", "get", "give", "change", "set", "edit", "ask", "open"}
+
+
+def _verb_candidate(word: str) -> Optional[tuple]:
+    """→ (canonical verb, tier) where tier 1 = an inflection (safe), 2 = sounds like it (needs a question). None for an ordinary word."""
+    w = (word or "").lower()
+    if not w or w in _COMMAND_WORDS:
+        return None
+    if w in _INFLECT:
+        return _INFLECT[w], 1
+    if w in _SOUNDS:
+        return _SOUNDS[w], 2
+    if len(w) >= 4:
+        from personal_assistant import phonetic
+        best = max(((phonetic.similarity(w, v), v) for v in ("share", "move", "send", "update")), default=(0.0, ""))
+        if best[0] >= 0.9:
+            return best[1], 2
+    return None
+
+
+def _repair_verb(text: str, seg: Segment) -> Optional[Segment]:
+    body = _norm_space(_LEAD.sub("", _norm_space(text)))
+    if not body or seg.correction:
+        return None
+    m = re.match(r"up[\s-]+date\b", body, re.I)
+    if m:
+        word, canon, tier, rest = "update", "update", 1, body[m.end():]
+        if seg.intent != "unknown":
+            return None
+    else:
+        wm = re.match(r"[A-Za-z']+", body)
+        if not wm:
+            return None
+        word, rest = wm.group(0), body[wm.end():]
+        cand = _verb_candidate(word)
+        if not cand:
+            return None
+        canon, tier = cand
+        # only when the clause as said gave no command, or glued the action word onto a name ("chair Shivi Rajput's profile" → a lookup of "chair Shivi Rajput")
+        glued = seg.intent == "lookup" and bool(seg.talents) and seg.talents[0].lower().startswith(word.lower() + " ")
+        if seg.intent != "unknown" and not glued:
+            return None
+    fixed = _parse_core(canon + rest)
+    if fixed.intent not in _EXPECT[canon] or not (fixed.talents or fixed.talent_ref or fixed.project_text or fixed.update_groups):
+        return None
+    if fixed.talents and fixed.talents[0].lower().startswith(word.lower() + " "):
+        return None
+    fixed.text = _norm_space(text)
+    if tier == 2:
+        fixed.verb_heard = {"said": word.lower(), "meant": canon}
+        fixed.alt = seg if seg.intent != "unknown" else None
+    return fixed
+
+
+# --- word order: the project said first ------------------------------------------------------------------------------------------------
+_FIRST_VERBS = ("move", "shift", "put", "add", "include", "send", "share", "forward", "mark")
+
+
+def _project_first(t: str) -> Optional[Segment]:
+    """"In MK Jewels film 1 move Shivi to Approved" → the same command with the project last. The project is the words up to the first command word,
+    and the rewrite is accepted only if it then reads as a complete command of that kind with exactly that project."""
+    m = re.match(r"(?:in|for|on)\s+(?P<body>.+)$", t, re.I)
+    if not m:
+        return None
+    words = m.group("body").split()
+    for k in range(1, len(words) - 1):
+        verb = words[k].lower()
+        if verb not in _FIRST_VERBS:
+            continue
+        proj, cmd = " ".join(words[:k]), " ".join(words[k:])
+        cand = _parse_core(f"{cmd} {'for' if verb == 'send' else 'in'} {proj}")
+        if cand.intent in ("move", "add", "send", "share") and cand.project_text and _norm_space(cand.project_text).lower() == proj.lower():
+            cand.text = _norm_space(t)
+            return cand
+    return None
 
 
 def _strip_stage_words(rest: str, key: Optional[str]) -> str:

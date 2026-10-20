@@ -47,9 +47,18 @@ def _entry(phrase: str, res: dict) -> dict:
 
 
 # --------------------------------------------------------------------------------------------- slot logic
+ACTION_LABEL = {"share": "share", "move": "move", "send": "send", "update": "update", "add": "add", "show": "show"}
+
+
 def compute_slots(task: dict) -> List[dict]:
     p = task["params"]
     slots: List[dict] = []
+    vh = p.get("verb_heard")
+    if vh and not p.get("verb_confirmed"):
+        meant = ACTION_LABEL.get(vh.get("meant"), vh.get("meant") or "")
+        slots.append({"key": "action", "kind": "action", "phrase": vh.get("said") or "",
+                      "options": [{"id": "yes", "label": f"Yes — {meant}", "sublabel": f"You said “{vh.get('said')}”", "thumb": None, "best": True}],
+                      "prompt": f"I heard “{vh.get('said')}” — did you mean to {meant}? Nothing happens until you confirm and then approve."})
     for i, e in enumerate(p.get("talents") or []):
         if e["state"] != "resolved":
             slots.append({"key": f"talent:{i}", "kind": "talent", "phrase": e["phrase"], "options": e.get("options") or [],
@@ -496,6 +505,42 @@ async def _talent_entries(seg: Segment, prev: Optional[dict], context: dict, pro
     return [{"phrase": "", "state": "none", "prompt": "No talents are selected. Type the names you want (e.g. “Angela and Riya”)."}], None
 
 
+async def _any_resolves(names: List[str]) -> bool:
+    for n in (names or [])[:MAX_NAMES]:
+        if (await R.resolve_talent(n))["state"] != "none":
+            return True
+    return False
+
+
+async def _settle_verb(seg: Segment, projects: List[dict], templates: List[dict]) -> Optional[Segment]:
+    """A SOUND-ALIKE action word ("chair" for share, "sand" for send) is only a hypothesis. It stands only if something in the clause is found in the
+    real data (a talent, a project, a template) — otherwise the clause is an ordinary unrecognised phrase. And when the reading WITHOUT the repair
+    already names a real person ("Sher Khan's profile"), that reading wins. → the Segment to plan, or None."""
+    if not seg.verb_heard:
+        return seg
+    if seg.alt is not None and await _any_resolves(seg.alt.talents):
+        return seg.alt
+    if await _any_resolves(seg.talents) or await _any_resolves([n for g in seg.update_groups for n in (g.get("names") or [])]):
+        return seg
+    if seg.project_text and any(r["state"] != "none" for r in await R.resolve_projects(seg.project_text, projects=projects)):
+        return seg
+    if seg.template and (await R.resolve_template(seg.template, templates))["state"] != "none":
+        return seg
+    return None
+
+
+async def _retarget_send(seg: Segment, projects: List[dict]) -> None:
+    """"Send the casting call to MK Jewels film 1": the words after "to" are a PROJECT, not a person. Only when they match no talent at all and do
+    match a project — a name that fits a talent (even as cards) is always read as the talent."""
+    if seg.intent != "send" or len(seg.talents) != 1 or seg.project_text or seg.project_ref:
+        return
+    phrase = seg.talents[0]
+    if (await R.resolve_talent(phrase))["state"] != "none":
+        return
+    if any(r["state"] != "none" for r in await R.resolve_projects(phrase, projects=projects)):
+        seg.project_text, seg.talents, seg.talent_ref = phrase, [], "selected"
+
+
 async def plan_command(owner_id: str, command_id: str, message: str, context: dict) -> tuple[List[dict], List[str], List[str]]:
     """→ (tasks, unrecognised_segments, offers). Tasks are NOT yet persisted."""
     context = context or {}
@@ -509,12 +554,23 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
     unrecognised: List[str] = []
     prev: Optional[dict] = None
     for seg in segments:
+        if seg.verb_heard:
+            settled = await _settle_verb(seg, projects, templates)
+            if settled is None:
+                unrecognised.append(seg.text)
+                continue
+            seg = settled
+        await _retarget_send(seg, projects)
         if seg.intent == "offer_send":
             if prev and prev["kind"] == "add":
                 prev["params"]["offer_send"] = True
             continue
         if seg.intent == "update":
             new = await _plan_update(owner_id, command_id, seg, prev, context, len(tasks))
+            if seg.verb_heard:
+                for nt in new:
+                    nt["params"]["verb_heard"] = dict(seg.verb_heard)
+                    await finalize(nt)
             if not new:
                 unrecognised.append(seg.text)
             tasks.extend(new)
@@ -528,6 +584,8 @@ async def plan_command(owner_id: str, command_id: str, message: str, context: di
         p = t["params"]
         if seg.worker_hint:
             p["worker_hint"] = seg.worker_hint
+        if seg.verb_heard:
+            p["verb_heard"] = dict(seg.verb_heard)
         if kind in ("add", "send", "move", "list") or (kind == "share" and ((seg.recipient or {}).get("kind") == "project_group")):
             # projects first: the project named in THIS clause is context for telling similar talent names apart (cards only — it never chooses)
             p["projects"], pfrom = await _project_entries(seg, kind, prev, ctx_project, projects)

@@ -28,7 +28,7 @@ function Thumb({ src, alt = "", className = "" }) {
     return <img src={src} alt={alt} loading="lazy" decoding="async" onError={() => setBad(true)} className={`object-cover ${className}`} />;
 }
 
-const IDENTIFY = { talent: "Who do you mean?", project: "Which project?", template: "Which template?", recipient: "Where should it go?", stage: "Which stage?" };
+const IDENTIFY = { talent: "Who do you mean?", project: "Which project?", template: "Which template?", recipient: "Where should it go?", stage: "Which stage?", action: "Is this the action you meant?" };
 const CONSEQUENTIAL = ["add", "send", "move", "share"];
 const STATUS_CHIP = { ongoing: "Ongoing", complete: "Complete", completed: "Complete", hold: "On hold", locked: "Locked" };
 
@@ -78,11 +78,11 @@ function ClarifySlot({ slot, busy, onPick, command }) {
                 </ul>
             )}
             {noMatch && <p className="text-xs text-amber-700 mt-1" data-testid="pa-no-match" role="status">{searched ? `Nothing matched “${searched}”.` : "No close matches."} Try another spelling or just part of the name.</p>}
-            <form className="flex gap-2 mt-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { setSearched(text.trim()); onPick(slot.key, { text: text.trim() }); setText(""); } }}>
+            {slot.kind !== "action" && <form className="flex gap-2 mt-2" onSubmit={(e) => { e.preventDefault(); if (text.trim()) { setSearched(text.trim()); onPick(slot.key, { text: text.trim() }); setText(""); } }}>
                 <input value={text} onChange={(e) => setText(e.target.value)} placeholder={slot.options?.length ? "Not here? Type the name again…" : "Type the name again…"} aria-label={`Search again: ${slot.prompt}`}
                     className="flex-1 min-w-0 border border-black/[0.12] rounded-lg px-3 min-h-[40px] text-sm focus:outline-none focus:border-black/50" />
                 <button type="submit" disabled={busy || !text.trim()} className="px-3 min-h-[40px] rounded-lg border border-black/[0.12] text-xs disabled:opacity-40">Search</button>
-            </form>
+            </form>}
         </div>
     );
 }

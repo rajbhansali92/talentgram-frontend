@@ -62,7 +62,9 @@ def find_items(text: str) -> List[Tuple[int, int, str, str]]:
 
 _SPLIT_NAMES = re.compile(r"\s*(?:,|\band\b|&)\s*", re.I)
 _LEAD = re.compile(r"^\s*(?:please\s+)?update\s+", re.I)             # only "update": "change X to Approved" stays a pipeline move
-_VALUE_MARK = re.compile(r"^\s*(?:(?:to|as|is|=|:|should\s+be|with)\s+|(?=\d))", re.I)
+_NUM_WORD = (r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+             r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)")
+_VALUE_MARK = re.compile(r"^\s*(?:(?:to|as|is|=|:|should\s+be|with)\s+|(?=\d|" + _NUM_WORD + r"\b))", re.I)
 _CONNECT_ONLY = re.compile(r"^[\s,&.!?]*(?:\b(?:and|also|then|plus)\b[\s,&.!?]*)*$", re.I)
 _POLITE = re.compile(r"\b(?:please|thanks|thank\s+you|for\s+me|now)\b", re.I)
 _NAMEISH = re.compile(r"^[A-Za-z][A-Za-z.\-']*(?:\s+[A-Za-z][A-Za-z.\-']*){0,7}$")
@@ -208,8 +210,53 @@ class BadValue(ValueError):
     pass
 
 
+_ONES = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split())}
+_TENS = {w: 10 * (i + 2) for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split())}
+
+
+def spoken_to_digits(raw: str) -> str:
+    """Spoken numbers as digits so a speech engine that writes words is understood: "five feet seven" → "5 feet 7", "twenty four" → "24",
+    "one hundred seventy" → "170". Only whole number words are read; anything else is left exactly as it was (and then checked as usual)."""
+    toks = re.findall(r"[A-Za-z]+|\d+|[^\sA-Za-z\d]", (raw or "").replace("-", " "))
+    out: List[str] = []
+    i = 0
+    while i < len(toks):
+        w = toks[i].lower()
+        if w in _ONES or w in _TENS or (w == "hundred"):
+            n, j, seen = 0, i, False
+            while j < len(toks):
+                x = toks[j].lower()
+                if x in _TENS and not seen or (x in _TENS and n % 100 == 0 and n):
+                    n += _TENS[x]
+                elif x in _ONES and _ONES[x] < 10 and n % 10 == 0 and not (n % 100 and n % 100 < 10):
+                    n += _ONES[x]
+                elif x in _ONES and not n:
+                    n += _ONES[x]
+                elif x == "hundred" and 0 < n < 10:
+                    n *= 100
+                elif x == "and" and n >= 100:
+                    j += 1
+                    continue
+                else:
+                    break
+                seen = True
+                j += 1
+            if seen:
+                out.append(str(n))
+                i = j
+                continue
+        out.append(toks[i])
+        i += 1
+    return " ".join(out)
+
+
 def parse_height(raw: str) -> Tuple[str, str]:
-    """→ (stored value in the profile's own format 5'7", how it was understood). "5 feet 7 inches", "5ft 7", "5'7", "170 cm"."""
+    """→ (stored value in the profile's own format 5'7", how it was understood). "5 feet 7 inches", "5ft 7", "5'7", "170 cm", "five feet seven"."""
+    raw0 = raw
+    if re.search(r"[A-Za-z]", raw or ""):
+        spoken = spoken_to_digits(raw)
+        m2 = re.fullmatch(r"([3-7])\s+(\d{1,2})", spoken.strip())                  # "five seven" — feet then inches, said without the units
+        raw = f"{m2.group(1)}'{m2.group(2)}" if m2 else spoken
     s = (raw or "").strip().lower().replace("’", "'").replace("”", '"').replace("“", '"')
     m = re.match(r"^(\d)\s*(?:'|ft|feet|foot|f)\s*(\d{1,2})?\s*(?:\"|in|inch|inches)?\.?$", s)
     if m:
@@ -224,10 +271,12 @@ def parse_height(raw: str) -> Tuple[str, str]:
             raise BadValue(f"“{raw}” isn't a realistic height in cm.")
         total = round(cm / 2.54)
         return f"{total // 12}'{total % 12}\"", f"{m.group(1)} cm ≈ {total // 12} ft {total % 12} in (rounded)"
-    raise BadValue(f"I couldn't read “{raw}” as a height. Say it like “5 feet 7 inches”, “5'7” or “170 cm”.")
+    raise BadValue(f"I couldn't read “{raw0}” as a height. Say it like “5 feet 7 inches”, “5'7” or “170 cm”.")
 
 
 def parse_age(raw: str) -> int:
+    if re.search(r"[A-Za-z]{3,}", raw or "") and re.match(r"^\s*" + _NUM_WORD, raw or "", re.I):
+        raw = re.sub(r"\s*(?:years?(?:\s+old)?)?\s*$", "", spoken_to_digits(raw), flags=re.I)
     m = re.match(r"^\s*(\d{1,3})\s*(?:years?(?:\s+old)?|yrs?|y\.?o\.?)?\s*\.?$", raw or "", re.I)
     if not m:
         raise BadValue(f"I couldn't read “{raw}” as an age. Give a number, e.g. 24.")

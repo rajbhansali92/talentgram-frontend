@@ -43,6 +43,44 @@ export function describeVoiceDiagnostics(d) {
     return [d.error ? `error ${d.error}` : d.result ? d.result : null, d.permission ? `browser permission ${d.permission}` : null, `page policy ${pol}`, d.ios ? "iOS" : null, d.standalone ? "home-screen app" : null].filter(Boolean).join(" · ");
 }
 
+// Command shortcuts: buttons that only TYPE an action word into the command box, so an important word never depends on speech recognition. They never
+// submit, never touch the microphone and never change a task — the Send button stays the only way to run a command.
+export const COMMAND_SHORTCUTS = ["Send", "Move", "Add", "Update", "Share"];
+const LEAD_WORD = new RegExp(`^(\\s*)(${COMMAND_SHORTCUTS.join("|")})(?![\\w'’])`, "i");
+const MAX_COMMAND_CHARS = 2000;
+
+/**
+ * Where does `word` go in `text`, with the caret at [start, end]? → { text, caret }. Rules (all editable afterwards, nothing is ever deleted
+ * except swapping a leading command word the user is standing on):
+ *   • empty draft → "Word ";
+ *   • the draft already starts with a shortcut word and the caret is on / right after it: the SAME word is a no-op (no "Move Move"), a DIFFERENT
+ *     word replaces just that leading word and keeps the rest of the draft ("Move Shivi to Approved" + Share → "Share Shivi to Approved");
+ *   • the same word right before the caret is a no-op;
+ *   • otherwise the word is inserted AT THE CARET with a space on each side as needed. A selection is never overwritten — it is left as it was.
+ */
+export function insertCommandWord(text, word, start, end) {
+    const t = text || "";
+    const a = Number.isInteger(start) ? Math.max(0, Math.min(start, t.length)) : t.length;
+    const lead = t.match(LEAD_WORD);
+    if (!t.trim()) return { text: `${word} `, caret: word.length + 1 };
+    if (lead) {
+        const from = lead[1].length, to = from + lead[2].length;
+        if (a <= to + 1) {
+            if (lead[2].toLowerCase() === word.toLowerCase()) return { text: t, caret: Math.max(a, to) };
+            const next = t.slice(0, from) + word + t.slice(to);
+            return next.length > MAX_COMMAND_CHARS ? { text: t, caret: a } : { text: next, caret: from + word.length + (t[to] === " " ? 1 : 0) };
+        }
+    }
+    const before = t.slice(0, a), after = t.slice(a);
+    const prev = before.match(/(\S+)\s?$/);                                      // the word right before the caret
+    if (prev && prev[1].toLowerCase() === word.toLowerCase()) return { text: t, caret: a };
+    const lead_ = before.length === 0 || /\s$/.test(before) ? "" : " ";
+    const trail = after.length === 0 || !/^\s/.test(after) ? " " : "";
+    const ins = `${lead_}${word}${trail}`;
+    if (t.length + ins.length > MAX_COMMAND_CHARS) return { text: t, caret: a };
+    return { text: before + ins + after, caret: before.length + lead_.length + word.length + 1 };
+}
+
 const readPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch { return d; } };
 const writePref = (k, v) => { try { localStorage.setItem(k, v ? "1" : "0"); } catch { /* storage blocked */ } };
 
@@ -167,6 +205,23 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
         setTimeout(() => inputRef.current?.focus(), 0);                          // ready to edit
     };
     useEffect(() => { if (speech.listening) setVoiceReady(false); }, [speech.listening]);
+
+    // Shortcut buttons: put the word in the command box (at the caret) and give the box back to the user. Nothing else happens.
+    const caretAfter = useRef(null);
+    const addCommandWord = (word) => {
+        const el = inputRef.current;
+        const r = insertCommandWord(text, word, el?.selectionStart, el?.selectionEnd);
+        caretAfter.current = r.caret;
+        if (r.text !== text) { setText(r.text); setVoiceReady(false); }
+        el?.focus();
+        if (r.text === text) { try { el?.setSelectionRange(r.caret, r.caret); } catch { /* not focusable */ } caretAfter.current = null; }
+    };
+    useEffect(() => {
+        if (caretAfter.current == null) return;
+        const el = inputRef.current, c = caretAfter.current;
+        caretAfter.current = null;
+        if (el) { el.focus(); try { el.setSelectionRange(c, c); } catch { /* not focusable */ } }
+    }, [text]);
     useEffect(() => {
         // A hidden page (another app, the screen locked) cannot keep recognising: end the recording now and keep the words as a draft.
         const hidden = () => { if (document.visibilityState === "hidden") speech.abort(); };
@@ -481,6 +536,13 @@ export default function AssistantPanel({ open, onClose, onAttention, lifted = fa
                                 <li className="text-[10px] text-black/40 self-center">Say what they are for (e.g. “update Angela's introduction video”), then tap “Use attached” on the card.</li>
                             </ul>
                         )}
+                        <div role="group" aria-label="Command shortcuts" data-testid="pa-shortcuts"
+                            className="flex flex-nowrap gap-1.5 mb-1.5 overflow-x-auto overscroll-x-contain pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                            {COMMAND_SHORTCUTS.map((w) => (
+                                <button key={w} type="button" onClick={() => addCommandWord(w)} aria-label={`Insert ${w}`} data-testid={`pa-shortcut-${w.toLowerCase()}`}
+                                    className="shrink-0 whitespace-nowrap px-3 min-h-[32px] rounded-full border border-black/[0.12] text-xs text-black/65 hover:border-black/40 hover:text-black/85 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/50">{w}</button>
+                            ))}
+                        </div>
                         <div className="flex items-end gap-2">
                             <label className="w-11 h-11 shrink-0 rounded-xl border border-black/[0.15] flex items-center justify-center text-black/70 cursor-pointer hover:border-black/40" title="Attach pictures or a video">
                                 <Paperclip className="w-4 h-4" aria-hidden />

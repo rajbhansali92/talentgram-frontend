@@ -11,7 +11,7 @@ vi.mock("@/lib/api", () => ({
 import { adminApi } from "@/lib/api";
 import { setAssistantContext } from "@/lib/assistantContext";
 import PersonalAssistant from "./PersonalAssistant";
-import { liveReply } from "./AssistantPanel";
+import { liveReply, insertCommandWord, COMMAND_SHORTCUTS } from "./AssistantPanel";
 
 // The whole suite runs in parallel workers; a 1 s findBy/waitFor budget flakes when the machine is busy (seen on clean commits too). Same assertions, more patience.
 configure({ asyncUtilTimeout: 4000 });
@@ -1872,6 +1872,43 @@ describe("voice input — tap to start, tap to stop, edit before sending", () =>
             expect(posts("/message")[0][1].text).toBe("move shivi rajput to approved in mk jules film one");
         });
     });
+
+    // ---------------------------------------------------------------------------------------------- command shortcuts never touch the microphone
+    describe("command shortcut buttons and the microphone", () => {
+        it("a shortcut neither starts nor stops recognition, and does not submit", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            fireEvent.click(screen.getByTestId("pa-shortcut-move"));
+            expect(inst.all).toHaveLength(0);                                                      // no recognition was created
+            expect(input()).toBe("Move ");
+            expect(mic().getAttribute("aria-label")).toBe("Tap to start");
+            await act(async () => {});
+            expect(posts("/message")).toHaveLength(0);
+        });
+
+        it("while it is listening, a shortcut leaves the recording running; the spoken words are added AFTER the typed word", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await begin(inst);
+            fireEvent.click(screen.getByTestId("pa-shortcut-share"));
+            expect(inst.rec.stop).not.toHaveBeenCalled(); expect(inst.rec.abort).not.toHaveBeenCalled();
+            expect(inst.all).toHaveLength(1);
+            expect(mic().getAttribute("aria-label")).toBe("Listening — tap to stop");
+            hear(inst.rec, ["shivi rajput's profile", true]);
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            expect(input()).toBe("Share shivi rajput's profile");                               // the typed action word + the dictated rest, once each
+            await act(async () => {});
+            expect(posts("/message")).toHaveLength(0);
+        });
+
+        it("a shortcut after a dictated draft keeps the whole transcript and ends the 'ready' caption like any edit", async () => {
+            server(); const inst = fakeRecognition(); mount(); await open();
+            await begin(inst); hear(inst.rec, ["shivi rajput to approved", true]);
+            fireEvent.click(mic()); engineEnds(inst.rec);
+            expect(screen.getByTestId("pa-voice-state").textContent).toBe("Transcript ready — edit before sending");
+            fireEvent.click(screen.getByTestId("pa-shortcut-update"));
+            expect(input()).toBe("shivi rajput to approved Update ");
+            expect(screen.getByTestId("pa-voice-state").textContent).toBe("Tap to start");
+        });
+    });
 });
 
 // ======================================================================================================================================
@@ -2045,5 +2082,159 @@ describe("persistent task center — clearing the chat leaves outstanding tasks 
         mount(); await open();
         await clearChat();
         expect(adminApi.post.mock.calls.map((c) => c[0])).toEqual(["/personal-assistant/history/clear"]);
+    });
+});
+
+
+// ======================================================================================================================================
+// Command shortcut buttons (2026-10-21): they only TYPE an action word into the existing command box.
+// ======================================================================================================================================
+describe("insertCommandWord (pure)", () => {
+    const at = (text, word, a = text.length, b = a) => insertCommandWord(text, word, a, b);
+    it("an empty or blank draft becomes 'Word '", () => {
+        expect(at("", "Send")).toEqual({ text: "Send ", caret: 5 });
+        expect(at("   ", "Move")).toEqual({ text: "Move ", caret: 5 });
+    });
+    it("inserts at the caret with a space on each side as needed, and keeps everything else", () => {
+        expect(at("Shivi Rajput", "Move").text).toBe("Shivi Rajput Move ");
+        expect(at("Shivi Rajput", "Move", 0).text).toBe("Move Shivi Rajput");
+        expect(at("Shivi to Approved", "Add", 5).text).toBe("Shivi Add to Approved");
+        expect(at("Shivi to Approved", "Add", 5).caret).toBe(10);
+    });
+    it("never overwrites a selection: it is left in place and the word goes at its start", () => {
+        expect(at("Shivi Rajput", "Share", 6, 12).text).toBe("Shivi Share Rajput");
+    });
+    it("the same word twice is a no-op, a different leading word is swapped, the rest of the draft is kept", () => {
+        expect(at("Move ", "Move").text).toBe("Move ");
+        expect(at("move shivi", "Move", 0).text).toBe("move shivi");
+        expect(at("Move Shivi to Approved", "Share", 0).text).toBe("Share Shivi to Approved");
+        expect(at("Move ", "Share").text).toBe("Share ");
+        expect(at("Move Shivi to Approved", "Send").text).toBe("Move Shivi to Approved Send ");       // caret at the END: inserted there, nothing replaced
+    });
+    it("the same word right before the caret is never typed twice, even in the middle of a draft", () => {
+        expect(at("Shivi Move ", "Move").text).toBe("Shivi Move ");
+        expect(at("Shivi Move", "move").text).toBe("Shivi Move");
+        expect(at("Shivi Move to Approved", "Move", 10).text).toBe("Shivi Move to Approved");
+        expect(at("Shivi Move ", "Add").text).toBe("Shivi Move Add ");                               // a different word is still inserted
+    });
+    it("a longer word that merely starts like a shortcut is not treated as one", () => {
+        expect(at("Movement notes", "Move", 0).text).toBe("Move Movement notes");
+        expect(at("Address Shivi", "Add", 0).text).toBe("Add Address Shivi");
+    });
+    it("respects the 2000-character limit by changing nothing", () => {
+        const long = "x".repeat(1998);
+        expect(at(long, "Send").text).toBe(long);
+    });
+});
+
+describe("command shortcut buttons", () => {
+    const row = () => screen.getByTestId("pa-shortcuts");
+    const box = () => screen.getByLabelText("Command");
+    const tap = (w) => fireEvent.click(screen.getByTestId(`pa-shortcut-${w.toLowerCase()}`));
+    const caretAt = (a, b = a) => { box().focus(); box().setSelectionRange(a, b); };
+
+    it("renders the five shortcuts, in order, one labelled group, each a real button with an accessible name", async () => {
+        server(); mount(); await open();
+        expect(row().getAttribute("role")).toBe("group");
+        expect(row().getAttribute("aria-label")).toBe("Command shortcuts");
+        const btns = within(row()).getAllByRole("button");
+        expect(btns.map((b) => b.textContent)).toEqual(["Send", "Move", "Add", "Update", "Share"]);
+        expect(COMMAND_SHORTCUTS).toEqual(["Send", "Move", "Add", "Update", "Share"]);
+        expect(btns.map((b) => b.getAttribute("aria-label"))).toEqual(["Insert Send", "Insert Move", "Insert Add", "Insert Update", "Insert Share"]);
+        btns.forEach((b) => expect(b.getAttribute("type")).toBe("button"));                       // a shortcut can never submit the form
+    });
+
+    it.each(["Send", "Move", "Add", "Update", "Share"])("%s puts exactly that word and a trailing space in an empty box, and focuses it", async (w) => {
+        server(); mount(); await open();
+        tap(w);
+        expect(box().value).toBe(`${w} `);
+        expect(document.activeElement).toBe(box());
+        expect(box().selectionStart).toBe(w.length + 1);
+    });
+
+    it("selecting one never submits anything or changes any task; Send stays the only way to run it", async () => {
+        server(); mount(); await open();
+        for (const w of COMMAND_SHORTCUTS) tap(w);
+        await act(async () => {});
+        expect(adminApi.post).not.toHaveBeenCalled();
+    });
+
+    it("existing text is preserved; with the caret in the middle the word goes there", async () => {
+        server(); mount(); await open();
+        type("Shivi Rajput to Approved");
+        caretAt(24);
+        tap("Add");
+        expect(box().value).toBe("Shivi Rajput to Approved Add ");
+        type("Shivi to Approved");
+        caretAt(5);
+        tap("Move");
+        expect(box().value).toBe("Shivi Move to Approved");
+        expect(box().selectionStart).toBe(11);                                                      // right after the inserted word: keep typing
+    });
+
+    it("repeated taps do not duplicate the word; a different shortcut swaps a leading word and keeps the rest", async () => {
+        server(); mount(); await open();
+        tap("Move"); tap("Move"); tap("Move");
+        expect(box().value).toBe("Move ");
+        tap("Share");
+        expect(box().value).toBe("Share ");                                                          // switching before typing anything else
+        type("Move Shivi Rajput to Approved in MK Jules film 1");
+        caretAt(0);
+        tap("Share");
+        expect(box().value).toBe("Share Shivi Rajput to Approved in MK Jules film 1");               // the rest of the draft survives
+        tap("Share");
+        expect(box().value).toBe("Share Shivi Rajput to Approved in MK Jules film 1");
+    });
+
+    it("the user continues typing after a shortcut and the existing Send button submits exactly the final text, once", async () => {
+        server(); mount(); await open();
+        tap("Move");
+        fireEvent.change(box(), { target: { value: "Move Shivi Rajput to Approved in MK Jules film 1" } });
+        expect(posts("/message")).toHaveLength(0);
+        fireEvent.click(screen.getByTestId("pa-send"));
+        await waitFor(() => expect(posts("/message")).toHaveLength(1));
+        expect(posts("/message")[0][1].text).toBe("Move Shivi Rajput to Approved in MK Jules film 1");
+    });
+
+    it("Enter in the box still submits (existing behaviour), and the shortcut row does not intercept keys", async () => {
+        server(); mount(); await open();
+        tap("Send");
+        fireEvent.change(box(), { target: { value: "Send the casting call to MK Jules film 1" } });
+        fireEvent.keyDown(box(), { key: "Enter" });
+        await waitFor(() => expect(posts("/message")).toHaveLength(1));
+    });
+
+    it("an open approval card is untouched by a shortcut (no confirm / cancel is sent)", async () => {
+        server(); tasksOnServer = [task({ id: "t1", fingerprint: "fp1" })];
+        mount(); await open();
+        tap("Move");
+        fireEvent.click(screen.getByTestId("pa-tab-tasks"));
+        const card = await within(await screen.findByTestId("pa-needs-you")).findByTestId("pa-task-t1");
+        expect(card.textContent).toMatch(/Approve this action/);                                     // still waiting for the user's approval
+        expect(posts("/confirm")).toHaveLength(0); expect(posts("/cancel")).toHaveLength(0);
+    });
+
+    it("the row is ONE horizontally scrollable line that sits above the input group and does not wrap or shrink the controls", async () => {
+        server(); mount(); await open();
+        const cls = row().className;
+        expect(cls).toMatch(/\boverflow-x-auto\b/); expect(cls).toMatch(/\bflex-nowrap\b/); expect(cls).not.toMatch(/flex-wrap/);
+        expect(cls).toMatch(/overscroll-x-contain/);                                                   // a sideways swipe on the row does not chain to the page
+        within(row()).getAllByRole("button").forEach((b) => { expect(b.className).toMatch(/\bshrink-0\b/); expect(b.className).toMatch(/whitespace-nowrap/); expect(b.className).toMatch(/focus-visible:ring/); });
+        const form = box().closest("form");
+        expect(form.contains(row())).toBe(true);
+        expect(row().compareDocumentPosition(box()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();   // above the input …
+        expect(row().contains(box())).toBe(false);
+        expect(within(form).getByTestId("pa-mic")).toBeTruthy(); expect(within(form).getByTestId("pa-send")).toBeTruthy(); expect(within(form).getByTestId("pa-attach")).toBeTruthy();   // … and the existing controls are all still there
+        expect(screen.getByTestId("pa-scroll").contains(row())).toBe(false);                            // outside the vertical chat scroller: no gesture conflict
+    });
+
+    it("works the same in the expanded panel, and with the Tasks tab selected the box and shortcuts are still there", async () => {
+        server(); mount(); await open();
+        fireEvent.click(screen.getByLabelText("Larger panel"));
+        tap("Update");
+        expect(box().value).toBe("Update ");
+        fireEvent.click(screen.getByTestId("pa-tab-tasks"));
+        tap("Share");
+        expect(box().value).toBe("Share ");
     });
 });

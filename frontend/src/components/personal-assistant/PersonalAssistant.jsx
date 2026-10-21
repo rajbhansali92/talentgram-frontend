@@ -3,6 +3,7 @@ import { Sparkles } from "lucide-react";
 import { getAdmin } from "@/lib/api";
 import { getAssistantAccess } from "@/lib/personalAssistant";
 import { useAssistantContext } from "@/lib/assistantContext";
+import GoToLauncher from "@/components/workspace/GoToLauncher";
 
 // The panel (and everything it pulls in) is only downloaded the first time the icon is tapped.
 const AssistantPanel = lazy(() => import("./AssistantPanel"));
@@ -56,9 +57,13 @@ export default function PersonalAssistant() {
     }, []);
 
     const openPanel = useCallback(() => { setOpen(true); setEverOpened(true); }, []);
-    if (!allowed) return null;
+    // "Go to" (workspace page launcher) lives beside the assistant's button and shares its bottom placement; it steps aside while the panel is open.
+    // It renders nothing outside the admin shell (no workspace).
+    const goTo = open ? null : <GoToLauncher assistantVisible={allowed} lifted={lifted} dock={dock} />;
+    if (!allowed) return goTo;
     return (
         <>
+            {goTo}
             {!open && (
                 <button type="button" onClick={openPanel} aria-label="Open assistant" data-testid="pa-launcher"
                     style={lifted && dock ? { bottom: `${dock}px` } : undefined}

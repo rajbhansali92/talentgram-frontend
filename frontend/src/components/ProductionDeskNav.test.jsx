@@ -8,6 +8,8 @@ vi.mock("@/lib/api", () => ({ getAdmin: () => ({ id: "a", role: "admin", name: "
 vi.mock("@/components/Logo", () => ({ default: () => null }));
 vi.mock("@/components/NotificationBell", () => ({ default: () => null }));
 vi.mock("@/components/ActionQueuePanel", () => ({ default: () => null }));
+// the sidebar is under test here, not the pages: the workspace host (which renders every open page) is stubbed
+vi.mock("@/components/workspace/WorkspaceHost", () => ({ default: () => null }));
 if (typeof window.ResizeObserver === "undefined") window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
 if (typeof window.localStorage === "undefined" || typeof window.localStorage.getItem !== "function") {
     const store = {};

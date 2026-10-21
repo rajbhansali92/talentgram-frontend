@@ -1,34 +1,21 @@
 import React, { useState, useEffect, useCallback, Suspense, lazy } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import { clearAdminSession, getAdmin } from "@/lib/api";
 import Logo from "@/components/Logo";
 import NotificationBell from "@/components/NotificationBell";
 import ActionQueuePanel from "@/components/ActionQueuePanel";
 import PersonalAssistant from "@/components/personal-assistant/PersonalAssistant";
+import { WorkspaceProvider, useWorkspace } from "@/components/workspace/WorkspaceContext";
+import WorkspaceHost from "@/components/workspace/WorkspaceHost";
+import TabBar from "@/components/workspace/TabBar";
 import {
-  LayoutDashboard,
-  Users,
-  Link2,
   LogOut,
-  Clapperboard,
-  Film,
-  UserPlus,
-  Shield,
   KeyRound,
-  MessageSquare,
-  Briefcase,
   Menu,
   ChevronLeft,
   X,
   AlertCircle,
-  ListTodo,
-  Cloud,
-  MessageCircle,
-  FileSpreadsheet,
-  Sparkles,
-  Radar,
 } from "lucide-react";
-import { SIMPLE_ASSISTANT_ENABLED } from "@/lib/simpleAssistant";
 
 // ============================================================================
 // LAZY LOADED MODAL (ISSUE 4 FIX)
@@ -85,33 +72,8 @@ class LayoutErrorBoundary extends React.Component {
   }
 }
 
-// ============================================================================
-// CONFIGURATION - Centralized navigation
-// ============================================================================
-export const NAV_ITEMS = {
-  base: [
-    { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true },
-    ...(SIMPLE_ASSISTANT_ENABLED
-      ? [{ to: "/admin/simple-assistant", label: "Assistant", icon: Radar }]
-      : []),
-    { to: "/admin/casting-desk", label: "AI Casting Desk", icon: Sparkles },
-    { to: "/admin/talents", label: "Talents", icon: Users },
-    { to: "/admin/applications", label: "Applications", icon: UserPlus },
-    { to: "/admin/projects", label: "Projects", icon: Clapperboard },
-    { to: "/admin/production", label: "Production Desk", icon: Film },
-    { to: "/admin/links", label: "Links", icon: Link2 },
-    { to: "/admin/marketing", label: "Marketing", icon: Briefcase },
-    { to: "/admin/feedback", label: "Feedback", icon: MessageSquare },
-    { to: "/admin/workflow", label: "Workflow", icon: ListTodo },
-    { to: "/admin/whatsapp", label: "WhatsApp", icon: MessageCircle },
-  ],
-  adminOnly: [
-    { to: "/admin/users", label: "Users", icon: Shield, adminOnly: true },
-    { to: "/admin/storage", label: "Storage", icon: Cloud, adminOnly: true },
-    { to: "/admin/diagnostics", label: "Diagnostics", icon: AlertCircle, adminOnly: true },
-    { to: "/admin/imports", label: "Data Center", icon: FileSpreadsheet, adminOnly: true },
-  ],
-};
+import { NAV_ITEMS } from "@/components/workspace/navConfig";
+export { NAV_ITEMS };
 
 // Storage key for sidebar state
 const SIDEBAR_STORAGE_KEY = "admin-sidebar-collapsed";
@@ -178,8 +140,23 @@ const useMobileDrawer = () => {
 // ============================================================================
 // COMPONENT: NavItem (Refined active state - ISSUE 7)
 // ============================================================================
+// A sidebar / drawer link opens (or activates) that page's IN-APP TAB instead of replacing the page you are on. A ctrl / cmd / shift / middle click is
+// left alone so the browser's own "open in new tab" still works. `data-workspace-nav` tells the pages' unsaved-changes click guards that this click
+// does not leave the page (the work stays open in its tab).
+const useOpenInWorkspace = (to, after) => {
+  const ws = useWorkspace();
+  return useCallback((e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (!ws) { after?.(); return; }
+    e.preventDefault();
+    ws.open(to);
+    after?.();
+  }, [ws, to, after]);
+};
+
 const NavItem = React.memo(({ to, label, icon: Icon, end, isCollapsed, onClick }) => {
   const [showTooltip, setShowTooltip] = useState(false);
+  const openTab = useOpenInWorkspace(to, onClick);
   const timeoutRef = React.useRef(null);
 
   const handleMouseEnter = () => {
@@ -204,7 +181,8 @@ const NavItem = React.memo(({ to, label, icon: Icon, end, isCollapsed, onClick }
       <NavLink
         to={to}
         end={end}
-        onClick={onClick}
+        onClick={openTab}
+        data-workspace-nav
         aria-label={isCollapsed ? label : undefined}
         className={({ isActive }) =>
           cn(baseClasses, collapsedClasses, isActive ? activeClasses : inactiveClasses)
@@ -350,6 +328,29 @@ SidebarFooter.displayName = "SidebarFooter";
 // ============================================================================
 // COMPONENT: MobileDrawer
 // ============================================================================
+const DrawerLink = ({ item, onNavigate }) => {
+  const openTab = useOpenInWorkspace(item.to, onNavigate);
+  return (
+    <NavLink
+      to={item.to}
+      end={item.end}
+      onClick={openTab}
+      data-workspace-nav
+      className={({ isActive }) =>
+        cn(
+          "flex items-center gap-3 px-4 py-3 rounded-sm text-sm transition-colors duration-200",
+          isActive
+            ? "bg-black text-white shadow-sm"
+            : "text-black/60 hover:text-black hover:bg-black/[0.04]"
+        )
+      }
+    >
+      <item.icon className="w-4 h-4" strokeWidth={1.5} />
+      <span className="font-medium">{item.label}</span>
+    </NavLink>
+  );
+};
+
 const MobileDrawer = React.memo(({
   isOpen,
   onClose,
@@ -410,25 +411,7 @@ const MobileDrawer = React.memo(({
         </div>
 
         <nav className="flex-1 overflow-y-auto py-6 px-4 space-y-1" aria-label="Mobile navigation">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              onClick={onNavigate}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-3 px-4 py-3 rounded-sm text-sm transition-colors duration-200",
-                  isActive
-                    ? "bg-black text-white shadow-sm"
-                    : "text-black/60 hover:text-black hover:bg-black/[0.04]"
-                )
-              }
-            >
-              <item.icon className="w-4 h-4" strokeWidth={1.5} />
-              <span className="font-medium">{item.label}</span>
-            </NavLink>
-          ))}
+          {navItems.map((item) => <DrawerLink key={item.to} item={item} onNavigate={onNavigate} />)}
         </nav>
 
         <div className="p-4 border-t border-black/[0.06] space-y-2">
@@ -508,7 +491,9 @@ export default function AdminLayout() {
 
   return (
     <LayoutErrorBoundary>
-      <div className="min-h-screen flex bg-gradient-to-br from-[#f8f8f6] via-[#f3f3f1] to-[#efefed] text-black">
+      <WorkspaceProvider admin={admin}>
+      {/* --tg-tabbar-h: height of the workspace tab bar, for anything fixed to the top or sized to the full viewport */}
+      <div className="min-h-screen flex bg-gradient-to-br from-[#f8f8f6] via-[#f3f3f1] to-[#efefed] text-black" style={{ "--tg-tabbar-h": "2.25rem" }}>
         {/* DESKTOP SIDEBAR */}
         <aside
           className={cn(
@@ -577,8 +562,9 @@ export default function AdminLayout() {
 
         {/* MAIN CONTENT */}
         <main className="flex-1 min-w-0 md:pt-0 pt-14 pb-[safe-area-inset-bottom] pb-safe">
+          <TabBar />
           <Suspense fallback={<LoadingFallback />}>
-            <Outlet />
+            <WorkspaceHost />
           </Suspense>
         </main>
 
@@ -588,7 +574,7 @@ export default function AdminLayout() {
         </Suspense>
 
         {/* Action Queue (2026-09-21) — deliberately mounted at the layout
-            level, a sibling of <Outlet />, never inside a page component:
+            level, a sibling of the workspace host, never inside a page component:
             it must keep polling and showing progress regardless of which
             page (or none) the admin is currently viewing, since the
             underlying backend action it reflects keeps running
@@ -599,6 +585,7 @@ export default function AdminLayout() {
             code is lazy-loaded on first open). Gated by the backend, see backend/personal_assistant/access.py. */}
         <PersonalAssistant />
       </div>
+      </WorkspaceProvider>
     </LayoutErrorBoundary>
   );
 }

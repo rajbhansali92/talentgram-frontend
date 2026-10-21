@@ -235,7 +235,7 @@ export default function ActionQueuePanel() {
                 onClick={openPanel}
                 aria-label={activeCount > 0 ? `Open Action Queue (${activeCount} active)` : "Open Action Queue"}
                 data-testid="action-queue-reopen"
-                className="fixed top-16 right-4 z-30 w-10 h-10 rounded-full bg-white hover:bg-black/[0.04] border border-black/[0.08] shadow-[0_4px_16px_rgba(0,0,0,0.12)] flex items-center justify-center transition-colors"
+                className="fixed top-[calc(4rem+var(--tg-tabbar-h,0px))] md:top-16 right-4 z-30 w-10 h-10 rounded-full bg-white hover:bg-black/[0.04] border border-black/[0.08] shadow-[0_4px_16px_rgba(0,0,0,0.12)] flex items-center justify-center transition-colors"
             >
                 <ListTodo className="w-4 h-4 text-black/60" />
                 {activeCount > 0 && (
@@ -257,7 +257,7 @@ export default function ActionQueuePanel() {
 
     return (
         <div
-            className="fixed top-16 right-4 z-30 w-[320px] max-w-[calc(100vw-2rem)] max-h-[min(70vh,32rem)] bg-white rounded-xl shadow-[0_8px_30px_rgba(0,0,0,0.14)] border border-black/[0.08] overflow-hidden flex flex-col transition-[max-height] duration-200"
+            className="fixed top-[calc(4rem+var(--tg-tabbar-h,0px))] md:top-16 right-4 z-30 w-[320px] max-w-[calc(100vw-2rem)] max-h-[min(70vh,32rem)] bg-white rounded-xl shadow-[0_8px_30px_rgba(0,0,0,0.14)] border border-black/[0.08] overflow-hidden flex flex-col transition-[max-height] duration-200"
             data-testid="action-queue-panel"
         >
             <div className="flex items-center gap-1 pl-3.5 pr-2 py-2.5 bg-black/[0.02] shrink-0">

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { adminApi, isAdmin, IMAGE_URL } from "@/lib/api";
+import { useTabTitle, useWorkspaceDirty } from "@/components/workspace/WorkspaceContext";
 import CommTimeline from "@/components/CommTimeline";
 import { toast } from "sonner";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
@@ -651,6 +652,8 @@ export default function TalentEdit() {
     const isDirty = useMemo(() => {
         return JSON.stringify(talent) !== JSON.stringify(originalTalent);
     }, [talent, originalTalent]);
+    useWorkspaceDirty(!loading && isDirty);                                      // closing this page's tab asks first; the tab shows an unsaved dot
+    useTabTitle(talent.name);
 
     // P1-7: SINGLE unsaved-changes guard covering every navigation vector
     // (tab close / refresh / external nav, browser Back, and in-app links).
@@ -699,6 +702,7 @@ export default function TalentEdit() {
             if (e.defaultPrevented) return;
             const anchor = e.target.closest("a");
             if (!anchor) return;
+            if (anchor.closest("[data-workspace-nav]")) return;          // a sidebar link opens another tab; this page and its edits stay open
             const href = anchor.getAttribute("href");
             if (!href || href.startsWith("#")) return;
             const internal = href.startsWith("/") || href.includes(window.location.host);

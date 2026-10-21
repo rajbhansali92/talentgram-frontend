@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, Link, useSearchParams } from "react-router-dom";
 import { adminApi, isAdmin, getSubdomainUrl } from "@/lib/api";
+import { useTabTitle, useWorkspaceDirty } from "@/components/workspace/WorkspaceContext";
 import ConfirmDeleteDialog from "@/components/ConfirmDeleteDialog";
 import DuplicateProjectDialog from "@/components/DuplicateProjectDialog";
 import { toast } from "sonner";
@@ -254,6 +255,8 @@ export default function ProjectEdit() {
     const [isEditing, setIsEditing] = useState(!isEdit);
     const [originalProject, setOriginalProject] = useState(empty);
     const isDirty = isEditing && JSON.stringify(project) !== JSON.stringify(originalProject);
+    useWorkspaceDirty(isDirty);                                                  // closing this page's tab asks first; the tab shows an unsaved dot
+    useTabTitle(isEditing ? project.brand_name : null);
 
     const updateProject = useCallback((patch) => {
         setProject(prev => ({
@@ -445,6 +448,7 @@ export default function ProjectEdit() {
         const handleClick = (e) => {
             const anchor = e.target.closest("a[href]");
             if (!anchor) return;
+            if (anchor.closest("[data-workspace-nav]")) return;          // a sidebar link opens another tab; this page and its edits stay open
             const href = anchor.getAttribute("href");
             if (!href || href.startsWith("#") || href.startsWith("http") || anchor.target === "_blank") return;
             e.preventDefault();
@@ -732,7 +736,7 @@ export default function ProjectEdit() {
                     <div style={{ height: tabBarLayout.height || 53 }} aria-hidden="true" />
                     <div
                         ref={tabBarRef}
-                        className="fixed top-14 md:top-0 right-0 z-30 bg-white border-b border-[#eaeaea]"
+                        className="fixed top-[calc(3.5rem+var(--tg-tabbar-h,0px))] md:top-[var(--tg-tabbar-h,0px)] right-0 z-30 bg-white border-b border-[#eaeaea]"
                         style={{ left: tabBarLayout.left }}
                         data-testid="project-tab-bar"
                     >

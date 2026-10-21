@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { adminApi, isAdmin, IMAGE_URL } from "@/lib/api";
+import { useTabTitle, useWorkspaceDirty } from "@/components/workspace/WorkspaceContext";
 import { toast } from "sonner";
 import { useUploadManager } from "@/context/UploadManagerContext";
 import {
@@ -727,6 +728,7 @@ export default function SubmissionReviewCenter() {
     const { uploadFile } = useUploadManager();
 
     const [project, setProject] = useState(null);
+    useTabTitle(project?.brand_name ? `${project.brand_name} · Review` : null);
     const [submissions, setSubmissions] = useState([]);
     const [selectedId, setSelectedId] = useState(null);
     const [detail, setDetail] = useState(null);
@@ -1794,7 +1796,7 @@ export default function SubmissionReviewCenter() {
     };
 
     return (
-        <div className="flex flex-col h-screen bg-[#fafaf9] text-neutral-800 overflow-hidden font-sans">
+        <div className="flex flex-col h-[calc(100vh-var(--tg-tabbar-h,0px))] bg-[#fafaf9] text-neutral-800 overflow-hidden font-sans">
             {/* Top Bar Navigation */}
             <header className="px-6 py-4 bg-white border-b border-black/[0.08] flex items-center justify-between gap-4 shrink-0 shadow-sm">
                 <div className="flex items-center gap-4 min-w-0">

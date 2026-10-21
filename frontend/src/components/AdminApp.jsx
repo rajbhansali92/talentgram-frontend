@@ -3,28 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import AdminLayout from "@/components/AdminLayout";
 import AdminLogin from "@/pages/AdminLogin";
-import Dashboard from "@/pages/Dashboard";
-import TalentList from "@/pages/TalentList";
-import TalentEdit from "@/pages/TalentEdit";
-import ProjectList from "@/pages/ProjectList";
-import ProjectEdit from "@/pages/ProjectEdit";
-import ProductionOverview from "@/pages/ProductionOverview";
-import SubmissionReviewCenter from "@/pages/SubmissionReviewCenter";
-import LinkHistory from "@/pages/LinkHistory";
-import LinkGenerator from "@/pages/LinkGenerator";
-import LinkResults from "@/pages/LinkResults";
-import Applications from "@/pages/Applications";
-import UserManagement from "@/pages/UserManagement";
-import AdminFeedback from "@/pages/AdminFeedback";
-import MarketingHub from "@/pages/MarketingHub";
-import NotificationsPage from "@/pages/NotificationsPage";
-import WorkflowPage from "@/pages/WorkflowPage";
-import StorageDashboard from "@/pages/StorageDashboard";
-import WhatsAppEnginePage from "@/pages/WhatsAppEnginePage";
-import SubmissionDiagnostics from "@/pages/SubmissionDiagnostics";
-import ImportWizard from "@/pages/ImportWizard";
-import CastingDesk from "@/pages/CastingDesk";
-import SimpleAssistant from "@/pages/SimpleAssistant";
+import { ADMIN_PAGE_ROUTES } from "@/components/workspace/adminRoutes";
 
 
 export default function AdminApp() {
@@ -40,32 +19,9 @@ export default function AdminApp() {
                         </ProtectedRoute>
                     }
                 >
-                    <Route index element={<Dashboard />} />
-                    <Route path="simple-assistant" element={<SimpleAssistant />} />
-                    <Route path="casting-desk" element={<CastingDesk />} />
-                    <Route path="casting-desk/:sessionId" element={<CastingDesk />} />
-                    <Route path="talents" element={<TalentList />} />
-                    <Route path="talents/new" element={<TalentEdit />} />
-                    <Route path="talents/:id" element={<TalentEdit />} />
-                    <Route path="applications" element={<Applications />} />
-                    <Route path="projects" element={<ProjectList />} />
-                    <Route path="projects/new" element={<ProjectEdit />} />
-                    <Route path="projects/:id" element={<ProjectEdit />} />
-                    <Route path="projects/:id/submissions" element={<SubmissionReviewCenter />} />
-                    <Route path="production" element={<ProductionOverview />} />
-                    <Route path="links" element={<LinkHistory />} />
-                    <Route path="links/new" element={<LinkGenerator />} />
-                    <Route path="links/:id/results" element={<LinkResults />} />
-                    <Route path="links/:id/edit" element={<LinkGenerator />} />
-                    <Route path="users" element={<UserManagement />} />
-                    <Route path="feedback" element={<AdminFeedback />} />
-                    <Route path="marketing" element={<MarketingHub />} />
-                    <Route path="notifications" element={<NotificationsPage />} />
-                    <Route path="workflow" element={<WorkflowPage />} />
-                    <Route path="storage" element={<StorageDashboard />} />
-                    <Route path="whatsapp" element={<WhatsAppEnginePage />} />
-                    <Route path="diagnostics" element={<SubmissionDiagnostics />} />
-                    <Route path="imports" element={<ImportWizard />} />
+                    {/* Every admin URL and the page it serves. AdminLayout renders the pages itself, one live pane per open tab (see
+                        workspace/WorkspaceHost, which reads the same ADMIN_PAGE_ROUTES), so these elements are what a bare <Outlet /> layout would show. */}
+                    {ADMIN_PAGE_ROUTES.map((r) => (r.path ? <Route key={r.path} path={r.path} element={r.element} /> : <Route key="index" index element={r.element} />))}
                 </Route>
                 <Route path="*" element={<Navigate to="/admin" replace />} />
             </Routes>

@@ -152,6 +152,7 @@ adminApi.interceptors.response.use(
             try {
                 localStorage.removeItem("tg_admin_token");
                 localStorage.removeItem("tg_admin");
+                sessionStorage.removeItem("tg_workspace_v1");      // the open-tabs list belongs to the session that just ended
             } catch (e) {
                 console.error(e);
             }
@@ -223,6 +224,7 @@ export function clearAdminSession() {
     if (typeof window === "undefined") return;
     localStorage.removeItem("tg_admin_token");
     localStorage.removeItem("tg_admin");
+    try { sessionStorage.removeItem("tg_workspace_v1"); } catch { /* storage blocked */ }      // the open-tabs list is private to the session that just ended
 }
 
 export function getAdmin() {

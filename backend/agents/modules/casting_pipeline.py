@@ -10791,7 +10791,7 @@ async def _undo_executor(collected: dict, ctx: ExecContext) -> ExecResult:
     total_restored = 0
     restored_ids: List[str] = []
     for prev_stage, ids in restorable.items():
-        res = await _timed_write(bulk_move_by_talent_ids(project_id, ids, prev_stage))
+        res = await _timed_write(bulk_move_by_talent_ids(project_id, ids, prev_stage, undo=True))
         total_restored += res["moved"]
         restored_ids.extend(ids)
     after_counts = await _timed_aggregation(get_stage_counts(project_id))

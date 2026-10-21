@@ -32,9 +32,11 @@ from pymongo.errors import BulkWriteError
 
 from core import (
     _now,
+    active_only,
     current_team_or_admin,
     db,
     enrich_talent,
+    normalize_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -341,6 +343,105 @@ async def sync_pipeline_from_submission(
             "pipeline.auto-sync failed project=%s talent=%s decision=%s",
             project_id, talent_id, decision_key,
         )
+
+
+# ---------------------------------------------------------------------------
+# Pipeline → submission-review sync (the reverse of the above)
+#
+# The Submission Review Center shows `submissions.decision`; the kanban shows
+# `casting_pipeline.stage`. They are separate records. A decision made in the
+# Review Center already moves the pipeline (sync_pipeline_from_submission), but a
+# stage change made on the pipeline side — kanban drag, bulk-move, the WhatsApp
+# agent, the Personal Assistant — only ever wrote `stage`, so the review center
+# kept showing "pending" for a talent already Approved / on Hold / Rejected.
+#
+# Every stage-changing write funnels through `move_pipeline` or
+# `bulk_move_by_talent_ids`; both call `sync_submission_from_pipeline`.
+#
+# Only the three stages whose meaning is identical in both places are mapped.
+# `ask_to_test`, `shortlisted` and `not_available` also have a forward mapping,
+# but the reverse is ambiguous (ask_to_test is where every talent starts; an undo
+# lands there) so they are deliberately NOT synced. follow_up / already_tested /
+# locked / pitch / not_interested have no submission-decision equivalent.
+#
+# Invariants: scoped to ONE project; touches only `decision`, `decided_at` and
+# one `status_history` entry (completeness is derived from media / answers and is
+# never written here); no notification, WhatsApp job or message is created;
+# idempotent (an unchanged decision matches nothing); never raises.
+# ---------------------------------------------------------------------------
+PIPELINE_STAGE_TO_SUBMISSION_DECISION = {
+    "approved": "approved",
+    "hold": "hold",
+    "rejected": "rejected",
+}
+
+
+async def sync_submission_from_pipeline(
+    project_id: Optional[str],
+    talent_ids: List[str],
+    stage: Optional[str],
+    *,
+    actor: Optional[str] = None,
+    undo: bool = False,
+) -> int:
+    """Best-effort: make the Submission Review decision of each (project_id,
+    talent_id) submission match the pipeline stage it was just moved into.
+    → number of submissions changed. NEVER raises.
+
+    `undo=True` (the WhatsApp agent's undo of a move) additionally reverts a
+    decision that a previous pipeline sync set, when the restored stage has no
+    decision of its own — otherwise an undone approval would stay approved."""
+    try:
+        ids = [t for t in dict.fromkeys(talent_ids or []) if isinstance(t, str) and t]
+        if not project_id or not ids:
+            return 0
+        target = PIPELINE_STAGE_TO_SUBMISSION_DECISION.get(_normalise_stage(stage) or "")
+        if not target and not undo:
+            return 0
+
+        # A talent-created draft may carry only the e-mail (talent_id unset until it is
+        # resolved), so match both — same rule as submissions' lookup-by-talent.
+        emails = set()
+        for t in await db.talents.find({"id": {"$in": ids}}, {"_id": 0, "email": 1, "normalized_email": 1}).to_list(len(ids)):
+            for e in (t.get("normalized_email"), t.get("email")):
+                if normalize_email(e):
+                    emails.add(normalize_email(e))
+        ors = [{"talent_id": {"$in": ids}}]
+        if emails:
+            ors.append({"talent_email": {"$in": sorted(emails)}})
+        q = active_only({"project_id": project_id, "$or": ors})
+        subs = await db.submissions.find(q, {"_id": 0, "id": 1, "decision": 1, "status_history": {"$slice": -1}}).to_list(2000)
+
+        from pymongo import UpdateOne
+        now = _now()
+        ops = []
+        for sub in subs:
+            current = sub.get("decision") or "pending"
+            new_decision, source, note = target, "pipeline_sync", "Synced from pipeline stage change"
+            if not target:
+                last = (sub.get("status_history") or [{}])[-1]
+                if last.get("source") != "pipeline_sync" or last.get("to_status") != current:
+                    continue                                   # a human decision (or none): an undo never touches it
+                new_decision, source, note = last.get("from_status") or "pending", "pipeline_sync_undo", "Pipeline move undone"
+            if new_decision == current:
+                continue
+            ops.append(UpdateOne(
+                {"id": sub["id"], "project_id": project_id, "decision": {"$ne": new_decision}},     # atomic: a repeat / race matches nothing
+                {"$set": {"decision": new_decision, "decided_at": now},
+                 "$push": {"status_history": {"from_status": current, "to_status": new_decision, "timestamp": now,
+                                              "admin_email": actor or "pipeline-sync", "note": note, "source": source}}},
+            ))
+        if not ops:
+            return 0
+        res = await db.submissions.bulk_write(ops, ordered=False)
+        logger.info(
+            "pipeline.submission-sync project=%s stage=%s undo=%s talents=%d submissions_changed=%d",
+            project_id, stage, undo, len(ids), res.modified_count,
+        )
+        return res.modified_count
+    except Exception:
+        logger.exception("pipeline.submission-sync failed project=%s stage=%s", project_id, stage)
+        return 0
 
 
 async def ensure_pipeline_from_finalized_submission(
@@ -790,6 +891,14 @@ async def move_pipeline(
         "pipeline.move project=%s stage=%s requested=%d matched=%d modified=%d",
         project_id, target_stage, len(ids), res.matched_count, res.modified_count,
     )
+    if res.matched_count and target_stage in PIPELINE_STAGE_TO_SUBMISSION_DECISION:
+        rows = await db.casting_pipeline.find(
+            {"project_id": project_id, "id": {"$in": ids}}, {"_id": 0, "talent_id": 1}
+        ).to_list(len(ids))
+        await sync_submission_from_pipeline(
+            project_id, [r["talent_id"] for r in rows if r.get("talent_id")], target_stage,
+            actor=(_admin or {}).get("email"),
+        )
     return {
         "success": True,
         "moved": res.modified_count,
@@ -821,12 +930,14 @@ async def delete_pipeline_entry(
 # Bulk Actions Endpoints
 # ---------------------------------------------------------------------------
 
-async def bulk_move_by_talent_ids(project_id: str, talent_ids: List[str], stage: str) -> dict:
+async def bulk_move_by_talent_ids(project_id: str, talent_ids: List[str], stage: str, *, undo: bool = False) -> dict:
     """Move every (project_id, talent_id) pipeline row named in `talent_ids`
     to `stage`. `stage` must already be normalised/validated by the caller
     — this function owns only the write, so both the REST endpoint below
     and the WhatsApp Casting Pipeline agent's move executor share one
-    update_many path with no duplicated logic."""
+    update_many path with no duplicated logic. It is also where the Submission
+    Review decision is kept in step (`sync_submission_from_pipeline`), so every
+    caller — REST, WhatsApp agent, Personal Assistant — gets it."""
     clean_ids = [tid.strip() for tid in talent_ids if isinstance(tid, str) and tid.strip()]
     if not clean_ids:
         return {"moved": 0, "matched": 0}
@@ -839,6 +950,8 @@ async def bulk_move_by_talent_ids(project_id: str, talent_ids: List[str], stage:
         "pipeline.bulk-move project=%s stage=%s requested=%d matched=%d modified=%d",
         project_id, stage, len(clean_ids), res.matched_count, res.modified_count,
     )
+    if res.matched_count:
+        await sync_submission_from_pipeline(project_id, clean_ids, stage, undo=undo)
     return {"moved": res.modified_count, "matched": res.matched_count}
 
 

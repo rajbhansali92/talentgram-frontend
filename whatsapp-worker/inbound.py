@@ -1383,6 +1383,11 @@ _state_rebuilt_at: float = 0.0
 _INVALID_GROUP_SKIP_LOG_INTERVAL_SEC = 300.0
 _invalid_group_last_logged: Dict[str, float] = {}
 
+# group -> (monotonic time of its first miss in the current streak, consecutive NOT_FOUND count).
+# A group is only marked INVALID_CONFIGURATION after the streak is long enough (see
+# config.GROUP_MISSING_CONFIRM_*); a successful open or a (re-)authentication clears it.
+_NOT_FOUND_STREAK: Dict[str, Tuple[float, int]] = {}
+
 # Live worker-health sub-statuses, mirrored onto whatsapp_sessions so the
 # admin UI can show them (see _update_worker_status). Kept in-process too so
 # each write only happens on an actual transition, not every 2s poll cycle.
@@ -1436,6 +1441,7 @@ async def _rearm_for_new_generation(
         _INVALID_GROUPS.clear()
     _seen_cache.clear()
     _invalid_group_last_logged.clear()
+    _NOT_FOUND_STREAK.clear()
     groups_cache.clear()
     participants_cache.clear()
     _state_rebuilt_at = time.monotonic()
@@ -1595,7 +1601,11 @@ async def poll_once(
             if status != "OPENED":
                 logger.info("inbound: group=%r not opened (status=%s) — skipping this cycle", group_name, status)
                 if status == "NOT_FOUND":
-                    grace_remaining = config.REAUTH_GRACE_SEC - (time.monotonic() - _state_rebuilt_at)
+                    now = time.monotonic()
+                    first_miss, misses = _NOT_FOUND_STREAK.get(group_name, (now, 0))
+                    misses += 1
+                    _NOT_FOUND_STREAK[group_name] = (first_miss, misses)
+                    grace_remaining = config.REAUTH_GRACE_SEC - (now - _state_rebuilt_at)
                     if grace_remaining > 0:
                         # A fresh (re-)auth happened recently enough that
                         # WhatsApp Web's chat list may still be syncing —
@@ -1608,9 +1618,24 @@ async def poll_once(
                             "not marking invalid", group_name, config.REAUTH_GRACE_SEC,
                             grace_remaining,
                         )
+                    elif (
+                        misses < config.GROUP_MISSING_CONFIRM_MISSES
+                        or now - first_miss < config.GROUP_MISSING_CONFIRM_SEC
+                    ):
+                        # Past the grace window, but one miss (or a few) is not proof:
+                        # WhatsApp Web's search can return stale/empty rows for a group
+                        # that exists. Keep probing; only a sustained run of misses counts.
+                        logger.info(
+                            "inbound: group=%r NOT_FOUND (miss %d/%d, %.0fs of %ds) — "
+                            "retrying, not marking invalid yet", group_name, misses,
+                            config.GROUP_MISSING_CONFIRM_MISSES, now - first_miss,
+                            config.GROUP_MISSING_CONFIRM_SEC,
+                        )
                     else:
+                        _NOT_FOUND_STREAK.pop(group_name, None)
                         await _mark_invalid_configuration(group_name)
                 continue
+            _NOT_FOUND_STREAK.pop(group_name, None)    # it opened: any earlier misses were a transient
             if group_name in _PENDING_REVALIDATION:
                 # Flagged in the DB, but it opened this time — the operator
                 # fixed the mapping or restored the group. Auto-recover.

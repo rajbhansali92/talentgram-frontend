@@ -108,6 +108,19 @@ AGENTS_INBOUND_SECRET: str = os.environ.get("AGENTS_INBOUND_SECRET", "")
 # time with margin; tunable without a code change if that changes.
 REAUTH_GRACE_SEC: int = int(os.environ.get("WA_REAUTH_GRACE_SEC", "60"))
 
+# Listener-group "missing" confirmation (2026-10-22). The grace window above is a
+# single clock from authentication, but WhatsApp Web's sidebar search can keep
+# returning stale or empty results for a group that exists well past it (default
+# worker restart: 'Talentgram CRM' and 'Talentgram Casting Pipeline' were judged
+# missing ~70 s after start from rows left over from the previous search, and the
+# listener then skipped them until an operator intervened). After the grace window
+# a group is therefore only marked INVALID_CONFIGURATION once it has been NOT_FOUND
+# on at least WA_GROUP_MISSING_CONFIRM_MISSES consecutive probes spread over at
+# least WA_GROUP_MISSING_CONFIRM_SEC seconds. Any successful open resets the count.
+# A group that is genuinely missing is still flagged, just not on the first miss.
+GROUP_MISSING_CONFIRM_SEC: int = int(os.environ.get("WA_GROUP_MISSING_CONFIRM_SEC", "300"))
+GROUP_MISSING_CONFIRM_MISSES: int = int(os.environ.get("WA_GROUP_MISSING_CONFIRM_MISSES", "5"))
+
 # Set to "false" to disable the inbound listener entirely (outbound sending
 # keeps working) — an emergency kill switch that needs no redeploy of the
 # Agent Platform or Marketing module, just a worker restart.

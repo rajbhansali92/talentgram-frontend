@@ -110,6 +110,7 @@ def _reset_module_state():
     inbound._PENDING_REVALIDATION.clear()
     inbound._seen_cache.clear()
     inbound._invalid_group_last_logged.clear()
+    inbound._NOT_FOUND_STREAK.clear()
     inbound._last_written_status.clear()
     inbound._last_seen_generation = None
     inbound._state_rebuilt_at = 0.0
@@ -275,6 +276,8 @@ async def test_not_found_within_grace_period_does_not_poison(_setup, monkeypatch
 
 
 async def test_not_found_after_grace_period_still_marks_invalid(_setup, monkeypatch):
+    """A group that is ACTUALLY missing is still flagged once the grace window has elapsed AND the misses are
+    sustained (config.GROUP_MISSING_CONFIRM_*). Before 2026-10-22 the first post-grace miss flagged it."""
     session = FakeSession(generation=1)
     groups_cache = _groups_cache(["Genuinely Missing Group"])
     participants_cache = inbound.GroupParticipantsCache()
@@ -286,15 +289,17 @@ async def test_not_found_after_grace_period_still_marks_invalid(_setup, monkeypa
 
     await inbound.poll_once(session, http=None, groups_cache=groups_cache,
                              participants_cache=participants_cache)
-    # Simulate the grace window having fully elapsed.
+    # Simulate the grace window having fully elapsed, and a sustained run of misses.
     inbound._state_rebuilt_at = time.monotonic() - config.REAUTH_GRACE_SEC - 1
+    _age_streak("Genuinely Missing Group", seconds=config.GROUP_MISSING_CONFIRM_SEC + 1,
+                misses=config.GROUP_MISSING_CONFIRM_MISSES - 1)
 
     await inbound.poll_once(session, http=None, groups_cache=groups_cache,
                              participants_cache=participants_cache)
 
     assert "Genuinely Missing Group" in inbound._INVALID_GROUPS, (
         "a group that's ACTUALLY missing (not just mid-sync) must still be "
-        "marked invalid once the grace window has genuinely elapsed — this "
+        "marked invalid once the grace window has genuinely elapsed and the misses are sustained — this "
         "existing protective behavior (added to stop an infinite-retry log "
         "storm) must not regress"
     )
@@ -316,6 +321,172 @@ async def test_group_participants_cache_clear_resets_all_groups():
     cache.clear()
     assert cache._by_group == {}
     assert cache._last_refresh == {}
+
+
+def _age_streak(group, seconds, misses):
+    """Pretend `group`'s current NOT_FOUND streak began `seconds` ago and already has `misses` misses."""
+    inbound._NOT_FOUND_STREAK[group] = (time.monotonic() - seconds, misses)
+
+
+async def _poll(session, groups_cache, participants_cache):
+    await inbound.poll_once(session, http=None, groups_cache=groups_cache, participants_cache=participants_cache)
+
+
+def _past_grace():
+    inbound._state_rebuilt_at = time.monotonic() - config.REAUTH_GRACE_SEC - 1
+
+
+def _agent_config_writes(fake_db):
+    coll = fake_db[inbound.AGENT_CONFIG_COLLECTION]
+    return coll.update_many_calls
+
+
+# ---- 2026-10-22: a group that is temporarily missing past the grace window is retried, not flagged -------------------
+async def test_delayed_chat_list_sync_is_retried_then_group_is_found_and_never_flagged(_setup, monkeypatch):
+    """The default-worker restart: 'Talentgram CRM' / 'Talentgram Casting Pipeline' returned stale/empty search rows
+    (NOT_FOUND) well after the grace window, then would have opened. They must not be flagged in the meantime."""
+    fake_db = _setup
+    session, participants = FakeSession(generation=1), inbound.GroupParticipantsCache()
+    groups_cache = _groups_cache(["Late Group"])
+
+    async def fake_open(page, group_name):
+        return "NOT_FOUND"
+
+    monkeypatch.setattr(sender, "_open_group_chat", fake_open)
+
+    await _poll(session, groups_cache, participants)                 # re-arm + first miss (inside grace)
+    _past_grace()
+    for _ in range(config.GROUP_MISSING_CONFIRM_MISSES + 1):         # many misses past grace, but a SHORT streak
+        _age_streak("Late Group", seconds=10, misses=inbound._NOT_FOUND_STREAK["Late Group"][1])
+        await _poll(session, groups_cache, participants)
+        assert "Late Group" not in inbound._INVALID_GROUPS
+    assert _agent_config_writes(fake_db) == [], "no INVALID_CONFIGURATION write while it is still being retried"
+    assert "Late Group" in inbound._NOT_FOUND_STREAK
+
+
+async def test_a_successful_open_clears_the_streak(_setup, monkeypatch):
+    session, participants = FakeSession(generation=1), inbound.GroupParticipantsCache()
+    groups_cache = _groups_cache(["Late Group"])
+    calls = {"n": 0}
+
+    async def fake_open(page, group_name):
+        calls["n"] += 1
+        return "OPENED" if calls["n"] > 3 else "NOT_FOUND"
+
+    monkeypatch.setattr(sender, "_open_group_chat", fake_open)
+
+    await _poll(session, groups_cache, participants)
+    _past_grace()
+    for _ in range(2):
+        await _poll(session, groups_cache, participants)
+    assert inbound._NOT_FOUND_STREAK["Late Group"][1] == 3
+    await _poll(session, groups_cache, participants)                # 4th probe opens (the scan body logs, not raises, on the stub page)
+    assert "Late Group" not in inbound._NOT_FOUND_STREAK, "an OPENED probe must reset the miss streak"
+    assert "Late Group" not in inbound._INVALID_GROUPS
+
+
+async def test_previously_flagged_group_that_is_now_found_is_cleared(_setup, monkeypatch):
+    """Eventual discovery of a DB-flagged (pending-revalidation) group after some misses auto-recovers it."""
+    fake_db = _setup
+    session, participants = FakeSession(generation=1), inbound.GroupParticipantsCache()
+    groups_cache = _groups_cache(["Casting Group"])
+    inbound._PENDING_REVALIDATION.add("Casting Group")
+    calls = {"n": 0}
+
+    async def fake_open(page, group_name):
+        calls["n"] += 1
+        return "NOT_FOUND" if calls["n"] <= 3 else "OPENED"
+
+    monkeypatch.setattr(sender, "_open_group_chat", fake_open)
+
+    await _poll(session, groups_cache, participants)                # miss 1 (inside grace)
+    _past_grace()
+    for _ in range(2):                                              # misses 2-3, past grace: still pending, still unflagged
+        await _poll(session, groups_cache, participants)
+    assert "Casting Group" in inbound._PENDING_REVALIDATION and "Casting Group" not in inbound._INVALID_GROUPS
+    assert _agent_config_writes(fake_db) == []
+    await _poll(session, groups_cache, participants)                # 4th probe opens
+    unsets = [c for c in _agent_config_writes(fake_db) if "$unset" in c[1]]
+    assert unsets, "found again -> the DB flag must be cleared (INVALID_CONFIGURATION recovery)"
+    assert "Casting Group" not in inbound._PENDING_REVALIDATION
+
+
+async def test_genuinely_missing_group_needs_BOTH_enough_misses_and_enough_time(_setup, monkeypatch):
+    fake_db = _setup
+    session, participants = FakeSession(generation=1), inbound.GroupParticipantsCache()
+    groups_cache = _groups_cache(["Gone Group"])
+
+    async def fake_open(page, group_name):
+        return "NOT_FOUND"
+
+    monkeypatch.setattr(sender, "_open_group_chat", fake_open)
+    await _poll(session, groups_cache, participants)
+    _past_grace()
+    n, t = config.GROUP_MISSING_CONFIRM_MISSES, config.GROUP_MISSING_CONFIRM_SEC
+
+    _age_streak("Gone Group", seconds=t + 60, misses=n - 2)         # long enough, but this probe is only miss n-1
+    await _poll(session, groups_cache, participants)
+    assert "Gone Group" not in inbound._INVALID_GROUPS, "too few misses"
+
+    _age_streak("Gone Group", seconds=t - 60, misses=n + 5)         # many misses, but not for long enough
+    await _poll(session, groups_cache, participants)
+    assert "Gone Group" not in inbound._INVALID_GROUPS, "not sustained for long enough"
+    assert _agent_config_writes(fake_db) == []
+
+    _age_streak("Gone Group", seconds=t + 1, misses=n - 1)          # both satisfied on this probe
+    await _poll(session, groups_cache, participants)
+    assert "Gone Group" in inbound._INVALID_GROUPS
+    flagged = [c for c in _agent_config_writes(fake_db) if c[1].get("$set", {}).get("config_status") == inbound.INVALID_CONFIGURATION]
+    assert len(flagged) == 1 and flagged[0][0] == {"group_names": "Gone Group"}
+    assert "Gone Group" not in inbound._NOT_FOUND_STREAK
+
+
+async def test_streaks_are_per_group_one_missing_group_does_not_affect_another(_setup, monkeypatch):
+    session, participants = FakeSession(generation=1), inbound.GroupParticipantsCache()
+    groups_cache = _groups_cache(["Missing", "Fine"])
+
+    async def fake_open(page, group_name):
+        return "NOT_FOUND" if group_name == "Missing" else "OPENED"
+
+    monkeypatch.setattr(sender, "_open_group_chat", fake_open)
+    await _poll(session, groups_cache, participants)
+    _past_grace()
+    _age_streak("Missing", seconds=config.GROUP_MISSING_CONFIRM_SEC + 1, misses=config.GROUP_MISSING_CONFIRM_MISSES)
+    await _poll(session, groups_cache, participants)
+    assert "Missing" in inbound._INVALID_GROUPS and "Fine" not in inbound._INVALID_GROUPS
+    assert "Fine" not in inbound._NOT_FOUND_STREAK
+
+
+async def test_retryable_search_failure_neither_counts_nor_flags(_setup, monkeypatch):
+    session, participants = FakeSession(generation=1), inbound.GroupParticipantsCache()
+    groups_cache = _groups_cache(["Flaky"])
+
+    async def fake_open(page, group_name):
+        return "SEARCH_FAILED"
+
+    monkeypatch.setattr(sender, "_open_group_chat", fake_open)
+    await _poll(session, groups_cache, participants)
+    _past_grace()
+    for _ in range(config.GROUP_MISSING_CONFIRM_MISSES + 2):
+        await _poll(session, groups_cache, participants)
+    assert "Flaky" not in inbound._INVALID_GROUPS and "Flaky" not in inbound._NOT_FOUND_STREAK
+
+
+async def test_reauthentication_resets_miss_streaks(_setup, monkeypatch):
+    session, participants = FakeSession(generation=1), inbound.GroupParticipantsCache()
+    groups_cache = _groups_cache(["Late Group"])
+
+    async def fake_open(page, group_name):
+        return "NOT_FOUND"
+
+    monkeypatch.setattr(sender, "_open_group_chat", fake_open)
+    await _poll(session, groups_cache, participants)
+    _past_grace()
+    _age_streak("Late Group", seconds=config.GROUP_MISSING_CONFIRM_SEC - 5, misses=config.GROUP_MISSING_CONFIRM_MISSES - 1)
+    session.generation = 2                                          # the account re-authenticated
+    await _poll(session, groups_cache, participants)
+    assert "Late Group" not in inbound._INVALID_GROUPS
+    assert inbound._NOT_FOUND_STREAK["Late Group"][1] == 1, "streak restarted from this probe, not carried over"
 
 
 if __name__ == "__main__":

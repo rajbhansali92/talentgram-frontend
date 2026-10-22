@@ -200,7 +200,7 @@ export default function TalentEdit() {
     // immediately through its own endpoint (PATCH /talents/{id}/media-download),
     // never through the profile form's Save, so it can't mark the form dirty or
     // be clobbered by a save response. Missing flag on the server == ON.
-    const [mediaLink, setMediaLink] = useState({ enabled: true, token: null });
+    const [mediaLink, setMediaLink] = useState({ enabled: true });
     const [mediaLinkBusy, setMediaLinkBusy] = useState(false);
     const [tagSearch, setTagSearch] = useState("");
     const [isTagDropdownOpen, setIsTagDropdownOpen] = useState(false);
@@ -299,10 +299,7 @@ export default function TalentEdit() {
                 const { data } = await adminApi.get(`/talents/${id}`);
                 setTalent({ ...emptyTalent, ...data });
                 setOriginalTalent({ ...emptyTalent, ...data });
-                setMediaLink({
-                    enabled: data.media_download_enabled !== false,
-                    token: data.media_download_token || null,
-                });
+                setMediaLink({ enabled: data.media_download_enabled !== false });
                 setLinksDraft(linksToText(data.work_links || []));
             } catch {
                 toast.error("Failed to load talent");
@@ -1412,11 +1409,19 @@ export default function TalentEdit() {
                         </p>
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
-                        {mediaLink.enabled && mediaLink.token && (
+                        {mediaLink.enabled && (
                             <button
                                 type="button"
-                                onClick={() => {
-                                    const url = `${window.location.origin.replace(/^https?:\/\/[^.]+\./, "https://links.")}/talent-media/${mediaLink.token}`;
+                                onClick={async () => {
+                                    // The server returns the current link, or a fresh one if the last link has expired.
+                                    let url = null;
+                                    try {
+                                        ({ data: { url } } = await adminApi.post(`/talents/${id}/media-download/link`));
+                                    } catch {
+                                        toast.error("Could not get the media link");
+                                        return;
+                                    }
+                                    if (!url) { toast.error("The media link is unavailable for this talent"); return; }
                                     navigator.clipboard?.writeText(url).then(
                                         () => toast.success("Media link copied"),
                                         () => toast.error("Could not copy the link"),
@@ -1442,7 +1447,7 @@ export default function TalentEdit() {
                                 setMediaLinkBusy(true);
                                 try {
                                     const { data } = await adminApi.patch(`/talents/${id}/media-download`, { enabled: next });
-                                    setMediaLink({ enabled: data.enabled, token: data.token || prev.token });
+                                    setMediaLink({ enabled: data.enabled });
                                     toast.success(next ? "Media download link is ON" : "Media download link is OFF");
                                 } catch {
                                     setMediaLink(prev);

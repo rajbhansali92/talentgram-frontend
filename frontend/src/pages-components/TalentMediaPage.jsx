@@ -5,7 +5,13 @@ import { useParams } from "next/navigation";
 import { api, API, IMAGE_URL } from "@/lib/api";
 import HlsVideo from "@/components/HlsVideo";
 import Logo from "@/components/Logo";
-import { ChevronLeft, ChevronRight, Download, Loader2, X, AlertCircle, Play } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, Loader2, X, AlertCircle, Clock, Play } from "lucide-react";
+
+// 404 = off / invalid; 410 = a real link whose access window has ended (the server enforces it on every request).
+const linkErrorState = (e) => {
+    const code = e?.response?.status;
+    return code === 410 ? "expired" : code === 404 ? "unavailable" : "error";
+};
 
 /**
  * Client-facing "download this talent's media" page. Opened from a WhatsApp
@@ -22,7 +28,7 @@ import { ChevronLeft, ChevronRight, Download, Loader2, X, AlertCircle, Play } fr
 export default function TalentMediaPage() {
     const { token } = useParams();
     const [data, setData] = useState(null);
-    const [state, setState] = useState("loading"); // loading | ready | unavailable | error
+    const [state, setState] = useState("loading"); // loading | ready | unavailable | expired | error
     const [lightbox, setLightbox] = useState(null); // { items, index }
     const [starting, setStarting] = useState(false);
 
@@ -33,7 +39,7 @@ export default function TalentMediaPage() {
             setData(res.data);
             setState("ready");
         } catch (e) {
-            setState(e?.response?.status === 404 ? "unavailable" : "error");
+            setState(linkErrorState(e));
         }
     }, [token]);
 
@@ -54,7 +60,7 @@ export default function TalentMediaPage() {
             await api.get(`/public/talent-media/${encodeURIComponent(token)}`);
             window.location.assign(`${base}/download-all`);
         } catch (e) {
-            setState(e?.response?.status === 404 ? "unavailable" : "error");
+            setState(linkErrorState(e));
         } finally {
             setTimeout(() => setStarting(false), 6000);
         }
@@ -91,6 +97,16 @@ export default function TalentMediaPage() {
                         ))}
                     </div>
                     <p className="sr-only" role="status">Loading media…</p>
+                </main>
+            )}
+
+            {state === "expired" && (
+                <main className="mx-auto max-w-md px-6 py-24 text-center" data-testid="talent-media-expired">
+                    <Clock className="w-9 h-9 mx-auto text-black/30 mb-4" strokeWidth={1.5} />
+                    <h1 className="font-display text-2xl mb-2">This link has expired</h1>
+                    <p className="text-sm text-black/55 leading-relaxed">
+                        For security, media links stop working after a limited time. Please contact Talentgram and ask for a new link.
+                    </p>
                 </main>
             )}
 

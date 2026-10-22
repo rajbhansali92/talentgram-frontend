@@ -22,6 +22,14 @@ Design (all reuse — no parallel media system):
                     in flight, 64 KiB chunks, STORED (no recompression) — NOT
                     the buffer-everything-in-RAM approach used by the client
                     link ZIP in routers/links.py (deliberately not reused).
+  * Expiry        : a link is ACTIVATED by its first valid request and then lives
+                    for TALENT_MEDIA_LINK_TTL_HOURS (default 48) — one window, set
+                    once, atomically, never extended. State lives in
+                    `talent_media_links` (one small doc per issued token). An
+                    expired link answers 410 on the page AND on every download
+                    endpoint; it is never revived. The media itself is untouched.
+                    Fresh link = `ensure_token` minting a new token once the
+                    current one has expired (no caller changes needed).
   * WhatsApp      : `enqueue_media_link_message` is called by the existing
                     submission-notification task AFTER the form message(s), in
                     its own try/except, and is made idempotent per submission
@@ -36,6 +44,7 @@ import struct
 import time
 import uuid
 import zlib
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -65,7 +74,53 @@ router = APIRouter(prefix="/api", tags=["talent-media"])
 MEDIA_LINK_BASE_URL = os.environ.get("TALENT_MEDIA_BASE_URL", "https://links.talentgramagency.com").rstrip("/")
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
+_TOKEN_IN_PATH_RE = re.compile(r"(/talent-media/)([A-Za-z0-9_-]{4})[A-Za-z0-9_-]{16,60}")
+
+
+class _MaskMediaTokens(logging.Filter):
+    """The token is the credential and it travels in the URL path, which uvicorn's access log prints for every
+    request. Keep only its first 4 characters in logs (enough to correlate, useless to use)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_TOKEN_IN_PATH_RE.sub(r"\1\2…", a) if isinstance(a, str) else a for a in record.args)
+        elif isinstance(record.msg, str):
+            record.msg = _TOKEN_IN_PATH_RE.sub(r"\1\2…", record.msg)
+        return True
+
+
+for _name in ("uvicorn.access", "uvicorn", "gunicorn.access"):
+    _lg = logging.getLogger(_name)
+    if not any(isinstance(f, _MaskMediaTokens) for f in _lg.filters):
+        _lg.addFilter(_MaskMediaTokens())
 _UNAVAILABLE = "This media link is not available."
+_EXPIRED = "This media link has expired."
+
+
+def link_ttl() -> timedelta:
+    """Access window that starts at a link's first valid request. One setting; 48 h by default."""
+    try:
+        hours = float(os.environ.get("TALENT_MEDIA_LINK_TTL_HOURS", "48"))
+    except ValueError:
+        hours = 48.0
+    return timedelta(hours=hours if hours > 0 else 48.0)
+
+
+def _parse_ts(ts: Any) -> Optional[datetime]:
+    try:
+        d = datetime.fromisoformat(str(ts))
+    except (TypeError, ValueError):
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _link_expired(link: Optional[dict], now: Optional[datetime] = None) -> bool:
+    """Activated and past its expiry. A never-activated link is not expired; an unparseable expiry fails closed."""
+    exp = (link or {}).get("expires_at")
+    if not exp:
+        return False
+    d = _parse_ts(exp)
+    return d is None or (now or datetime.now(timezone.utc)) >= d
 
 # Display order + labels mirror TalentEdit.jsx's media sections exactly.
 _SECTIONS: List[Tuple[str, str, str]] = [
@@ -143,6 +198,8 @@ async def _ensure_indexes() -> None:
             partialFilterExpression={"media_download_token": {"$type": "string"}},
         )
         await db.talent_media_link_events.create_index("event_key", unique=True, name="event_key_unique")
+        await db.talent_media_links.create_index("token", unique=True, name="media_link_token_unique")
+        await db.talent_media_links.create_index("talent_id", name="media_link_talent")
         _indexes_ready = True
     except Exception:
         logger.exception("talent_media index creation failed (non-fatal)")
@@ -158,17 +215,59 @@ def _new_token() -> str:
     return "".join(secrets.choice(_TOKEN_ALPHABET) for _ in range(32))
 
 
+async def _link_doc(token: str, tid: str) -> dict:
+    """The state doc for `token`, created (unactivated) if this token predates link state. Race-safe: the
+    unique token index makes concurrent creators converge on one doc."""
+    try:
+        await db.talent_media_links.update_one(
+            {"token": token},
+            {"$setOnInsert": {"token": token, "talent_id": tid, "created_at": _now(), "activated_at": None, "expires_at": None}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        pass
+    return await db.talent_media_links.find_one({"token": token}, {"_id": 0}) or {}
+
+
+async def _activate(link: dict) -> dict:
+    """First valid request starts the window. The filter only matches a still-unactivated doc, so of any number
+    of simultaneous first requests exactly one writes; the rest read its values. Never touches an activated doc."""
+    now = datetime.now(timezone.utc)
+    await db.talent_media_links.update_one(
+        {"token": link["token"], "activated_at": None},
+        {"$set": {"activated_at": now.isoformat(), "expires_at": (now + link_ttl()).isoformat()}},
+    )
+    return await db.talent_media_links.find_one({"token": link["token"]}, {"_id": 0}) or link
+
+
+async def _token_expired(token: str) -> bool:
+    link = await db.talent_media_links.find_one({"token": token}, {"_id": 0, "expires_at": 1})
+    return _link_expired(link)
+
+
+async def usable_token(tid: str) -> Optional[str]:
+    """The talent's current token if it can still be used (never opened, or inside its window); None if there is
+    none or it has expired. Read-only."""
+    t = await db.talents.find_one({"id": tid}, {"_id": 0, "media_download_token": 1})
+    tok = (t or {}).get("media_download_token")
+    if not tok or await _token_expired(tok):
+        return None
+    return tok
+
+
 async def ensure_token(tid: str) -> Optional[str]:
-    """Return the talent's media token, minting it exactly once (race-safe:
-    the conditional update only ever succeeds for the first writer)."""
+    """Return the talent's CURRENT usable media token, minting a fresh one when there is none or the current
+    one has expired (an expired link is never revived — it gets a new token). Race-safe: the conditional update
+    only ever succeeds for the first writer; everyone else reads the winner's token."""
     await _ensure_indexes()
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "media_download_token": 1})
     if t is None:
         return None
-    if t.get("media_download_token"):
-        return t["media_download_token"]
+    cur = t.get("media_download_token")
+    if cur and not await _token_expired(cur):
+        return cur
     await db.talents.update_one(
-        {"id": tid, "media_download_token": {"$in": [None, ""]}},
+        {"id": tid, "media_download_token": cur if cur else {"$in": [None, ""]}},
         {"$set": {"media_download_token": _new_token()}},
     )
     t = await db.talents.find_one({"id": tid}, {"_id": 0, "media_download_token": 1})
@@ -183,7 +282,8 @@ async def resolve_media_link(tid: str) -> Optional[Tuple[str, Optional[str]]]:
     Returns None if the talent doesn't exist, else (name, url). `url` is None
     when the link is currently unavailable (toggle OFF, or archived/merged) —
     callers must then NOT offer any fallback link. When enabled, the token is
-    the existing one (minted at most once by ensure_token)."""
+    the current one (minted by ensure_token if none, or a fresh one if the last
+    link has expired)."""
     talent = await db.talents.find_one({"id": tid}, {"_id": 0, "name": 1, "status": 1, "media_download_enabled": 1})
     if not talent:
         return None
@@ -195,14 +295,20 @@ async def resolve_media_link(tid: str) -> Optional[Tuple[str, Optional[str]]]:
 
 
 async def _talent_for_token(token: str) -> dict:
-    """Resolve token -> talent, enforcing the toggle EVERY call. Invalid,
-    unknown, disabled and archived/merged all return the same 404 so the
-    endpoint reveals nothing about which case applied."""
+    """Resolve token -> talent, enforcing the toggle and the expiry EVERY call (page, file and ZIP all come
+    through here). Invalid, unknown, disabled and archived/merged all return the same 404 so the endpoint
+    reveals nothing about which case applied; only a link that really was issued and has run out answers 410."""
     if not token or not _TOKEN_RE.match(token):
         raise HTTPException(404, _UNAVAILABLE)
     await _ensure_indexes()
+    link = await db.talent_media_links.find_one({"token": token}, {"_id": 0})
+    if link is None:
+        owner = await db.talents.find_one({"media_download_token": token}, {"_id": 0, "id": 1})   # current token not yet seen (or issued before link state existed)
+        if not owner:
+            raise HTTPException(404, _UNAVAILABLE)
+        link = await _link_doc(token, owner["id"])
     talent = await db.talents.find_one(
-        {"media_download_token": token},
+        {"id": link.get("talent_id")},
         {"_id": 0, "id": 1, "name": 1, "media": 1, "cover_media_id": 1, "status": 1, "media_download_enabled": 1},
     )
     if (
@@ -211,6 +317,10 @@ async def _talent_for_token(token: str) -> dict:
         or str(talent.get("status") or "").lower() in _BLOCKED_STATUSES
     ):
         raise HTTPException(404, _UNAVAILABLE)
+    if not link.get("expires_at"):
+        link = await _activate(link)
+    if _link_expired(link):
+        raise HTTPException(410, _EXPIRED)
     return talent
 
 
@@ -302,6 +412,15 @@ async def set_media_download(tid: str, payload: MediaDownloadToggleIn, admin: di
     await db.talents.update_one({"id": tid}, {"$set": {"media_download_enabled": bool(payload.enabled)}})
     logger.info("talent media link toggled: talent=%s enabled=%s by=%s", tid, payload.enabled, admin.get("email"))
     return {"enabled": bool(payload.enabled), "token": token, "url": media_link_url(token) if token else None}
+
+
+@router.post("/talents/{tid}/media-download/link")
+async def get_media_download_link(tid: str, admin: dict = Depends(current_team_or_admin)):
+    """The talent's current usable link — a fresh one if the last link expired. Never a revived expired link."""
+    resolved = await resolve_media_link(tid)
+    if resolved is None:
+        raise HTTPException(404, "Talent not found")
+    return {"url": resolved[1]}
 
 
 # ---------------------------------------------------------------------------

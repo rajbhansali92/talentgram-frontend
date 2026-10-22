@@ -752,12 +752,13 @@ async def group_collisions(group: str, project_id: Optional[str]) -> Dict[str, i
 async def peek_media_link(tid: str) -> dict:
     """What the talent's media link WOULD be, without writing anything (resolve_media_link mints a token on first
     use — a write — so previews use this and only the confirmed send mints)."""
-    from routers.talent_media import is_media_download_enabled, media_link_url
-    t = await db.talents.find_one({"id": tid}, {"_id": 0, "id": 1, "status": 1, "media_download_enabled": 1, "media_download_token": 1})
+    from routers.talent_media import is_media_download_enabled, media_link_url, usable_token
+    t = await db.talents.find_one({"id": tid}, {"_id": 0, "id": 1, "status": 1, "media_download_enabled": 1})
     if t is None:          # NOT `if not t`: a real talent with none of the optional fields projects to {} (falsy)
         return {"state": "missing"}
     if not is_media_download_enabled(t) or str(t.get("status") or "").lower() in ("archived", "merged"):
         return {"state": "off"}
-    if t.get("media_download_token"):
-        return {"state": "ready", "url": media_link_url(t["media_download_token"])}
+    token = await usable_token(tid)                    # None when there is no link yet OR the last one has expired (a fresh one is created on confirm)
+    if token:
+        return {"state": "ready", "url": media_link_url(token)}
     return {"state": "will_create"}

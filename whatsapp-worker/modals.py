@@ -40,6 +40,10 @@ KNOWN_DIALOG_PATTERNS = [
     r"what.{0,3}s new on whatsapp",      # "What’s new on WhatsApp Web" (Jul 2026 rollout)
     r"turn on notifications",
     r"whatsapp is now faster",
+    # Informational "Camera not found / You can't make a call because it looks like your computer doesn't have a
+    # camera" popup (a call attempt on a camera-less headless browser). Its only control is OK. Left unrecognised it
+    # stayed on screen and failed EVERY send at chat-open (batch fa40a1e6, 2026-10-22), so it is exact-matched here.
+    r"camera not found",
 ]
 
 # Explicit close/X controls, scoped INSIDE the dialog.

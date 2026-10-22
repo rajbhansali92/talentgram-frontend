@@ -235,6 +235,40 @@ def main():
     assert "bounding_rect" in diag and "computed_position" in diag
     print("9. UNKNOWN dialog diagnostics   -> ancestry/rect/style/context captured, behavior unchanged")
 
+    # 10. Production 2026-10-22 (batch fa40a1e6): WhatsApp Web's informational "Camera not found" popup stayed open and,
+    #     being unrecognised, failed every send at chat-open. Exact production text; its only control is OK.
+    CAMERA_BODY = (
+        "Camera not found\n"
+        "You can't make a call because it looks like your computer doesn't have a camera. "
+        "Try connecting one or if you have one connected, try restarting your browser.\n"
+        "OK"
+    )
+    assert modals._is_recognized("Camera not found", CAMERA_BODY) is True
+    p = FakePage(body=CAMERA_BODY, dismisses_on={"key:Escape"}, has_close=False, safe_labels=("OK",))
+    assert run(modals.dismiss_blocking_dialogs(p, "pre-open")) is True
+    assert p.actions == ["key:Escape"], p.actions
+    p = FakePage(body=CAMERA_BODY, dismisses_on={"click:OK"}, has_close=False, safe_labels=("OK",))
+    assert run(modals.dismiss_blocking_dialogs(p, "pre-open")) is True
+    assert p.actions == ["key:Escape", "click:OK"], p.actions          # Escape first, then only the whitelisted OK
+    n_before = len(fake_db.docs)
+    p = FakePage(body=CAMERA_BODY, dismisses_on=set(), has_close=False, safe_labels=("OK",))
+    assert run(modals.dismiss_blocking_dialogs(p, "pre-open")) is False   # if it cannot be cleared: still fails safe,
+    assert fake_db.docs[-1]["reason"] == "dialog_undismissable"           # captured, nothing forced
+    assert len(fake_db.docs) == n_before + 1
+    print("10. 'Camera not found' popup    -> recognized; Escape then OK only; undismissable still fails safe")
+
+    # 11. The new pattern is exact: other camera/call/permission dialogs, and risky ones with an OK button, stay UNKNOWN
+    #     (zero interaction) — nothing broader than the observed popup is ever auto-clicked.
+    for risky in ("Allow camera access?\nWhatsApp wants to use your camera.\nOK",
+                  "Start video call?\nCall Talent Name\nOK",
+                  "Log out of all devices?\nCancel\nOK",
+                  "Delete this chat?\nThis cannot be undone\nOK"):
+        assert modals._is_recognized(risky.split("\n")[0], risky) is False, risky
+        p = FakePage(body=risky, dismisses_on=set(), safe_labels=("OK",))
+        assert run(modals.dismiss_blocking_dialogs(p, "pre-open")) is False
+        assert p.actions == [], (risky, p.actions)
+    print("11. exactness                   -> other camera/call/risky dialogs stay UNKNOWN, zero interactions")
+
     print("\nALL MODAL-FRAMEWORK REGRESSION TESTS PASSED")
 
 

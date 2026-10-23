@@ -26,6 +26,19 @@ export const formatCurrency = (val) => {
     }
 };
 
+// GST and instalment figures carry paise (1,097.39 + 137.17 = 1,234.56): whole rupees when the amount is whole,
+// two decimals otherwise, so a displayed breakdown always adds up to the displayed total.
+export const formatMoneyExact = (val) => {
+    if (val === undefined || val === null || val === "") return "—";
+    const n = Number(val);
+    if (!Number.isFinite(n) || Math.abs(n - Math.round(n)) < 0.005) return formatCurrency(Number.isFinite(n) ? Math.round(n) : val);
+    try {
+        return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+    } catch {
+        return `₹${n.toFixed(2)}`;
+    }
+};
+
 // due_at / pd_*_at fields are stored as full ISO datetimes (matching
 // core._now()'s own shape); a plain <input type="date"> only round-trips
 // the date part, so these convert at the UI boundary — noon UTC is the

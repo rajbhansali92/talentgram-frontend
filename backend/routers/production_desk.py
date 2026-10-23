@@ -122,6 +122,7 @@ from core import (
 # Reuse the EXISTING generic admin-notification fan-out (Dashboard "Recent
 # Activity" feed) — not a new activity/audit system. See module docstring.
 from notifications import fanout as notify_fanout
+import production_money as pm
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["Production Desk"])
@@ -459,6 +460,19 @@ def _talent_card(
         if commissionable_amount is not None
         else None
     )
+    # What Talentgram owes THIS talent, with GST only where a valid GST invoice is recorded, the
+    # instalments paid so far and the ageing — one pure calculation (production_money). It never
+    # changes the net payable above; legacy rows (no GST/instalments) keep their old meaning.
+    payable = pm.talent_obligation_view(
+        net_payable=invoice_amount, treatment=row.get("pd_talent_gst_treatment"), rate=row.get("pd_talent_gst_rate"),
+        gst_invoice_number=row.get("pd_talent_gst_invoice_number"), gst_invoice_date=row.get("pd_talent_gst_invoice_date"),
+        due_date=row.get("pd_talent_due_date"), payments=row.get("pd_talent_payments"),
+        legacy_cleared=(row.get("pd_payment_status") or "pending") == "cleared", today=ist_today(),
+    )
+    payment_status = (
+        ("cleared" if payable["state"] == "paid" else "pending") if payable is not None
+        else (row.get("pd_payment_status") or "pending")
+    )
 
     # ── Production (client) side — INTERNAL ONLY ───────────────────────────
     # `pd_budget_*` above is the TALENT-facing agreed rate: commission, the talent's
@@ -505,7 +519,15 @@ def _talent_card(
         "shooting_days": shooting_days,
         "commission_percent": (commission_fraction * 100.0) if commission_fraction is not None else None,
         "commission_amount": commission_amount,
-        "payment_status": row.get("pd_payment_status") or "pending",
+        "payment_status": payment_status,
+        # GST invoice + instalments (production_money.talent_obligation_view); None until a net payable exists.
+        "payable": payable,
+        "gst_treatment": row.get("pd_talent_gst_treatment"),
+        "gst_rate": row.get("pd_talent_gst_rate"),
+        "gst_invoice_number": row.get("pd_talent_gst_invoice_number"),
+        "gst_invoice_date": row.get("pd_talent_gst_invoice_date"),
+        "payment_due_date": row.get("pd_talent_due_date"),
+        "payments": row.get("pd_talent_payments") or [],
         # V2 — per-day shooting schedule + overtime (spec sections 1-4).
         "shoot_days": shoot_days,
         "extra_hours_total": extra_hours_total,
@@ -691,6 +713,7 @@ def _financial_rollup(
     locked: List[dict], project: dict, *, production_overtime_total: float, production_reimbursements_total: float,
     ot_spread_total: float, reimbursement_spread_total: float,
     kickbacks_total: float, commission_gross: float, tranches: List[dict], tranches_received_total: float,
+    tranches_received_gst_total: float = 0.0,
 ) -> Dict[str, Any]:
     """The ONE place the project-level money model is computed (the desk summary and the
     payment follow-up message both call this, so they can never disagree).
@@ -733,11 +756,16 @@ def _financial_rollup(
         received = float(tranches_received_total)
     else:
         received = 0.0
+    # Cash received may include GST collected on a GST-recorded invoice; the production's BASE
+    # billing (quote + OT + reimbursements, ex-GST) is reduced only by the non-GST part. With no GST
+    # recorded (every historical tranche) this is exactly the old figure.
+    received_base = received - float(tranches_received_gst_total or 0.0)
     # An explicit "client payment received" tick means the production has paid in full.
     if project.get("pd_payment_in_received") and billable is not None:
         received = max(received, billable)
+        received_base = max(received_base, billable)
     outstanding = (
-        round(max(billable - received, 0.0), 2)
+        round(max(billable - received_base, 0.0), 2)
         if billable is not None and basis != "partial"
         else None
     )
@@ -794,12 +822,17 @@ def _desk_summary(locked: List[dict], project: dict, reimbursements: List[dict],
     reimbursements_total_all = round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2)
     production_reimbursements_total_all = round(sum(_reimbursement_production_amount(r) for r in reimbursements), 2)
     production_overtime_total_all = round(sum(c["production_overtime"] for c in locked), 2)
-    tranches_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches), 2)
-    tranches_received_total = round(sum(_num(t.get("amount")) or 0.0 for t in tranches if t.get("payment_status") == "received"), 2)
-    # What Talentgram actually owes the talents: their NET payable (rate + overtime - commission +
-    # reimbursements), split by the payment status already tracked per talent.
-    talent_paid_total = round(sum(c["talent_net_payable"] for c in locked if c["payment_status"] == "cleared" and c.get("talent_net_payable") is not None), 2)
-    talent_pending_total = round(sum(c["talent_net_payable"] for c in locked if c["payment_status"] != "cleared" and c.get("talent_net_payable") is not None), 2)
+    tviews = [_tranche_receivable(t, project) for t in tranches]
+    receivables = _client_receivables(tviews)
+    tranches_total = round(sum(v["invoice_total"] or 0.0 for v in tviews), 2)
+    tranches_received_total = round(sum(v["received"] for v in tviews), 2)
+    # What Talentgram actually owes the talents: net payable (rate + overtime - commission +
+    # reimbursements) plus GST where a valid GST invoice is recorded, split by the instalments paid.
+    # Legacy rows (binary cleared/pending) give exactly the old paid/pending figures.
+    obligations = [c["payable"] for c in locked if c.get("payable")]
+    talent_paid_total = round(sum(o["paid"] for o in obligations), 2)
+    talent_pending_total = round(sum(o["balance"] for o in obligations), 2)
+    talent_payables = _talent_payables(obligations)
     return {
         "locked_count": len(locked),
         "shoot_days": project.get("pd_shooting_days"),
@@ -819,6 +852,8 @@ def _desk_summary(locked: List[dict], project: dict, reimbursements: List[dict],
         "tranches_received_total": tranches_received_total,
         "talent_paid_total": talent_paid_total,
         "talent_pending_total": talent_pending_total,
+        "client_receivables": receivables,
+        "talent_payables": talent_payables,
         **_financial_rollup(
             locked, project, production_overtime_total=production_overtime_total_all,
             production_reimbursements_total=production_reimbursements_total_all,
@@ -826,13 +861,64 @@ def _desk_summary(locked: List[dict], project: dict, reimbursements: List[dict],
             reimbursement_spread_total=production_reimbursements_total_all - reimbursements_total_all,
             kickbacks_total=kickbacks_total, commission_gross=commission_gross,
             tranches=tranches, tranches_received_total=tranches_received_total,
+            tranches_received_gst_total=receivables["received_gst_total"],
         ),
+    }
+
+
+def _tranche_receivable(t: dict, project: dict) -> Dict[str, Any]:
+    """One client invoice (tranche) through the central money rules. A tranche that has no instalments and is
+    marked "received" counts its whole recorded amount, exactly as before instalments existed."""
+    return pm.receivable_view(
+        amount=t.get("amount"), treatment=t.get("gst_treatment"), rate=t.get("gst_rate"), payments=t.get("payments"),
+        legacy_received=t.get("payment_status") == "received" and not t.get("payments"),
+        due_date=t.get("due_date"), invoice_date=t.get("invoice_date"),
+        terms=project.get("pd_payment_terms"), expected_date=project.get("pd_expected_payment_date"), today=ist_today(),
+    )
+
+
+def _client_receivables(views: List[dict]) -> Dict[str, Any]:
+    """Project-level client receivables from the per-invoice views. GST figures cover only invoices whose
+    tax treatment is recorded; the rest are reported separately (`tax_unresolved_*`), never guessed."""
+    resolved = [v for v in views if v["tax"]["state"] in ("none", "exclusive", "inclusive")]
+    unresolved = [v for v in views if v["tax"]["state"] not in ("none", "exclusive", "inclusive")]
+    overdue = [v for v in views if v["overdue"]]
+    return {
+        "invoice_count": len(views),
+        "gst_recorded_count": sum(1 for v in resolved if v["tax"]["state"] in ("exclusive", "inclusive")),
+        "tax_unresolved_count": len(unresolved),
+        "tax_unresolved_total": round(sum(v["invoice_total"] or 0.0 for v in unresolved), 2),
+        "invoiced_base_total": round(sum(v["tax"]["base"] for v in resolved), 2),
+        "invoiced_gst_total": round(sum(v["tax"]["gst"] for v in resolved), 2),
+        "invoiced_total": round(sum(v["invoice_total"] or 0.0 for v in views), 2),
+        "received_total": round(sum(v["received"] for v in views), 2),
+        "received_gst_total": round(sum(v["received_gst"] or 0.0 for v in resolved), 2),
+        "outstanding_total": round(sum(v["outstanding"] or 0.0 for v in views), 2),
+        "outstanding_gst_total": round(sum(v["outstanding_gst"] or 0.0 for v in resolved), 2),
+        "overdue_count": len(overdue),
+        "overdue_total": round(sum(v["outstanding"] or 0.0 for v in overdue), 2),
+        "max_days_overdue": max((v["days_overdue"] for v in overdue), default=0),
+    }
+
+
+def _talent_payables(obligations: List[dict]) -> Dict[str, Any]:
+    overdue = [o for o in obligations if o["overdue"]]
+    return {
+        "count": len(obligations),
+        "gst_total": round(sum(o["gst"] for o in obligations), 2),
+        "total_payable": round(sum(o["total_payable"] for o in obligations), 2),
+        "paid_total": round(sum(o["paid"] for o in obligations), 2),
+        "balance_total": round(sum(o["balance"] for o in obligations), 2),
+        "gst_invoice_missing_count": sum(1 for o in obligations if o["gst_state"] in ("invoice_missing", "incomplete")),
+        "overdue_count": len(overdue),
+        "overdue_total": round(sum(o["balance"] for o in overdue), 2),
+        "max_days_overdue": max((o["days_overdue"] for o in overdue), default=0),
     }
 
 
 def _needs_attention(
     project: dict, locked: List[dict], reimbursements: List[dict], documents: List[dict], overdue_task_count: int,
-    *, followup_due_today: bool, followup_overdue: bool,
+    *, followup_due_today: bool, followup_overdue: bool, summary: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """The ONE Needs Attention definition — the project page and the global Production Desk both call it."""
     cleared = sum(1 for c in locked if c["payment_status"] == "cleared")
@@ -865,6 +951,12 @@ def _needs_attention(
     if overdue_task_count:
         n = overdue_task_count
         needs_attention.append(f"{n} task{'s' if n != 1 else ''} overdue")
+    cr = (summary or {}).get("client_receivables") or {}
+    if cr.get("overdue_count"):
+        needs_attention.append(f"Client payment overdue: ₹{_fmt_inr(cr['overdue_total'])} ({cr['max_days_overdue']} days)")
+    tp = (summary or {}).get("talent_payables") or {}
+    if tp.get("overdue_count"):
+        needs_attention.append(f"Talent payment overdue: {tp['overdue_count']} ({tp['max_days_overdue']} days)")
     if payment_followup_overdue:
         needs_attention.append("Payment follow-up overdue")
     elif payment_followup_due_today:
@@ -1017,10 +1109,13 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
     followup_status = project.get("pd_payment_followup_status") or "not_due"
     payment_followup_due_today, payment_followup_overdue, payment_followup_upcoming = _followup_flags(project, today_start, today_end)
 
+    summary = _desk_summary(locked, project, reimbursements, kickbacks, tranches)
     needs_attention = _needs_attention(
         project, locked, reimbursements, documents, len(task_buckets["overdue"]),
-        followup_due_today=payment_followup_due_today, followup_overdue=payment_followup_overdue,
+        followup_due_today=payment_followup_due_today, followup_overdue=payment_followup_overdue, summary=summary,
     )
+    for t in tranches:
+        t["receivable"] = _tranche_receivable(t, project)
 
     # V2 polish (spec section 32) — "recently completed", using each
     # record's own updated_at (already set by every status-changing PATCH
@@ -1111,7 +1206,7 @@ async def get_production_desk(pid: str, admin: dict = Depends(current_team_or_ad
         # actually has a key, so an unconfigured environment never makes (or logs) a failing request.
         "capabilities": {"places_search": bool((os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip())},
         "locked_talents": locked,
-        "summary": _desk_summary(locked, project, reimbursements, kickbacks, tranches),
+        "summary": summary,
         "needs_attention": needs_attention,
         "kickbacks": kickbacks,
         "reimbursements": reimbursements,
@@ -1318,6 +1413,13 @@ class TalentProductionPatch(BaseModel):
     shooting_days: Optional[int] = None
     commission_percent: Optional[float] = None
     payment_status: Optional[str] = None
+    # Talent's own GST invoice to Talentgram (separate from commission and from the client's GST). A taxable
+    # treatment counts only with a rate AND an invoice number; otherwise GST is shown as "invoice missing".
+    gst_treatment: Optional[str] = None      # none | exclusive | inclusive ; null clears
+    gst_rate: Optional[float] = None
+    gst_invoice_number: Optional[str] = Field(None, max_length=60)
+    gst_invoice_date: Optional[str] = None
+    payment_due_date: Optional[str] = None
     # Talent Preparation (Phase 2)
     costume_trial_at: Optional[str] = None
     # V2 polish (spec section 2) — free-text time, matching the exact
@@ -1348,6 +1450,17 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
         raise HTTPException(400, f"look_test_status must be one of {TRIAL_STATUS_OPTIONS}")
     if payload.shoot_status is not None and payload.shoot_status not in SHOOT_STATUS_OPTIONS:
         raise HTTPException(400, f"shoot_status must be one of {SHOOT_STATUS_OPTIONS}")
+    sent = payload.model_dump(exclude_unset=True)
+    if row.get("pd_talent_payments") and "payment_status" in sent:
+        raise HTTPException(400, "This talent has recorded payments — add, edit or void a payment instead of changing the status.")
+    if {"gst_treatment", "gst_rate", "gst_invoice_number", "gst_invoice_date", "payment_due_date"} & set(sent):
+        merged_treatment = sent.get("gst_treatment", row.get("pd_talent_gst_treatment")) or None
+        merged_rate = sent.get("gst_rate", row.get("pd_talent_gst_rate"))
+        if "gst_treatment" in sent and merged_treatment not in ("exclusive", "inclusive"):
+            merged_rate = None
+        _check_tax_fields(merged_treatment, merged_rate)
+        _check_date(sent.get("gst_invoice_date"), "gst_invoice_date")
+        _check_date(sent.get("payment_due_date"), "payment_due_date")
 
     field_map = {
         "budget_per_day": "pd_budget_per_day",
@@ -1357,6 +1470,11 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
         "shooting_days": "pd_shooting_days",
         "commission_percent": "pd_commission_percent",
         "payment_status": "pd_payment_status",
+        "gst_treatment": "pd_talent_gst_treatment",
+        "gst_rate": "pd_talent_gst_rate",
+        "gst_invoice_number": "pd_talent_gst_invoice_number",
+        "gst_invoice_date": "pd_talent_gst_invoice_date",
+        "payment_due_date": "pd_talent_due_date",
         "costume_trial_at": "pd_costume_trial_at",
         "costume_trial_time": "pd_costume_trial_time",
         "costume_trial_location": "pd_costume_trial_location",
@@ -1367,8 +1485,20 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
         "special_instructions": "pd_special_instructions",
         "shoot_status": "pd_shoot_status",
     }
-    updates = {field_map[k]: v for k, v in payload.model_dump(exclude_unset=True).items()}
+    updates = {field_map[k]: v for k, v in sent.items()}
+    for k in ("pd_talent_gst_treatment", "pd_talent_gst_invoice_number", "pd_talent_gst_invoice_date", "pd_talent_due_date"):
+        if k in updates and updates[k] in ("", None):
+            updates[k] = None  # an empty value clears it ("not recorded") — it is never defaulted
+    if "pd_talent_gst_treatment" in updates and updates["pd_talent_gst_treatment"] not in ("exclusive", "inclusive"):
+        updates["pd_talent_gst_rate"] = None
     if updates:
+        # A GST/due-date change must not push the total payable below what was already paid.
+        if any(k.startswith("pd_talent_") for k in updates):
+            project_doc = await _get_project_or_404(pid)
+            t, rt = await _talent_pay_context(pid, talent_id)
+            prospective = _talent_card(t, {**row, **updates}, project_doc, *rt)["payable"]
+            if prospective and prospective["paid"] > prospective["total_payable"] + pm.TOLERANCE:
+                raise HTTPException(400, "The total payable would drop below the amount already paid — correct or void a payment first.")
         updates["updated_at"] = _now()
         await db.casting_pipeline.update_one({"project_id": pid, "talent_id": talent_id}, {"$set": updates})
 
@@ -1386,6 +1516,107 @@ async def update_locked_talent_production(pid: str, talent_id: str, payload: Tal
                 payload={"project_id": pid, "talent_id": talent_id},
                 actor_id=admin.get("id"),
             )
+    return await get_production_desk(pid, admin)
+
+
+# ---- talent instalments (payments made to one talent) ---------------------------------------------------
+async def _talent_pay_context(pid: str, talent_id: str):
+    """(talent doc, (talent reimbursements, production reimbursements)) — what _talent_card needs besides the row."""
+    t = await db.talents.find_one(
+        {"id": talent_id},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "phone": 1, "instagram_handle": 1, "cover_media_id": 1, "media": 1, "whatsapp_group_name": 1},
+    )
+    if not t:
+        raise HTTPException(404, "Talent not found")
+    reimbs = await db.project_reimbursements.find({"project_id": pid, "talent_id": talent_id}, {"_id": 0}).to_list(500)
+    return t, _reimbursement_totals(reimbs).get(talent_id, (0.0, 0.0))
+
+
+def _talent_payments_sets(project: dict, t: dict, rt: tuple, row: dict, pays: List[dict]) -> dict:
+    after = _talent_card(t, {**row, "pd_talent_payments": pays}, project, *rt)
+    return {"pd_talent_payments": pays, "pd_payment_status": after["payment_status"], "updated_at": _now()}
+
+
+async def _talent_payment_write(pid: str, talent_id: str, admin: dict, mutate) -> None:
+    project = await _get_project_or_404(pid)
+    await _get_locked_pipeline_row(pid, talent_id)
+    t, rt = await _talent_pay_context(pid, talent_id)
+    seen: Dict[str, Any] = {}
+
+    def build(row):
+        before = _talent_card(t, row, project, *rt)
+        if before["payable"] is None:
+            raise HTTPException(400, "Enter the talent's agreed rate and commission first — there is no amount payable yet.")
+        pays = list(row.get("pd_talent_payments") or [])
+        if not pays and (row.get("pd_payment_status") or "pending") == "cleared":
+            # marked cleared before instalments existed: keep it as ONE instalment of the net payable it covered
+            pays = [{"id": str(uuid.uuid4()), "amount": before["payable"]["net_payable"], "date": None, "reference": None,
+                     "notes": "Marked cleared before instalments were recorded", "gst_amount": None, "request_id": None,
+                     "status": "active", "created_at": _now(), "created_by": None, "revisions": [], "legacy": True}]
+        pays = mutate(pays, {**row, "pd_talent_payments": pays}, lambda r: _talent_card(t, r, project, *rt)["payable"])
+        if pays is None:
+            return None
+        sets = _talent_payments_sets(project, t, rt, row, pays)
+        seen["before"], seen["after"] = before["payment_status"], sets["pd_payment_status"]
+        return sets
+
+    await _cas_write(db.casting_pipeline, {"project_id": pid, "talent_id": talent_id}, "pd_pay_ver", build)
+    if seen.get("before") != "cleared" and seen.get("after") == "cleared":
+        await notify_fanout(
+            db, type="production_desk_payment_cleared",
+            title=f"Talent payment cleared — {t.get('name') or 'Talent'}",
+            body=f"{project.get('brand_name') or 'Project'} — fully paid on Production Desk.",
+            payload={"project_id": pid, "talent_id": talent_id}, actor_id=admin.get("id"),
+        )
+
+
+@router.post("/{pid}/production-desk/talents/{talent_id}/payments")
+async def add_talent_payment(pid: str, talent_id: str, payload: PaymentIn, admin: dict = Depends(current_team_or_admin)):
+    _check_request_id(payload.request_id)
+    new = _new_payment(payload, admin)
+
+    def mutate(pays, row, payable_of):
+        if payload.request_id and any(p.get("request_id") == payload.request_id for p in pays):
+            return None  # same submission repeated — already recorded
+        view = payable_of(row)
+        if payload.gst_amount is not None and not (view["gst"] or 0) > 0:
+            raise HTTPException(400, "No valid GST invoice is recorded for this talent, so a GST portion cannot be set.")
+        err = pm.validate_new_payment(view["total_payable"], view["paid"], payload.amount, payload.gst_amount)
+        if err:
+            raise HTTPException(400, err)
+        return [*pays, new]
+
+    await _talent_payment_write(pid, talent_id, admin, mutate)
+    return await get_production_desk(pid, admin)
+
+
+@router.patch("/{pid}/production-desk/talents/{talent_id}/payments/{payment_id}")
+async def edit_talent_payment(pid: str, talent_id: str, payment_id: str, payload: PaymentUpdateIn, admin: dict = Depends(current_team_or_admin)):
+    def mutate(pays, row, payable_of):
+        i = _instalment_change(pays, payment_id)
+        edited = _edited(pays[i], payload, admin)
+        rest = [p for j, p in enumerate(pays) if j != i]
+        view = payable_of({**row, "pd_talent_payments": rest})
+        err = pm.validate_new_payment(view["total_payable"], view["paid"], edited["amount"], edited.get("gst_amount"))
+        if err:
+            raise HTTPException(400, err)
+        out = list(pays)
+        out[i] = edited
+        return out
+
+    await _talent_payment_write(pid, talent_id, admin, mutate)
+    return await get_production_desk(pid, admin)
+
+
+@router.delete("/{pid}/production-desk/talents/{talent_id}/payments/{payment_id}")
+async def void_talent_payment(pid: str, talent_id: str, payment_id: str, admin: dict = Depends(current_team_or_admin)):
+    def mutate(pays, row, payable_of):
+        i = _instalment_change(pays, payment_id)
+        out = list(pays)
+        out[i] = {**pays[i], "status": "voided", "voided_at": _now(), "voided_by": admin.get("email")}
+        return out
+
+    await _talent_payment_write(pid, talent_id, admin, mutate)
     return await get_production_desk(pid, admin)
 
 
@@ -1970,6 +2201,24 @@ async def get_place(
 # reconciliation (see module docstring's Zoho section for the same
 # "honest, not-built" boundary this follows).
 # ---------------------------------------------------------------------------
+_PAY_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,100}$")
+
+
+def _check_tax_fields(treatment: Optional[str], rate: Optional[float]) -> None:
+    """Tax treatment is explicit or absent — never defaulted. A taxable treatment needs its rate."""
+    if treatment not in (None, "") and treatment not in pm.GST_TREATMENTS:
+        raise HTTPException(400, f"gst_treatment must be one of {list(pm.GST_TREATMENTS)}")
+    if rate is not None and not (0 <= rate <= 100):
+        raise HTTPException(400, "gst_rate must be between 0 and 100")
+    if treatment in ("exclusive", "inclusive") and rate is None:
+        raise HTTPException(400, "A GST rate is required when GST is added on top or included.")
+
+
+def _check_date(raw: Optional[str], label: str) -> None:
+    if raw not in (None, "") and pm.parse_date(raw) is None:
+        raise HTTPException(400, f"{label} must be a valid date (YYYY-MM-DD)")
+
+
 class TrancheIn(BaseModel):
     name: str = Field(..., min_length=1)
     amount: float = Field(..., gt=0)
@@ -1980,6 +2229,11 @@ class TrancheIn(BaseModel):
     payment_status: Optional[str] = "pending"
     payment_date: Optional[str] = None
     notes: Optional[str] = None
+    # Tax + terms of THIS invoice. gst_treatment: none | exclusive (GST added on top of `amount`) |
+    # inclusive (`amount` already includes GST); unset = not recorded (legacy). No default rate.
+    gst_treatment: Optional[str] = None
+    gst_rate: Optional[float] = None
+    due_date: Optional[str] = None
 
 
 class TrancheUpdateIn(BaseModel):
@@ -1992,6 +2246,30 @@ class TrancheUpdateIn(BaseModel):
     payment_status: Optional[str] = None
     payment_date: Optional[str] = None
     notes: Optional[str] = None
+    gst_treatment: Optional[str] = None
+    gst_rate: Optional[float] = None
+    due_date: Optional[str] = None
+
+
+class PaymentIn(BaseModel):
+    """One instalment against a client invoice or a talent obligation."""
+    amount: float = Field(..., gt=0)
+    date: Optional[str] = None
+    reference: Optional[str] = Field(None, max_length=120)
+    notes: Optional[str] = Field(None, max_length=500)
+    # Optional: how much of THIS payment is GST. Unset = pro-rata to the invoice's own GST/total mix.
+    gst_amount: Optional[float] = Field(None, ge=0)
+    # Client-generated once per submit (reused on a retry): a double-click or network retry with the same
+    # id can never record the payment twice.
+    request_id: Optional[str] = None
+
+
+class PaymentUpdateIn(BaseModel):
+    amount: Optional[float] = Field(None, gt=0)
+    date: Optional[str] = None
+    reference: Optional[str] = Field(None, max_length=120)
+    notes: Optional[str] = Field(None, max_length=500)
+    gst_amount: Optional[float] = Field(None, ge=0)
 
 
 def _validate_tranche_statuses(invoice_status, payment_status):
@@ -2001,10 +2279,82 @@ def _validate_tranche_statuses(invoice_status, payment_status):
         raise HTTPException(400, f"payment_status must be one of {TRANCHE_PAYMENT_STATUSES}")
 
 
+async def _cas_write(coll, flt: dict, ver_field: str, build) -> dict:
+    """Versioned read-modify-write: `build(doc)` returns the $set fields (or None for an idempotent no-op,
+    or raises HTTPException). The write only lands if nobody changed the record since it was read, so two
+    simultaneous payments can never both pass the overpayment check or overwrite each other."""
+    for _ in range(6):
+        doc = await coll.find_one(flt)
+        if not doc:
+            raise HTTPException(404, "Record not found")
+        cur = int(doc.get(ver_field) or 0)
+        sets = build(doc)
+        if sets is None:
+            return doc
+        guard = {**flt, ver_field: cur} if cur else {**flt, "$or": [{ver_field: {"$exists": False}}, {ver_field: 0}]}
+        res = await coll.update_one(guard, {"$set": sets, "$inc": {ver_field: 1}})
+        if res.matched_count:
+            return doc
+    raise HTTPException(409, "This record was changed at the same moment — please retry.")
+
+
+def _clean_text(v: Optional[str]) -> Optional[str]:
+    v = (v or "").strip()
+    return v or None
+
+
+def _new_payment(payload: PaymentIn, admin: dict) -> dict:
+    _check_date(payload.date, "Payment date")
+    return {
+        "id": str(uuid.uuid4()), "amount": pm.money(payload.amount), "date": (payload.date or None),
+        "reference": _clean_text(payload.reference), "notes": _clean_text(payload.notes),
+        "gst_amount": None if payload.gst_amount is None else pm.money(payload.gst_amount),
+        "request_id": payload.request_id, "status": "active", "created_at": _now(),
+        "created_by": admin.get("email"), "revisions": [],
+    }
+
+
+def _check_request_id(rid: Optional[str]) -> None:
+    if rid is not None and not _PAY_REQUEST_ID_RE.match(rid):
+        raise HTTPException(400, "request_id must be 8-100 characters (letters, digits, - or _)")
+
+
+def _edited(pay: dict, payload: PaymentUpdateIn, admin: dict) -> dict:
+    changes = payload.model_dump(exclude_unset=True)
+    if "date" in changes:
+        _check_date(changes["date"], "Payment date")
+    prev = {k: pay.get(k) for k in ("amount", "date", "reference", "notes", "gst_amount")}
+    out = dict(pay)
+    for k, v in changes.items():
+        out[k] = pm.money(v) if k in ("amount", "gst_amount") and v is not None else (_clean_text(v) if k in ("reference", "notes") else (v or None))
+    out["revisions"] = [*(pay.get("revisions") or []), {"at": _now(), "by": admin.get("email"), "previous": prev}]
+    out["updated_at"] = _now()
+    return out
+
+
+def _tranche_derived(doc: dict, project: dict) -> dict:
+    """Keep the legacy binary fields in step with the instalments (other readers — Management Agent,
+    the Completed list — still look at them)."""
+    v = _tranche_receivable(doc, project)
+    return {"payment_status": "received" if v["state"] == "paid" else "pending", "payment_date": v["last_payment_date"]}
+
+
+def _legacy_tranche_seed(doc: dict) -> List[dict]:
+    """A tranche marked "received" before instalments existed becomes ONE instalment of its recorded amount,
+    on its recorded payment date (or no date) — nothing is invented."""
+    if doc.get("payments") or doc.get("payment_status") != "received":
+        return list(doc.get("payments") or [])
+    return [{"id": str(uuid.uuid4()), "amount": pm.money(doc.get("amount")), "date": doc.get("payment_date") or None, "reference": None,
+             "notes": "Marked received before instalments were recorded", "gst_amount": None, "request_id": None, "status": "active",
+             "created_at": _now(), "created_by": None, "revisions": [], "legacy": True}]
+
+
 @router.post("/{pid}/production-desk/tranches")
 async def add_tranche(pid: str, payload: TrancheIn, admin: dict = Depends(current_team_or_admin)):
     await _get_project_or_404(pid)
     _validate_tranche_statuses(payload.invoice_status, payload.payment_status)
+    _check_tax_fields(payload.gst_treatment, payload.gst_rate)
+    _check_date(payload.due_date, "due_date")
     doc = {
         "id": str(uuid.uuid4()),
         "project_id": pid,
@@ -2017,6 +2367,9 @@ async def add_tranche(pid: str, payload: TrancheIn, admin: dict = Depends(curren
         "payment_status": payload.payment_status or "pending",
         "payment_date": payload.payment_date,
         "notes": payload.notes,
+        "gst_treatment": payload.gst_treatment or None,
+        "gst_rate": payload.gst_rate if payload.gst_treatment in ("exclusive", "inclusive") else None,
+        "due_date": payload.due_date or None,
         "created_at": _now(),
         "created_by": admin.get("email"),
     }
@@ -2027,12 +2380,35 @@ async def add_tranche(pid: str, payload: TrancheIn, admin: dict = Depends(curren
 @router.patch("/{pid}/production-desk/tranches/{tranche_id}")
 async def update_tranche(pid: str, tranche_id: str, payload: TrancheUpdateIn, admin: dict = Depends(current_team_or_admin)):
     _validate_tranche_statuses(payload.invoice_status, payload.payment_status)
-    updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
-    if updates:
-        updates["updated_at"] = _now()
-        res = await db.project_payment_tranches.update_one({"id": tranche_id, "project_id": pid}, {"$set": updates})
-        if not res.matched_count:
-            raise HTTPException(404, "Tranche not found")
+    project = await _get_project_or_404(pid)
+    data = payload.model_dump(exclude_unset=True)
+    clearable = {"gst_treatment", "gst_rate", "due_date"}
+    updates = {k: v for k, v in data.items() if v is not None or k in clearable}
+    for k in clearable:
+        if k in updates and updates[k] in (None, ""):
+            updates[k] = None
+    if "due_date" in updates:
+        _check_date(updates["due_date"], "due_date")
+
+    def build(doc):
+        if doc.get("payments") and ({"payment_status", "payment_date"} & set(updates)):
+            raise HTTPException(400, "This invoice has recorded payments — add, edit or void a payment instead of changing its status.")
+        merged = {**doc, **updates}
+        if "gst_treatment" in updates and merged.get("gst_treatment") not in ("exclusive", "inclusive"):
+            updates["gst_rate"] = merged["gst_rate"] = None  # a rate only means something for a taxable treatment
+        _check_tax_fields(merged.get("gst_treatment"), merged.get("gst_rate"))
+        sets = dict(updates)
+        if updates:
+            v = _tranche_receivable({**merged, "payment_status": merged.get("payment_status")}, project)
+            if doc.get("payments") and v["invoice_total"] is not None and v["received"] > v["invoice_total"] + pm.TOLERANCE:
+                raise HTTPException(400, "The invoice total would drop below the amount already received — correct or void a payment first.")
+            if doc.get("payments"):
+                sets.update(_tranche_derived(merged, project))
+            sets["updated_at"] = _now()
+        return sets or None
+
+    if updates or data:
+        await _cas_write(db.project_payment_tranches, {"id": tranche_id, "project_id": pid}, "version", build)
     return await get_production_desk(pid, admin)
 
 
@@ -2041,6 +2417,73 @@ async def delete_tranche(pid: str, tranche_id: str, admin: dict = Depends(curren
     res = await db.project_payment_tranches.delete_one({"id": tranche_id, "project_id": pid})
     if not res.deleted_count:
         raise HTTPException(404, "Tranche not found")
+    return await get_production_desk(pid, admin)
+
+
+# ---- client instalments (payments received against one invoice) ----------------------------------------
+@router.post("/{pid}/production-desk/tranches/{tranche_id}/payments")
+async def add_tranche_payment(pid: str, tranche_id: str, payload: PaymentIn, admin: dict = Depends(current_team_or_admin)):
+    project = await _get_project_or_404(pid)
+    _check_request_id(payload.request_id)
+    new = _new_payment(payload, admin)
+
+    def build(doc):
+        pays = _legacy_tranche_seed(doc)
+        if payload.request_id and any(p.get("request_id") == payload.request_id for p in pays):
+            return None  # a repeat of the same submission: already recorded, nothing to do
+        view = _tranche_receivable({**doc, "payments": pays}, project)
+        if payload.gst_amount is not None and not (view["tax"]["gst"]):
+            raise HTTPException(400, "No GST is recorded on this invoice, so a GST portion cannot be set.")
+        err = pm.validate_new_payment(view["invoice_total"], view["received"], payload.amount, payload.gst_amount)
+        if err:
+            raise HTTPException(400, err)
+        pays.append(new)
+        return {"payments": pays, **_tranche_derived({**doc, "payments": pays}, project), "updated_at": _now()}
+
+    await _cas_write(db.project_payment_tranches, {"id": tranche_id, "project_id": pid}, "version", build)
+    return await get_production_desk(pid, admin)
+
+
+def _instalment_change(pays: List[dict], payment_id: str):
+    for i, p in enumerate(pays):
+        if p.get("id") == payment_id and p.get("status", "active") != "voided":
+            return i
+    raise HTTPException(404, "Payment not found")
+
+
+@router.patch("/{pid}/production-desk/tranches/{tranche_id}/payments/{payment_id}")
+async def edit_tranche_payment(pid: str, tranche_id: str, payment_id: str, payload: PaymentUpdateIn, admin: dict = Depends(current_team_or_admin)):
+    project = await _get_project_or_404(pid)
+
+    def build(doc):
+        pays = list(doc.get("payments") or [])
+        i = _instalment_change(pays, payment_id)
+        pays[i] = _edited(pays[i], payload, admin)
+        others = {**doc, "payments": [p for j, p in enumerate(pays) if j != i]}
+        view = _tranche_receivable(others, project)
+        if pays[i].get("gst_amount") is not None and not view["tax"]["gst"]:
+            raise HTTPException(400, "No GST is recorded on this invoice, so a GST portion cannot be set.")
+        err = pm.validate_new_payment(view["invoice_total"], view["received"], pays[i]["amount"], pays[i].get("gst_amount"))
+        if err:
+            raise HTTPException(400, err)
+        return {"payments": pays, **_tranche_derived({**doc, "payments": pays}, project), "updated_at": _now()}
+
+    await _cas_write(db.project_payment_tranches, {"id": tranche_id, "project_id": pid}, "version", build)
+    return await get_production_desk(pid, admin)
+
+
+@router.delete("/{pid}/production-desk/tranches/{tranche_id}/payments/{payment_id}")
+async def void_tranche_payment(pid: str, tranche_id: str, payment_id: str, admin: dict = Depends(current_team_or_admin)):
+    """A correction, not a deletion: the instalment stays in the history marked voided and no longer counts."""
+    project = await _get_project_or_404(pid)
+
+    def build(doc):
+        pays = list(doc.get("payments") or [])
+        i = _instalment_change(pays, payment_id)
+        pays[i] = {**pays[i], "status": "voided", "voided_at": _now(), "voided_by": admin.get("email")}
+        return {"payments": pays, **_tranche_derived({**doc, "payments": pays}, project), "updated_at": _now()}
+
+    await _cas_write(db.project_payment_tranches, {"id": tranche_id, "project_id": pid}, "version", build)
     return await get_production_desk(pid, admin)
 
 
@@ -2163,6 +2606,7 @@ async def _financial_context(pid: str, project: dict) -> tuple:
     locked = await _locked_talent_cards(pid, project, reimb_totals)
     kickbacks = await db.project_kickbacks.find({"project_id": pid}, {"_id": 0}).to_list(500)
     tranches = await db.project_payment_tranches.find({"project_id": pid}, {"_id": 0}).to_list(200)
+    tviews = [_tranche_receivable(t, project) for t in tranches]
     reimbursements_total = round(sum(_num(r.get("amount")) or 0.0 for r in reimbursements), 2)
     production_reimbursements_total = round(sum(_reimbursement_production_amount(r) for r in reimbursements), 2)
     rollup = _financial_rollup(
@@ -2174,7 +2618,8 @@ async def _financial_context(pid: str, project: dict) -> tuple:
         kickbacks_total=sum(_num(k.get("amount")) or 0 for k in kickbacks),
         commission_gross=sum(c["commission_amount"] for c in locked if c["commission_amount"] is not None),
         tranches=tranches,
-        tranches_received_total=round(sum(_num(t.get("amount")) or 0.0 for t in tranches if t.get("payment_status") == "received"), 2),
+        tranches_received_total=round(sum(v["received"] for v in tviews), 2),
+        tranches_received_gst_total=_client_receivables(tviews)["received_gst_total"],
     )
     return locked, rollup
 
@@ -2561,7 +3006,8 @@ async def production_overview(
         {"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "talent_id": 1, "amount": 1, "production_amount": 1, "status": 1, "material_id": 1}).to_list(20000))
     kickbacks = by_project(await db.project_kickbacks.find({"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "amount": 1}).to_list(20000))
     tranches = by_project(await db.project_payment_tranches.find(
-        {"project_id": {"$in": pid_list}}, {"_id": 0, "project_id": 1, "amount": 1, "payment_status": 1}).to_list(20000))
+        {"project_id": {"$in": pid_list}},
+        {"_id": 0, "project_id": 1, "amount": 1, "payment_status": 1, "gst_treatment": 1, "gst_rate": 1, "payments": 1, "due_date": 1, "invoice_date": 1}).to_list(20000))
     task_docs = await db.workflow_tasks.find(
         {"$or": [{"project_id": {"$in": pid_list}}, {"talent_id": {"$in": talent_ids}}], "status": {"$in": _ACTIVE_TASK_STATUSES}},
         {"_id": 0, "project_id": 1, "talent_id": 1, "status": 1, "due_at": 1},
@@ -2588,7 +3034,7 @@ async def production_overview(
         overdue = _bucket_tasks(p_tasks, today_start, today_end)["overdue"]
         documents = [m for m in (project.get("materials") or []) if m.get("category") in PRODUCTION_DESK_DOCUMENT_CATEGORIES]
         due_today, overdue_fu, _upcoming_fu = _followup_flags(project, today_start, today_end)
-        attention_items = _needs_attention(project, cards, p_reimb, documents, len(overdue), followup_due_today=due_today, followup_overdue=overdue_fu)
+        attention_items = _needs_attention(project, cards, p_reimb, documents, len(overdue), followup_due_today=due_today, followup_overdue=overdue_fu, summary=summary)
         shoot = _shoot_info(project, cards, today)
         contact = name_map.get(project.get("pd_production_contact_client_id")) or {}
         client_label = (contact.get("company_name") or project.get("production_house") or "").strip() or None

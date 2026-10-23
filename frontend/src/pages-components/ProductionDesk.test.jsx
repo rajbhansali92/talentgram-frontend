@@ -1361,3 +1361,235 @@ describe("IST dates", () => {
         expect(screen.getByTestId("pd-payment-followup-block").textContent).toMatch(/05 Oct/);
     });
 });
+
+// ---------------------------------------------------------------------------
+// GST, partial payments and payment ageing — the UI shows the server's figures
+// (`receivable` on a tranche, `payable` on a talent, `client_receivables` /
+// `talent_payables` in the summary) and never calculates or defaults GST itself.
+// ---------------------------------------------------------------------------
+describe("GST, instalments and ageing", () => {
+    const TAX = { state: "exclusive", treatment: "exclusive", rate: 18, base: 100000, gst: 18000, total: 118000 };
+    const RECV = {
+        tax: TAX, invoice_total: 118000, received: 59000, received_gst: 9000, outstanding: 59000, outstanding_gst: 9000, overpaid: 0,
+        state: "partially_paid", status: "Overdue", instalments: 1, first_payment_date: "2026-10-05", last_payment_date: "2026-10-05",
+        due_date: "2026-10-13", due_basis: "due_date", overdue: true, days_overdue: 10, days_since_invoice: null,
+    };
+    const PAYMENT = { id: "pay1", amount: 59000, date: "2026-10-05", reference: "UTR-1", notes: null, gst_amount: null, status: "active", revisions: [] };
+    const TRANCHE = {
+        id: "tr1", name: "Invoice 1", amount: 100000, trigger: null, invoice_status: "raised_and_sent", invoice_date: "2026-10-01", invoice_number: "INV-1",
+        payment_status: "pending", payment_date: null, notes: null, gst_treatment: "exclusive", gst_rate: 18, due_date: "2026-10-13",
+        payments: [PAYMENT], receivable: RECV,
+    };
+    const CR = {
+        invoice_count: 1, gst_recorded_count: 1, tax_unresolved_count: 0, tax_unresolved_total: 0, invoiced_base_total: 100000, invoiced_gst_total: 18000,
+        invoiced_total: 118000, received_total: 59000, received_gst_total: 9000, outstanding_total: 59000, outstanding_gst_total: 9000,
+        overdue_count: 1, overdue_total: 59000, max_days_overdue: 10,
+    };
+    const withTranche = (extra = {}) => ({
+        ...BASE_DATA, tranches: [TRANCHE],
+        summary: { ...BASE_DATA.summary, tranches_total: 118000, tranches_received_total: 59000, client_receivables: CR, ...extra },
+    });
+    const load = (data, apiOverrides = {}) => {
+        globalThis.__mockAdminApi = mockAdminApi({
+            get: vi.fn((url) => {
+                if (url === "/projects/proj-1/production-desk") return Promise.resolve({ data });
+                if (url === "/projects/proj-1/production-desk/known-locations") return Promise.resolve({ data: { locations: [] } });
+                if (url === "/marketing/clients") return Promise.resolve({ data: [] });
+                return Promise.resolve({ data: {} });
+            }),
+            ...apiOverrides,
+        });
+        render(<ProductionDesk projectId="proj-1" project={{}} />);
+    };
+    const text = (id) => screen.getByTestId(id).textContent;
+
+    it("a historical tranche without server GST data renders exactly as before — no GST lines, old status text", async () => {
+        load({ ...BASE_DATA, tranches: [{ id: "old", name: "Signing", amount: 40000, invoice_status: "raised", payment_status: "received", payment_date: "2026-09-01", notes: null }],
+            summary: { ...BASE_DATA.summary, tranches_total: 40000, tranches_received_total: 40000 } });
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-old")).toBeTruthy());
+        expect(text("pd-tranche-old")).toMatch(/Payment: Received/);
+        expect(text("pd-tranche-old")).not.toMatch(/GST/);
+        expect(screen.queryByTestId("pd-tranches-gst")).toBeNull();
+        expect(screen.queryByTestId("pd-fin-client-gst")).toBeNull();
+    });
+
+    it("shows base + GST = total, the partially paid status, received/outstanding with the GST part, and the ageing", async () => {
+        load(withTranche());
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-tr1-recv")).toBeTruthy());
+        expect(text("pd-tranche-tr1-recv-tax")).toMatch(/Base ₹1,00,000 \+ GST 18% ₹18,000 = ₹1,18,000/);
+        expect(text("pd-tranche-tr1-recv-status")).toMatch(/Overdue · 10d/);
+        expect(text("pd-tranche-tr1-recv-received")).toBe("₹59,000");
+        expect(text("pd-tranche-tr1-recv-outstanding")).toBe("₹59,000");
+        expect(text("pd-tranche-tr1-recv")).toMatch(/GST part ₹9,000/);
+        expect(text("pd-tranche-tr1-recv-ageing")).toMatch(/Due 13 Oct \(due date\) · 10 days overdue/);
+        expect(text("pd-tranche-total-tr1")).toBe("₹1,18,000");                      // the invoice total including GST
+        expect(text("pd-tranches-gst")).toMatch(/₹18,000.*₹9,000 received/);
+        expect(text("pd-tranches-overdue")).toMatch(/₹59,000 · up to 10 days/);
+        expect(text("pd-tranches-outstanding")).toBe("₹59,000");
+        expect(text("pd-fin-client-receivable")).toBe("₹59,000");
+        expect(text("pd-fin-client-gst")).toBe("₹18,000");
+    });
+
+    it("labels an unavailable due date and an unrecorded GST treatment instead of inventing them", async () => {
+        const v = { ...RECV, tax: { state: "not_recorded", treatment: null, rate: null, base: null, gst: null, total: 50000 }, invoice_total: 50000, received: 0, received_gst: null,
+            outstanding: 50000, outstanding_gst: null, state: "unpaid", status: "Unpaid", instalments: 0, first_payment_date: null, last_payment_date: null,
+            due_date: null, due_basis: null, overdue: false, days_overdue: 0, days_since_invoice: 22 };
+        load(withTranche({ client_receivables: { ...CR, gst_recorded_count: 0, tax_unresolved_count: 1, overdue_count: 0 } }));
+        globalThis.__mockAdminApi.get.mockImplementation((url) => Promise.resolve({ data: url === "/projects/proj-1/production-desk"
+            ? { ...withTranche({ client_receivables: { ...CR, gst_recorded_count: 0, tax_unresolved_count: 1, overdue_count: 0 } }), tranches: [{ ...TRANCHE, gst_treatment: null, gst_rate: null, due_date: null, payments: [], receivable: v }] }
+            : (url === "/marketing/clients" ? [] : {}) }));
+        cleanup();
+        render(<ProductionDesk projectId="proj-1" project={{}} />);
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-tr1-recv")).toBeTruthy());
+        expect(text("pd-tranche-tr1-recv-tax")).toBe("GST not recorded");
+        expect(text("pd-tranche-tr1-recv-ageing")).toMatch(/Due date unavailable · 22 days since invoice date/);
+        expect(text("pd-tranche-tr1-recv-status")).toBe("Unpaid");
+        expect(screen.getByTestId("pd-fin-client-gst-unresolved").textContent).toBe("1");
+    });
+
+    it("lists the instalment ledger with date and reference, and records a payment with a request id", async () => {
+        load(withTranche());
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-tr1-ledger")).toBeTruthy());
+        expect(text("pd-tranche-tr1-ledger-list")).toMatch(/₹59,000.*05 Oct.*Ref UTR-1/);
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-record"));
+        const amount = screen.getByTestId("pd-tranche-tr1-ledger-amount");
+        expect(amount.value).toBe("59000");                                           // defaults to what is still due
+        fireEvent.change(amount, { target: { value: "20000" } });
+        fireEvent.change(screen.getByTestId("pd-tranche-tr1-ledger-date"), { target: { value: "2026-10-20" } });
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-submit"));
+        await waitFor(() => expect(globalThis.__mockAdminApi.post).toHaveBeenCalledTimes(1));
+        const [url, body] = globalThis.__mockAdminApi.post.mock.calls[0];
+        expect(url).toBe("/projects/proj-1/production-desk/tranches/tr1/payments");
+        expect(body).toMatchObject({ amount: 20000, date: "2026-10-20" });
+        expect(body.request_id).toMatch(/^[A-Za-z0-9_-]{8,100}$/);
+    });
+
+    it("a double-click records one payment, and a retry after a failure re-sends the SAME request id", async () => {
+        let release;
+        const post = vi.fn()
+            .mockImplementationOnce(() => new Promise((_, reject) => { release = () => reject({ response: { data: { detail: "network" } } }); }))
+            .mockImplementation(() => Promise.resolve({ data: withTranche() }));
+        load(withTranche(), { post });
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-tr1-ledger-record")).toBeTruthy());
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-record"));
+        const submit = screen.getByTestId("pd-tranche-tr1-ledger-submit");
+        fireEvent.click(submit);
+        fireEvent.click(submit);
+        fireEvent.click(submit);
+        expect(post).toHaveBeenCalledTimes(1);                                        // in flight: further clicks are ignored
+        release();
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-tr1-ledger-submit").textContent).toBe("Save"));   // form stays open after the failure
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-submit"));
+        await waitFor(() => expect(post).toHaveBeenCalledTimes(2));
+        expect(post.mock.calls[1][1].request_id).toBe(post.mock.calls[0][1].request_id);
+    });
+
+    it("after a payment is recorded the screen shows the server's new totals immediately", async () => {
+        const paid = withTranche({ client_receivables: { ...CR, received_total: 118000, outstanding_total: 0, overdue_count: 0, overdue_total: 0 } });
+        paid.tranches = [{ ...TRANCHE, receivable: { ...RECV, received: 118000, outstanding: 0, state: "paid", status: "Paid", overdue: false, days_overdue: 0 } }];
+        load(withTranche(), { post: vi.fn(() => Promise.resolve({ data: paid })) });
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-tr1-ledger-record")).toBeTruthy());
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-record"));
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-submit"));
+        await waitFor(() => expect(text("pd-tranche-tr1-recv-status")).toBe("Paid"));
+        expect(text("pd-tranche-tr1-recv-outstanding")).toBe("₹0");
+        expect(screen.queryByTestId("pd-tranche-tr1-ledger-record")).toBeNull();      // nothing left to record
+        expect(screen.queryByTestId("pd-tranches-overdue")).toBeNull();
+    });
+
+    it("voiding and correcting an instalment call the audited endpoints", async () => {
+        load(withTranche(), { patch: vi.fn(() => Promise.resolve({ data: withTranche() })) });
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-tr1-ledger-row-pay1-edit")).toBeTruthy());
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-row-pay1-edit"));
+        fireEvent.change(screen.getByTestId("pd-tranche-tr1-ledger-row-pay1-amount"), { target: { value: "50000" } });
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-row-pay1-save"));
+        await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalledWith("/projects/proj-1/production-desk/tranches/tr1/payments/pay1", expect.objectContaining({ amount: 50000 })));
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-row-pay1-void"));
+        fireEvent.click(screen.getByTestId("pd-tranche-tr1-ledger-row-pay1-void-confirm"));
+        await waitFor(() => expect(globalThis.__mockAdminApi.delete).toHaveBeenCalledWith("/projects/proj-1/production-desk/tranches/tr1/payments/pay1"));
+    });
+
+    it("editing a tranche that has payments never sends a manual payment status, and a taxable GST needs a rate", async () => {
+        load(withTranche());
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-tr1")).toBeTruthy());
+        fireEvent.click(within(screen.getByTestId("pd-tranche-tr1")).getByText("Edit"));
+        expect(screen.getByTestId("pd-tranche-derived-note")).toBeTruthy();
+        fireEvent.click(within(screen.getByTestId("pd-tranche-tr1")).getByText("Save"));
+        await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalledTimes(1));
+        const [url, body] = globalThis.__mockAdminApi.patch.mock.calls[0];
+        expect(url).toBe("/projects/proj-1/production-desk/tranches/tr1");
+        expect(body).not.toHaveProperty("payment_status");
+        expect(body).not.toHaveProperty("payment_date");
+        expect(body).toMatchObject({ gst_treatment: "exclusive", gst_rate: 18, due_date: "2026-10-13" });
+    });
+
+    const TALENT_PAYABLE = {
+        gst_state: "valid", treatment: "exclusive", rate: 18, gst_invoice_number: "TX-77", gst_invoice_date: "2026-10-02", net_payable: 42500, base: 42500,
+        gst: 7650, total_payable: 50150, paid: 20000, balance: 30150, state: "partially_paid", status: "Partially Paid", instalments: 1,
+        first_payment_date: "2026-10-03", last_payment_date: "2026-10-03", due_date: "2099-01-01", due_basis: "due_date", overdue: false, days_overdue: 0, days_since_invoice: null,
+    };
+    const talentWith = (payable, extra = {}) => ({ ...TALENT, payable, payments: [{ id: "tp1", amount: 20000, date: "2026-10-03", status: "active", revisions: [] }], gst_treatment: "exclusive", gst_rate: 18,
+        gst_invoice_number: "TX-77", gst_invoice_date: "2026-10-02", payment_due_date: "2099-01-01", ...extra });
+
+    it("a talent with a valid GST invoice shows base, GST, total payable, paid, remaining and the invoice reference", async () => {
+        load({ ...BASE_DATA, locked_talents: [talentWith(TALENT_PAYABLE)] });
+        await waitFor(() => expect(screen.getByTestId("pd-payable-t1")).toBeTruthy());
+        expect(text("pd-payable-t1-base")).toBe("₹42,500");
+        expect(text("pd-payable-t1-gst")).toBe("₹7,650");
+        expect(text("pd-payable-t1-total")).toBe("₹50,150");
+        expect(text("pd-payable-t1-paid")).toBe("₹20,000");
+        expect(text("pd-payable-t1-balance")).toBe("₹30,150");
+        expect(text("pd-payable-t1-gst-invoice")).toMatch(/GST invoice TX-77 · 02 Oct/);
+        expect(text("pd-payable-t1-status")).toBe("Partially Paid");
+        expect(screen.getByTestId("pd-talent-pay-chip-t1")).toBeTruthy();             // the manual Pending/Cleared select is replaced
+    });
+
+    it("a taxable talent without a GST invoice number shows that GST is not added, and records the GST invoice through the talent endpoint", async () => {
+        const missing = { ...TALENT_PAYABLE, gst_state: "invoice_missing", gst_invoice_number: null, gst_invoice_date: null, gst: 0, total_payable: 42500, balance: 22500 };
+        load({ ...BASE_DATA, locked_talents: [talentWith(missing, { gst_invoice_number: null, gst_invoice_date: null })] });
+        await waitFor(() => expect(screen.getByTestId("pd-payable-t1")).toBeTruthy());
+        expect(text("pd-payable-t1-gst")).toBe("—");
+        expect(text("pd-payable-t1-gst-note")).toMatch(/no GST invoice number recorded/);
+        fireEvent.click(screen.getByTestId("pd-payable-t1-edit-gst"));
+        fireEvent.change(screen.getByTestId("pd-payable-t1-gst-invoice-number"), { target: { value: "TX-9" } });
+        fireEvent.click(screen.getByTestId("pd-payable-t1-gst-save"));
+        await waitFor(() => expect(globalThis.__mockAdminApi.patch).toHaveBeenCalledWith("/projects/proj-1/production-desk/talents/t1",
+            expect.objectContaining({ gst_treatment: "exclusive", gst_rate: 18, gst_invoice_number: "TX-9", payment_due_date: "2099-01-01" })));
+    });
+
+    it("a talent with no instalments keeps the old Pending/Cleared control", async () => {
+        load({ ...BASE_DATA, locked_talents: [{ ...TALENT, payments: [], payable: { ...TALENT_PAYABLE, gst_state: "no_gst", gst: 0, total_payable: 42500, paid: 0, balance: 42500, state: "unpaid", status: "Unpaid", instalments: 0 } }] });
+        await waitFor(() => expect(screen.getByTestId("pd-payable-t1")).toBeTruthy());
+        expect(screen.queryByTestId("pd-talent-pay-chip-t1")).toBeNull();
+        expect(text("pd-payable-t1-gst-note")).toMatch(/No GST on this talent/);
+    });
+
+    it("project totals and the overview carry the talent GST, paid, remaining and overdue figures", async () => {
+        load({ ...BASE_DATA, locked_talents: [talentWith(TALENT_PAYABLE)], summary: { ...BASE_DATA.summary,
+            talent_payables: { count: 1, gst_total: 7650, total_payable: 50150, paid_total: 20000, balance_total: 30150, gst_invoice_missing_count: 0, overdue_count: 1, overdue_total: 30150, max_days_overdue: 4 } } });
+        await waitFor(() => expect(screen.getByTestId("pd-fin-talent-gst")).toBeTruthy());
+        expect(text("pd-fin-talent-gst")).toBe("₹7,650");
+        expect(text("pd-fin-talent-paid")).toBe("₹20,000");
+        expect(text("pd-fin-talent-remaining")).toBe("₹30,150");
+        expect(text("pd-fin-talent-overdue")).toBe("₹30,150");
+        expect(text("pd-overview")).toMatch(/Talent Overdue/);
+    });
+});
+
+describe("GST amounts keep their paise", () => {
+    it("a displayed base + GST breakdown adds up to the displayed total (no whole-rupee rounding)", async () => {
+        const v = {
+            tax: { state: "inclusive", treatment: "inclusive", rate: 12.5, base: 1097.39, gst: 137.17, total: 1234.56 }, invoice_total: 1234.56, received: 0, received_gst: 0,
+            outstanding: 1234.56, outstanding_gst: 137.17, overpaid: 0, state: "unpaid", status: "Unpaid", instalments: 0, first_payment_date: null, last_payment_date: null,
+            due_date: null, due_basis: null, overdue: false, days_overdue: 0, days_since_invoice: null,
+        };
+        const data = { ...BASE_DATA, tranches: [{ id: "odd", name: "Odd", amount: 1234.56, invoice_status: "pending", payment_status: "pending", gst_treatment: "inclusive", gst_rate: 12.5, payments: [], receivable: v }],
+            summary: { ...BASE_DATA.summary, tranches_total: 1234.56, tranches_received_total: 0 } };
+        globalThis.__mockAdminApi = mockAdminApi({ get: vi.fn((url) => Promise.resolve({ data: url === "/projects/proj-1/production-desk" ? data : (url === "/marketing/clients" ? [] : {}) })) });
+        render(<ProductionDesk projectId="proj-1" project={{}} />);
+        await waitFor(() => expect(screen.getByTestId("pd-tranche-odd-recv-tax")).toBeTruthy());
+        expect(screen.getByTestId("pd-tranche-odd-recv-tax").textContent).toBe("Base ₹1,097.39 + GST 12.5% ₹137.17 = ₹1,234.56 (GST included in amount)");
+        expect(screen.getByTestId("pd-tranche-total-odd").textContent).toBe("₹1,234.56");
+        expect(screen.getByTestId("pd-tranche-odd-recv-outstanding").textContent).toBe("₹1,234.56");
+    });
+});

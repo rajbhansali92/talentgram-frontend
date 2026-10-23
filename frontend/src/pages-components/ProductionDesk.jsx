@@ -33,6 +33,9 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+    PaymentLedger, ReceivableSummary, StatusChip, TalentPayableBlock, TaxFields, taxMissingRate, taxPayload,
+} from "./ProductionPayments";
+import {
     Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
@@ -54,7 +57,7 @@ import {
     Building2, History,
 } from "lucide-react";
 import {
-    formatCurrency, IST_TZ, toDateInputValue, fromDateInputValue, formatDate, formatClock, clockInputValue,
+    formatCurrency, formatMoneyExact, IST_TZ, toDateInputValue, fromDateInputValue, formatDate, formatClock, clockInputValue,
     clockMinutes, reportingAfterCall, openWhatsApp, LocationLink, askTalentToRaiseInvoice, usePaymentFollowUp,
     PaymentRecipientSelect, FollowUpReviewDialog,
 } from "@/lib/productionDesk";
@@ -401,7 +404,7 @@ const spreadTone = (v) => (v < 0 ? "bad" : undefined);
 //   PRODUCTION  what the production is quoted and owes (quote, production OT, production reimbursements)
 //   TALENTGRAM  commission + quote spread + OT spread + reimbursement spread
 // Every number is the server's `_talent_card` value — nothing is calculated here.
-function TalentFinancialCard({ talent: t, onAskInvoice }) {
+function TalentFinancialCard({ talent: t, onAskInvoice, payHandlers }) {
     const id = t.talent_id;
     const noQuote = t.production_quote === null || t.production_quote === undefined;
     return (
@@ -444,11 +447,12 @@ function TalentFinancialCard({ talent: t, onAskInvoice }) {
                     <FinLine label="Total earnings" value={moneyOrDash(t.talentgram_earning)} strong testId={`pd-fin-${id}-earning`} />
                 </FinGroup>
             </div>
+            {payHandlers && <TalentPayableBlock talent={t} {...payHandlers} />}
         </div>
     );
 }
 
-function ProductionFinancials({ project: p, talents, summary: s, onSaveProject, onAskInvoice }) {
+function ProductionFinancials({ project: p, talents, summary: s, onSaveProject, onAskInvoice, payHandlers }) {
     const [showLegacy, setShowLegacy] = useState(false);
     const billable = s.production_billable_total;
     const quoteBase = billable === null || billable === undefined ? null : billable - (s.production_overtime_total || 0) - (s.production_reimbursements_total || 0);
@@ -465,7 +469,7 @@ function ProductionFinancials({ project: p, talents, summary: s, onSaveProject, 
 
                 {talents.length > 0 && (
                     <div className="space-y-2" data-testid="pd-fin-table">
-                        {talents.map((t) => <TalentFinancialCard key={t.talent_id} talent={t} onAskInvoice={() => onAskInvoice(t.talent_id)} />)}
+                        {talents.map((t) => <TalentFinancialCard key={t.talent_id} talent={t} onAskInvoice={() => onAskInvoice(t.talent_id)} payHandlers={payHandlers} />)}
                     </div>
                 )}
 
@@ -478,6 +482,15 @@ function ProductionFinancials({ project: p, talents, summary: s, onSaveProject, 
                         <FinLine label="Talent OT" value={formatCurrency(s.extra_hours_total || 0)} testId="pd-fin-talent-ot" />
                         <FinLine label="Talent reimbursements" value={formatCurrency(s.reimbursements_total || 0)} testId="pd-fin-talent-reimb" />
                         <FinLine label="Total talent net payable" value={formatCurrency(s.talent_payable_total || 0)} strong testId="pd-fin-talent-payable" />
+                        {s.talent_payables && (s.talent_payables.gst_total > 0 || s.talent_payables.paid_total > 0 || s.talent_payables.overdue_count > 0) && (
+                            <>
+                                {s.talent_payables.gst_total > 0 && <FinLine label="GST on talent invoices" value={formatMoneyExact(s.talent_payables.gst_total)} testId="pd-fin-talent-gst" />}
+                                {s.talent_payables.gst_total > 0 && <FinLine label="Total payable incl. GST" value={formatMoneyExact(s.talent_payables.total_payable)} testId="pd-fin-talent-total-gst" />}
+                                <FinLine label="Paid to talents" value={formatMoneyExact(s.talent_payables.paid_total)} tone="good" testId="pd-fin-talent-paid" />
+                                <FinLine label="Remaining to pay" value={formatMoneyExact(s.talent_payables.balance_total)} tone={s.talent_payables.balance_total > 0 ? "warn" : "good"} testId="pd-fin-talent-remaining" />
+                                {s.talent_payables.overdue_count > 0 && <FinLine label={`Overdue (${s.talent_payables.overdue_count}, up to ${s.talent_payables.max_days_overdue}d)`} value={formatMoneyExact(s.talent_payables.overdue_total)} tone="bad" testId="pd-fin-talent-overdue" />}
+                            </>
+                        )}
                     </FinGroup>
 
                     <FinGroup title="Production / Client" tag="Client" tagClass="bg-sky-50 text-sky-700 border-sky-200" testId="pd-fin-client">
@@ -485,8 +498,18 @@ function ProductionFinancials({ project: p, talents, summary: s, onSaveProject, 
                         <FinLine label="Production OT" value={formatCurrency(s.production_overtime_total || 0)} testId="pd-fin-prod-ot" />
                         <FinLine label="Production reimbursements" value={formatCurrency(s.production_reimbursements_total || 0)} testId="pd-fin-prod-reimb" />
                         <FinLine label="Total to bill production" value={moneyOrDash(billable)} strong testId="pd-fin-billable" />
-                        <FinLine label="Received" value={formatCurrency(s.client_received_total || 0)} tone="good" />
-                        <FinLine label="Outstanding" value={incomplete ? "Incomplete" : moneyOrDash(s.client_outstanding_total)} strong tone={s.client_outstanding_total > 0 ? "warn" : "good"} testId="pd-fin-outstanding" />
+                        <FinLine label="Received" value={formatMoneyExact(s.client_received_total || 0)} tone="good" />
+                        <FinLine label="Outstanding" value={incomplete ? "Incomplete" : (s.client_outstanding_total == null ? "—" : formatMoneyExact(s.client_outstanding_total))} strong tone={s.client_outstanding_total > 0 ? "warn" : "good"} testId="pd-fin-outstanding" />
+                        {s.client_receivables && s.client_receivables.invoice_count > 0 && (
+                            <>
+                                {s.client_receivables.gst_recorded_count > 0 && <FinLine label="GST on invoices" value={formatMoneyExact(s.client_receivables.invoiced_gst_total)} testId="pd-fin-client-gst" />}
+                                {s.client_receivables.gst_recorded_count > 0 && <FinLine label="GST received" value={formatMoneyExact(s.client_receivables.received_gst_total)} testId="pd-fin-client-gst-received" />}
+                                <FinLine label="Invoiced incl. GST" value={formatMoneyExact(s.client_receivables.invoiced_total)} testId="pd-fin-client-invoiced" />
+                                <FinLine label="Receivable incl. GST" value={formatMoneyExact(s.client_receivables.outstanding_total)} tone={s.client_receivables.outstanding_total > 0 ? "warn" : "good"} testId="pd-fin-client-receivable" />
+                                {s.client_receivables.overdue_count > 0 && <FinLine label={`Overdue (${s.client_receivables.overdue_count}, up to ${s.client_receivables.max_days_overdue}d)`} value={formatMoneyExact(s.client_receivables.overdue_total)} tone="bad" testId="pd-fin-client-overdue" />}
+                                {s.client_receivables.tax_unresolved_count > 0 && <FinLine label="Invoices with GST not recorded" value={String(s.client_receivables.tax_unresolved_count)} tone="warn" testId="pd-fin-client-gst-unresolved" />}
+                            </>
+                        )}
                     </FinGroup>
 
                     <FinGroup title="Talentgram" tag="Internal only" tagClass="bg-amber-50 text-amber-800 border-amber-200" testId="pd-fin-internal">
@@ -612,6 +635,12 @@ function OverviewDashboard({ project: p, summary, needsAttention, today, upcomin
             value: summary.production_basis === "partial" ? "Incomplete" : moneyOrDash(summary.client_outstanding_total),
             tone: summary.client_outstanding_total > 0 || summary.production_basis === "partial" ? "warn" : "good",
         },
+        ...(summary.client_receivables && summary.client_receivables.overdue_count > 0
+            ? [{ label: "Client Overdue", value: `${formatMoneyExact(summary.client_receivables.overdue_total)} · ${summary.client_receivables.max_days_overdue}d`, tone: "warn" }]
+            : []),
+        ...(summary.client_receivables && summary.client_receivables.invoiced_gst_total > 0
+            ? [{ label: "GST on Invoices", value: `${formatMoneyExact(summary.client_receivables.invoiced_gst_total)} (${formatMoneyExact(summary.client_receivables.received_gst_total)} in)` }]
+            : []),
         {
             label: "Client Payment",
             value: p.pd_payment_in_received ? "Received" : "Pending",
@@ -626,6 +655,12 @@ function OverviewDashboard({ project: p, summary, needsAttention, today, upcomin
         // global Production Desk shows. Older payloads without it fall back to the previous gross figure.
         ...((summary.talent_pending_total ?? summary.payments_pending_amount) > 0
             ? [{ label: "Talent Pending Amount", value: formatCurrency(summary.talent_pending_total ?? summary.payments_pending_amount), tone: "warn" }]
+            : []),
+        ...(summary.talent_payables && summary.talent_payables.overdue_count > 0
+            ? [{ label: "Talent Overdue", value: `${formatMoneyExact(summary.talent_payables.overdue_total)} · ${summary.talent_payables.max_days_overdue}d`, tone: "warn" }]
+            : []),
+        ...(summary.talent_payables && summary.talent_payables.gst_total > 0
+            ? [{ label: "GST to Talents", value: formatMoneyExact(summary.talent_payables.gst_total) }]
             : []),
     ];
 
@@ -1079,6 +1114,26 @@ export default function ProductionDesk({ projectId, project }) {
         }
     }, [projectId]);
 
+    // GST + instalments (client invoices and talents). Each call returns the whole desk (one refresh, no second
+    // source) and resolves true/false so the form can stay open and re-send the SAME request id after a failure.
+    const paymentCall = useCallback(async (method, path, payload, failMsg) => {
+        try {
+            const { data } = await adminApi[method](`/projects/${projectId}/production-desk/${path}`, ...(payload === undefined ? [] : [payload]));
+            setData(data);
+            return true;
+        } catch (err) {
+            toast.error(formatErrorDetail(err) || failMsg);
+            return false;
+        }
+    }, [projectId]);
+    const addTranchePayment = useCallback((tid, payload) => paymentCall("post", `tranches/${tid}/payments`, payload, "Could not record payment"), [paymentCall]);
+    const editTranchePayment = useCallback((tid, pid, payload) => paymentCall("patch", `tranches/${tid}/payments/${pid}`, payload, "Could not correct payment"), [paymentCall]);
+    const voidTranchePayment = useCallback((tid, pid) => paymentCall("delete", `tranches/${tid}/payments/${pid}`, undefined, "Could not void payment"), [paymentCall]);
+    const addTalentPayment = useCallback((talentId, payload) => paymentCall("post", `talents/${talentId}/payments`, payload, "Could not record payment"), [paymentCall]);
+    const editTalentPayment = useCallback((talentId, pid, payload) => paymentCall("patch", `talents/${talentId}/payments/${pid}`, payload, "Could not correct payment"), [paymentCall]);
+    const voidTalentPayment = useCallback((talentId, pid) => paymentCall("delete", `talents/${talentId}/payments/${pid}`, undefined, "Could not void payment"), [paymentCall]);
+    const saveTalentGst = useCallback((talentId, payload) => paymentCall("patch", `talents/${talentId}`, payload, "Update failed"), [paymentCall]);
+
     // V2 — WhatsApp one-tap actions (spec sections 17/18/23-26). The
     // backend computes the exact message/amount server-side (single
     // source of truth for the financial formula); this just opens the
@@ -1218,6 +1273,9 @@ export default function ProductionDesk({ projectId, project }) {
                                             </TableCell>
                                             <TableCell className="text-xs text-black/60">{formatCurrency(t.commission_amount)}</TableCell>
                                             <TableCell>
+                                                {(t.payments || []).length > 0 && t.payable ? (
+                                                    <StatusChip view={t.payable} testId={`pd-talent-pay-chip-${t.talent_id}`} />
+                                                ) : (
                                                 <Select value={t.payment_status} onValueChange={(v) => patchTalent(t.talent_id, { payment_status: v })}>
                                                     <SelectTrigger className={`h-7 text-xs w-[110px] ${t.payment_status === "cleared" ? "text-emerald-700" : "text-amber-700"}`}>
                                                         <SelectValue />
@@ -1227,6 +1285,7 @@ export default function ProductionDesk({ projectId, project }) {
                                                         <SelectItem value="cleared">Cleared</SelectItem>
                                                     </SelectContent>
                                                 </Select>
+                                                )}
                                             </TableCell>
                                         </TableRow>
                                     ))}
@@ -1255,6 +1314,9 @@ export default function ProductionDesk({ projectId, project }) {
                                         <div><span className="text-black/40 block mb-0.5">Commission ₹</span><span className="text-black/60">{formatCurrency(t.commission_amount)}</span></div>
                                         <div>
                                             <span className="text-black/40 block mb-0.5">Payment</span>
+                                            {(t.payments || []).length > 0 && t.payable ? (
+                                                <StatusChip view={t.payable} testId={`pd-talent-pay-chip-mobile-${t.talent_id}`} />
+                                            ) : (
                                             <Select value={t.payment_status} onValueChange={(v) => patchTalent(t.talent_id, { payment_status: v })}>
                                                 <SelectTrigger className={`h-7 text-xs w-full ${t.payment_status === "cleared" ? "text-emerald-700" : "text-amber-700"}`}>
                                                     <SelectValue />
@@ -1264,6 +1326,7 @@ export default function ProductionDesk({ projectId, project }) {
                                                     <SelectItem value="cleared">Cleared</SelectItem>
                                                 </SelectContent>
                                             </Select>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
@@ -1339,7 +1402,7 @@ export default function ProductionDesk({ projectId, project }) {
                 )}
             </SectionCard>
 
-            <ProductionFinancials project={p} talents={talents} summary={summary} onSaveProject={patchProject} onAskInvoice={(talentId) => askTalentToRaiseInvoice(projectId, talentId)} />
+            <ProductionFinancials project={p} talents={talents} summary={summary} onSaveProject={patchProject} onAskInvoice={(talentId) => askTalentToRaiseInvoice(projectId, talentId)} payHandlers={{ onSaveGst: saveTalentGst, onAdd: addTalentPayment, onEdit: editTalentPayment, onVoid: voidTalentPayment }} />
 
             {/* V2 polish (spec section 3/4/6) — Shoot Details now holds
                 BOTH the project-level shoot info AND every locked talent's
@@ -1405,6 +1468,8 @@ export default function ProductionDesk({ projectId, project }) {
                 onUpdate={updateTranche}
                 onDelete={deleteTranche}
                 totals={{ total: summary.tranches_total, received: summary.tranches_received_total }}
+                receivables={summary.client_receivables}
+                payHandlers={{ onAdd: addTranchePayment, onEdit: editTranchePayment, onVoid: voidTranchePayment }}
             />
 
             {/* Commission & Kickbacks */}
@@ -2529,7 +2594,7 @@ function TalentReadingsRehearsals({ talent, knownLocations, onAdd, onUpdate, onD
 // Edit/Save/Cancel/Delete (previously every field committed on blur —
 // risky for a financial record someone could accidentally edit while
 // scrolling/clicking).
-function TrancheRow({ tranche: t, index, onUpdate, onDelete }) {
+function TrancheRow({ tranche: t, index, onUpdate, onDelete, payHandlers }) {
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState(null);
 
@@ -2538,15 +2603,19 @@ function TrancheRow({ tranche: t, index, onUpdate, onDelete }) {
             name: t.name, amount: String(t.amount ?? ""), trigger: t.trigger || "",
             invoice_status: t.invoice_status, invoice_date: t.invoice_date || "", invoice_number: t.invoice_number || "",
             payment_status: t.payment_status, payment_date: t.payment_date || "", notes: t.notes || "",
+            gst_treatment: t.gst_treatment || "unset", gst_rate: t.gst_rate ?? "", due_date: t.due_date || "",
         });
         setEditing(true);
     };
+    // Once instalments exist the status/date are DERIVED from them (the server refuses a manual override).
+    const hasPayments = (t.payments || []).length > 0;
     const save = () => {
         onUpdate({
             name: draft.name.trim() || t.name, amount: draft.amount === "" ? t.amount : Number(draft.amount),
             trigger: draft.trigger || null, invoice_status: draft.invoice_status, invoice_date: draft.invoice_date || null,
-            invoice_number: draft.invoice_number || null, payment_status: draft.payment_status,
-            payment_date: draft.payment_date || null, notes: draft.notes || null,
+            invoice_number: draft.invoice_number || null,
+            ...(hasPayments ? {} : { payment_status: draft.payment_status, payment_date: draft.payment_date || null }),
+            notes: draft.notes || null, ...taxPayload(draft),
         });
         setEditing(false);
         setDraft(null);
@@ -2568,18 +2637,25 @@ function TrancheRow({ tranche: t, index, onUpdate, onDelete }) {
                     </div>
                     <div><Label className="text-[10px]">Invoice Date</Label><Input type="date" value={draft.invoice_date} onChange={(e) => setDraft((d) => ({ ...d, invoice_date: e.target.value }))} className="h-7 text-xs" /></div>
                     <div><Label className="text-[10px]">Invoice #</Label><Input value={draft.invoice_number} onChange={(e) => setDraft((d) => ({ ...d, invoice_number: e.target.value }))} className="h-7 text-xs" /></div>
-                    <div>
-                        <Label className="text-[10px]">Payment Status</Label>
-                        <Select value={draft.payment_status} onValueChange={(v) => setDraft((d) => ({ ...d, payment_status: v }))}>
-                            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
-                            <SelectContent>{TRANCHE_PAYMENT_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
-                        </Select>
-                    </div>
-                    <div><Label className="text-[10px]">Payment Date</Label><Input type="date" value={draft.payment_date} onChange={(e) => setDraft((d) => ({ ...d, payment_date: e.target.value }))} className="h-7 text-xs" /></div>
+                    {hasPayments ? (
+                        <div className="sm:col-span-2 text-[11px] text-black/40 self-end pb-1.5" data-testid="pd-tranche-derived-note">Payment status and dates follow the recorded payments below.</div>
+                    ) : (
+                        <>
+                            <div>
+                                <Label className="text-[10px]">Payment Status</Label>
+                                <Select value={draft.payment_status} onValueChange={(v) => setDraft((d) => ({ ...d, payment_status: v }))}>
+                                    <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+                                    <SelectContent>{TRANCHE_PAYMENT_STATUSES.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
+                                </Select>
+                            </div>
+                            <div><Label className="text-[10px]">Payment Date</Label><Input type="date" value={draft.payment_date} onChange={(e) => setDraft((d) => ({ ...d, payment_date: e.target.value }))} className="h-7 text-xs" /></div>
+                        </>
+                    )}
+                    <TaxFields value={draft} onChange={(v) => setDraft((d) => ({ ...d, ...v }))} />
                     <div><Label className="text-[10px]">Notes</Label><Input value={draft.notes} onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))} className="h-7 text-xs" /></div>
                 </div>
                 <div className="flex justify-end mt-2">
-                    <EditControls editing onSave={save} onCancel={() => { setEditing(false); setDraft(null); }} />
+                    <EditControls editing onSave={save} saveDisabled={taxMissingRate(draft)} onCancel={() => { setEditing(false); setDraft(null); }} />
                 </div>
             </div>
         );
@@ -2590,7 +2666,7 @@ function TrancheRow({ tranche: t, index, onUpdate, onDelete }) {
             <div className="flex items-center justify-between gap-2 mb-1.5">
                 <span className="text-xs font-semibold text-black/80">{index + 1}. {t.name}</span>
                 <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-black/70">{formatCurrency(t.amount)}</span>
+                    <span className="text-xs font-semibold text-black/70" data-testid={`pd-tranche-total-${t.id}`}>{formatMoneyExact(t.receivable ? t.receivable.invoice_total : t.amount)}</span>
                     <EditControls editing={false} onEdit={startEdit} onDelete={onDelete} />
                 </div>
             </div>
@@ -2601,22 +2677,34 @@ function TrancheRow({ tranche: t, index, onUpdate, onDelete }) {
                     {t.invoice_date && ` (${formatDate(t.invoice_date)})`}
                 </span>
                 {t.invoice_number && <span className="text-black/50">Inv# {t.invoice_number}</span>}
-                <span className={t.payment_status === "received" ? "text-emerald-700" : "text-amber-700"}>
-                    Payment: {TRANCHE_PAYMENT_STATUSES.find((o) => o.value === t.payment_status)?.label || t.payment_status}
-                    {t.payment_date && ` (${formatDate(t.payment_date)})`}
-                </span>
+                {!hasPayments && (
+                    <span className={t.payment_status === "received" ? "text-emerald-700" : "text-amber-700"}>
+                        Payment: {TRANCHE_PAYMENT_STATUSES.find((o) => o.value === t.payment_status)?.label || t.payment_status}
+                        {t.payment_date && ` (${formatDate(t.payment_date)})`}
+                    </span>
+                )}
             </div>
+            <ReceivableSummary view={t.receivable} testId={`pd-tranche-${t.id}-recv`} />
+            {payHandlers && t.receivable && (
+                <PaymentLedger
+                    testId={`pd-tranche-${t.id}-ledger`}
+                    payments={t.payments} outstanding={t.receivable.outstanding} allowGst={t.receivable.tax.state === "exclusive" || t.receivable.tax.state === "inclusive"}
+                    canRecord={t.receivable.outstanding > 0}
+                    onAdd={(payload) => payHandlers.onAdd(t.id, payload)} onEdit={(pid, payload) => payHandlers.onEdit(t.id, pid, payload)} onVoid={(pid) => payHandlers.onVoid(t.id, pid)}
+                />
+            )}
             {t.notes && <div className="text-[11px] text-black/40 mt-1">Notes: {t.notes}</div>}
         </div>
     );
 }
 
-function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals }) {
+function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals, receivables, payHandlers }) {
     const [adding, setAdding] = useState(false);
-    const [form, setForm] = useState({ name: "", amount: "", trigger: "", invoice_number: "", invoice_date: "", payment_date: "", notes: "" });
+    const BLANK_TRANCHE = { name: "", amount: "", trigger: "", invoice_number: "", invoice_date: "", payment_date: "", notes: "", gst_treatment: "unset", gst_rate: "", due_date: "" };
+    const [form, setForm] = useState(BLANK_TRANCHE);
 
     const submit = () => {
-        if (!form.name.trim() || !form.amount) return;
+        if (!form.name.trim() || !form.amount || taxMissingRate(form)) return;
         onAdd({
             name: form.name.trim(),
             amount: Number(form.amount),
@@ -2625,8 +2713,9 @@ function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals })
             invoice_date: form.invoice_date || null,
             payment_date: form.payment_date || null,
             notes: form.notes || null,
+            ...taxPayload(form),
         });
-        setForm({ name: "", amount: "", trigger: "", invoice_number: "", invoice_date: "", payment_date: "", notes: "" });
+        setForm(BLANK_TRANCHE);
         setAdding(false);
     };
 
@@ -2639,9 +2728,15 @@ function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals })
         >
             {tranches.length > 0 && (
                 <div className="flex flex-wrap gap-x-8 gap-y-2 mb-3 text-xs">
-                    <span className="text-black/40">Total: <span className="text-black/80 font-semibold">{formatCurrency(totals.total)}</span></span>
-                    <span className="text-black/40">Received: <span className="text-emerald-700 font-semibold">{formatCurrency(totals.received)}</span></span>
-                    <span className="text-black/40">Outstanding: <span className="text-amber-700 font-semibold">{formatCurrency((totals.total || 0) - (totals.received || 0))}</span></span>
+                    <span className="text-black/40">Total: <span className="text-black/80 font-semibold" data-testid="pd-tranches-total">{formatMoneyExact(totals.total)}</span></span>
+                    <span className="text-black/40">Received: <span className="text-emerald-700 font-semibold" data-testid="pd-tranches-received">{formatMoneyExact(totals.received)}</span></span>
+                    <span className="text-black/40">Outstanding: <span className="text-amber-700 font-semibold" data-testid="pd-tranches-outstanding">{formatMoneyExact(receivables ? receivables.outstanding_total : (totals.total || 0) - (totals.received || 0))}</span></span>
+                    {receivables && receivables.gst_recorded_count > 0 && (
+                        <span className="text-black/40" data-testid="pd-tranches-gst">GST: <span className="text-black/70 font-semibold">{formatMoneyExact(receivables.invoiced_gst_total)}</span> ({formatMoneyExact(receivables.received_gst_total)} received)</span>
+                    )}
+                    {receivables && receivables.overdue_count > 0 && (
+                        <span className="text-red-600 font-medium" data-testid="pd-tranches-overdue">Overdue: {formatMoneyExact(receivables.overdue_total)} · up to {receivables.max_days_overdue} days</span>
+                    )}
                 </div>
             )}
             {tranches.length === 0 && !adding ? (
@@ -2649,7 +2744,7 @@ function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals })
             ) : (
                 <div className="space-y-2">
                     {tranches.map((t, i) => (
-                        <TrancheRow key={t.id} tranche={t} index={i} onUpdate={(payload) => onUpdate(t.id, payload)} onDelete={() => onDelete(t.id)} />
+                        <TrancheRow key={t.id} tranche={t} index={i} onUpdate={(payload) => onUpdate(t.id, payload)} onDelete={() => onDelete(t.id)} payHandlers={payHandlers} />
                     ))}
                 </div>
             )}
@@ -2661,10 +2756,11 @@ function PaymentTranchesSection({ tranches, onAdd, onUpdate, onDelete, totals })
                     <div><Label className="text-[10px]">Invoice Date (optional)</Label><Input type="date" value={form.invoice_date} onChange={(e) => setForm((f) => ({ ...f, invoice_date: e.target.value }))} className="h-8 text-xs" /></div>
                     <div><Label className="text-[10px]">Invoice # (optional)</Label><Input value={form.invoice_number} onChange={(e) => setForm((f) => ({ ...f, invoice_number: e.target.value }))} className="h-8 text-xs" /></div>
                     <div><Label className="text-[10px]">Payment Date (optional)</Label><Input type="date" value={form.payment_date} onChange={(e) => setForm((f) => ({ ...f, payment_date: e.target.value }))} className="h-8 text-xs" /></div>
+                    <TaxFields value={form} onChange={(v) => setForm((f) => ({ ...f, ...v }))} />
                     <div className="sm:col-span-3"><Label className="text-[10px]">Notes (optional)</Label><Input value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} className="h-8 text-xs" /></div>
                     <div className="sm:col-span-3 flex justify-end gap-1.5">
                         <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setAdding(false)}>Cancel</Button>
-                        <Button size="sm" className="h-7 text-xs" disabled={!form.name.trim() || !form.amount} onClick={submit}>Add Tranche</Button>
+                        <Button size="sm" className="h-7 text-xs" disabled={!form.name.trim() || !form.amount || taxMissingRate(form)} onClick={submit}>Add Tranche</Button>
                     </div>
                 </div>
             )}

@@ -1,0 +1,202 @@
+{
+  "generated_at": "2026-08-30T17:18:31.279412+00:00",
+  "aborted": null,
+  "approved_hash": "b9abc586ff6fb894f989d045d98e846941fc2681570737e90028be052396db94",
+  "approved_ids": [
+    "4e0b91628ad040df8f03b35be20d40a9",
+    "90e2c0d506f9c3204805c540a2b906d7",
+    "dcb3a4b118d6ea2d24dc152bfd9bd743",
+    "36a77e5f8dd27f5e628133fb56afff65",
+    "73d1d947e0df9b419a43b492a9a265a1",
+    "87b0e6770c6e9815b756624c8f19a185",
+    "439200ab322c41e518aee866828ff021",
+    "b1a29f34d6901420dae9cfa783e6f286",
+    "ee24054723beeb7b14da77221c9ccdd8",
+    "20ff5acda320d634c2d66ad523e63ddd"
+  ],
+  "fresh_manifest_id": "pm_d9a40130a1937e262dbe",
+  "fresh_passed_hash": "b9abc586ff6fb894f989d045d98e846941fc2681570737e90028be052396db94",
+  "fresh_by_verdict": {
+    "PASS": 10
+  },
+  "approval_id": "ap_5a7d79e2365b48adc8f1",
+  "batch_id": "b_924a1600328b3c5e5852",
+  "execution": {
+    "batch_id": "b_924a1600328b3c5e5852",
+    "dry_run": false,
+    "attempted": 10,
+    "deleted": 10,
+    "skipped": 0,
+    "blocked": 0,
+    "stopped": false,
+    "stop_reason": null,
+    "per_asset": [
+      {
+        "derived_id": "20ff5acda320d634c2d66ad523e63ddd",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "36a77e5f8dd27f5e628133fb56afff65",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "439200ab322c41e518aee866828ff021",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "4e0b91628ad040df8f03b35be20d40a9",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "73d1d947e0df9b419a43b492a9a265a1",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "87b0e6770c6e9815b756624c8f19a185",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "90e2c0d506f9c3204805c540a2b906d7",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "b1a29f34d6901420dae9cfa783e6f286",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "dcb3a4b118d6ea2d24dc152bfd9bd743",
+        "result": "deleted"
+      },
+      {
+        "derived_id": "ee24054723beeb7b14da77221c9ccdd8",
+        "result": "deleted"
+      }
+    ]
+  },
+  "delete_calls_made": [
+    [
+      "20ff5acda320d634c2d66ad523e63ddd"
+    ],
+    [
+      "36a77e5f8dd27f5e628133fb56afff65"
+    ],
+    [
+      "439200ab322c41e518aee866828ff021"
+    ],
+    [
+      "4e0b91628ad040df8f03b35be20d40a9"
+    ],
+    [
+      "73d1d947e0df9b419a43b492a9a265a1"
+    ],
+    [
+      "87b0e6770c6e9815b756624c8f19a185"
+    ],
+    [
+      "90e2c0d506f9c3204805c540a2b906d7"
+    ],
+    [
+      "b1a29f34d6901420dae9cfa783e6f286"
+    ],
+    [
+      "dcb3a4b118d6ea2d24dc152bfd9bd743"
+    ],
+    [
+      "ee24054723beeb7b14da77221c9ccdd8"
+    ]
+  ],
+  "post_delete_derived_gone": [
+    [
+      "4e0b91628ad040df8f03b35be20d40a9",
+      true
+    ],
+    [
+      "90e2c0d506f9c3204805c540a2b906d7",
+      true
+    ],
+    [
+      "dcb3a4b118d6ea2d24dc152bfd9bd743",
+      true
+    ],
+    [
+      "36a77e5f8dd27f5e628133fb56afff65",
+      true
+    ],
+    [
+      "73d1d947e0df9b419a43b492a9a265a1",
+      true
+    ],
+    [
+      "87b0e6770c6e9815b756624c8f19a185",
+      true
+    ],
+    [
+      "439200ab322c41e518aee866828ff021",
+      true
+    ],
+    [
+      "b1a29f34d6901420dae9cfa783e6f286",
+      true
+    ],
+    [
+      "ee24054723beeb7b14da77221c9ccdd8",
+      true
+    ],
+    [
+      "20ff5acda320d634c2d66ad523e63ddd",
+      true
+    ]
+  ],
+  "post_delete_parent_exists": [
+    [
+      "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/9301e771-8eb0-4b46-b5da-0bfbd4ba41f7",
+      true
+    ],
+    [
+      "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/093c3967-d713-4b22-b72e-e90314d5cb6d",
+      true
+    ],
+    [
+      "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/f75d7d72-6da0-4103-a1a2-61d1aa7f1887",
+      true
+    ],
+    [
+      "talentgram/applications/17c84979-3a39-47c0-aeb5-27e6dd4b71fc/e0b83309-2bfe-417a-bf00-1fd40afb8094",
+      true
+    ],
+    [
+      "talentgram/submissions/f6feb6ba-dc16-459b-8a15-b8d5c8b50d58/087d2995-adab-4cf9-a163-508ee0a7770e",
+      true
+    ],
+    [
+      "talentgram/talents/382d8b6c-79c3-4045-a27c-d0e5b9292eb5_riti-walia/profile_images/0157ceab-1a0c-4654-b98a-5f4150191fe8",
+      true
+    ],
+    [
+      "talentgram/talents/8f5e31f8-1e15-4f65-9ef6-9f4ac345a699_ria-jaitley/profile_images/f51b8165-6c70-4dc6-a157-8c52850fdccb",
+      true
+    ],
+    [
+      "talentgram/talents/9227e123-3717-4df6-a918-33273b3e359d_tejshri-subodh/profile_images/bed18bd3-d913-4dee-b1ec-72fd6b90a7f2",
+      true
+    ],
+    [
+      "talentgram/applications/f022cbcf-aba3-4dc7-9b65-6f5ebee55e30/9509616f-4f46-429f-ba89-88ac8bba5cf9",
+      true
+    ],
+    [
+      "talentgram/talents/382d8b6c-79c3-4045-a27c-d0e5b9292eb5_riti-walia/profile_images/186b6a18-3e47-46d2-b44e-8f340664eb76",
+      true
+    ]
+  ],
+  "usage_before": {
+    "storage": 19629649193,
+    "derived": 8511,
+    "transformations": 71687
+  },
+  "usage_after": {
+    "storage": 19629649193,
+    "derived": 8511,
+    "transformations": 71687
+  }
+}

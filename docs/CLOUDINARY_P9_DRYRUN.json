@@ -1,0 +1,307 @@
+{
+  "manifest_id": "pm_1c850b20c08d8551e914",
+  "candidate_hash": "b9abc586ff6fb894f989d045d98e846941fc2681570737e90028be052396db94",
+  "canary_derived_ids": [
+    "20ff5acda320d634c2d66ad523e63ddd",
+    "36a77e5f8dd27f5e628133fb56afff65",
+    "439200ab322c41e518aee866828ff021",
+    "4e0b91628ad040df8f03b35be20d40a9",
+    "73d1d947e0df9b419a43b492a9a265a1",
+    "87b0e6770c6e9815b756624c8f19a185",
+    "90e2c0d506f9c3204805c540a2b906d7",
+    "b1a29f34d6901420dae9cfa783e6f286",
+    "dcb3a4b118d6ea2d24dc152bfd9bd743",
+    "ee24054723beeb7b14da77221c9ccdd8"
+  ],
+  "canary": [
+    {
+      "n": 1,
+      "derived_id": "4e0b91628ad040df8f03b35be20d40a9",
+      "public_id": "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/9301e771-8eb0-4b46-b5da-0bfbd4ba41f7",
+      "parent_public_id": "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/9301e771-8eb0-4b46-b5da-0bfbd4ba41f7",
+      "parent_talent_id": "011d6e3e-ac55-43bc-9033-cd263b945cd9",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 91,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 91,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    },
+    {
+      "n": 2,
+      "derived_id": "90e2c0d506f9c3204805c540a2b906d7",
+      "public_id": "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/093c3967-d713-4b22-b72e-e90314d5cb6d",
+      "parent_public_id": "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/093c3967-d713-4b22-b72e-e90314d5cb6d",
+      "parent_talent_id": "011d6e3e-ac55-43bc-9033-cd263b945cd9",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 91,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 91,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    },
+    {
+      "n": 3,
+      "derived_id": "dcb3a4b118d6ea2d24dc152bfd9bd743",
+      "public_id": "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/f75d7d72-6da0-4103-a1a2-61d1aa7f1887",
+      "parent_public_id": "talentgram/applications/29db6f7c-1027-4ea7-bbdc-c5c2c8105659/f75d7d72-6da0-4103-a1a2-61d1aa7f1887",
+      "parent_talent_id": "011d6e3e-ac55-43bc-9033-cd263b945cd9",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 91,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 91,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    },
+    {
+      "n": 4,
+      "derived_id": "36a77e5f8dd27f5e628133fb56afff65",
+      "public_id": "talentgram/applications/17c84979-3a39-47c0-aeb5-27e6dd4b71fc/e0b83309-2bfe-417a-bf00-1fd40afb8094",
+      "parent_public_id": "talentgram/applications/17c84979-3a39-47c0-aeb5-27e6dd4b71fc/e0b83309-2bfe-417a-bf00-1fd40afb8094",
+      "parent_talent_id": "7c65b4f7-0156-4df9-939e-6a7feae48487",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 95,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/png",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 95,
+      "cloudinary_transformation": "f_avif,q_auto/png"
+    },
+    {
+      "n": 5,
+      "derived_id": "73d1d947e0df9b419a43b492a9a265a1",
+      "public_id": "talentgram/submissions/f6feb6ba-dc16-459b-8a15-b8d5c8b50d58/087d2995-adab-4cf9-a163-508ee0a7770e",
+      "parent_public_id": "talentgram/submissions/f6feb6ba-dc16-459b-8a15-b8d5c8b50d58/087d2995-adab-4cf9-a163-508ee0a7770e",
+      "parent_talent_id": "b5766027-4318-4548-b1aa-e77f78cb1c67",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 6294,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 6294,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    },
+    {
+      "n": 6,
+      "derived_id": "87b0e6770c6e9815b756624c8f19a185",
+      "public_id": "talentgram/talents/382d8b6c-79c3-4045-a27c-d0e5b9292eb5_riti-walia/profile_images/0157ceab-1a0c-4654-b98a-5f4150191fe8",
+      "parent_public_id": "talentgram/talents/382d8b6c-79c3-4045-a27c-d0e5b9292eb5_riti-walia/profile_images/0157ceab-1a0c-4654-b98a-5f4150191fe8",
+      "parent_talent_id": "382d8b6c-79c3-4045-a27c-d0e5b9292eb5",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 10449,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 10449,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    },
+    {
+      "n": 7,
+      "derived_id": "439200ab322c41e518aee866828ff021",
+      "public_id": "talentgram/talents/8f5e31f8-1e15-4f65-9ef6-9f4ac345a699_ria-jaitley/profile_images/f51b8165-6c70-4dc6-a157-8c52850fdccb",
+      "parent_public_id": "talentgram/talents/8f5e31f8-1e15-4f65-9ef6-9f4ac345a699_ria-jaitley/profile_images/f51b8165-6c70-4dc6-a157-8c52850fdccb",
+      "parent_talent_id": "8f5e31f8-1e15-4f65-9ef6-9f4ac345a699",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 10514,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 10514,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    },
+    {
+      "n": 8,
+      "derived_id": "b1a29f34d6901420dae9cfa783e6f286",
+      "public_id": "talentgram/talents/9227e123-3717-4df6-a918-33273b3e359d_tejshri-subodh/profile_images/bed18bd3-d913-4dee-b1ec-72fd6b90a7f2",
+      "parent_public_id": "talentgram/talents/9227e123-3717-4df6-a918-33273b3e359d_tejshri-subodh/profile_images/bed18bd3-d913-4dee-b1ec-72fd6b90a7f2",
+      "parent_talent_id": "9227e123-3717-4df6-a918-33273b3e359d",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 10621,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 10621,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    },
+    {
+      "n": 9,
+      "derived_id": "ee24054723beeb7b14da77221c9ccdd8",
+      "public_id": "talentgram/applications/f022cbcf-aba3-4dc7-9b65-6f5ebee55e30/9509616f-4f46-429f-ba89-88ac8bba5cf9",
+      "parent_public_id": "talentgram/applications/f022cbcf-aba3-4dc7-9b65-6f5ebee55e30/9509616f-4f46-429f-ba89-88ac8bba5cf9",
+      "parent_talent_id": "689b82e6-9323-42b8-af8d-d47edfc29973",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 11062,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 2,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 11062,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    },
+    {
+      "n": 10,
+      "derived_id": "20ff5acda320d634c2d66ad523e63ddd",
+      "public_id": "talentgram/talents/382d8b6c-79c3-4045-a27c-d0e5b9292eb5_riti-walia/profile_images/186b6a18-3e47-46d2-b44e-8f340664eb76",
+      "parent_public_id": "talentgram/talents/382d8b6c-79c3-4045-a27c-d0e5b9292eb5_riti-walia/profile_images/186b6a18-3e47-46d2-b44e-8f340664eb76",
+      "parent_talent_id": "382d8b6c-79c3-4045-a27c-d0e5b9292eb5",
+      "owner_type": "talent",
+      "resource_type": "image",
+      "format": "avif",
+      "bytes": 11243,
+      "created_at": null,
+      "transformation": "f_avif,q_auto/jpg",
+      "p85_classification": "DELETE_CANDIDATE",
+      "p9_verdict": "PASS",
+      "reference_count": 1,
+      "persisted_url_reference": "NO",
+      "retention_status": "n/a (talent global media)",
+      "parent_exists": "YES",
+      "parent_active": "YES",
+      "cloudinary_derived_bytes": 11243,
+      "cloudinary_transformation": "f_avif,q_auto/jpg"
+    }
+  ],
+  "generated_at": "2026-08-30T17:08:55.056345+00:00",
+  "delete_candidate_total": 5005,
+  "delete_candidate_bytes": 2589628578,
+  "delete_candidate_by_family": {
+    "q_auto,vc_auto": {
+      "count": 2,
+      "bytes": 4329490
+    },
+    "fl_attachment:*": {
+      "count": 146,
+      "bytes": 795667136
+    },
+    "f_avif,q_auto/png": {
+      "count": 68,
+      "bytes": 6917790
+    },
+    "f_avif,q_auto/webp": {
+      "count": 26,
+      "bytes": 2322547
+    },
+    "f_avif,q_auto/heic": {
+      "count": 3,
+      "bytes": 989814
+    },
+    "f_avif,q_auto/jpg": {
+      "count": 2080,
+      "bytes": 768797716
+    },
+    "c_limit,h_N,w_N/q_auto,vc_auto/f_mpN/": {
+      "count": 44,
+      "bytes": 176350708
+    },
+    "c_limit,h_N,w_N,f_mpN/q_auto,vc_auto": {
+      "count": 22,
+      "bytes": 69309156
+    },
+    "c_limit,h_N,w_N/q_auto,vc_auto/f_mpN": {
+      "count": 179,
+      "bytes": 700800169
+    },
+    "w_N,c_fill,dpr_auto,f_auto,q_auto": {
+      "count": 1968,
+      "bytes": 54438814
+    },
+    "c_fill,dpr_N.N,f_avif,q_auto,w_N/": {
+      "count": 214,
+      "bytes": 3305063
+    },
+    "c_fill,dpr_auto,f_auto,q_auto,w_N": {
+      "count": 42,
+      "bytes": 1013599
+    },
+    "c_limit,h_N,w_N/q_auto,vc_auto/mpN": {
+      "count": 1,
+      "bytes": 1053731
+    },
+    "c_fill,dpr_auto,h_N,w_N/q_auto/jpg": {
+      "count": 2,
+      "bytes": 27042
+    },
+    "c_fill,dpr_N.N,h_N,w_N/q_auto/jpg": {
+      "count": 208,
+      "bytes": 4305803
+    }
+  },
+  "sample_live_verdicts": {
+    "PASS": 15
+  },
+  "resource_read_calls": 15
+}
